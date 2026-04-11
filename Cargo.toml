@@ -1,0 +1,67 @@
+[package]
+name = "i-dream"
+version = "0.1.0"
+edition = "2024"
+description = "A subconsciousness layer for Claude Code — dreaming, metacognition, intuition, and background consolidation"
+license = "MIT"
+
+[[bin]]
+name = "i-dream"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# HTTP client (for Claude API)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# File watching
+notify = "7"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUIDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Glob matching
+glob = "0.3"
+
+# Unix socket
+tokio-stream = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Hashing (for message privacy)
+sha2 = "0.10"
+
+# Directories
+dirs = "6"
+
+# Unix signal handling
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

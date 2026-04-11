@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+
+# Runtime state (daemon)
+*.pid
+*.sock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Agent artifacts
+.claude/
+**/.playwright-mcp/
