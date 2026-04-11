@@ -201,3 +201,135 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── expand_tilde ──────────────────────────────────────────
+    // Tests the path expansion utility that's used by every module
+    // to resolve config paths. Critical because wrong expansion
+    // means the daemon writes state to the wrong location.
+
+    #[test]
+    fn expand_tilde_home_prefix() {
+        let result = expand_tilde(Path::new("~/some/path"));
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.join("some/path"));
+    }
+
+    #[test]
+    fn expand_tilde_nested_path() {
+        let result = expand_tilde(Path::new("~/a/b/c/d.toml"));
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(result, home.join("a/b/c/d.toml"));
+    }
+
+    #[test]
+    fn expand_tilde_absolute_path_unchanged() {
+        let result = expand_tilde(Path::new("/usr/local/bin"));
+        assert_eq!(result, PathBuf::from("/usr/local/bin"));
+    }
+
+    #[test]
+    fn expand_tilde_relative_path_unchanged() {
+        let result = expand_tilde(Path::new("relative/path"));
+        assert_eq!(result, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde_unchanged() {
+        // Just "~" without "/" should NOT expand (the function checks "~/")
+        let result = expand_tilde(Path::new("~"));
+        assert_eq!(result, PathBuf::from("~"));
+    }
+
+    // ── Config::default ───────────────────────────────────────
+    // Validates that default config values are sane. These defaults
+    // are what new users get — wrong defaults mean the daemon either
+    // never triggers (threshold too high) or burns API budget (too low).
+
+    #[test]
+    fn default_config_idle_threshold_is_4_hours() {
+        let config = Config::default();
+        assert_eq!(config.idle.threshold_hours, 4);
+    }
+
+    #[test]
+    fn default_config_budget_is_50k_tokens() {
+        let config = Config::default();
+        assert_eq!(config.budget.max_tokens_per_cycle, 50_000);
+    }
+
+    #[test]
+    fn default_config_metacog_sample_rate_is_25_percent() {
+        let config = Config::default();
+        assert!((config.modules.metacog.sample_rate - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_config_all_modules_enabled() {
+        let config = Config::default();
+        assert!(config.modules.dreaming.enabled);
+        assert!(config.modules.metacog.enabled);
+        assert!(config.modules.intuition.enabled);
+        assert!(config.modules.introspection.enabled);
+        assert!(config.modules.prospective.enabled);
+    }
+
+    #[test]
+    fn default_config_all_hooks_enabled() {
+        let config = Config::default();
+        assert!(config.hooks.session_start);
+        assert!(config.hooks.post_tool_use);
+        assert!(config.hooks.stop);
+    }
+
+    // ── TOML round-trip ───────────────────────────────────────
+    // The config is persisted as TOML. If serialization loses data,
+    // users lose their custom settings after a save+reload cycle.
+
+    #[test]
+    fn config_toml_roundtrip() {
+        let config = Config::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+
+        // Compare key fields (no PartialEq on Config, so spot-check)
+        assert_eq!(parsed.idle.threshold_hours, config.idle.threshold_hours);
+        assert_eq!(parsed.budget.max_tokens_per_cycle, config.budget.max_tokens_per_cycle);
+        assert_eq!(parsed.budget.model, config.budget.model);
+        assert_eq!(parsed.modules.metacog.sample_rate, config.modules.metacog.sample_rate);
+        assert_eq!(parsed.modules.intuition.decay_halflife_days, config.modules.intuition.decay_halflife_days);
+        assert_eq!(parsed.modules.prospective.max_active_intentions, config.modules.prospective.max_active_intentions);
+    }
+
+    // ── Config::load / save with tempdir ──────────────────────
+    // Tests the full persistence cycle: save to disk, load back.
+    // This catches issues like TOML field naming mismatches between
+    // Serialize and Deserialize impls.
+
+    #[test]
+    fn config_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-config.toml");
+
+        let mut config = Config::default();
+        config.idle.threshold_hours = 8;
+        config.budget.max_tokens_per_cycle = 100_000;
+        config.save(&path).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.idle.threshold_hours, 8);
+        assert_eq!(loaded.budget.max_tokens_per_cycle, 100_000);
+    }
+
+    #[test]
+    fn config_load_missing_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.idle.threshold_hours, 4); // default
+    }
+}

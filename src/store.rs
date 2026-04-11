@@ -148,3 +148,220 @@ impl Store {
         self.root.join(rel_path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use tempfile::TempDir;
+
+    // Helper struct for store tests — simple enough to verify by eye
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestEntry {
+        id: u32,
+        name: String,
+    }
+
+    fn test_store() -> (TempDir, Store) {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        (dir, store)
+    }
+
+    // ── Store::new ────────────────────────────────────────────
+    // Verifies that creating a Store also creates the root directory.
+    // If this fails, every subsequent file operation will fail.
+
+    #[test]
+    fn store_new_creates_root_dir() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("subconscious");
+        assert!(!root.exists());
+
+        let _store = Store::new(root.clone()).unwrap();
+        assert!(root.exists());
+    }
+
+    // ── Store::init_dirs ──────────────────────────────────────
+    // The daemon expects a specific directory tree. Missing dirs
+    // cause runtime panics when modules try to write state files.
+
+    #[test]
+    fn store_init_dirs_creates_all_subdirs() {
+        let (_dir, store) = test_store();
+        store.init_dirs().unwrap();
+
+        let expected = [
+            "dreams", "metacog", "metacog/samples", "metacog/audits",
+            "valence", "introspection", "introspection/chains",
+            "introspection/reports", "intentions", "logs",
+        ];
+        for subdir in &expected {
+            assert!(
+                store.path(subdir).exists(),
+                "Missing directory: {subdir}"
+            );
+        }
+    }
+
+    // ── JSON write + read ─────────────────────────────────────
+    // Atomic JSON persistence: write_json uses a .tmp → rename
+    // pattern to prevent partial writes on crash. These tests
+    // verify both the happy path and atomicity guarantee.
+
+    #[test]
+    fn store_json_roundtrip() {
+        let (_dir, store) = test_store();
+        let entry = TestEntry { id: 1, name: "alpha".into() };
+
+        store.write_json("test.json", &entry).unwrap();
+        let loaded: TestEntry = store.read_json("test.json").unwrap();
+
+        assert_eq!(loaded, entry);
+    }
+
+    #[test]
+    fn store_json_write_no_leftover_tmp() {
+        let (_dir, store) = test_store();
+        let entry = TestEntry { id: 1, name: "alpha".into() };
+
+        store.write_json("data.json", &entry).unwrap();
+
+        // The .tmp file should be renamed away — not left behind
+        assert!(!store.path("data.tmp").exists());
+        assert!(store.path("data.json").exists());
+    }
+
+    #[test]
+    fn store_json_creates_parent_dirs() {
+        let (_dir, store) = test_store();
+        let entry = TestEntry { id: 1, name: "nested".into() };
+
+        store.write_json("deep/nested/data.json", &entry).unwrap();
+        let loaded: TestEntry = store.read_json("deep/nested/data.json").unwrap();
+        assert_eq!(loaded, entry);
+    }
+
+    #[test]
+    fn store_json_read_missing_file_errors() {
+        let (_dir, store) = test_store();
+        let result: Result<TestEntry> = store.read_json("nonexistent.json");
+        assert!(result.is_err());
+    }
+
+    // ── JSONL append + read ───────────────────────────────────
+    // JSONL is the format for append-only logs (dream journal,
+    // calibration entries, intention registry). Tests verify:
+    // - ordering is preserved (critical for temporal data)
+    // - empty/missing files return empty Vec (not errors)
+    // - blank lines are skipped (robustness against partial writes)
+
+    #[test]
+    fn store_jsonl_append_and_read() {
+        let (_dir, store) = test_store();
+
+        let entries = vec![
+            TestEntry { id: 1, name: "first".into() },
+            TestEntry { id: 2, name: "second".into() },
+            TestEntry { id: 3, name: "third".into() },
+        ];
+        for entry in &entries {
+            store.append_jsonl("log.jsonl", entry).unwrap();
+        }
+
+        let loaded: Vec<TestEntry> = store.read_jsonl("log.jsonl").unwrap();
+        assert_eq!(loaded, entries);
+    }
+
+    #[test]
+    fn store_jsonl_read_missing_file_returns_empty() {
+        let (_dir, store) = test_store();
+        let loaded: Vec<TestEntry> = store.read_jsonl("nonexistent.jsonl").unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn store_jsonl_skips_blank_lines() {
+        let (_dir, store) = test_store();
+
+        // Write one entry, then inject a blank line manually
+        let entry = TestEntry { id: 1, name: "only".into() };
+        store.append_jsonl("log.jsonl", &entry).unwrap();
+
+        // Append a blank line directly
+        use std::io::Write;
+        let path = store.path("log.jsonl");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "").unwrap();
+        writeln!(file, "  ").unwrap();
+
+        let loaded: Vec<TestEntry> = store.read_jsonl("log.jsonl").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], entry);
+    }
+
+    // ── JSONL count ───────────────────────────────────────────
+    // Used by should_run() checks to decide whether enough data
+    // has accumulated for analysis. Must be consistent with read_jsonl.
+
+    #[test]
+    fn store_jsonl_count_matches_read_len() {
+        let (_dir, store) = test_store();
+
+        for i in 0..5 {
+            let entry = TestEntry { id: i, name: format!("entry-{i}") };
+            store.append_jsonl("log.jsonl", &entry).unwrap();
+        }
+
+        let count = store.count_jsonl("log.jsonl").unwrap();
+        let entries: Vec<TestEntry> = store.read_jsonl("log.jsonl").unwrap();
+        assert_eq!(count, entries.len());
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn store_jsonl_count_missing_file_returns_zero() {
+        let (_dir, store) = test_store();
+        assert_eq!(store.count_jsonl("nope.jsonl").unwrap(), 0);
+    }
+
+    // ── exists / path ─────────────────────────────────────────
+
+    #[test]
+    fn store_exists_true_for_written_file() {
+        let (_dir, store) = test_store();
+        assert!(!store.exists("data.json"));
+
+        store.write_json("data.json", &TestEntry { id: 1, name: "x".into() }).unwrap();
+        assert!(store.exists("data.json"));
+    }
+
+    #[test]
+    fn store_path_joins_correctly() {
+        let (dir, store) = test_store();
+        let expected = dir.path().join("sub/file.json");
+        assert_eq!(store.path("sub/file.json"), expected);
+    }
+
+    // ── Markdown write ────────────────────────────────────────
+
+    #[test]
+    fn store_write_md() {
+        let (_dir, store) = test_store();
+        store.write_md("notes/report.md", "# Hello\n\nWorld").unwrap();
+
+        let content = std::fs::read_to_string(store.path("notes/report.md")).unwrap();
+        assert_eq!(content, "# Hello\n\nWorld");
+    }
+
+    // ── timestamped_name ──────────────────────────────────────
+    // Format: YYYYMMDD-HHMM-{prefix}.{ext}
+
+    #[test]
+    fn store_timestamped_name_format() {
+        let name = Store::timestamped_name("dream", "jsonl");
+        // Should match pattern like "20260411-1234-dream.jsonl"
+        assert!(name.ends_with("-dream.jsonl"), "Got: {name}");
+        assert_eq!(name.len(), "20260411-1234-dream.jsonl".len());
+    }
+}

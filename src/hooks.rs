@@ -176,6 +176,129 @@ fn add_hook_entry(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── add_hook_entry: JSON manipulation ─────────────────────
+    // This function modifies the user's ~/.claude/settings.json.
+    // Getting the JSON structure wrong means Claude Code won't
+    // recognize the hooks. Idempotency is critical — running
+    // `i-dream hooks install` twice must not create duplicates.
+
+    #[test]
+    fn add_hook_creates_entry_with_correct_format() {
+        let mut hooks = serde_json::Map::new();
+        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
+
+        add_hook_entry(&mut hooks, "SessionStart", script);
+
+        let arr = hooks["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "command");
+        assert_eq!(
+            arr[0]["command"].as_str().unwrap(),
+            "bash /tmp/hooks/session-start.sh"
+        );
+    }
+
+    #[test]
+    fn add_hook_is_idempotent() {
+        let mut hooks = serde_json::Map::new();
+        let script = std::path::Path::new("/tmp/hooks/test.sh");
+
+        add_hook_entry(&mut hooks, "PostToolUse", script);
+        add_hook_entry(&mut hooks, "PostToolUse", script);
+        add_hook_entry(&mut hooks, "PostToolUse", script);
+
+        let arr = hooks["PostToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "Duplicate entries must not be created");
+    }
+
+    #[test]
+    fn add_hook_preserves_existing_entries() {
+        let mut hooks = serde_json::Map::new();
+
+        // Simulate an existing hook from another tool
+        hooks.insert("SessionStart".into(), serde_json::json!([
+            { "type": "command", "command": "bash /other-tool/hook.sh" }
+        ]));
+
+        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
+        add_hook_entry(&mut hooks, "SessionStart", script);
+
+        let arr = hooks["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "Should preserve the existing hook entry");
+        assert!(
+            arr[0]["command"].as_str().unwrap().contains("other-tool"),
+            "Original hook should be first"
+        );
+    }
+
+    #[test]
+    fn add_hook_creates_array_if_event_missing() {
+        let mut hooks = serde_json::Map::new();
+        // No "Stop" key exists yet
+
+        let script = std::path::Path::new("/tmp/hooks/stop.sh");
+        add_hook_entry(&mut hooks, "Stop", script);
+
+        assert!(hooks.contains_key("Stop"));
+        let arr = hooks["Stop"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+    }
+
+    // ── Hook script generation ────────────────────────────────
+    // The generated bash scripts are the bridge between Claude Code
+    // hooks and the i-dream daemon. They must include the correct
+    // socket path and activity signal path from config.
+
+    #[test]
+    fn session_start_hook_contains_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_session_start_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("session-start.sh")).unwrap();
+        let expected_socket = config.data_dir().join("daemon.sock");
+        assert!(
+            script.contains(&expected_socket.to_string_lossy().to_string()),
+            "Script must reference the daemon socket path"
+        );
+        assert!(script.starts_with("#!/bin/bash"), "Must have bash shebang");
+        assert!(script.contains("socat"), "Must use socat for Unix socket comms");
+        assert!(script.contains("session_start"), "Must send session_start event");
+    }
+
+    #[test]
+    fn post_tool_use_hook_contains_activity_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_post_tool_use_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("post-tool-use.sh")).unwrap();
+        let activity_path = expand_tilde(&config.idle.activity_signal);
+        assert!(
+            script.contains(&activity_path.to_string_lossy().to_string()),
+            "Script must touch the activity signal file"
+        );
+        assert!(script.contains("tool_use"), "Must send tool_use event");
+    }
+
+    #[test]
+    fn stop_hook_sends_session_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_stop_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("stop.sh")).unwrap();
+        assert!(script.contains("session_end"), "Must send session_end event");
+    }
+}
+
 fn write_session_start_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
     let socket = config.data_dir().join("daemon.sock");
     let script = format!(

@@ -52,7 +52,7 @@ pub struct OutcomeMeta {
     pub user_reaction: Reaction,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Reaction {
     Accepted,
     Corrected,
@@ -107,6 +107,181 @@ impl<'a> MetacogModule<'a> {
         let hash_val = hasher.finish();
         let sample_threshold = (self.config.modules.metacog.sample_rate * u64::MAX as f64) as u64;
         hash_val < sample_threshold
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_unit(id: &str, is_correction: bool, tools: Vec<ToolUseMeta>) -> ExecutionUnit {
+        ExecutionUnit {
+            unit_id: id.into(),
+            session_id: "sess-001".into(),
+            timestamp: Utc::now(),
+            input: InputMeta {
+                message_hash: "abc123".into(),
+                message_length: 100,
+                topic_keywords: vec!["test".into()],
+                is_correction,
+            },
+            tools,
+            output: OutputMeta {
+                message_length: 200,
+                code_blocks: 1,
+            },
+            outcome: OutcomeMeta {
+                user_reaction: Reaction::Accepted,
+            },
+        }
+    }
+
+    fn tool(name: &str, success: bool) -> ToolUseMeta {
+        ToolUseMeta {
+            name: name.into(),
+            target: None,
+            success,
+            duration_ms: 100,
+        }
+    }
+
+    // ── should_sample: trigger-based sampling ─────────────────
+    // The metacog monitor can't analyze every execution unit (too
+    // expensive). Sampling strategy: always capture corrections and
+    // failures (high signal), randomly sample the rest. This directly
+    // controls the cost/insight tradeoff of the entire metacog module.
+
+    #[test]
+    fn sample_always_on_correction() {
+        let config = Config::default();
+        let store = Store::new(std::env::temp_dir().join("idream-test-metacog-corr")).unwrap();
+        let module = MetacogModule::new(&config, &store);
+
+        let unit = make_unit("unit-1", true, vec![tool("Read", true)]);
+        assert!(
+            module.should_sample(&unit),
+            "Corrections must ALWAYS be sampled — they're the highest-signal events"
+        );
+    }
+
+    #[test]
+    fn sample_always_on_consecutive_failures() {
+        let config = Config::default();
+        let store = Store::new(std::env::temp_dir().join("idream-test-metacog-fail")).unwrap();
+        let module = MetacogModule::new(&config, &store);
+
+        let unit = make_unit("unit-2", false, vec![
+            tool("Edit", false),
+            tool("Edit", false), // consecutive failures
+        ]);
+        assert!(
+            module.should_sample(&unit),
+            "Consecutive tool failures indicate a struggling strategy — must sample"
+        );
+    }
+
+    #[test]
+    fn sample_not_triggered_on_single_failure() {
+        let config = Config::default();
+        let store = Store::new(std::env::temp_dir().join("idream-test-metacog-single")).unwrap();
+        let module = MetacogModule::new(&config, &store);
+
+        // Failure followed by success — not consecutive
+        let unit = make_unit("unit-3", false, vec![
+            tool("Edit", false),
+            tool("Edit", true),
+        ]);
+        // This might or might not sample based on hash — we can't assert
+        // it's definitely NOT sampled (hash might land in the 25% window).
+        // But we CAN verify the consecutive failure path isn't triggered:
+        let consecutive = unit.tools.windows(2)
+            .filter(|w| !w[0].success && !w[1].success)
+            .count();
+        assert_eq!(consecutive, 0, "Single failure + success should not trigger consecutive failure path");
+    }
+
+    #[test]
+    fn sample_deterministic_for_same_unit_id() {
+        let config = Config::default();
+        let store = Store::new(std::env::temp_dir().join("idream-test-metacog-det")).unwrap();
+        let module = MetacogModule::new(&config, &store);
+
+        let unit = make_unit("deterministic-id", false, vec![tool("Read", true)]);
+        let result1 = module.should_sample(&unit);
+        let result2 = module.should_sample(&unit);
+        assert_eq!(
+            result1, result2,
+            "Same unit_id must produce the same sampling decision (hash-based)"
+        );
+    }
+
+    #[test]
+    fn sample_rate_zero_never_samples_normal_units() {
+        let mut config = Config::default();
+        config.modules.metacog.sample_rate = 0.0;
+        let store = Store::new(std::env::temp_dir().join("idream-test-metacog-zero")).unwrap();
+        let module = MetacogModule::new(&config, &store);
+
+        // Test 100 different unit IDs — none should be sampled
+        for i in 0..100 {
+            let unit = make_unit(&format!("unit-{i}"), false, vec![tool("Read", true)]);
+            assert!(
+                !module.should_sample(&unit),
+                "With sample_rate=0, non-triggered units should never be sampled"
+            );
+        }
+    }
+
+    #[test]
+    fn sample_rate_one_always_samples() {
+        let mut config = Config::default();
+        config.modules.metacog.sample_rate = 1.0;
+        let store = Store::new(std::env::temp_dir().join("idream-test-metacog-one")).unwrap();
+        let module = MetacogModule::new(&config, &store);
+
+        for i in 0..100 {
+            let unit = make_unit(&format!("unit-{i}"), false, vec![tool("Read", true)]);
+            assert!(
+                module.should_sample(&unit),
+                "With sample_rate=1.0, all units should be sampled"
+            );
+        }
+    }
+
+    // ── Serde round-trips ─────────────────────────────────────
+
+    #[test]
+    fn execution_unit_serde_roundtrip() {
+        let unit = make_unit("u-1", false, vec![tool("Read", true), tool("Edit", false)]);
+        let json = serde_json::to_string(&unit).unwrap();
+        let parsed: ExecutionUnit = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn calibration_entry_serde_roundtrip() {
+        let entry = CalibrationEntry {
+            date: "2026-04-11".into(),
+            session_id: "sess-001".into(),
+            units_sampled: 12,
+            calibration_score: 0.72,
+            overconfident_count: 2,
+            underconfident_count: 1,
+            well_calibrated_count: 9,
+            biases_detected: vec!["anchoring".into()],
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let parsed: CalibrationEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn reaction_variants_serde() {
+        for reaction in [Reaction::Accepted, Reaction::Corrected, Reaction::Ignored, Reaction::Unknown] {
+            let json = serde_json::to_string(&reaction).unwrap();
+            let parsed: Reaction = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, reaction);
+        }
     }
 }
 

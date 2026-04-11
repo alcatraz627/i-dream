@@ -95,6 +95,193 @@ impl<'a> IntrospectionModule<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── available_chains: directory scanning ───────────────────
+    // Controls whether should_run() triggers a weekly analysis.
+    // Must correctly count only .jsonl files and handle empty dirs.
+
+    #[test]
+    fn available_chains_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        let config = Config::default();
+        let module = IntrospectionModule::new(&config, &store);
+
+        assert_eq!(module.available_chains().unwrap(), 0);
+    }
+
+    #[test]
+    fn available_chains_counts_jsonl_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        // Create some .jsonl files and a .json file (should not count)
+        let chains_dir = store.path("introspection/chains");
+        std::fs::write(chains_dir.join("chain-001.jsonl"), "{}").unwrap();
+        std::fs::write(chains_dir.join("chain-002.jsonl"), "{}").unwrap();
+        std::fs::write(chains_dir.join("metadata.json"), "{}").unwrap();
+        std::fs::write(chains_dir.join("notes.txt"), "hi").unwrap();
+
+        let config = Config::default();
+        let module = IntrospectionModule::new(&config, &store);
+
+        assert_eq!(module.available_chains().unwrap(), 2, "Should count only .jsonl files");
+    }
+
+    // ── should_run: gating logic ──────────────────────────────
+    // The introspection module runs weekly IF enough chains exist.
+    // Tests verify the three gates: enabled, min chains, interval.
+
+    #[test]
+    fn should_run_false_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let mut config = Config::default();
+        config.modules.introspection.enabled = false;
+        let module = IntrospectionModule::new(&config, &store);
+
+        assert!(!module.should_run().unwrap());
+    }
+
+    #[test]
+    fn should_run_false_when_not_enough_chains() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let mut config = Config::default();
+        config.modules.introspection.min_chains_for_report = 10;
+        // Only create 3 chains
+        let chains_dir = store.path("introspection/chains");
+        for i in 0..3 {
+            std::fs::write(chains_dir.join(format!("chain-{i}.jsonl")), "{}").unwrap();
+        }
+
+        let module = IntrospectionModule::new(&config, &store);
+        assert!(!module.should_run().unwrap(), "Need 10 chains but only have 3");
+    }
+
+    #[test]
+    fn should_run_true_when_enough_chains_no_prior_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let mut config = Config::default();
+        config.modules.introspection.min_chains_for_report = 3;
+        let chains_dir = store.path("introspection/chains");
+        for i in 0..5 {
+            std::fs::write(chains_dir.join(format!("chain-{i}.jsonl")), "{}").unwrap();
+        }
+
+        let module = IntrospectionModule::new(&config, &store);
+        assert!(module.should_run().unwrap(), "5 chains >= 3 minimum, no prior report");
+    }
+
+    #[test]
+    fn should_run_false_when_recent_report_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let mut config = Config::default();
+        config.modules.introspection.min_chains_for_report = 2;
+        config.modules.introspection.report_interval_days = 7;
+
+        let chains_dir = store.path("introspection/chains");
+        for i in 0..5 {
+            std::fs::write(chains_dir.join(format!("chain-{i}.jsonl")), "{}").unwrap();
+        }
+
+        // Write a recent patterns.json (updated today)
+        let patterns = ReasoningPatterns {
+            last_updated: Utc::now(),
+            average_depth: 3.0,
+            average_breadth: 2.5,
+            fixation_rate: 0.1,
+            assumption_rate: 0.2,
+            overconfidence_rate: 0.15,
+            common_assumptions: vec![],
+            strength_patterns: vec![],
+            weakness_patterns: vec![],
+            trend: Trend {
+                calibration_improving: true,
+                depth_trend: "stable".into(),
+                breadth_trend: "increasing".into(),
+            },
+        };
+        store.write_json("introspection/patterns.json", &patterns).unwrap();
+
+        let module = IntrospectionModule::new(&config, &store);
+        assert!(
+            !module.should_run().unwrap(),
+            "Should not run again within the 7-day interval"
+        );
+    }
+
+    // ── Serde round-trips ─────────────────────────────────────
+
+    #[test]
+    fn reasoning_chain_serde_roundtrip() {
+        let chain = ReasoningChain {
+            chain_id: "c-001".into(),
+            session_id: "sess-1".into(),
+            timestamp: Utc::now(),
+            task_description: "Fix auth bug".into(),
+            steps: vec![ReasoningStep {
+                step: 1,
+                step_type: "search".into(),
+                target: Some("auth.rs".into()),
+                reasoning_summary: "Looking for auth logic".into(),
+                alternatives_considered: vec!["grep".into()],
+                chosen: Some("ripgrep".into()),
+                confidence: Some("high".into()),
+                time_ms: 500,
+            }],
+            outcome: "fixed".into(),
+            total_steps: 1,
+            total_time_ms: 500,
+            depth: 3,
+            breadth: 2,
+            fixation_detected: false,
+            assumptions: vec!["auth module exists".into()],
+        };
+        let json = serde_json::to_string(&chain).unwrap();
+        let parsed: ReasoningChain = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn reasoning_patterns_serde_roundtrip() {
+        let patterns = ReasoningPatterns {
+            last_updated: Utc::now(),
+            average_depth: 4.2,
+            average_breadth: 2.1,
+            fixation_rate: 0.08,
+            assumption_rate: 0.15,
+            overconfidence_rate: 0.12,
+            common_assumptions: vec!["file exists".into()],
+            strength_patterns: vec!["methodical search".into()],
+            weakness_patterns: vec!["premature optimization".into()],
+            trend: Trend {
+                calibration_improving: true,
+                depth_trend: "stable".into(),
+                breadth_trend: "increasing".into(),
+            },
+        };
+        let json = serde_json::to_string(&patterns).unwrap();
+        let parsed: ReasoningPatterns = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+}
+
 impl<'a> Module for IntrospectionModule<'a> {
     fn should_run(&self) -> Result<bool> {
         if !self.config.modules.introspection.enabled {

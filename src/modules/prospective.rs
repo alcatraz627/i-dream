@@ -50,7 +50,7 @@ pub struct Action {
     pub source: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Priority {
     Low,
     Medium,
@@ -173,6 +173,374 @@ impl<'a> ProspectiveModule<'a> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn make_intention(
+        id: &str,
+        trigger: Trigger,
+        expires_in_days: i64,
+        fire_count: u64,
+        max_fires: u64,
+    ) -> Intention {
+        Intention {
+            id: id.into(),
+            trigger,
+            action: Action {
+                message: format!("Action for {id}"),
+                priority: Priority::Medium,
+                source: "test".into(),
+            },
+            created: Utc::now() - Duration::days(1),
+            expires: Utc::now() + Duration::days(expires_in_days),
+            fire_count,
+            max_fires,
+            last_fired: None,
+        }
+    }
+
+    // ── match_intentions: trigger matching ────────────────────
+    // Prospective memory fires when the session context matches
+    // stored intentions. Wrong matching = important reminders lost
+    // or irrelevant reminders annoying the user.
+
+    #[test]
+    fn match_event_trigger_by_keyword() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let intention = make_intention(
+            "int-1",
+            Trigger::Event {
+                condition: "keyword match".into(),
+                keywords: vec!["migration".into(), "database".into()],
+                file_patterns: vec![],
+            },
+            30, 0, 3,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        let matched = module.match_intentions("Running the database migration", None).unwrap();
+        assert_eq!(matched.len(), 1, "Should match on keyword 'database'");
+    }
+
+    #[test]
+    fn match_event_trigger_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let intention = make_intention(
+            "int-2",
+            Trigger::Event {
+                condition: "keyword match".into(),
+                keywords: vec!["DEPLOY".into()],
+                file_patterns: vec![],
+            },
+            30, 0, 3,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        let matched = module.match_intentions("Starting deploy to production", None).unwrap();
+        assert_eq!(matched.len(), 1, "Keyword matching should be case-insensitive");
+    }
+
+    #[test]
+    fn match_skips_expired_intentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let intention = make_intention(
+            "int-3",
+            Trigger::Event {
+                condition: "keyword match".into(),
+                keywords: vec!["test".into()],
+                file_patterns: vec![],
+            },
+            -1, // expired yesterday
+            0, 3,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        let matched = module.match_intentions("test message", None).unwrap();
+        assert_eq!(matched.len(), 0, "Expired intentions should never match");
+    }
+
+    #[test]
+    fn match_skips_maxed_out_intentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let intention = make_intention(
+            "int-4",
+            Trigger::Event {
+                condition: "keyword match".into(),
+                keywords: vec!["test".into()],
+                file_patterns: vec![],
+            },
+            30,
+            3, 3, // fire_count == max_fires
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        let matched = module.match_intentions("test message", None).unwrap();
+        assert_eq!(matched.len(), 0, "Maxed-out intentions should not fire again");
+    }
+
+    #[test]
+    fn match_time_trigger_respects_after_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        // Intention with time gate in the future
+        let intention = make_intention(
+            "int-5",
+            Trigger::Time {
+                after: Utc::now() + Duration::hours(2), // 2 hours from now
+                keywords: vec![],
+            },
+            30, 0, 1,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        let matched = module.match_intentions("anything", None).unwrap();
+        assert_eq!(matched.len(), 0, "Time trigger should not fire before 'after' gate");
+    }
+
+    #[test]
+    fn match_time_trigger_fires_after_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let intention = make_intention(
+            "int-6",
+            Trigger::Time {
+                after: Utc::now() - Duration::hours(1), // 1 hour ago
+                keywords: vec![], // empty = match any message
+            },
+            30, 0, 1,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        let matched = module.match_intentions("anything", None).unwrap();
+        assert_eq!(matched.len(), 1, "Time trigger should fire after gate with empty keywords");
+    }
+
+    #[test]
+    fn match_context_trigger_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let intention = make_intention(
+            "int-7",
+            Trigger::Context {
+                keywords: vec!["auth".into(), "login".into(), "session".into()],
+                min_keyword_matches: 2,
+            },
+            30, 0, 3,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        // Only 1 match — below threshold
+        let matched = module.match_intentions("fix the auth bug", None).unwrap();
+        assert_eq!(matched.len(), 0, "Should NOT match with only 1 of 2 required keywords");
+
+        // 2 matches — meets threshold
+        let matched = module.match_intentions("fix the auth login flow", None).unwrap();
+        assert_eq!(matched.len(), 1, "Should match with 2 of 2 required keywords");
+    }
+
+    #[test]
+    fn match_empty_registry_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        // Don't write any intentions
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+
+        let matched = module.match_intentions("anything", None).unwrap();
+        assert!(matched.is_empty());
+    }
+
+    // ── cleanup_expired ────────────────────────────────���──────
+    // Prevents unbounded growth of the intention registry.
+    // Must: archive expired, rewrite active, preserve ordering.
+
+    #[test]
+    fn cleanup_archives_expired_and_keeps_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        // One active, one expired
+        let active = make_intention(
+            "active-1",
+            Trigger::Event {
+                condition: "kw".into(),
+                keywords: vec!["test".into()],
+                file_patterns: vec![],
+            },
+            30, 0, 3,
+        );
+        let expired = make_intention(
+            "expired-1",
+            Trigger::Event {
+                condition: "kw".into(),
+                keywords: vec!["old".into()],
+                file_patterns: vec![],
+            },
+            -5, // expired 5 days ago
+            0, 3,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &active).unwrap();
+        store.append_jsonl("intentions/registry.jsonl", &expired).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+        module.cleanup_expired().unwrap();
+
+        // Registry should only have the active one
+        let remaining: Vec<Intention> = store.read_jsonl("intentions/registry.jsonl").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "active-1");
+
+        // Expired one should be archived
+        let archived: Vec<Intention> = store.read_jsonl("intentions/expired.jsonl").unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "expired-1");
+    }
+
+    #[test]
+    fn cleanup_noop_when_nothing_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let active = make_intention(
+            "active-2",
+            Trigger::Event {
+                condition: "kw".into(),
+                keywords: vec!["test".into()],
+                file_patterns: vec![],
+            },
+            30, 0, 3,
+        );
+        store.append_jsonl("intentions/registry.jsonl", &active).unwrap();
+
+        let config = Config::default();
+        let module = ProspectiveModule::new(&config, &store);
+        module.cleanup_expired().unwrap();
+
+        let remaining: Vec<Intention> = store.read_jsonl("intentions/registry.jsonl").unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "active-2");
+
+        // No expired archive should be created
+        assert!(!store.exists("intentions/expired.jsonl"));
+    }
+
+    // ── Serde round-trips ──────────────────���──────────────────
+
+    #[test]
+    fn intention_event_trigger_serde() {
+        let intention = make_intention(
+            "serde-1",
+            Trigger::Event {
+                condition: "keyword match".into(),
+                keywords: vec!["deploy".into()],
+                file_patterns: vec!["*.rs".into()],
+            },
+            30, 0, 5,
+        );
+        let json = serde_json::to_string(&intention).unwrap();
+        let parsed: Intention = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn intention_time_trigger_serde() {
+        let intention = make_intention(
+            "serde-2",
+            Trigger::Time {
+                after: Utc::now(),
+                keywords: vec!["reminder".into()],
+            },
+            7, 0, 1,
+        );
+        let json = serde_json::to_string(&intention).unwrap();
+        let parsed: Intention = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn intention_context_trigger_serde() {
+        let intention = make_intention(
+            "serde-3",
+            Trigger::Context {
+                keywords: vec!["auth".into(), "jwt".into()],
+                min_keyword_matches: 2,
+            },
+            14, 1, 3,
+        );
+        let json = serde_json::to_string(&intention).unwrap();
+        let parsed: Intention = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn priority_variants_serde() {
+        for priority in [Priority::Low, Priority::Medium, Priority::High] {
+            let json = serde_json::to_string(&priority).unwrap();
+            let parsed: Priority = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, priority);
+        }
+    }
+
+    #[test]
+    fn fired_record_serde() {
+        let record = FiredRecord {
+            intention_id: "int-1".into(),
+            fired_at: Utc::now(),
+            session_id: "sess-001".into(),
+            was_relevant: Some(true),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: FiredRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
     }
 }
 
