@@ -54,6 +54,9 @@ sha2 = "0.10"
 # Directories
 dirs = "6"
 
+# .env file loading
+dotenvy = "0.15"
+
 # Unix signal handling
 libc = "0.2"
 

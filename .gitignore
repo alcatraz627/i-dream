@@ -17,3 +17,5 @@
 # Agent artifacts
 .claude/
 **/.playwright-mcp/
+
+.env

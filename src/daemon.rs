@@ -4,7 +4,7 @@ use crate::api::ClaudeClient;
 use crate::cli::DreamPhase;
 use crate::config::Config;
 use crate::modules::{
-    dreaming::DreamingModule, introspection::IntrospectionModule, intuition::IntuitionModule,
+    dreaming::DreamingModule, introspection::IntrospectionModule,
     metacog::MetacogModule, prospective::ProspectiveModule, Module,
 };
 use crate::store::Store;

@@ -13,6 +13,9 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if it exists (ignored if missing)
+    let _ = dotenvy::dotenv();
+
     let cli = Cli::parse();
 
     let log_level = cli.log_level.as_deref().unwrap_or("info");
