@@ -7,7 +7,7 @@ use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
     dreaming::DreamingModule,
     introspection::{IntrospectionModule, ReasoningPatterns},
-    metacog::MetacogModule,
+    metacog::{MetacogModule, ToolActivitySample},
     prospective::{Intention, Priority, ProspectiveModule, Trigger},
     Module,
 };
@@ -24,6 +24,11 @@ use tracing::{debug, error, info, warn};
 
 /// Relative path (under the data dir) of the hook-event log.
 const EVENTS_LOG: &str = "logs/events.jsonl";
+
+/// Relative path of the metacog real-time tool-activity log. Written on
+/// each `ToolUse` hook event as a lightweight heartbeat — counterpart to
+/// the deep-sampling batch file `metacog/samples.jsonl`.
+const METACOG_ACTIVITY_LOG: &str = "metacog/activity.jsonl";
 
 /// Persistent daemon state, saved between consolidation cycles.
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -401,6 +406,21 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     let record = HookEventRecord::new(event.clone());
     store.append_jsonl(EVENTS_LOG, &record)?;
 
+    // Per-event side effects. `ToolUse` gets a lightweight realtime
+    // sample written to metacog/activity.jsonl — the per-tool heartbeat
+    // that complements the deep batch sampling done during consolidation.
+    // Best-effort: a failed activity write must not drop the event ack.
+    if let HookEvent::ToolUse { tool, ts } = &event {
+        let sample = ToolActivitySample {
+            received_at: record.received_at,
+            tool: tool.clone(),
+            hook_ts: *ts,
+        };
+        if let Err(e) = store.append_jsonl(METACOG_ACTIVITY_LOG, &sample) {
+            warn!("Failed to write metacog activity sample: {e:#}");
+        }
+    }
+
     // SessionStart is the only event that gets a non-empty response —
     // the hook script echoes whatever we write back into Claude's context.
     // For all other events we just ack with an empty body.
@@ -653,6 +673,93 @@ mod tests {
             HookEvent::ToolUse { tool: "Edit".into(), ts: 102 }
         );
         assert_eq!(records[3].event, HookEvent::SessionEnd { ts: 103 });
+
+        // Task #6: the two tool_use events should ALSO have been sampled
+        // to metacog/activity.jsonl as real-time heartbeat records. The
+        // session_start/session_end events must NOT appear there.
+        let activity: Vec<ToolActivitySample> =
+            store.read_jsonl(METACOG_ACTIVITY_LOG).unwrap();
+        assert_eq!(
+            activity.len(),
+            2,
+            "Only the two tool_use events should land in the activity log"
+        );
+        assert_eq!(activity[0].tool, "Read");
+        assert_eq!(activity[0].hook_ts, 101);
+        assert_eq!(activity[1].tool, "Edit");
+        assert_eq!(activity[1].hook_ts, 102);
+    }
+
+    // ── PostToolUse → metacog activity sampling (Task #6) ─────
+    // Every tool_use event from the shell hook must land in
+    // metacog/activity.jsonl as a lightweight heartbeat sample.
+    // This is the realtime counterpart to the deep post-session
+    // sampling that happens during consolidation. If this breaks,
+    // metacog loses its per-tool heartbeat signal and the daemon
+    // has no way to prioritize which sessions to deep-sample.
+
+    #[tokio::test]
+    async fn tool_use_writes_metacog_activity_sample() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let socket_path = dir.path().join("tool.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let client_path = socket_path.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(&client_path).await.unwrap();
+            let payload = r#"{"event":"tool_use","tool":"Grep","ts":777}"#;
+            stream.write_all(payload.as_bytes()).await.unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let before = Utc::now();
+        handle_hook_connection(stream, &store).await.unwrap();
+        let after = Utc::now();
+        client.await.unwrap();
+
+        let samples: Vec<ToolActivitySample> =
+            store.read_jsonl(METACOG_ACTIVITY_LOG).unwrap();
+        assert_eq!(samples.len(), 1, "tool_use must produce exactly one sample");
+        assert_eq!(samples[0].tool, "Grep");
+        assert_eq!(samples[0].hook_ts, 777);
+        assert!(samples[0].received_at >= before && samples[0].received_at <= after,
+            "received_at must be set to the daemon-side receive time");
+    }
+
+    #[tokio::test]
+    async fn session_start_does_not_write_activity_sample() {
+        // Only tool_use events produce activity samples. SessionStart
+        // and SessionEnd must not pollute the activity log — they're
+        // not tool heartbeats.
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let socket_path = dir.path().join("start.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let client_path = socket_path.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(&client_path).await.unwrap();
+            stream.write_all(b"{\"event\":\"session_start\",\"ts\":1}\n").await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        handle_hook_connection(stream, &store).await.unwrap();
+        client.await.unwrap();
+
+        // The events log should have the session_start event…
+        assert_eq!(store.count_jsonl(EVENTS_LOG).unwrap(), 1);
+        // …but the activity log should be empty / nonexistent.
+        assert_eq!(store.count_jsonl(METACOG_ACTIVITY_LOG).unwrap(), 0);
     }
 
     #[test]

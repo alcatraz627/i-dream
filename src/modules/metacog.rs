@@ -79,6 +79,28 @@ pub enum Reaction {
     Unknown,
 }
 
+/// Real-time per-tool activity sample, written when a `PostToolUse` hook
+/// event arrives at the daemon. This is the *heartbeat* counterpart to
+/// [`ExecutionUnit`] — a lightweight ping that lands in
+/// `metacog/activity.jsonl` as tool calls happen, separate from the
+/// deep post-session sampling that reads full transcripts.
+///
+/// Downstream use cases:
+/// - Consolidation runs can count activity per session to prioritize
+///   which transcripts to deep-sample first.
+/// - Operational visibility — `status` can show recent tool-call rates.
+/// - Cross-correlation with dream cycles — tie a tool spike to a later
+///   learning extracted by the dreaming module.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolActivitySample {
+    /// Daemon-side receive timestamp.
+    pub received_at: DateTime<Utc>,
+    /// Tool name as reported by the PostToolUse hook (e.g. "Read", "Edit").
+    pub tool: String,
+    /// Hook-side timestamp (unix seconds) from the shell script.
+    pub hook_ts: i64,
+}
+
 /// Per-session calibration record.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CalibrationEntry {
@@ -356,6 +378,18 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: CalibrationEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn tool_activity_sample_serde_roundtrip() {
+        let sample = ToolActivitySample {
+            received_at: Utc::now(),
+            tool: "Read".into(),
+            hook_ts: 1712345679,
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        let parsed: ToolActivitySample = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, sample);
     }
 
     #[test]
