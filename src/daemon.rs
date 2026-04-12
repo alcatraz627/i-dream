@@ -5,8 +5,11 @@ use crate::cli::DreamPhase;
 use crate::config::Config;
 use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
-    dreaming::DreamingModule, introspection::IntrospectionModule,
-    metacog::MetacogModule, prospective::ProspectiveModule, Module,
+    dreaming::DreamingModule,
+    introspection::{IntrospectionModule, ReasoningPatterns},
+    metacog::MetacogModule,
+    prospective::{Intention, Priority, ProspectiveModule, Trigger},
+    Module,
 };
 use crate::store::Store;
 use anyhow::{Context, Result};
@@ -398,11 +401,11 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     let record = HookEventRecord::new(event.clone());
     store.append_jsonl(EVENTS_LOG, &record)?;
 
-    // Response is empty for now. Task #4 will populate it for SessionStart
-    // with surfaced intuitions + matched intentions, which the hook script
-    // then echoes into Claude's context.
+    // SessionStart is the only event that gets a non-empty response —
+    // the hook script echoes whatever we write back into Claude's context.
+    // For all other events we just ack with an empty body.
     let response = match &event {
-        HookEvent::SessionStart { .. } => String::new(),
+        HookEvent::SessionStart { .. } => build_session_start_response(store),
         _ => String::new(),
     };
     writer.write_all(response.as_bytes()).await?;
@@ -411,9 +414,124 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     Ok(())
 }
 
+/// Compose the markdown briefing the hook echoes into Claude's context
+/// at session start.
+///
+/// SessionStart carries no message text (only a timestamp), so we can
+/// only surface context-free signal:
+///   1. Broadcast intentions — `Trigger::Time` entries where the
+///      `after` gate has passed and `keywords` is empty. Context-gated
+///      intentions (Event/Context triggers) need the first user prompt
+///      to match against and are deferred until we can hook
+///      UserPromptSubmit.
+///   2. Reasoning patterns from the latest introspection report —
+///      recent strengths, weaknesses, and common assumptions.
+///
+/// Returns an empty string when nothing is worth surfacing. An empty
+/// body is the correct no-op signal for the shell hook — it writes
+/// nothing into Claude's context.
+fn build_session_start_response(store: &Store) -> String {
+    let mut sections: Vec<String> = Vec::new();
+
+    // ── 1. Broadcast intentions ─────────────────────────────
+    if let Some(section) = broadcast_intentions_section(store) {
+        sections.push(section);
+    }
+
+    // ── 2. Introspection patterns ───────────────────────────
+    if let Some(section) = introspection_patterns_section(store) {
+        sections.push(section);
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("# i-dream briefing\n\n");
+    out.push_str(&sections.join("\n\n"));
+    out.push('\n');
+    out
+}
+
+/// Filter the intention registry to "broadcast-ready" entries — those
+/// that can fire without needing to match against a user prompt.
+fn broadcast_intentions_section(store: &Store) -> Option<String> {
+    let registry: Vec<Intention> = store
+        .read_jsonl("intentions/registry.jsonl")
+        .unwrap_or_default();
+    if registry.is_empty() {
+        return None;
+    }
+
+    let now = Utc::now();
+    let mut broadcast: Vec<&Intention> = registry
+        .iter()
+        .filter(|intent| intent.expires > now)
+        .filter(|intent| intent.fire_count < intent.max_fires)
+        .filter(|intent| matches!(
+            &intent.trigger,
+            Trigger::Time { after, keywords } if *after <= now && keywords.is_empty()
+        ))
+        .collect();
+
+    if broadcast.is_empty() {
+        return None;
+    }
+
+    // High priority first, then medium, then low.
+    broadcast.sort_by_key(|i| match i.action.priority {
+        Priority::High => 0,
+        Priority::Medium => 1,
+        Priority::Low => 2,
+    });
+
+    let mut s = format!("## Reminders ({})", broadcast.len());
+    for intent in broadcast {
+        let tag = match intent.action.priority {
+            Priority::High => "high",
+            Priority::Medium => "medium",
+            Priority::Low => "low",
+        };
+        s.push_str(&format!("\n- [{tag}] {}", intent.action.message));
+    }
+    Some(s)
+}
+
+/// Surface strengths/weaknesses/assumptions from the latest
+/// introspection report, if one exists.
+fn introspection_patterns_section(store: &Store) -> Option<String> {
+    if !store.exists("introspection/patterns.json") {
+        return None;
+    }
+    let patterns: ReasoningPatterns = store.read_json("introspection/patterns.json").ok()?;
+
+    let strengths = patterns.strength_patterns.join(", ");
+    let weaknesses = patterns.weakness_patterns.join(", ");
+    let assumptions = patterns.common_assumptions.join(", ");
+
+    // If every field is empty there's nothing worth surfacing.
+    if strengths.is_empty() && weaknesses.is_empty() && assumptions.is_empty() {
+        return None;
+    }
+
+    let mut s = String::from("## Self-awareness");
+    if !strengths.is_empty() {
+        s.push_str(&format!("\nRecent strengths: {strengths}"));
+    }
+    if !weaknesses.is_empty() {
+        s.push_str(&format!("\nWatch for: {weaknesses}"));
+    }
+    if !assumptions.is_empty() {
+        s.push_str(&format!("\nCommon assumptions: {assumptions}"));
+    }
+    Some(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::introspection::Trend;
+    use crate::modules::prospective::Action;
     use tempfile::TempDir;
     use tokio::io::AsyncReadExt;
 
@@ -557,5 +675,280 @@ mod tests {
 
         bind_socket(&socket_path).unwrap();
         assert!(socket_path.parent().unwrap().exists());
+    }
+
+    // ── SessionStart briefing composer ────────────────────────
+    // build_session_start_response is what the hook script echoes
+    // into Claude's context at session start. It has to:
+    //   1. Return empty when there's nothing worth saying
+    //   2. Surface time-unlocked broadcast intentions only
+    //   3. Ignore keyword-gated intentions (they need a prompt to
+    //      match against — SessionStart has no text)
+    //   4. Surface introspection strengths/weaknesses when present
+    //
+    // These tests lock the minimum-signal contract: we don't want
+    // the daemon injecting noise into every new session.
+
+    fn mk_store() -> (TempDir, Store) {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        (dir, store)
+    }
+
+    fn broadcast_intention(
+        id: &str,
+        message: &str,
+        priority: Priority,
+        after_offset: chrono::Duration,
+    ) -> Intention {
+        Intention {
+            id: id.into(),
+            trigger: Trigger::Time {
+                after: Utc::now() + after_offset,
+                keywords: vec![],
+            },
+            action: Action {
+                message: message.into(),
+                priority,
+                source: "test".into(),
+            },
+            created: Utc::now() - chrono::Duration::days(1),
+            expires: Utc::now() + chrono::Duration::days(7),
+            fire_count: 0,
+            max_fires: 5,
+            last_fired: None,
+        }
+    }
+
+    #[test]
+    fn session_start_response_empty_when_no_data() {
+        let (_dir, store) = mk_store();
+        let out = build_session_start_response(&store);
+        assert!(
+            out.is_empty(),
+            "Empty store should yield empty response, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn session_start_response_surfaces_broadcast_intention() {
+        let (_dir, store) = mk_store();
+        // after = 1 hour ago, keywords empty → broadcastable
+        let intention = broadcast_intention(
+            "b-1",
+            "Update CHANGELOG for v0.5.0",
+            Priority::High,
+            chrono::Duration::hours(-1),
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let out = build_session_start_response(&store);
+        assert!(out.contains("# i-dream briefing"), "missing header: {out}");
+        assert!(out.contains("## Reminders (1)"), "missing section: {out}");
+        assert!(out.contains("[high]"), "missing priority tag: {out}");
+        assert!(out.contains("Update CHANGELOG for v0.5.0"), "missing message: {out}");
+    }
+
+    #[test]
+    fn session_start_response_skips_future_gated_intention() {
+        let (_dir, store) = mk_store();
+        // after is 1 hour in the future → NOT broadcastable yet
+        let intention = broadcast_intention(
+            "future-1",
+            "Scheduled reminder",
+            Priority::Medium,
+            chrono::Duration::hours(1),
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let out = build_session_start_response(&store);
+        assert!(
+            out.is_empty(),
+            "Future-gated time intentions should not fire at session start: {out:?}"
+        );
+    }
+
+    #[test]
+    fn session_start_response_skips_keyword_gated_triggers() {
+        let (_dir, store) = mk_store();
+        // Event trigger with keywords — can't match SessionStart (no text)
+        let event_intention = Intention {
+            id: "evt-1".into(),
+            trigger: Trigger::Event {
+                condition: "kw".into(),
+                keywords: vec!["deploy".into()],
+                file_patterns: vec![],
+            },
+            action: Action {
+                message: "Check deploy config".into(),
+                priority: Priority::High,
+                source: "test".into(),
+            },
+            created: Utc::now(),
+            expires: Utc::now() + chrono::Duration::days(7),
+            fire_count: 0,
+            max_fires: 3,
+            last_fired: None,
+        };
+        store.append_jsonl("intentions/registry.jsonl", &event_intention).unwrap();
+
+        let out = build_session_start_response(&store);
+        assert!(
+            out.is_empty(),
+            "Keyword-gated intentions need a prompt to match — must not surface at session start: {out:?}"
+        );
+    }
+
+    #[test]
+    fn session_start_response_sorts_intentions_by_priority() {
+        let (_dir, store) = mk_store();
+        // Insert in low → high → medium order; expected order in
+        // output is high, medium, low.
+        let ago = chrono::Duration::hours(-1);
+        store.append_jsonl(
+            "intentions/registry.jsonl",
+            &broadcast_intention("low-1", "Low thing", Priority::Low, ago),
+        ).unwrap();
+        store.append_jsonl(
+            "intentions/registry.jsonl",
+            &broadcast_intention("high-1", "High thing", Priority::High, ago),
+        ).unwrap();
+        store.append_jsonl(
+            "intentions/registry.jsonl",
+            &broadcast_intention("med-1", "Medium thing", Priority::Medium, ago),
+        ).unwrap();
+
+        let out = build_session_start_response(&store);
+        let high_pos = out.find("High thing").expect("high missing");
+        let med_pos = out.find("Medium thing").expect("medium missing");
+        let low_pos = out.find("Low thing").expect("low missing");
+        assert!(high_pos < med_pos, "High should precede Medium");
+        assert!(med_pos < low_pos, "Medium should precede Low");
+    }
+
+    #[test]
+    fn session_start_response_skips_expired_and_maxed_intentions() {
+        let (_dir, store) = mk_store();
+        // Expired
+        let mut expired = broadcast_intention(
+            "exp-1",
+            "Expired broadcast",
+            Priority::High,
+            chrono::Duration::hours(-1),
+        );
+        expired.expires = Utc::now() - chrono::Duration::days(1);
+        store.append_jsonl("intentions/registry.jsonl", &expired).unwrap();
+
+        // Max-fired
+        let mut maxed = broadcast_intention(
+            "max-1",
+            "Already fired out",
+            Priority::High,
+            chrono::Duration::hours(-1),
+        );
+        maxed.fire_count = 5;
+        maxed.max_fires = 5;
+        store.append_jsonl("intentions/registry.jsonl", &maxed).unwrap();
+
+        let out = build_session_start_response(&store);
+        assert!(
+            out.is_empty(),
+            "Expired and maxed intentions must not surface: {out:?}"
+        );
+    }
+
+    #[test]
+    fn session_start_response_surfaces_introspection_patterns() {
+        let (_dir, store) = mk_store();
+        let patterns = ReasoningPatterns {
+            last_updated: Utc::now(),
+            average_depth: 4.0,
+            average_breadth: 2.5,
+            fixation_rate: 0.1,
+            assumption_rate: 0.2,
+            overconfidence_rate: 0.15,
+            common_assumptions: vec!["file exists".into(), "API is stable".into()],
+            strength_patterns: vec!["methodical search".into()],
+            weakness_patterns: vec!["premature optimization".into()],
+            trend: Trend {
+                calibration_improving: true,
+                depth_trend: "stable".into(),
+                breadth_trend: "stable".into(),
+            },
+        };
+        store.write_json("introspection/patterns.json", &patterns).unwrap();
+
+        let out = build_session_start_response(&store);
+        assert!(out.contains("## Self-awareness"), "missing section: {out}");
+        assert!(out.contains("methodical search"), "missing strength: {out}");
+        assert!(out.contains("premature optimization"), "missing weakness: {out}");
+        assert!(out.contains("file exists"), "missing assumption: {out}");
+    }
+
+    #[test]
+    fn session_start_response_combines_all_sections() {
+        let (_dir, store) = mk_store();
+        // One broadcast intention + a patterns file
+        let intention = broadcast_intention(
+            "combo-1",
+            "Weekly review",
+            Priority::Medium,
+            chrono::Duration::hours(-1),
+        );
+        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+
+        let patterns = ReasoningPatterns {
+            last_updated: Utc::now(),
+            average_depth: 3.0,
+            average_breadth: 2.0,
+            fixation_rate: 0.0,
+            assumption_rate: 0.0,
+            overconfidence_rate: 0.0,
+            common_assumptions: vec![],
+            strength_patterns: vec!["incremental verification".into()],
+            weakness_patterns: vec![],
+            trend: Trend {
+                calibration_improving: true,
+                depth_trend: "stable".into(),
+                breadth_trend: "stable".into(),
+            },
+        };
+        store.write_json("introspection/patterns.json", &patterns).unwrap();
+
+        let out = build_session_start_response(&store);
+        assert!(out.contains("## Reminders"), "missing reminders: {out}");
+        assert!(out.contains("## Self-awareness"), "missing self-awareness: {out}");
+        assert!(out.contains("Weekly review"));
+        assert!(out.contains("incremental verification"));
+    }
+
+    #[test]
+    fn session_start_response_empty_patterns_contribute_nothing() {
+        let (_dir, store) = mk_store();
+        // Patterns file exists but every surfaceable field is empty
+        let patterns = ReasoningPatterns {
+            last_updated: Utc::now(),
+            average_depth: 3.0,
+            average_breadth: 2.0,
+            fixation_rate: 0.0,
+            assumption_rate: 0.0,
+            overconfidence_rate: 0.0,
+            common_assumptions: vec![],
+            strength_patterns: vec![],
+            weakness_patterns: vec![],
+            trend: Trend {
+                calibration_improving: true,
+                depth_trend: "stable".into(),
+                breadth_trend: "stable".into(),
+            },
+        };
+        store.write_json("introspection/patterns.json", &patterns).unwrap();
+
+        let out = build_session_start_response(&store);
+        assert!(
+            out.is_empty(),
+            "Patterns with no surfaceable content should not produce a section: {out:?}"
+        );
     }
 }
