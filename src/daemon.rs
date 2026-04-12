@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -42,7 +43,12 @@ pub struct DaemonState {
 pub struct Daemon {
     config: Config,
     store: Store,
-    state: DaemonState,
+    /// Wrapped in a blocking `Mutex` for interior mutability across
+    /// `&self` — the hook handler, consolidation loop, and signal
+    /// shutdown all need to mutate it through the same `&self`.
+    /// We use `std::sync::Mutex` (not `tokio::sync::Mutex`) because the
+    /// critical sections are tiny field pokes with no `.await` inside.
+    state: Mutex<DaemonState>,
     client: Option<ClaudeClient>,
 }
 
@@ -63,9 +69,38 @@ impl Daemon {
         Ok(Self {
             config,
             store,
-            state,
+            state: Mutex::new(state),
             client,
         })
+    }
+
+    /// Mutate the in-memory state and persist the new snapshot to
+    /// `state.json`. Callers pass a closure so the mutation and the
+    /// write are paired — nothing updates `state` without flushing.
+    fn update_state<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut DaemonState),
+    {
+        let snapshot = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|e| anyhow::anyhow!("daemon state mutex poisoned: {e}"))?;
+            f(&mut state);
+            serde_json::to_value(&*state)?
+        };
+        self.store.write_json("state.json", &snapshot)?;
+        Ok(())
+    }
+
+    /// Lightweight, disk-free state touch. Used on the hot path (every
+    /// hook event) to keep `last_activity` fresh without hammering
+    /// `state.json` — the disk snapshot is taken at coarser intervals
+    /// (end of each consolidation cycle, graceful shutdown).
+    fn touch_last_activity(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.last_activity = Some(Utc::now());
+        }
     }
 
     /// Run in the foreground (blocking).
@@ -102,6 +137,10 @@ impl Daemon {
                 accept = listener.accept() => {
                     match accept {
                         Ok((stream, _addr)) => {
+                            // Touch in-memory activity before handling —
+                            // we count "connection received" as activity
+                            // whether or not the event parses.
+                            self.touch_last_activity();
                             if let Err(e) = handle_hook_connection(stream, &self.store).await {
                                 warn!("Hook event handler failed: {e:#}");
                             }
@@ -119,19 +158,65 @@ impl Daemon {
             debug!("Failed to remove socket file on shutdown: {e}");
         }
 
+        // Flush the in-memory state snapshot one last time so `status`
+        // sees the final `last_activity` after a graceful SIGTERM.
+        if let Err(e) = self.update_state(|_| {}) {
+            debug!("Failed to persist state on shutdown: {e:#}");
+        }
+
         info!("Daemon stopped");
         result
     }
 
-    /// Daemonize (fork to background).
+    /// Acquire the PID file and run in the foreground.
+    ///
+    /// Despite the name, this function does NOT fork. It writes our PID
+    /// into `daemon.pid`, runs the foreground loop to completion, and
+    /// then cleans up the PID file on the way out. The backgrounding
+    /// (nohup/launchd/systemd) is delegated to whatever supervisor
+    /// starts the process.
+    ///
+    /// Refuses to start if `daemon.pid` points at a still-alive
+    /// process — otherwise we'd end up with two daemons racing on the
+    /// same Unix socket. A stale PID file (process is dead) is
+    /// silently cleaned.
     pub async fn daemonize(&self) -> Result<()> {
-        // Write PID file
-        let pid = std::process::id();
         let pid_path = self.config.data_dir().join("daemon.pid");
-        std::fs::write(&pid_path, pid.to_string())?;
+
+        match read_pid_file(&pid_path) {
+            Some(existing) if is_process_alive(existing) => {
+                anyhow::bail!(
+                    "Daemon already running (PID {existing}). \
+                     Run `i-dream stop` first, or remove {} if you're sure it's stale.",
+                    pid_path.display()
+                );
+            }
+            Some(existing) => {
+                warn!(
+                    "Removing stale PID file at {} (PID {existing} is not alive)",
+                    pid_path.display()
+                );
+                let _ = std::fs::remove_file(&pid_path);
+            }
+            None => {}
+        }
+
+        let pid = std::process::id();
+        write_pid_file(&pid_path, pid)?;
         info!("Daemon started with PID {pid}");
 
-        self.run_foreground().await
+        let result = self.run_foreground().await;
+
+        // Always attempt to clean the PID file on exit — whether the
+        // foreground loop returned Ok or Err. Best-effort: if the file
+        // already vanished (someone ran `i-dream stop`), that's fine.
+        if let Err(e) = std::fs::remove_file(&pid_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                debug!("Failed to remove PID file on shutdown: {e}");
+            }
+        }
+
+        result
     }
 
     /// Check idle state and run consolidation if appropriate.
@@ -254,6 +339,20 @@ impl Daemon {
         let prospective = ProspectiveModule::new(&self.config, &self.store);
         prospective.cleanup_expired()?;
 
+        // Record the cycle in persistent state. `used` is derived from
+        // the original budget minus whatever's left — saturates at zero
+        // if modules somehow overspent (shouldn't, but defensive).
+        let used = self
+            .config
+            .budget
+            .max_tokens_per_cycle
+            .saturating_sub(budget);
+        self.update_state(|s| {
+            s.last_consolidation = Some(Utc::now());
+            s.total_cycles += 1;
+            s.total_tokens_used += used;
+        })?;
+
         info!(
             "Consolidation cycle complete (tokens remaining: {budget}/{})",
             self.config.budget.max_tokens_per_cycle
@@ -290,28 +389,67 @@ impl Daemon {
         Ok(())
     }
 
-    /// Stop a running daemon by PID.
+    /// Stop a running daemon, verifying liveness and waiting for exit.
+    ///
+    /// Protocol:
+    ///   1. If no PID file → nothing to do.
+    ///   2. If PID file exists but process is dead → clean stale file,
+    ///      report, return. **Never signal a stale PID** — it may have
+    ///      been recycled by an unrelated process.
+    ///   3. Send SIGTERM, poll for up to 3 s for the process to exit.
+    ///   4. If still alive, fall back to SIGKILL and give it 200 ms.
+    ///   5. Remove the PID file as the final step (the daemon's own
+    ///      shutdown path also tries to remove it, whichever wins is
+    ///      fine — `NotFound` is ignored).
     pub async fn stop() -> Result<()> {
         let pid_path = pid_file_path();
-        if !pid_path.exists() {
-            println!("No daemon running (no PID file found)");
+        let pid = match read_pid_file(&pid_path) {
+            Some(p) => p,
+            None => {
+                println!("No daemon running (no PID file found)");
+                return Ok(());
+            }
+        };
+
+        if !is_process_alive(pid) {
+            println!("Stale PID file (PID {pid} is not alive), cleaning up");
+            let _ = std::fs::remove_file(&pid_path);
             return Ok(());
         }
 
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        let pid: i32 = pid_str.trim().parse()?;
-
-        // Send SIGTERM
+        // Send SIGTERM. Safety: we verified the PID is alive and the
+        // kill(2) syscall with a valid signal is always well-defined.
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
 
-        std::fs::remove_file(&pid_path)?;
-        println!("Stopped daemon (PID {pid})");
+        // Poll for graceful exit (30 × 100 ms = 3 s).
+        let exited = wait_for_exit(pid, 30, Duration::from_millis(100)).await;
+
+        if !exited {
+            warn!("Daemon (PID {pid}) did not exit on SIGTERM, sending SIGKILL");
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            // Give the kernel a moment to reap.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = std::fs::remove_file(&pid_path);
+            println!("Force-stopped daemon (PID {pid})");
+        } else {
+            let _ = std::fs::remove_file(&pid_path);
+            println!("Stopped daemon (PID {pid})");
+        }
         Ok(())
     }
 
     /// Get daemon status.
+    ///
+    /// Distinguishes three cases for the PID file:
+    ///   - no file → "stopped"
+    ///   - file exists and PID is alive → "running"
+    ///   - file exists but PID is dead → "stopped (stale PID file)",
+    ///     so operators can see something is wrong without having to
+    ///     `ps` themselves.
     pub async fn status() -> Result<String> {
         let pid_path = pid_file_path();
         let data_dir = dirs::home_dir()
@@ -320,12 +458,20 @@ impl Daemon {
 
         let mut out = String::new();
 
-        // Daemon status
-        if pid_path.exists() {
-            let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
-            out.push_str(&format!("Daemon: running (PID {pid})\n"));
-        } else {
-            out.push_str("Daemon: stopped\n");
+        // Daemon status — verify liveness, don't trust the file alone.
+        match read_pid_file(&pid_path) {
+            Some(pid) if is_process_alive(pid) => {
+                out.push_str(&format!("Daemon: running (PID {pid})\n"));
+            }
+            Some(pid) => {
+                out.push_str(&format!(
+                    "Daemon: stopped (stale PID file at {}, PID {pid} is not alive)\n",
+                    pid_path.display()
+                ));
+            }
+            None => {
+                out.push_str("Daemon: stopped\n");
+            }
         }
 
         // State
@@ -335,6 +481,9 @@ impl Daemon {
             let state: DaemonState = serde_json::from_str(&content)?;
             if let Some(last) = state.last_consolidation {
                 out.push_str(&format!("Last consolidation: {last}\n"));
+            }
+            if let Some(activity) = state.last_activity {
+                out.push_str(&format!("Last activity: {activity}\n"));
             }
             out.push_str(&format!("Total cycles: {}\n", state.total_cycles));
             out.push_str(&format!("Total tokens used: {}\n", state.total_tokens_used));
@@ -351,6 +500,62 @@ impl Daemon {
 
         Ok(out)
     }
+}
+
+/// Read and parse the daemon PID file, returning `None` if the file
+/// doesn't exist or the contents are unparseable. Broken contents get
+/// logged but produce `None` so callers can treat it as "no daemon".
+fn read_pid_file(path: &Path) -> Option<i32> {
+    let content = std::fs::read_to_string(path).ok()?;
+    match content.trim().parse::<i32>() {
+        Ok(pid) => Some(pid),
+        Err(e) => {
+            warn!("PID file at {} is corrupt: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Atomically write a PID to the PID file. Uses tmp+rename so a
+/// reader will never observe a half-written file.
+fn write_pid_file(path: &Path, pid: u32) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("pid.tmp");
+    std::fs::write(&tmp, pid.to_string())
+        .with_context(|| format!("Failed to write PID file tmp at {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("Failed to rename PID file to {}", path.display()))?;
+    Ok(())
+}
+
+/// Check whether a PID refers to a process we could signal.
+///
+/// Uses `kill(pid, 0)` — the null signal, which performs the usual
+/// permission and existence checks without actually delivering a
+/// signal. Returns `true` iff the process exists. This is the portable
+/// Unix idiom and is exactly what `systemctl` / `docker` do.
+fn is_process_alive(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // Safety: kill(2) with sig=0 is always safe — it performs checks
+    // but delivers no signal, and has no side effects on the target.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Poll `is_process_alive` up to `attempts` times waiting `interval`
+/// between each check. Returns `true` as soon as the process is gone,
+/// `false` if it was still alive at the final check.
+async fn wait_for_exit(pid: i32, attempts: u32, interval: Duration) -> bool {
+    for _ in 0..attempts {
+        if !is_process_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(interval).await;
+    }
+    !is_process_alive(pid)
 }
 
 fn pid_file_path() -> PathBuf {
@@ -1057,5 +1262,187 @@ mod tests {
             out.is_empty(),
             "Patterns with no surfaceable content should not produce a section: {out:?}"
         );
+    }
+
+    // ── Daemon process management hardening (Task #7) ──────────
+    // These tests cover the PID-file helpers and the liveness probe
+    // without actually forking or signaling real daemons. The rule
+    // is: never signal a stale PID (it may have been recycled), and
+    // never overwrite a live daemon's PID file.
+
+    #[test]
+    fn is_process_alive_reports_true_for_self() {
+        // Our own PID must always be alive from our point of view.
+        // If this ever returns false, the probe is broken.
+        let my_pid = std::process::id() as i32;
+        assert!(
+            is_process_alive(my_pid),
+            "is_process_alive({my_pid}) returned false for current process",
+        );
+    }
+
+    #[test]
+    fn is_process_alive_reports_false_for_nonexistent_pid() {
+        // PID 0x7FFF_FFFF is outside any realistic PID range on Linux
+        // and macOS (both cap at well below 2^31-1), so it should
+        // always read as dead. Also check a few zero/negative guards.
+        assert!(!is_process_alive(i32::MAX));
+        assert!(!is_process_alive(0));
+        assert!(!is_process_alive(-1));
+    }
+
+    #[test]
+    fn read_pid_file_returns_none_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nope.pid");
+        assert_eq!(read_pid_file(&path), None);
+    }
+
+    #[test]
+    fn read_pid_file_parses_integer_contents() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ok.pid");
+        std::fs::write(&path, "12345\n").unwrap();
+        assert_eq!(read_pid_file(&path), Some(12345));
+    }
+
+    #[test]
+    fn read_pid_file_returns_none_for_corrupt_contents() {
+        // A garbled PID file mustn't crash the daemon or cause a
+        // parse error — it's treated as "no daemon, clean to start".
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bad.pid");
+        std::fs::write(&path, "not-a-pid").unwrap();
+        assert_eq!(read_pid_file(&path), None);
+    }
+
+    #[test]
+    fn write_pid_file_creates_parent_dir() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nested/subdir/daemon.pid");
+        assert!(!path.parent().unwrap().exists());
+        write_pid_file(&path, 42).unwrap();
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "42");
+    }
+
+    #[test]
+    fn write_pid_file_is_atomic_via_rename() {
+        // We can't directly observe the rename from outside, but we
+        // can at least verify that the tmp file is cleaned up after
+        // a successful write.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("atomic.pid");
+        write_pid_file(&path, 99).unwrap();
+        let tmp = path.with_extension("pid.tmp");
+        assert!(!tmp.exists(), "tmp file should have been renamed away");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "99");
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_returns_immediately_for_dead_pid() {
+        // With a nonexistent PID, wait_for_exit should return true
+        // on the first iteration without consuming the full budget.
+        let start = std::time::Instant::now();
+        let result = wait_for_exit(i32::MAX, 50, Duration::from_millis(100)).await;
+        assert!(result, "wait_for_exit should see a nonexistent PID as dead");
+        // Should be near-instant — if this took the full 5 s budget,
+        // the early-return branch is broken.
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "wait_for_exit took too long for a dead pid: {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_returns_false_when_pid_stays_alive() {
+        let my_pid = std::process::id() as i32;
+        let start = std::time::Instant::now();
+        let result = wait_for_exit(my_pid, 3, Duration::from_millis(20)).await;
+        assert!(!result, "wait_for_exit should time out on a live pid");
+        // Budget is 3 × 20 ms = 60 ms minimum; allow generous slop.
+        assert!(start.elapsed() >= Duration::from_millis(55));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    // ── DaemonState persistence ───────────────────────────────
+    //
+    // `Config::data_dir()` is hardcoded to `~/.claude/subconscious`,
+    // so `Daemon::new()` can't be routed to a tempdir via config.
+    // Instead we build the `Daemon` struct directly — all fields are
+    // private but accessible from this same-module test.
+
+    fn mk_daemon_with_store(store: Store) -> Daemon {
+        Daemon {
+            config: Config::default(),
+            store,
+            state: Mutex::new(DaemonState::default()),
+            client: None,
+        }
+    }
+
+    #[test]
+    fn update_state_persists_to_disk() {
+        // update_state is the single write-path for state.json — if
+        // this roundtrip breaks, total_cycles will silently reset to
+        // zero on every daemon restart and status will be useless.
+        let (dir, store) = mk_store();
+        let daemon = mk_daemon_with_store(store);
+
+        daemon
+            .update_state(|s| {
+                s.total_cycles = 7;
+                s.total_tokens_used = 12345;
+                s.last_consolidation = Some(Utc::now());
+            })
+            .unwrap();
+
+        // Read it back from disk, not from the in-memory field.
+        let reloaded: DaemonState = daemon.store.read_json("state.json").unwrap();
+        assert_eq!(reloaded.total_cycles, 7);
+        assert_eq!(reloaded.total_tokens_used, 12345);
+        assert!(reloaded.last_consolidation.is_some());
+        drop(dir);
+    }
+
+    #[test]
+    fn update_state_accumulates_across_calls() {
+        // Each call replaces the snapshot on disk. Accumulated counters
+        // like total_cycles need to be additive across calls — we test
+        // this by calling update_state twice and checking the final
+        // disk state is the sum, not just the last call's values.
+        let (_dir, store) = mk_store();
+        let daemon = mk_daemon_with_store(store);
+
+        daemon.update_state(|s| s.total_cycles += 1).unwrap();
+        daemon.update_state(|s| s.total_cycles += 1).unwrap();
+        daemon.update_state(|s| s.total_cycles += 3).unwrap();
+
+        let reloaded: DaemonState = daemon.store.read_json("state.json").unwrap();
+        assert_eq!(reloaded.total_cycles, 5);
+    }
+
+    #[test]
+    fn touch_last_activity_updates_memory_without_disk_write() {
+        // touch_last_activity is on the hot path (every hook event),
+        // so it must NOT touch the disk. We verify by reading the
+        // mutex directly and confirming state.json is absent.
+        let (_dir, store) = mk_store();
+        let daemon = mk_daemon_with_store(store);
+
+        // state.json does not yet exist (fresh store).
+        assert!(!daemon.store.exists("state.json"));
+
+        daemon.touch_last_activity();
+
+        // Still no state.json on disk.
+        assert!(
+            !daemon.store.exists("state.json"),
+            "touch_last_activity must not write to disk"
+        );
+        // But in-memory state has been updated.
+        let state = daemon.state.lock().unwrap();
+        assert!(state.last_activity.is_some());
     }
 }
