@@ -4,13 +4,26 @@
 //! "gut feelings" when pattern-matched situations are encountered.
 
 use crate::api::ClaudeClient;
-use crate::config::Config;
+use crate::config::{expand_tilde, Config};
+use crate::modules::metacog::ExecutionUnit;
 use crate::modules::Module;
 use crate::store::Store;
-use anyhow::Result;
+use crate::transcript;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use tracing::{info, warn};
+use uuid::Uuid;
+
+/// Sessions already scanned for valence outcomes. Stored at
+/// `valence/processed.json` — mirrors the pattern used by metacog and
+/// dreaming so the same session isn't double-counted on every cycle.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProcessedState {
+    sessions: HashSet<String>,
+}
 
 /// A single outcome observation for a pattern.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -110,6 +123,222 @@ impl<'a> IntuitionModule<'a> {
         } else {
             0.0
         }
+    }
+
+    /// Classify an execution unit into a valence outcome, if the signal is
+    /// strong enough to store. Returns `None` for neutral units (no signal)
+    /// or units with fewer than 2 topic keywords (can't be matched later).
+    ///
+    /// Heuristic:
+    /// - `is_correction` → Negative (0.8) — user pushback is the strongest
+    ///   negative signal we can detect cheaply from the transcript.
+    /// - All tools failed (≥1 tool call) → Negative (0.5) — strategy failure.
+    /// - ≥2 tools, all succeeded → Positive (0.4) — confident execution.
+    /// - Otherwise → `None` (neutral / insufficient signal).
+    pub fn outcome_for_unit(
+        unit: &ExecutionUnit,
+        session_id: &str,
+        date: &str,
+    ) -> Option<(Vec<String>, Outcome)> {
+        // Need at least 2 tags for `match_patterns` to ever fire on this.
+        let tags: Vec<String> = unit.input.topic_keywords.iter().take(5).cloned().collect();
+        if tags.len() < 2 {
+            return None;
+        }
+
+        let tool_count = unit.tools.len();
+        let successful = unit.tools.iter().filter(|t| t.success).count();
+        let failed = tool_count - successful;
+
+        let (result, magnitude, detail) = if unit.input.is_correction {
+            (ValenceResult::Negative, 0.8, "user correction")
+        } else if tool_count > 0 && failed == tool_count {
+            (ValenceResult::Negative, 0.5, "all tools failed")
+        } else if tool_count >= 2 && successful == tool_count {
+            (ValenceResult::Positive, 0.4, "all tools succeeded")
+        } else {
+            return None;
+        };
+
+        Some((
+            tags,
+            Outcome {
+                date: date.to_string(),
+                session: session_id.to_string(),
+                result,
+                magnitude,
+                detail: detail.to_string(),
+            },
+        ))
+    }
+
+    /// Merge newly-observed outcomes into the existing valence memory.
+    ///
+    /// Entries are keyed by sorted-tags signature (e.g. `["async","rust"]`
+    /// and `["rust","async"]` hit the same entry). New tag signatures
+    /// create a new entry; existing signatures get the outcome appended
+    /// and aggregates recomputed via [`compute_valence`].
+    pub fn merge_outcomes(
+        mut existing: Vec<ValenceEntry>,
+        new_outcomes: Vec<(Vec<String>, Outcome)>,
+        halflife_days: f64,
+    ) -> Vec<ValenceEntry> {
+        // Index existing entries by their sorted-tag signature.
+        let mut index: HashMap<String, usize> = HashMap::new();
+        for (i, entry) in existing.iter().enumerate() {
+            index.insert(tag_signature(&entry.context_tags), i);
+        }
+
+        for (tags, outcome) in new_outcomes {
+            let sig = tag_signature(&tags);
+            if let Some(&i) = index.get(&sig) {
+                let entry = &mut existing[i];
+                entry.last_seen = outcome.date.clone();
+                entry.outcomes.push(outcome);
+                entry.occurrences += 1;
+                entry.aggregate_valence =
+                    Self::compute_valence(&entry.outcomes, halflife_days);
+            } else {
+                let date = outcome.date.clone();
+                let entry = ValenceEntry {
+                    id: Uuid::new_v4().to_string(),
+                    pattern: tags.join("/"),
+                    context_tags: tags,
+                    outcomes: vec![outcome],
+                    aggregate_valence: 0.0, // recomputed below
+                    occurrences: 1,
+                    first_seen: date.clone(),
+                    last_seen: date,
+                    decayed_relevance: 1.0,
+                };
+                let mut entry = entry;
+                entry.aggregate_valence =
+                    Self::compute_valence(&entry.outcomes, halflife_days);
+                index.insert(sig, existing.len());
+                existing.push(entry);
+            }
+        }
+
+        existing
+    }
+
+    /// Scan new sessions, extract valence outcomes, merge into memory,
+    /// and persist. Returns `(sessions_scanned, outcomes_collected)`.
+    ///
+    /// Pure w.r.t. the Claude API — no network calls. This is the
+    /// learning loop: every consolidation cycle, we replay the newest
+    /// sessions and update the valence memory that `match_patterns`
+    /// queries at `SessionStart`.
+    pub fn collect_valence_batch(&self) -> Result<(u64, u64)> {
+        let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
+        let files = transcript::scan_projects(&projects_dir)?;
+
+        let mut processed: ProcessedState = if self.store.exists("valence/processed.json") {
+            self.store
+                .read_json("valence/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+
+        let max_sessions = self.config.ingestion.max_sessions_per_scan as usize;
+        let mut sessions_scanned = 0u64;
+        let mut new_outcomes: Vec<(Vec<String>, Outcome)> = Vec::new();
+        let mut sessions_seen: Vec<String> = Vec::new();
+
+        for file in files.iter().rev() {
+            if sessions_scanned as usize >= max_sessions {
+                break;
+            }
+            if processed.sessions.contains(&file.session_id) {
+                continue;
+            }
+
+            let entries = match transcript::read_transcript(&file.path) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("skipping unreadable transcript {}: {e:#}", file.path.display());
+                    continue;
+                }
+            };
+
+            let units = transcript::into_execution_units(&entries, &file.session_id);
+            for unit in &units {
+                let date = unit.timestamp.format("%Y-%m-%d").to_string();
+                if let Some(outcome) =
+                    Self::outcome_for_unit(unit, &file.session_id, &date)
+                {
+                    new_outcomes.push(outcome);
+                }
+            }
+
+            sessions_seen.push(file.session_id.clone());
+            sessions_scanned += 1;
+        }
+
+        let collected = new_outcomes.len() as u64;
+
+        if new_outcomes.is_empty() {
+            // Still mark sessions as processed so empty transcripts don't
+            // get re-scanned forever.
+            for sid in &sessions_seen {
+                processed.sessions.insert(sid.clone());
+            }
+            if !sessions_seen.is_empty() {
+                self.store.write_json("valence/processed.json", &processed)?;
+            }
+            return Ok((sessions_scanned, 0));
+        }
+
+        // Load the existing valence memory, merge, and rewrite.
+        let existing: Vec<ValenceEntry> = self
+            .store
+            .read_jsonl("valence/memory.jsonl")
+            .unwrap_or_default();
+
+        let halflife = self.config.modules.intuition.decay_halflife_days;
+        let mut merged = Self::merge_outcomes(existing, new_outcomes, halflife);
+
+        // Cap total entries — if we overflow, drop the oldest by last_seen.
+        let max_entries = self.config.modules.intuition.max_valence_entries as usize;
+        if merged.len() > max_entries {
+            merged.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+            merged.truncate(max_entries);
+        }
+
+        // Atomic rewrite: write to .tmp then rename. Store only exposes
+        // append_jsonl, so we reach for the raw path here — it's the
+        // same atomic pattern Store::write_json uses internally.
+        let memory_path = self.store.path("valence/memory.jsonl");
+        if let Some(parent) = memory_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp_path = memory_path.with_extension("jsonl.tmp");
+        {
+            let mut tmp = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("create {}", tmp_path.display()))?;
+            for entry in &merged {
+                let line = serde_json::to_string(entry)?;
+                writeln!(tmp, "{line}")?;
+            }
+            tmp.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, &memory_path)
+            .with_context(|| format!("rename to {}", memory_path.display()))?;
+
+        for sid in &sessions_seen {
+            processed.sessions.insert(sid.clone());
+        }
+        self.store.write_json("valence/processed.json", &processed)?;
+
+        info!(
+            "Intuition: collected {} outcomes from {} sessions, memory now has {} entries",
+            collected,
+            sessions_scanned,
+            merged.len()
+        );
+
+        Ok((sessions_scanned, collected))
     }
 
     /// Match user message keywords against valence memory.
@@ -429,6 +658,322 @@ mod tests {
         assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
     }
 
+    // ── outcome_for_unit: heuristic classifier ────────────────
+    // Turns ExecutionUnit signals into a valence outcome. This is the
+    // "feedback" half of the intuition engine — without it, valence
+    // memory never grows. Wrong heuristics here mean the engine
+    // either learns nothing (all None) or learns noise (all outcomes).
+
+    use crate::modules::metacog::{ExecutionUnit, InputMeta, OutcomeMeta, OutputMeta, Reaction, ToolUseMeta};
+
+    fn make_exec_unit(
+        id: &str,
+        is_correction: bool,
+        keywords: Vec<&str>,
+        tools: Vec<ToolUseMeta>,
+    ) -> ExecutionUnit {
+        ExecutionUnit {
+            unit_id: id.into(),
+            session_id: "sess-001".into(),
+            timestamp: Utc::now(),
+            input: InputMeta {
+                message_hash: "h".into(),
+                message_length: 100,
+                topic_keywords: keywords.into_iter().map(String::from).collect(),
+                is_correction,
+            },
+            tools,
+            output: OutputMeta {
+                message_length: 200,
+                code_blocks: 0,
+            },
+            outcome: OutcomeMeta {
+                user_reaction: Reaction::Unknown,
+            },
+        }
+    }
+
+    fn tool(name: &str, success: bool) -> ToolUseMeta {
+        ToolUseMeta {
+            name: name.into(),
+            target: None,
+            success,
+            duration_ms: 0,
+        }
+    }
+
+    #[test]
+    fn outcome_correction_is_strong_negative() {
+        let unit = make_exec_unit(
+            "u-1",
+            true, // correction
+            vec!["rust", "async", "tokio"],
+            vec![tool("Read", true)],
+        );
+        let result = IntuitionModule::outcome_for_unit(&unit, "sess-1", "2026-04-11");
+        let (tags, outcome) = result.expect("correction should produce outcome");
+        assert_eq!(tags, vec!["rust", "async", "tokio"]);
+        assert_eq!(outcome.result, ValenceResult::Negative);
+        assert!((outcome.magnitude - 0.8).abs() < f64::EPSILON);
+        assert_eq!(outcome.session, "sess-1");
+        assert_eq!(outcome.date, "2026-04-11");
+    }
+
+    #[test]
+    fn outcome_all_tools_failed_is_negative() {
+        let unit = make_exec_unit(
+            "u-2",
+            false,
+            vec!["db", "migration"],
+            vec![tool("Edit", false), tool("Bash", false)],
+        );
+        let (_, outcome) =
+            IntuitionModule::outcome_for_unit(&unit, "s", "2026-04-11").unwrap();
+        assert_eq!(outcome.result, ValenceResult::Negative);
+        assert!((outcome.magnitude - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn outcome_all_tools_succeeded_is_positive() {
+        let unit = make_exec_unit(
+            "u-3",
+            false,
+            vec!["test", "parse"],
+            vec![tool("Read", true), tool("Edit", true), tool("Bash", true)],
+        );
+        let (_, outcome) =
+            IntuitionModule::outcome_for_unit(&unit, "s", "2026-04-11").unwrap();
+        assert_eq!(outcome.result, ValenceResult::Positive);
+        assert!((outcome.magnitude - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn outcome_single_successful_tool_is_neutral() {
+        // Single successful tool isn't strong enough signal — we need
+        // ≥2 to call it a confident execution.
+        let unit = make_exec_unit(
+            "u-4",
+            false,
+            vec!["read", "file"],
+            vec![tool("Read", true)],
+        );
+        assert!(IntuitionModule::outcome_for_unit(&unit, "s", "d").is_none());
+    }
+
+    #[test]
+    fn outcome_mixed_tools_is_neutral() {
+        // Mixed success/failure without correction isn't classifiable.
+        let unit = make_exec_unit(
+            "u-5",
+            false,
+            vec!["rust", "async"],
+            vec![tool("Read", true), tool("Edit", false)],
+        );
+        assert!(IntuitionModule::outcome_for_unit(&unit, "s", "d").is_none());
+    }
+
+    #[test]
+    fn outcome_requires_two_keywords() {
+        // Fewer than 2 keywords can never be matched by match_patterns
+        // (which requires ≥2 tag overlap), so we skip storing them.
+        let unit = make_exec_unit(
+            "u-6",
+            true, // would otherwise be Negative
+            vec!["rust"],
+            vec![],
+        );
+        assert!(IntuitionModule::outcome_for_unit(&unit, "s", "d").is_none());
+    }
+
+    #[test]
+    fn outcome_empty_keywords_skipped() {
+        let unit = make_exec_unit("u-7", true, vec![], vec![]);
+        assert!(IntuitionModule::outcome_for_unit(&unit, "s", "d").is_none());
+    }
+
+    #[test]
+    fn outcome_truncates_to_five_keywords() {
+        let unit = make_exec_unit(
+            "u-8",
+            true,
+            vec!["a", "b", "c", "d", "e", "f", "g", "h"],
+            vec![],
+        );
+        let (tags, _) = IntuitionModule::outcome_for_unit(&unit, "s", "d").unwrap();
+        assert_eq!(tags.len(), 5, "Should cap tags at 5");
+        assert_eq!(tags, vec!["a", "b", "c", "d", "e"]);
+    }
+
+    // ── merge_outcomes: idempotent accumulation ───────────────
+    // Re-running the consolidation cycle on the same data must not
+    // duplicate entries — the tag signature is the primary key.
+    // Aggregate valence must be recomputed after every merge so
+    // that decay stays consistent with the full outcome history.
+
+    fn mk_outcome(date: &str, session: &str, result: ValenceResult, mag: f64) -> Outcome {
+        Outcome {
+            date: date.into(),
+            session: session.into(),
+            result,
+            magnitude: mag,
+            detail: "test".into(),
+        }
+    }
+
+    #[test]
+    fn merge_creates_new_entry_for_novel_tag_sig() {
+        let existing = vec![];
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let new_outcomes = vec![(
+            vec!["rust".into(), "async".into()],
+            mk_outcome(&today, "s1", ValenceResult::Positive, 0.4),
+        )];
+        let merged = IntuitionModule::merge_outcomes(existing, new_outcomes, 30.0);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].context_tags, vec!["rust", "async"]);
+        assert_eq!(merged[0].occurrences, 1);
+        assert!(merged[0].aggregate_valence > 0.3);
+        assert_eq!(merged[0].pattern, "rust/async");
+    }
+
+    #[test]
+    fn merge_appends_to_existing_entry() {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let existing = vec![ValenceEntry {
+            id: "v-1".into(),
+            pattern: "rust/async".into(),
+            context_tags: vec!["rust".into(), "async".into()],
+            outcomes: vec![mk_outcome(
+                &today,
+                "s-old",
+                ValenceResult::Positive,
+                0.4,
+            )],
+            aggregate_valence: 0.4,
+            occurrences: 1,
+            first_seen: today.clone(),
+            last_seen: today.clone(),
+            decayed_relevance: 1.0,
+        }];
+        let new_outcomes = vec![(
+            vec!["rust".into(), "async".into()],
+            mk_outcome(&today, "s-new", ValenceResult::Positive, 0.4),
+        )];
+        let merged = IntuitionModule::merge_outcomes(existing, new_outcomes, 30.0);
+        assert_eq!(merged.len(), 1, "Should merge into existing entry, not duplicate");
+        assert_eq!(merged[0].occurrences, 2);
+        assert_eq!(merged[0].outcomes.len(), 2);
+        assert_eq!(merged[0].id, "v-1", "Should preserve original id");
+    }
+
+    #[test]
+    fn merge_tag_order_insensitive() {
+        // An existing entry tagged [rust, async] must match new
+        // outcomes tagged [async, rust] — order can't matter.
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let existing = vec![ValenceEntry {
+            id: "v-1".into(),
+            pattern: "rust/async".into(),
+            context_tags: vec!["rust".into(), "async".into()],
+            outcomes: vec![],
+            aggregate_valence: 0.0,
+            occurrences: 0,
+            first_seen: today.clone(),
+            last_seen: today.clone(),
+            decayed_relevance: 1.0,
+        }];
+        let new_outcomes = vec![(
+            vec!["async".into(), "rust".into()], // reversed
+            mk_outcome(&today, "s", ValenceResult::Positive, 0.4),
+        )];
+        let merged = IntuitionModule::merge_outcomes(existing, new_outcomes, 30.0);
+        assert_eq!(merged.len(), 1, "Reversed tag order should hit same entry");
+    }
+
+    #[test]
+    fn merge_case_insensitive_signatures() {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let existing = vec![ValenceEntry {
+            id: "v-1".into(),
+            pattern: "Rust/Async".into(),
+            context_tags: vec!["Rust".into(), "Async".into()],
+            outcomes: vec![],
+            aggregate_valence: 0.0,
+            occurrences: 0,
+            first_seen: today.clone(),
+            last_seen: today.clone(),
+            decayed_relevance: 1.0,
+        }];
+        let new_outcomes = vec![(
+            vec!["rust".into(), "async".into()],
+            mk_outcome(&today, "s", ValenceResult::Positive, 0.4),
+        )];
+        let merged = IntuitionModule::merge_outcomes(existing, new_outcomes, 30.0);
+        assert_eq!(merged.len(), 1, "Case should not split tag signatures");
+    }
+
+    #[test]
+    fn merge_recomputes_aggregate_valence() {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        // Start with a positive entry
+        let existing = vec![ValenceEntry {
+            id: "v-1".into(),
+            pattern: "x/y".into(),
+            context_tags: vec!["x".into(), "y".into()],
+            outcomes: vec![mk_outcome(&today, "s0", ValenceResult::Positive, 1.0)],
+            aggregate_valence: 1.0,
+            occurrences: 1,
+            first_seen: today.clone(),
+            last_seen: today.clone(),
+            decayed_relevance: 1.0,
+        }];
+        // Add a matching negative
+        let new_outcomes = vec![(
+            vec!["x".into(), "y".into()],
+            mk_outcome(&today, "s1", ValenceResult::Negative, 1.0),
+        )];
+        let merged = IntuitionModule::merge_outcomes(existing, new_outcomes, 30.0);
+        // Two opposite outcomes same day → aggregate ≈ 0
+        assert!(
+            merged[0].aggregate_valence.abs() < 0.01,
+            "Opposing outcomes should cancel, got {}",
+            merged[0].aggregate_valence
+        );
+    }
+
+    #[test]
+    fn merge_distinct_tag_sigs_create_separate_entries() {
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let new_outcomes = vec![
+            (
+                vec!["rust".into(), "async".into()],
+                mk_outcome(&today, "s", ValenceResult::Positive, 0.4),
+            ),
+            (
+                vec!["python".into(), "django".into()],
+                mk_outcome(&today, "s", ValenceResult::Negative, 0.5),
+            ),
+        ];
+        let merged = IntuitionModule::merge_outcomes(vec![], new_outcomes, 30.0);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn tag_signature_is_deterministic() {
+        assert_eq!(
+            tag_signature(&["rust".into(), "async".into()]),
+            tag_signature(&["async".into(), "rust".into()])
+        );
+        assert_eq!(
+            tag_signature(&["Rust".into(), "ASYNC".into()]),
+            tag_signature(&["rust".into(), "async".into()])
+        );
+        assert_ne!(
+            tag_signature(&["rust".into(), "async".into()]),
+            tag_signature(&["rust".into(), "sync".into()])
+        );
+    }
+
     #[test]
     fn surfaced_intuition_serde_roundtrip() {
         let si = SurfacedIntuition {
@@ -444,16 +989,29 @@ mod tests {
     }
 }
 
+/// Deterministic key for a context-tag set. Order-insensitive, lowercased —
+/// `["Rust","async"]` and `["ASYNC","rust"]` collapse to the same signature
+/// so merge_outcomes lands them on the same ValenceEntry.
+fn tag_signature(tags: &[String]) -> String {
+    let mut lowered: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+    lowered.sort();
+    lowered.join("|")
+}
+
 impl<'a> Module for IntuitionModule<'a> {
     fn should_run(&self) -> Result<bool> {
-        // Intuition module runs at session start, not during consolidation cycles
-        // The daemon triggers it via the SessionStart hook
-        Ok(false)
+        Ok(self.config.modules.intuition.enabled)
     }
 
     async fn run(&self, _client: &ClaudeClient, _budget: u64) -> Result<u64> {
-        info!("Intuition module does not run during consolidation cycles");
-        info!("It is triggered by SessionStart hooks to provide real-time intuitions");
-        Ok(0)
+        // Intuition's learning loop: replay new sessions, classify their
+        // outcomes, and update valence memory. No API calls — pure transcript
+        // analysis. The matching side (match_patterns) runs at SessionStart
+        // via the daemon hook handler.
+        let (scanned, collected) = self.collect_valence_batch()?;
+        info!(
+            "Intuition consolidation: scanned {scanned} sessions, collected {collected} outcomes"
+        );
+        Ok(0) // No tokens used — all local analysis
     }
 }
