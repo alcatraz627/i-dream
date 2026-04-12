@@ -2,6 +2,7 @@ mod api;
 mod cli;
 mod config;
 mod daemon;
+mod events;
 mod hooks;
 mod modules;
 mod store;

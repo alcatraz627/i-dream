@@ -3,6 +3,7 @@
 use crate::api::ClaudeClient;
 use crate::cli::DreamPhase;
 use crate::config::Config;
+use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
     dreaming::DreamingModule, introspection::IntrospectionModule,
     metacog::MetacogModule, prospective::ProspectiveModule, Module,
@@ -11,10 +12,15 @@ use crate::store::Store;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+
+/// Relative path (under the data dir) of the hook-event log.
+const EVENTS_LOG: &str = "logs/events.jsonl";
 
 /// Persistent daemon state, saved between consolidation cycles.
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -55,26 +61,58 @@ impl Daemon {
     }
 
     /// Run in the foreground (blocking).
+    ///
+    /// Three concurrent responsibilities, multiplexed via `tokio::select!`:
+    ///   1. Ctrl-C handler (graceful shutdown)
+    ///   2. Periodic idle check → consolidation
+    ///   3. Unix socket listener for hook events
+    ///
+    /// The listener is bound once before the loop so we can clean up
+    /// the socket file deterministically on exit.
     pub async fn run_foreground(&self) -> Result<()> {
         info!("i-dream daemon running in foreground (Ctrl+C to stop)");
 
         let check_interval =
             Duration::from_secs(self.config.idle.check_interval_minutes * 60);
 
-        loop {
+        // Bind Unix socket for hook events.
+        let socket_path = self.config.data_dir().join("daemon.sock");
+        bind_socket(&socket_path)?;
+        let listener = UnixListener::bind(&socket_path)
+            .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
+        info!("Hook socket listening on {}", socket_path.display());
+
+        let result: Result<()> = loop {
             tokio::select! {
                 _ = signal::ctrl_c() => {
                     info!("Received shutdown signal");
-                    break;
+                    break Ok(());
                 }
                 _ = tokio::time::sleep(check_interval) => {
                     self.check_and_run().await;
                 }
+                accept = listener.accept() => {
+                    match accept {
+                        Ok((stream, _addr)) => {
+                            if let Err(e) = handle_hook_connection(stream, &self.store).await {
+                                warn!("Hook event handler failed: {e:#}");
+                            }
+                        }
+                        Err(e) => {
+                            error!("Socket accept failed: {e:#}");
+                        }
+                    }
+                }
             }
+        };
+
+        // Best-effort cleanup — don't let a missing file block shutdown.
+        if let Err(e) = std::fs::remove_file(&socket_path) {
+            debug!("Failed to remove socket file on shutdown: {e}");
         }
 
         info!("Daemon stopped");
-        Ok(())
+        result
     }
 
     /// Daemonize (fork to background).
@@ -311,4 +349,213 @@ fn pid_file_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
         .join(".claude/subconscious/daemon.pid")
+}
+
+/// Remove any stale socket file before binding.
+///
+/// Unix socket files persist on disk — if a previous daemon crashed
+/// without cleaning up, `bind()` will fail with `EADDRINUSE`. Removing
+/// the file is safe because we're the only writer and the old process
+/// is gone (otherwise the PID-file check in `stop()` would have caught it).
+fn bind_socket(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        std::fs::remove_file(path).with_context(|| {
+            format!("Failed to remove stale socket at {}", path.display())
+        })?;
+    }
+    Ok(())
+}
+
+/// Handle a single hook-script connection.
+///
+/// Protocol: the client writes one JSON line and closes the write half.
+/// We parse it into a `HookEvent`, append to `logs/events.jsonl`, touch
+/// the activity signal via the `last_activity` field (task #6 will wire
+/// this into state.json), and write an empty response.
+///
+/// Task #4 (SessionStart response injection) will populate the response
+/// body with matched intuitions/intentions for `SessionStart` events.
+async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    // Read a single line — the hook scripts send exactly one JSON object.
+    let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line).await?;
+    if bytes_read == 0 {
+        debug!("Empty hook connection, ignoring");
+        return Ok(());
+    }
+
+    let trimmed = line.trim();
+    let event: HookEvent = serde_json::from_str(trimmed)
+        .with_context(|| format!("Invalid hook event payload: {trimmed}"))?;
+    debug!("Received hook event: {event:?}");
+
+    let record = HookEventRecord::new(event.clone());
+    store.append_jsonl(EVENTS_LOG, &record)?;
+
+    // Response is empty for now. Task #4 will populate it for SessionStart
+    // with surfaced intuitions + matched intentions, which the hook script
+    // then echoes into Claude's context.
+    let response = match &event {
+        HookEvent::SessionStart { .. } => String::new(),
+        _ => String::new(),
+    };
+    writer.write_all(response.as_bytes()).await?;
+    writer.shutdown().await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::io::AsyncReadExt;
+
+    // ── Socket listener end-to-end ────────────────────────────
+    // This is the only test in the project that actually spins up
+    // a real Unix socket. It verifies the full round-trip of the
+    // hook-script protocol:
+    //   client writes a JSON line → daemon parses → event lands
+    //   in logs/events.jsonl with a daemon-side timestamp.
+    //
+    // If this breaks, hook-to-daemon communication is dead even
+    // though the event schema tests still pass.
+
+    #[tokio::test]
+    async fn handle_hook_connection_persists_event_to_jsonl() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        // Bind a throwaway socket inside the tempdir
+        let socket_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        // Client task: connect and write a real session_start payload.
+        // We read the response to EOF as the sync point — explicit
+        // shutdown() races with the server's close on macOS.
+        let client_path = socket_path.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(&client_path).await.unwrap();
+            let payload = r#"{"event":"session_start","ts":42}"#;
+            stream.write_all(payload.as_bytes()).await.unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+        });
+
+        // Server side: accept + handle
+        let (stream, _) = listener.accept().await.unwrap();
+        handle_hook_connection(stream, &store).await.unwrap();
+        client.await.unwrap();
+
+        // Verify persistence
+        let records: Vec<HookEventRecord> = store.read_jsonl(EVENTS_LOG).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event, HookEvent::SessionStart { ts: 42 });
+    }
+
+    #[tokio::test]
+    async fn handle_hook_connection_rejects_malformed_payload() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let socket_path = dir.path().join("bad.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let client_path = socket_path.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(&client_path).await.unwrap();
+            // Not valid JSON for any HookEvent variant
+            stream.write_all(b"not json\n").await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let result = handle_hook_connection(stream, &store).await;
+        client.await.unwrap();
+
+        assert!(result.is_err(), "Bad payload should produce an error");
+        // And nothing should have been written
+        assert_eq!(store.count_jsonl(EVENTS_LOG).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn handle_hook_connection_handles_multiple_events_in_sequence() {
+        // The listener calls handle_hook_connection once per accept.
+        // This test verifies that multiple sequential events all land
+        // in order — the order guarantee is what lets the metacog
+        // module correlate tool_use events with their session bounds.
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let socket_path = dir.path().join("seq.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+
+        let payloads = [
+            r#"{"event":"session_start","ts":100}"#,
+            r#"{"event":"tool_use","tool":"Read","ts":101}"#,
+            r#"{"event":"tool_use","tool":"Edit","ts":102}"#,
+            r#"{"event":"session_end","ts":103}"#,
+        ];
+
+        for payload in payloads {
+            let client_path = socket_path.clone();
+            let payload_owned = payload.to_string();
+            let client = tokio::spawn(async move {
+                let mut stream = UnixStream::connect(&client_path).await.unwrap();
+                stream.write_all(payload_owned.as_bytes()).await.unwrap();
+                stream.write_all(b"\n").await.unwrap();
+                let mut buf = Vec::new();
+                let _ = stream.read_to_end(&mut buf).await;
+            });
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_hook_connection(stream, &store).await.unwrap();
+            client.await.unwrap();
+        }
+
+        let records: Vec<HookEventRecord> = store.read_jsonl(EVENTS_LOG).unwrap();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].event, HookEvent::SessionStart { ts: 100 });
+        assert_eq!(
+            records[1].event,
+            HookEvent::ToolUse { tool: "Read".into(), ts: 101 }
+        );
+        assert_eq!(
+            records[2].event,
+            HookEvent::ToolUse { tool: "Edit".into(), ts: 102 }
+        );
+        assert_eq!(records[3].event, HookEvent::SessionEnd { ts: 103 });
+    }
+
+    #[test]
+    fn bind_socket_removes_stale_file() {
+        let dir = TempDir::new().unwrap();
+        let socket_path = dir.path().join("stale.sock");
+        // Simulate a stale socket file from a crashed previous run
+        std::fs::write(&socket_path, "").unwrap();
+        assert!(socket_path.exists());
+
+        bind_socket(&socket_path).unwrap();
+        assert!(!socket_path.exists(), "Stale file should be removed");
+    }
+
+    #[test]
+    fn bind_socket_creates_parent_dir() {
+        let dir = TempDir::new().unwrap();
+        let socket_path = dir.path().join("nested/subdir/new.sock");
+        assert!(!socket_path.parent().unwrap().exists());
+
+        bind_socket(&socket_path).unwrap();
+        assert!(socket_path.parent().unwrap().exists());
+    }
 }
