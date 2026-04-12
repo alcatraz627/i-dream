@@ -6,6 +6,7 @@ mod events;
 mod hooks;
 mod modules;
 mod store;
+mod transcript;
 
 use anyhow::Result;
 use clap::Parser;

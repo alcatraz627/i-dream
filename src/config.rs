@@ -9,6 +9,27 @@ pub struct Config {
     pub budget: BudgetConfig,
     pub modules: ModulesConfig,
     pub hooks: HooksConfig,
+    #[serde(default)]
+    pub ingestion: IngestionConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngestionConfig {
+    /// Root directory where Claude Code stores per-project session transcripts.
+    /// Each subdirectory is one project; each `.jsonl` file is one session.
+    pub projects_dir: PathBuf,
+    /// Cap on how many sessions a single scan will process. Prevents runaway
+    /// work if the user has thousands of historical transcripts.
+    pub max_sessions_per_scan: u64,
+}
+
+impl Default for IngestionConfig {
+    fn default() -> Self {
+        Self {
+            projects_dir: PathBuf::from("~/.claude/projects"),
+            max_sessions_per_scan: 50,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -187,6 +208,7 @@ impl Default for Config {
                 stop: true,
                 pre_compact: true,
             },
+            ingestion: IngestionConfig::default(),
         }
     }
 }
