@@ -4,13 +4,22 @@
 //! patterns, and produces weekly analysis reports.
 
 use crate::api::ClaudeClient;
-use crate::config::Config;
+use crate::config::{expand_tilde, Config};
 use crate::modules::Module;
 use crate::store::Store;
+use crate::transcript;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use std::collections::HashSet;
+use tracing::{info, warn};
+
+/// Per-module ledger of sessions we've already ingested. Mirrors the
+/// metacog pattern — stored at `introspection/processed.json`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProcessedState {
+    sessions: HashSet<String>,
+}
 
 /// A captured reasoning chain.
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,6 +80,87 @@ pub struct IntrospectionModule<'a> {
 impl<'a> IntrospectionModule<'a> {
     pub fn new(config: &'a Config, store: &'a Store) -> Self {
         Self { config, store }
+    }
+
+    /// Scan the configured projects directory, parse new sessions into
+    /// reasoning chains, and persist them as one JSONL file per session
+    /// under `introspection/chains/{session_id}.jsonl`. Returns the set
+    /// of newly-collected chains so [`run`] can feed them straight into
+    /// the analysis prompt.
+    ///
+    /// Pure w.r.t. the Claude API — no network calls. Extracted from
+    /// [`run`] so it can be unit-tested without a live [`ClaudeClient`].
+    pub fn load_new_chains(&self) -> Result<(Vec<ReasoningChain>, Vec<String>)> {
+        let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
+        let files = transcript::scan_projects(&projects_dir)?;
+
+        let processed: ProcessedState = if self.store.exists("introspection/processed.json") {
+            self.store
+                .read_json("introspection/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+
+        let max_sessions = self.config.ingestion.max_sessions_per_scan as usize;
+
+        let mut new_chains = Vec::new();
+        let mut sessions_seen = Vec::new();
+        let mut scanned = 0usize;
+
+        for file in files.iter().rev() {
+            if scanned >= max_sessions {
+                break;
+            }
+            if processed.sessions.contains(&file.session_id) {
+                continue;
+            }
+
+            let entries = match transcript::read_transcript(&file.path) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("skipping unreadable transcript {}: {e:#}", file.path.display());
+                    continue;
+                }
+            };
+
+            let chains = transcript::into_reasoning_chains(&entries, &file.session_id);
+            if !chains.is_empty() {
+                // One JSONL file per session so `available_chains()` file-count
+                // stays meaningful. If the file already exists from a prior
+                // partial run, append — duplicates are fine at this layer.
+                let rel = format!("introspection/chains/{}.jsonl", file.session_id);
+                for chain in &chains {
+                    if let Err(e) = self.store.append_jsonl(&rel, chain) {
+                        warn!("failed to persist reasoning chain: {e:#}");
+                    }
+                }
+                new_chains.extend(chains);
+            }
+
+            sessions_seen.push(file.session_id.clone());
+            scanned += 1;
+        }
+
+        Ok((new_chains, sessions_seen))
+    }
+
+    fn persist_processed(&self, sessions: &[String]) -> Result<()> {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let mut state: ProcessedState = if self.store.exists("introspection/processed.json") {
+            self.store
+                .read_json("introspection/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+        for sid in sessions {
+            state.sessions.insert(sid.clone());
+        }
+        self.store.write_json("introspection/processed.json", &state)?;
+        Ok(())
     }
 
     /// Count available chains since last report.
@@ -314,6 +404,23 @@ impl<'a> Module for IntrospectionModule<'a> {
     async fn run(&self, client: &ClaudeClient, _budget: u64) -> Result<u64> {
         info!("Running weekly introspection analysis");
 
+        let (chains, sessions_seen) = self.load_new_chains()?;
+
+        if chains.is_empty() {
+            info!(
+                "Introspection: no new reasoning chains (scanned {} sessions), skipping API call",
+                sessions_seen.len()
+            );
+            self.persist_processed(&sessions_seen)?;
+            return Ok(0);
+        }
+
+        info!(
+            "Introspection: analyzing {} new reasoning chains from {} sessions",
+            chains.len(),
+            sessions_seen.len()
+        );
+
         let system_prompt = r#"You are analyzing reasoning chains from Claude Code sessions
 to identify meta-patterns in how Claude thinks. Analyze the provided chains and identify:
 
@@ -341,18 +448,77 @@ Produce a JSON report with:
   }
 }"#;
 
-        // TODO: Load actual chain data
-        let prompt = "Analyze these reasoning chains:\n\n[Chain data would be inserted here]";
+        // Compact, not pretty. Budget: keep prompt under ~40k chars so
+        // the analysis stays inside a reasonable cost envelope.
+        let serialized = serde_json::to_string(&chains)?;
+        let trimmed = if serialized.len() > 40_000 {
+            warn!(
+                "Introspection chain batch exceeds 40k chars ({}), truncating",
+                serialized.len()
+            );
+            let mut cut = 40_000;
+            while !serialized.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            &serialized[..cut]
+        } else {
+            serialized.as_str()
+        };
+
+        let prompt = format!("Analyze these reasoning chains:\n\n{trimmed}");
 
         let response = client
             .analyze(
                 system_prompt,
-                prompt,
+                &prompt,
                 &self.config.budget.model,
                 4096,
                 0.2,
             )
             .await?;
+
+        // Best-effort parse into ReasoningPatterns. The LLM sometimes
+        // wraps JSON in prose or markdown fences — try a direct parse
+        // first, then fall back to writing a timestamped report only.
+        match serde_json::from_str::<serde_json::Value>(&response.content) {
+            Ok(mut json) => {
+                // Inject our authoritative last_updated so the field
+                // exists even if the LLM forgot to emit it.
+                if let Some(obj) = json.as_object_mut() {
+                    obj.insert(
+                        "last_updated".into(),
+                        serde_json::to_value(Utc::now())?,
+                    );
+                }
+                // Try strict parse into the typed struct.
+                match serde_json::from_value::<ReasoningPatterns>(json.clone()) {
+                    Ok(patterns) => {
+                        if let Err(e) =
+                            self.store.write_json("introspection/patterns.json", &patterns)
+                        {
+                            warn!("failed to persist introspection patterns: {e:#}");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Introspection response did not match ReasoningPatterns shape: {e:#}"
+                        );
+                        // Still archive the raw response for later inspection.
+                        let name = Store::timestamped_name("report", "json");
+                        let rel = format!("introspection/reports/{name}");
+                        let _ = self.store.write_json(&rel, &json);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Introspection response was not valid JSON: {e:#}");
+                let name = Store::timestamped_name("report", "md");
+                let rel = format!("introspection/reports/{name}");
+                let _ = self.store.write_md(&rel, &response.content);
+            }
+        }
+
+        self.persist_processed(&sessions_seen)?;
 
         info!(
             "Introspection analysis complete ({} tokens)",

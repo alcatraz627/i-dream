@@ -5,13 +5,32 @@
 //! strategy quality.
 
 use crate::api::ClaudeClient;
-use crate::config::Config;
+use crate::config::{expand_tilde, Config};
 use crate::modules::Module;
 use crate::store::Store;
+use crate::transcript;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use std::collections::HashSet;
+use tracing::{info, warn};
+
+/// Per-module ledger of sessions we've already ingested. Stored at
+/// `metacog/processed.json` so repeated consolidation cycles don't
+/// re-sample the same transcripts.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ProcessedState {
+    sessions: HashSet<String>,
+}
+
+/// Result of a scan+sample pass. Used by [`MetacogModule::run`] and
+/// directly unit-testable without a live [`ClaudeClient`].
+#[derive(Debug, Default)]
+pub struct SampleBatch {
+    pub units: Vec<ExecutionUnit>,
+    pub sessions_seen: Vec<String>,
+    pub sessions_scanned: u64,
+}
 
 /// A sampled unit of execution.
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,6 +126,70 @@ impl<'a> MetacogModule<'a> {
         let hash_val = hasher.finish();
         let sample_threshold = (self.config.modules.metacog.sample_rate * u64::MAX as f64) as u64;
         hash_val < sample_threshold
+    }
+
+    /// Scan the configured projects directory, parse any sessions we
+    /// haven't seen before, and return the set of execution units
+    /// that pass [`should_sample`]. Also appends the sampled units
+    /// to `metacog/samples.jsonl` as a durable audit trail.
+    ///
+    /// Pure w.r.t. the Claude API — no network calls. Extracted from
+    /// [`run`] so the scanning/sampling path is testable without a
+    /// live [`ClaudeClient`].
+    pub fn load_new_samples(&self) -> Result<SampleBatch> {
+        let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
+        let files = transcript::scan_projects(&projects_dir)?;
+
+        // Load ledger of previously-processed sessions.
+        let processed: ProcessedState = if self.store.exists("metacog/processed.json") {
+            self.store
+                .read_json("metacog/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+
+        let max_sessions = self.config.ingestion.max_sessions_per_scan as usize;
+        let max_per_session = self.config.modules.metacog.max_samples_per_session as usize;
+
+        let mut batch = SampleBatch::default();
+
+        for file in files.iter().rev() {
+            if batch.sessions_scanned as usize >= max_sessions {
+                break;
+            }
+            if processed.sessions.contains(&file.session_id) {
+                continue;
+            }
+
+            let entries = match transcript::read_transcript(&file.path) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("skipping unreadable transcript {}: {e:#}", file.path.display());
+                    continue;
+                }
+            };
+
+            let units = transcript::into_execution_units(&entries, &file.session_id);
+            let sampled: Vec<ExecutionUnit> = units
+                .into_iter()
+                .filter(|u| self.should_sample(u))
+                .take(max_per_session)
+                .collect();
+
+            // Append each sampled unit to the canonical samples log.
+            for unit in &sampled {
+                if let Err(e) = self.store.append_jsonl("metacog/samples.jsonl", unit) {
+                    warn!("failed to persist metacog sample: {e:#}");
+                }
+            }
+
+            batch.units.extend(sampled);
+            batch.sessions_seen.push(file.session_id.clone());
+            batch.sessions_scanned += 1;
+        }
+
+        Ok(batch)
     }
 }
 
@@ -299,6 +382,25 @@ impl<'a> Module for MetacogModule<'a> {
     async fn run(&self, client: &ClaudeClient, _budget: u64) -> Result<u64> {
         info!("Running metacognitive analysis on recent session samples");
 
+        let batch = self.load_new_samples()?;
+
+        if batch.units.is_empty() {
+            info!(
+                "Metacog: no new samples (scanned {} sessions), skipping API call",
+                batch.sessions_scanned
+            );
+            // Still record that we looked at these sessions so we don't
+            // rescan empty ones forever.
+            self.persist_processed(&batch.sessions_seen)?;
+            return Ok(0);
+        }
+
+        info!(
+            "Metacog: sampled {} units from {} new sessions",
+            batch.units.len(),
+            batch.sessions_scanned
+        );
+
         let system_prompt = r#"You are analyzing execution units from Claude Code sessions
 for metacognitive assessment. For each unit, assess:
 
@@ -313,22 +415,87 @@ Then provide session-level assessment:
 - Dominant biases detected
 - Recommended adjustments
 
-Output as JSON."#;
+Output as JSON matching this shape:
+{
+  "calibration_score": number,
+  "overconfident_count": integer,
+  "underconfident_count": integer,
+  "well_calibrated_count": integer,
+  "biases_detected": [string],
+  "recommendations": [string]
+}"#;
 
-        // TODO: Load actual samples
-        let prompt = "Analyze these execution units:\n\n[Samples would be inserted here]";
+        // Compact JSON (not pretty) to keep token cost down. Budget the
+        // prompt to ~40k chars — anything more and Claude's analysis
+        // would be both expensive and low-signal.
+        let serialized = serde_json::to_string(&batch.units)?;
+        let trimmed = if serialized.len() > 40_000 {
+            warn!(
+                "Metacog sample batch exceeds 40k chars ({}), truncating",
+                serialized.len()
+            );
+            // Keep prefix — newer samples come first due to rev() scan.
+            let mut cut = 40_000;
+            while !serialized.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            &serialized[..cut]
+        } else {
+            serialized.as_str()
+        };
+
+        let prompt = format!("Analyze these execution units:\n\n{trimmed}");
 
         let response = client
             .analyze(
                 system_prompt,
-                prompt,
+                &prompt,
                 &self.config.budget.model,
                 4096,
                 0.2, // Low temperature for analytical work
             )
             .await?;
 
+        // Persist the raw audit response for later inspection / debugging.
+        let audit_name = Store::timestamped_name("audit", "json");
+        let audit_path = format!("metacog/audits/{audit_name}");
+        if let Err(e) = self.store.write_json(
+            &audit_path,
+            &serde_json::json!({
+                "timestamp": Utc::now(),
+                "sessions": batch.sessions_seen,
+                "units_analyzed": batch.units.len(),
+                "tokens_used": response.tokens_used,
+                "response": response.content,
+            }),
+        ) {
+            warn!("failed to persist metacog audit: {e:#}");
+        }
+
+        self.persist_processed(&batch.sessions_seen)?;
+
         info!("Metacog analysis complete ({} tokens)", response.tokens_used);
         Ok(response.tokens_used)
+    }
+}
+
+impl<'a> MetacogModule<'a> {
+    /// Add newly-processed session IDs to the ledger and persist.
+    fn persist_processed(&self, sessions: &[String]) -> Result<()> {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let mut state: ProcessedState = if self.store.exists("metacog/processed.json") {
+            self.store
+                .read_json("metacog/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+        for sid in sessions {
+            state.sessions.insert(sid.clone());
+        }
+        self.store.write_json("metacog/processed.json", &state)?;
+        Ok(())
     }
 }
