@@ -51,6 +51,23 @@ pub enum Command {
         action: HookAction,
     },
 
+    /// Manage the daemon as a background service (launchd on macOS).
+    ///
+    /// This installs a launchd LaunchAgent that keeps the daemon
+    /// running across reboots, restarts it if it crashes, and captures
+    /// its stderr into the rolling log directory.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+
+    /// Generate an HTML dashboard snapshot of the subconscious store.
+    Dashboard {
+        /// Suppress opening the dashboard in the default browser.
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// Show current configuration
     Config,
 }
@@ -71,4 +88,24 @@ pub enum HookAction {
     Uninstall,
     /// Show hook status
     Status,
+}
+
+#[derive(Subcommand)]
+pub enum ServiceAction {
+    /// Install the LaunchAgent and bootstrap it into launchd
+    Install,
+    /// Bootout the LaunchAgent and remove the plist
+    Uninstall,
+    /// Start (or restart) the installed service via launchctl kickstart
+    Start,
+    /// Stop the service via launchctl stop (the agent will NOT auto-restart)
+    Stop,
+    /// Show launchctl print + PID-file liveness
+    Status,
+    /// Tail the latest rolling log file
+    Logs {
+        /// Number of lines to show from the end (default: 50)
+        #[arg(short, long, default_value_t = 50)]
+        lines: usize,
+    },
 }

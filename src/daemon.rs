@@ -3,6 +3,7 @@
 use crate::api::ClaudeClient;
 use crate::cli::DreamPhase;
 use crate::config::Config;
+use crate::dream_trace::{DreamTracer, EventKind, Phase as TracePhase};
 use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
     dreaming::DreamingModule,
@@ -21,6 +22,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
 use tracing::{debug, error, info, warn};
 
 /// Relative path (under the data dir) of the hook-event log.
@@ -125,10 +127,31 @@ impl Daemon {
             .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
         info!("Hook socket listening on {}", socket_path.display());
 
+        // Install a SIGTERM handler for supervisor-driven shutdown.
+        //
+        // `signal::ctrl_c()` only catches SIGINT, which is what the
+        // terminal sends on Ctrl+C. Any supervisor — launchd, systemd,
+        // Docker, even a manual `kill $PID` — uses SIGTERM instead,
+        // and without this handler tokio falls back to the process
+        // default (instant termination) and the cleanup code below
+        // never runs. That means a stale PID file, a stale socket
+        // file, and a missed `state.json` flush after every restart.
+        //
+        // The stream is constructed outside the loop so the handler
+        // stays installed for the whole daemon lifetime — dropping
+        // the `Signal` would reset the signal disposition back to
+        // the default.
+        let mut sigterm = unix_signal(SignalKind::terminate())
+            .context("Failed to install SIGTERM handler")?;
+
         let result: Result<()> = loop {
             tokio::select! {
                 _ = signal::ctrl_c() => {
-                    info!("Received shutdown signal");
+                    info!("Received SIGINT (Ctrl+C), shutting down");
+                    break Ok(());
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM (supervisor shutdown), shutting down");
                     break Ok(());
                 }
                 _ = tokio::time::sleep(check_interval) => {
@@ -362,6 +385,12 @@ impl Daemon {
     }
 
     /// Manually trigger a dream cycle.
+    ///
+    /// The `All` case delegates to `module.run`, which owns its own
+    /// tracer. Single-phase runs (`Sws`/`Rem`/`Wake`) create a tracer
+    /// here and bracket the call with CycleStart/CycleEnd so their
+    /// trace files look structurally identical to a full-cycle trace on
+    /// the dashboard.
     pub async fn run_dream(&self, phase: DreamPhase) -> Result<()> {
         let client = self
             .client
@@ -376,13 +405,52 @@ impl Daemon {
                 module.run(client, budget).await?;
             }
             DreamPhase::Sws => {
-                module.run_sws(client, budget).await?;
+                let tracer = DreamTracer::new(&self.store);
+                tracer.emit(
+                    TracePhase::Init,
+                    EventKind::CycleStart,
+                    "manual: sws only".to_string(),
+                    vec![],
+                    vec![tracer.trace_rel_path().to_string()],
+                )?;
+                let (tokens, _, _) = module.run_sws(client, budget, &tracer).await?;
+                tracer.note(
+                    TracePhase::Done,
+                    EventKind::CycleEnd,
+                    format!("total_tokens={tokens}"),
+                )?;
             }
             DreamPhase::Rem => {
-                module.run_rem(client, budget).await?;
+                let tracer = DreamTracer::new(&self.store);
+                tracer.emit(
+                    TracePhase::Init,
+                    EventKind::CycleStart,
+                    "manual: rem only".to_string(),
+                    vec![],
+                    vec![tracer.trace_rel_path().to_string()],
+                )?;
+                let (tokens, _) = module.run_rem(client, budget, &tracer).await?;
+                tracer.note(
+                    TracePhase::Done,
+                    EventKind::CycleEnd,
+                    format!("total_tokens={tokens}"),
+                )?;
             }
             DreamPhase::Wake => {
-                module.run_wake(client, budget).await?;
+                let tracer = DreamTracer::new(&self.store);
+                tracer.emit(
+                    TracePhase::Init,
+                    EventKind::CycleStart,
+                    "manual: wake only".to_string(),
+                    vec![],
+                    vec![tracer.trace_rel_path().to_string()],
+                )?;
+                let (tokens, _) = module.run_wake(client, budget, &tracer).await?;
+                tracer.note(
+                    TracePhase::Done,
+                    EventKind::CycleEnd,
+                    format!("total_tokens={tokens}"),
+                )?;
             }
         }
 

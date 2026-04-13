@@ -26,6 +26,7 @@ impl Store {
     pub fn init_dirs(&self) -> Result<()> {
         let dirs = [
             "dreams",
+            "dreams/traces",
             "metacog",
             "metacog/samples",
             "metacog/audits",
@@ -192,9 +193,10 @@ mod tests {
         store.init_dirs().unwrap();
 
         let expected = [
-            "dreams", "metacog", "metacog/samples", "metacog/audits",
-            "valence", "introspection", "introspection/chains",
-            "introspection/reports", "intentions", "logs",
+            "dreams", "dreams/traces", "metacog", "metacog/samples",
+            "metacog/audits", "valence", "introspection",
+            "introspection/chains", "introspection/reports",
+            "intentions", "logs",
         ];
         for subdir in &expected {
             assert!(
