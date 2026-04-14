@@ -13,16 +13,18 @@ use crate::transcript;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Sessions already consolidated in a prior dream cycle. Persisted at
-/// `dreams/processed.json` — prevents re-compressing the same sessions
-/// on every cycle.
+/// `dreams/processed.json` — prevents re-compressing sessions that haven't
+/// changed since last cycle. Maps session_id → file size in bytes at last
+/// processing time. A session is re-queued when its current size exceeds the
+/// stored size, meaning new turns have been appended to the live JSONL file.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProcessedState {
-    sessions: HashSet<String>,
+    sessions: HashMap<String, u64>,
 }
 
 /// A compressed learning extracted during SWS phase.
@@ -151,6 +153,18 @@ fn parse_json_codeblock(content: &str) -> Option<String> {
     None
 }
 
+/// Normalize a pattern string for deduplication. Lowercases, strips punctuation,
+/// and collapses whitespace so near-duplicate phrasings hash to the same key.
+fn normalize_pattern(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct DreamingModule<'a> {
@@ -217,7 +231,7 @@ impl<'a> DreamingModule<'a> {
                 summaries.len()
             ),
             vec![format!("{}", projects_dir.display())],
-            sessions_seen.iter().map(|s| format!("session:{s}")).collect(),
+            sessions_seen.iter().map(|(sid, _)| format!("session:{sid}")).collect(),
             dump_payload,
             dump_kind,
         )?;
@@ -271,7 +285,7 @@ Output as a JSON array of objects."#;
                 self.config.budget.model,
                 prompt.len()
             ),
-            sessions_seen.iter().map(|s| format!("session:{s}")).collect(),
+            sessions_seen.iter().map(|(sid, _)| format!("session:{sid}")).collect(),
             vec![],
             Some(full_prompt_payload),
             Some("text"),
@@ -312,7 +326,7 @@ Output as a JSON array of objects."#;
                             valence: r.valence,
                             confidence: r.confidence,
                             category: r.category,
-                            source_sessions: sessions_seen.clone(),
+                            source_sessions: sessions_seen.iter().map(|(sid, _)| sid.clone()).collect(),
                             occurrences: 1,
                             first_seen: now.clone(),
                             last_seen: now.clone(),
@@ -325,14 +339,38 @@ Output as a JSON array of objects."#;
             warn!("SWS: no JSON block found in API response — patterns not saved");
         }
 
-        let patterns_count = new_patterns.len() as u64;
+        // Load existing patterns for deduplication and cap enforcement.
+        let mut all: Vec<ExtractedPattern> = if self.store.exists("dreams/patterns.json") {
+            self.store.read_json("dreams/patterns.json").unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Deduplicate: build normalized-text fingerprints of existing patterns
+        // so near-duplicate phrasings (same meaning, different wording) are filtered out.
+        let existing_keys: HashSet<String> =
+            all.iter().map(|p| normalize_pattern(&p.pattern)).collect();
+        let unique_new: Vec<ExtractedPattern> = new_patterns
+            .into_iter()
+            .filter(|p| !existing_keys.contains(&normalize_pattern(&p.pattern)))
+            .collect();
+        let patterns_count = unique_new.len() as u64;
+
         if patterns_count > 0 {
-            let mut all: Vec<ExtractedPattern> = if self.store.exists("dreams/patterns.json") {
-                self.store.read_json("dreams/patterns.json").unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            all.extend(new_patterns);
+            all.extend(unique_new);
+
+            // Cap total patterns at 500, keeping highest-confidence ones.
+            // Without a cap patterns.json grows unboundedly and REM prompts bloat.
+            const MAX_PATTERNS: usize = 500;
+            if all.len() > MAX_PATTERNS {
+                all.sort_by(|a, b| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                all.truncate(MAX_PATTERNS);
+            }
+
             self.store.write_json("dreams/patterns.json", &all)?;
         }
 
@@ -347,7 +385,7 @@ Output as a JSON array of objects."#;
             TracePhase::Sws,
             EventKind::ProcessedStateUpdated,
             format!("+{} sessions marked processed", sessions_seen.len()),
-            sessions_seen.iter().map(|s| format!("session:{s}")).collect(),
+            sessions_seen.iter().map(|(sid, _)| format!("session:{sid}")).collect(),
             vec!["dreams/processed.json".into()],
         )?;
 
@@ -358,7 +396,11 @@ Output as a JSON array of objects."#;
 
     /// Scan projects and build short per-turn summaries from new sessions.
     /// Pure data-loading, no API calls.
-    fn load_session_summaries(&self) -> Result<(Vec<SessionSummary>, Vec<String>)> {
+    ///
+    /// Returns `(summaries, sessions_seen)` where each entry in `sessions_seen`
+    /// is `(session_id, current_file_size_bytes)`. The file size is stored in
+    /// `ProcessedState` so sessions are re-scanned when new turns are appended.
+    fn load_session_summaries(&self) -> Result<(Vec<SessionSummary>, Vec<(String, u64)>)> {
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
         let files = transcript::scan_projects(&projects_dir)?;
 
@@ -372,14 +414,18 @@ Output as a JSON array of objects."#;
 
         let max_sessions = self.config.ingestion.max_sessions_per_scan as usize;
         let mut summaries = Vec::new();
-        let mut sessions_seen = Vec::new();
+        let mut sessions_seen: Vec<(String, u64)> = Vec::new();
         let mut scanned = 0usize;
 
         for file in files.iter().rev() {
             if scanned >= max_sessions {
                 break;
             }
-            if processed.sessions.contains(&file.session_id) {
+            // Re-scan only if the file has grown since last processing.
+            // A size of 0 means we can't stat the file — include it to be safe.
+            let current_size = std::fs::metadata(&file.path).map(|m| m.len()).unwrap_or(0);
+            let last_size = processed.sessions.get(&file.session_id).copied().unwrap_or(0);
+            if last_size > 0 && current_size <= last_size {
                 continue;
             }
 
@@ -415,14 +461,14 @@ Output as a JSON array of objects."#;
                     reply_length: unit.output.message_length,
                 });
             }
-            sessions_seen.push(file.session_id.clone());
+            sessions_seen.push((file.session_id.clone(), current_size));
             scanned += 1;
         }
 
         Ok((summaries, sessions_seen))
     }
 
-    fn persist_processed(&self, sessions: &[String]) -> Result<()> {
+    fn persist_processed(&self, sessions: &[(String, u64)]) -> Result<()> {
         if sessions.is_empty() {
             return Ok(());
         }
@@ -433,8 +479,8 @@ Output as a JSON array of objects."#;
         } else {
             ProcessedState::default()
         };
-        for sid in sessions {
-            state.sessions.insert(sid.clone());
+        for (sid, size) in sessions {
+            state.sessions.insert(sid.clone(), *size);
         }
         self.store.write_json("dreams/processed.json", &state)?;
         Ok(())
@@ -480,7 +526,17 @@ Output as a JSON array of objects."#;
 
         // Serialize patterns into a compact line-per-pattern digest the model
         // can reference by ID. Short form: [id] (category, valence, conf): text
-        let pattern_digest: String = all_patterns
+        // Cap at top 50 by confidence to prevent token bloat as patterns.json grows.
+        const MAX_PATTERNS_FOR_REM: usize = 50;
+        let mut sorted_patterns: Vec<&ExtractedPattern> = all_patterns.iter().collect();
+        sorted_patterns.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        sorted_patterns.truncate(MAX_PATTERNS_FOR_REM);
+
+        let pattern_digest: String = sorted_patterns
             .iter()
             .map(|p| {
                 format!(
@@ -511,8 +567,9 @@ Output as a JSON array of objects."#;
             TracePhase::Rem,
             EventKind::ApiCall,
             format!(
-                "model={} (heavy), patterns={}, max_tokens=4096, temp=0.9",
+                "model={} (heavy), patterns={}/{} (capped), max_tokens=4096, temp=0.9",
                 self.config.budget.model_heavy,
+                sorted_patterns.len(),
                 all_patterns.len()
             ),
             vec!["dreams/patterns.json".into()],
@@ -610,10 +667,9 @@ Output as a JSON array of objects."#;
         // Load all associations, find those that are:
         //   - not yet promoted
         //   - actionable (user can act on the rule)
-        //   - confidence ≥ 0.5 (low bar — the hypothesis is still speculative but
-        //     worth surfacing; the insights.md file is human-readable not machine-
-        //     executed so false positives are cheap)
-        const THRESHOLD: f64 = 0.5;
+        //   - confidence ≥ threshold (configurable; default 0.5 — low bar since
+        //     insights.md is human-readable, not machine-executed)
+        let threshold = self.config.modules.dreaming.wake_promotion_threshold;
 
         let mut all_assocs: Vec<Association> = if self.store.exists("dreams/associations.json") {
             self.store.read_json("dreams/associations.json").unwrap_or_default()
@@ -625,7 +681,7 @@ Output as a JSON array of objects."#;
         // without fighting the borrow checker.
         let candidates: Vec<Association> = all_assocs
             .iter()
-            .filter(|a| !a.promoted && a.actionable && a.confidence >= THRESHOLD)
+            .filter(|a| !a.promoted && a.actionable && a.confidence >= threshold)
             .cloned()
             .collect();
 
@@ -800,6 +856,28 @@ impl<'a> Module for DreamingModule<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── normalize_pattern ──────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_pattern_lowercases_and_strips_punctuation() {
+        assert_eq!(
+            normalize_pattern("Always use --no-verify!"),
+            "always use noverify"
+        );
+    }
+
+    #[test]
+    fn normalize_pattern_collapses_whitespace() {
+        assert_eq!(normalize_pattern("  foo   bar  "), "foo bar");
+    }
+
+    #[test]
+    fn normalize_pattern_same_for_near_duplicates() {
+        let a = normalize_pattern("Use cargo test before committing.");
+        let b = normalize_pattern("use cargo test before committing");
+        assert_eq!(a, b);
+    }
 
     // ── parse_json_codeblock ────────────────────────────────────────────────
 

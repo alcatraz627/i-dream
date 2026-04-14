@@ -71,6 +71,9 @@ pub struct DreamingConfig {
     pub wake_enabled: bool,
     pub min_sessions_since_last: u64,
     pub journal_max_entries: u64,
+    /// Minimum confidence score for Wake phase to promote an association to insights.md.
+    #[serde(default = "default_wake_threshold")]
+    pub wake_promotion_threshold: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,6 +117,10 @@ pub struct HooksConfig {
     pub post_tool_use: bool,
     pub stop: bool,
     pub pre_compact: bool,
+}
+
+fn default_wake_threshold() -> f64 {
+    0.5
 }
 
 impl Config {
@@ -173,6 +180,7 @@ impl Default for Config {
                     wake_enabled: true,
                     min_sessions_since_last: 3,
                     journal_max_entries: 500,
+                    wake_promotion_threshold: 0.5,
                 },
                 metacog: MetacogConfig {
                     enabled: true,
