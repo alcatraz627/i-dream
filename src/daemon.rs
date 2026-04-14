@@ -1479,6 +1479,7 @@ mod tests {
             store,
             state: Mutex::new(DaemonState::default()),
             client: None,
+            cycle_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 

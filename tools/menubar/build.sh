@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# build.sh — Compile and manage the i-dream menu bar widget.
+#
+# Usage:
+#   bash tools/menubar/build.sh              # compile + launch (replaces running instance)
+#   bash tools/menubar/build.sh --install    # compile + register LaunchAgent (auto-start on login)
+#   bash tools/menubar/build.sh --uninstall  # remove LaunchAgent + kill widget
+#   bash tools/menubar/build.sh --logs       # tail the widget debug log (/tmp/i-dream-bar.log)
+#   bash tools/menubar/build.sh --status     # show running instances + plist status
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="$SCRIPT_DIR/i-dream-bar.swift"
+OUTPUT="$SCRIPT_DIR/i-dream-bar"
+LABEL="dev.i-dream.menubar"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+DEBUG_LOG="/tmp/i-dream-bar.log"
+
+MODE="${1:-}"
+
+# ── Quick helpers ─────────────────────────────────────────────────────────────
+
+case "$MODE" in
+  --logs)
+    echo "→ tailing $DEBUG_LOG  (Ctrl+C to stop)"
+    tail -f "$DEBUG_LOG"
+    exit 0
+    ;;
+  --status)
+    echo "Running instances:"
+    pgrep -la "i-dream-bar" 2>/dev/null || echo "  (none)"
+    echo ""
+    echo "LaunchAgent ($LABEL):"
+    if launchctl list "$LABEL" 2>/dev/null | grep -q PID; then
+      launchctl list "$LABEL" 2>/dev/null
+    else
+      echo "  (not registered)"
+    fi
+    exit 0
+    ;;
+  --uninstall)
+    echo "▶ Uninstalling LaunchAgent..."
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null && echo "  ✓ Unregistered" || echo "  (was not registered)"
+    [[ -f "$PLIST" ]] && { rm -f "$PLIST"; echo "  ✓ Removed $PLIST"; }
+    pkill -x "i-dream-bar" 2>/dev/null && echo "  ✓ Killed running instance" || echo "  (no instance running)"
+    exit 0
+    ;;
+esac
+
+# ── Kill any existing instances ───────────────────────────────────────────────
+# Temporarily unregister the LaunchAgent (if installed) before killing so launchd
+# doesn't race us by restarting the old binary while we're still compiling.
+# We'll re-register (or use 'open') after the new binary is ready.
+
+echo "▶ Stopping any running i-dream-bar instances..."
+LAUNCHD_WAS_REGISTERED=false
+if launchctl list "$LABEL" &>/dev/null; then
+    LAUNCHD_WAS_REGISTERED=true
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    echo "  ✓ Suspended LaunchAgent (will re-register after compile)"
+fi
+KILLED=0
+while pgrep -x "i-dream-bar" &>/dev/null; do
+    pkill -x "i-dream-bar" 2>/dev/null || true
+    sleep 0.3
+    KILLED=$((KILLED+1))
+    [[ $KILLED -ge 5 ]] && { echo "  ⚠ Could not stop all instances; continuing anyway"; break; }
+done
+[[ $KILLED -gt 0 ]] && echo "  ✓ Stopped (killed $KILLED time(s))" || echo "  (none were running)"
+
+# ── Compile ───────────────────────────────────────────────────────────────────
+# Delete old binary first — macOS refuses to overwrite a binary that was
+# ever mapped into memory (Text Segment Protection), even after all processes
+# using it have been killed.
+
+echo "▶ Compiling..."
+rm -f "$OUTPUT"
+/usr/bin/swiftc -O "$SOURCE" -o "$OUTPUT" 2>&1
+echo "  ✓ Built: $OUTPUT"
+
+# Ad-hoc sign the binary — launchctl bootstrap gui/$UID requires a code
+# signature on macOS Ventura+. --sign - adds a self-signed (no cert) sig
+# that satisfies the kernel's requirement without needing a Developer ID.
+echo "▶ Signing (ad-hoc)..."
+/usr/bin/codesign --sign - --force "$OUTPUT" 2>&1 && echo "  ✓ Signed" || echo "  ⚠ Signing failed — launchctl install may not work"
+
+# ── Install or launch ─────────────────────────────────────────────────────────
+
+if [[ "$MODE" == "--install" ]]; then
+    # Remove stale launchd registration (ignore error if not registered)
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+
+    mkdir -p "$(dirname "$PLIST")"
+    cat > "$PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$OUTPUT</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Restart only if it exits non-zero (crash), not if killed by user -->
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>$DEBUG_LOG</string>
+    <key>StandardErrorPath</key>
+    <string>$DEBUG_LOG</string>
+</dict>
+</plist>
+EOF
+
+    # Bootstrap: launchd will start the widget immediately (RunAtLoad=true)
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    echo "  ✓ Registered LaunchAgent: $LABEL"
+    echo "  ✓ Widget will start now and auto-start on every login"
+    echo ""
+    echo "  Debug logs:  bash tools/menubar/build.sh --logs"
+    echo "  Status:      bash tools/menubar/build.sh --status"
+    echo "  Uninstall:   bash tools/menubar/build.sh --uninstall"
+
+else
+    echo "▶ Launching..."
+    if [[ "$LAUNCHD_WAS_REGISTERED" == "true" ]]; then
+        # LaunchAgent was installed — restore it so launchd owns the lifecycle.
+        launchctl bootstrap "gui/$(id -u)" "$PLIST"
+        echo "  ✓ Re-registered LaunchAgent: $LABEL"
+        echo "  ✓ launchd will manage the widget (auto-restart on crash)"
+    else
+        # No LaunchAgent — plain direct launch.
+        open "$OUTPUT"
+    fi
+    sleep 0.8
+    if pgrep -x "i-dream-bar" &>/dev/null; then
+        PID=$(pgrep -x "i-dream-bar" | head -1)
+        echo "  ✓ Running (PID $PID)"
+    else
+        echo "  ⚠ Process did not appear in pgrep — check $DEBUG_LOG"
+    fi
+    echo ""
+    echo "  Debug logs:  bash tools/menubar/build.sh --logs"
+    echo "  Auto-start:  bash tools/menubar/build.sh --install"
+fi

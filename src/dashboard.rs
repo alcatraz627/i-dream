@@ -319,7 +319,7 @@ fn collect_daemon_state(data_dir: &Path) -> DaemonState {
             is_running: false,
         },
         None => DaemonState {
-            status_line: "stopped".to_string(),
+            status_line: "no pid file — daemon not running".to_string(),
             is_running: false,
         },
     }
@@ -569,6 +569,19 @@ fn collect_file_inventory(data_dir: &Path) -> Vec<InventoryGroup> {
     groups
 }
 
+/// Map a filename to its type label for the file-detail dialog badge.
+fn file_type_label(name: &str) -> &'static str {
+    match name.rsplit('.').next().unwrap_or("") {
+        "jsonl" => "JSONL",
+        "json"  => "JSON",
+        "toml"  => "TOML",
+        "md"    => "Markdown",
+        "txt"   => "Text",
+        "log"   => "Log",
+        _       => "Data",
+    }
+}
+
 // ─── HTML rendering — pure, testable, no I/O ─────────────────────────
 
 /// Render a snapshot to a self-contained HTML document.
@@ -600,12 +613,40 @@ pub fn render_html(snap: &Snapshot) -> String {
 <style>
 {css}
 </style>
+<script>
+(function(){{
+  var t = localStorage.getItem('idream-theme');
+  if (t === 'light') document.body.classList.add('light');
+}})();
+</script>
 </head>
 <body>
-<button class="theme-toggle" onclick="document.body.classList.toggle('light')" aria-label="Toggle theme">☀ / ☾</button>
+<button class="theme-toggle" onclick="var l=document.body.classList.toggle('light');localStorage.setItem('idream-theme',l?'light':'dark')" aria-label="Toggle theme">☀ / ☾</button>
 <main>
 {body}
 </main>
+<div id="fd-overlay" class="fd-overlay" onclick="if(event.target===this)closeFileDialog()">
+  <div class="fd-box">
+    <button class="fd-close" onclick="closeFileDialog()">×</button>
+    <h3 id="fd-name" class="fd-name"></h3>
+    <span id="fd-badge" class="badge badge-on fd-badge"></span>
+    <p id="fd-path" class="fd-path"></p>
+  </div>
+</div>
+<script>
+function showFileDialog(name, type, path) {{
+  document.getElementById('fd-name').textContent = name;
+  document.getElementById('fd-badge').textContent = type;
+  document.getElementById('fd-path').textContent = path;
+  document.getElementById('fd-overlay').classList.add('open');
+}}
+function closeFileDialog() {{
+  document.getElementById('fd-overlay').classList.remove('open');
+}}
+document.addEventListener('keydown', function(e) {{
+  if (e.key === 'Escape') closeFileDialog();
+}});
+</script>
 </body>
 </html>
 "#,
@@ -770,7 +811,7 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
         };
 
         out.push_str(&format!(
-            r#"<details open class="trace-card"><summary class="trace-summary">
+            r#"<details class="trace-card"><summary class="trace-summary">
   <span class="trace-start">{start}</span>
   <span class="trace-id">{id}</span>
   {badge}
@@ -952,7 +993,7 @@ fn render_inventory_section(snap: &Snapshot) -> String {
         out.push_str(r#"<div class="inventory">"#);
         for group in &snap.file_inventory {
             out.push_str(&format!(
-                r#"<details open class="inv-group"><summary>{title} <span class="count">({n})</span></summary><ul>"#,
+                r#"<details class="inv-group"><summary>{title} <span class="count">({n})</span></summary><ul>"#,
                 title = html_escape(&group.title),
                 n = group.files.len(),
             ));
@@ -965,11 +1006,19 @@ fn render_inventory_section(snap: &Snapshot) -> String {
                     ),
                     None => String::new(),
                 };
+                let full_path = snap.data_dir
+                    .join(group.title.trim_end_matches('/'))
+                    .join(&file.name)
+                    .display()
+                    .to_string();
+                let file_type = file_type_label(&file.name);
                 out.push_str(&format!(
-                    "<li><code>{name}</code><span class=\"file-meta\">{mtime}<span class=\"size\">{size}</span></span></li>",
-                    name = html_escape(&file.name),
+                    "<li class=\"inv-file\" data-name=\"{name}\" data-type=\"{ftype}\" data-path=\"{path}\" onclick=\"showFileDialog(this.dataset.name,this.dataset.type,this.dataset.path)\"><code class=\"inv-file-name\">{name}</code><span class=\"file-meta\">{mtime}<span class=\"size\">{size}</span></span></li>",
+                    name  = html_escape(&file.name),
+                    ftype = html_escape(file_type),
+                    path  = html_escape(&full_path),
                     mtime = mtime_html,
-                    size = format_size(file.size),
+                    size  = format_size(file.size),
                 ));
             }
             out.push_str("</ul></details>");
@@ -1519,6 +1568,70 @@ details summary { cursor: pointer; color: var(--accent); }
   font-family: var(--mono);
 }
 .theme-toggle:hover { background: var(--surface-elevated); }
+
+/* ── Inventory file rows (clickable) ────────────────────────── */
+li.inv-file {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 3px 4px;
+  margin: 0 -4px;
+  transition: background 0.1s;
+}
+li.inv-file:hover { background: var(--surface-elevated); }
+li.inv-file code.inv-file-name {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+/* ── File detail dialog ─────────────────────────────────────── */
+.fd-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 500;
+  align-items: center;
+  justify-content: center;
+}
+.fd-overlay.open { display: flex; }
+.fd-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 26px 28px 24px;
+  min-width: 380px;
+  max-width: 580px;
+  position: relative;
+}
+.fd-close {
+  position: absolute;
+  top: 10px; right: 14px;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+}
+.fd-close:hover { color: var(--text); }
+.fd-name {
+  margin: 0 0 10px;
+  font-family: var(--mono);
+  font-size: 15px;
+  padding-right: 24px;
+}
+.fd-badge { display: inline-block; margin-bottom: 8px; }
+.fd-path {
+  margin: 10px 0 0;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  word-break: break-all;
+  user-select: all;
+}
 "#;
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -1998,5 +2111,115 @@ mod tests {
         // Dreaming had a last_activity; metacog didn't.
         assert!(html.contains("last activity"));
         assert!(html.contains("no activity yet"));
+    }
+
+    // ── file_type_label helper ───────────────────────────────────
+
+    #[test]
+    fn file_type_label_maps_known_extensions() {
+        assert_eq!(file_type_label("journal.jsonl"), "JSONL");
+        assert_eq!(file_type_label("state.json"), "JSON");
+        assert_eq!(file_type_label("config.toml"), "TOML");
+        assert_eq!(file_type_label("20260412-0300-sws.md"), "Markdown");
+        assert_eq!(file_type_label("notes.txt"), "Text");
+        assert_eq!(file_type_label("i-dream.log"), "Log");
+    }
+
+    #[test]
+    fn file_type_label_returns_data_for_unknown_extension() {
+        assert_eq!(file_type_label("archive.gz"), "Data");
+        assert_eq!(file_type_label("noextension"), "Data");
+    }
+
+    // ── dream traces collapsed by default ───────────────────────
+
+    #[test]
+    fn render_html_dream_traces_are_collapsed_by_default() {
+        let html = render_html(&sample_snapshot());
+        // <details open ...> means expanded — must NOT appear for trace cards
+        assert!(
+            !html.contains(r#"<details open class="trace-card""#),
+            "trace-card <details> must not have 'open' attribute (collapsed by default)"
+        );
+        // The class itself should still be present (collapsed form)
+        assert!(html.contains(r#"<details class="trace-card""#));
+    }
+
+    #[test]
+    fn render_html_inventory_groups_are_collapsed_by_default() {
+        let html = render_html(&sample_snapshot());
+        assert!(
+            !html.contains(r#"<details open class="inv-group""#),
+            "inv-group <details> must not have 'open' attribute (collapsed by default)"
+        );
+        assert!(html.contains(r#"<details class="inv-group""#));
+    }
+
+    // ── clickable file inventory items ──────────────────────────
+
+    #[test]
+    fn render_html_inventory_files_have_dialog_data_attributes() {
+        let html = render_html(&sample_snapshot());
+        // Files must be rendered as clickable items with data attributes
+        assert!(html.contains("class=\"inv-file\""), "inv-file class must be present");
+        assert!(html.contains("data-name="), "data-name attribute required for dialog");
+        assert!(html.contains("data-type="), "data-type attribute required for dialog");
+        assert!(html.contains("data-path="), "data-path attribute required for dialog");
+        assert!(html.contains("showFileDialog("), "onclick must call showFileDialog");
+    }
+
+    #[test]
+    fn render_html_includes_file_dialog_overlay() {
+        let html = render_html(&sample_snapshot());
+        assert!(html.contains("fd-overlay"), "file dialog overlay must be embedded");
+        assert!(html.contains("fd-box"), "file dialog box container must be present");
+        assert!(html.contains("closeFileDialog"), "close function must be present");
+        assert!(html.contains("showFileDialog"), "show function must be present");
+    }
+
+    // ── daemon stopped status is not redundant ───────────────────
+
+    #[test]
+    fn render_html_stopped_status_line_is_not_just_stopped() {
+        // collect_daemon_state() returns "no pid file — daemon not running"
+        // for the None case, not the bare word "stopped".  If the status card
+        // ever rendered both the "STOPPED" badge and a "stopped" status_line,
+        // users would see "STOPPED stopped" which is redundant and confusing.
+        let mut snap = sample_snapshot();
+        snap.daemon_state = DaemonState {
+            status_line: "no pid file — daemon not running".into(),
+            is_running: false,
+        };
+        let html = render_html(&snap);
+        assert!(html.contains("STOPPED"), "STOPPED badge must be present");
+        assert!(
+            html.contains("no pid file"),
+            "status_line must carry the descriptive 'no pid file' message"
+        );
+        // The status_line text must NOT be the bare word "stopped" which
+        // would create a "STOPPED stopped" redundancy on the page.
+        assert!(
+            !html.contains(">stopped<"),
+            "bare 'stopped' text node would create STOPPED/stopped redundancy"
+        );
+    }
+
+    // ── localStorage theme persistence ───────────────────────────
+
+    #[test]
+    fn render_html_theme_toggle_persists_to_localstorage() {
+        let html = render_html(&sample_snapshot());
+        // The toggle onclick must write to localStorage
+        assert!(
+            html.contains("localStorage.setItem"),
+            "theme toggle must persist choice to localStorage"
+        );
+        // On load, the stored preference must be applied
+        assert!(
+            html.contains("localStorage.getItem"),
+            "page load must read stored theme from localStorage"
+        );
+        // Both read and write must use the same key
+        assert!(html.contains("idream-theme"), "localStorage key must be 'idream-theme'");
     }
 }
