@@ -32,6 +32,7 @@ fn install(config: &Config) -> Result<()> {
     write_session_start_hook(&hooks_dir, config)?;
     write_post_tool_use_hook(&hooks_dir, config)?;
     write_stop_hook(&hooks_dir, config)?;
+    write_user_prompt_submit_hook(&hooks_dir, config)?;
 
     // Update Claude Code settings.json
     let settings_path = expand_tilde(Path::new("~/.claude/settings.json"));
@@ -61,6 +62,9 @@ fn install(config: &Config) -> Result<()> {
     }
     if config.hooks.stop {
         add_hook_entry(hooks_obj, "Stop", &hooks_dir.join("stop.sh"));
+    }
+    if config.hooks.user_prompt_submit {
+        add_hook_entry(hooks_obj, "UserPromptSubmit", &hooks_dir.join("user-prompt-submit.sh"));
     }
 
     let content = serde_json::to_string_pretty(&settings)?;
@@ -121,7 +125,7 @@ fn status(config: &Config) -> Result<String> {
     let hooks_dir = config.data_dir().join("hooks");
     let prefix = hooks_dir.to_string_lossy().to_string();
 
-    let check_events = ["SessionStart", "PostToolUse", "Stop"];
+    let check_events = ["SessionStart", "PostToolUse", "Stop", "UserPromptSubmit"];
 
     for event in &check_events {
         let installed = settings
@@ -267,7 +271,7 @@ mod tests {
             "Script must reference the daemon socket path"
         );
         assert!(script.starts_with("#!/bin/bash"), "Must have bash shebang");
-        assert!(script.contains("socat"), "Must use socat for Unix socket comms");
+        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
         assert!(script.contains("session_start"), "Must send session_start event");
     }
 
@@ -297,6 +301,43 @@ mod tests {
         let script = std::fs::read_to_string(dir.path().join("stop.sh")).unwrap();
         assert!(script.contains("session_end"), "Must send session_end event");
     }
+
+    #[test]
+    fn user_prompt_submit_hook_emits_no_stdout() {
+        // The hook MUST NOT print to stdout — Claude Code injects stdout
+        // into the user's message for UserPromptSubmit hooks.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh")).unwrap();
+        // The only `echo` allowed is inside the Python heredoc or the `touch` command.
+        // There must be no bare `echo "$RESPONSE"` that prints to stdout.
+        assert!(script.contains("user_signal"), "Must send user_signal event");
+        assert!(script.contains("IDREAM_INPUT"), "Must pass prompt via env var");
+        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
+        // Key safety check: no raw echo that would inject into user's message
+        assert!(
+            !script.contains("\necho \"$RESULT\""),
+            "Must NOT echo result to stdout — that would corrupt user messages"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_hook_contains_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh")).unwrap();
+        let expected_socket = config.data_dir().join("daemon.sock");
+        assert!(
+            script.contains(&expected_socket.to_string_lossy().to_string()),
+            "Script must reference the daemon socket path"
+        );
+    }
 }
 
 fn write_session_start_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
@@ -307,7 +348,22 @@ fn write_session_start_hook(dir: &std::path::Path, config: &Config) -> Result<()
 SOCKET="{socket}"
 if [ -S "$SOCKET" ]; then
     RESPONSE=$(echo '{{"event":"session_start","ts":'$(date +%s)'}}' \
-        | socat -t2 - UNIX-CONNECT:"$SOCKET" 2>/dev/null)
+        | python3 -c "
+import sys, socket as S
+s = S.socket(S.AF_UNIX)
+s.connect('$SOCKET')
+s.sendall(sys.stdin.buffer.read())
+s.settimeout(2)
+try:
+    data = b''
+    while True:
+        chunk = s.recv(4096)
+        if not chunk: break
+        data += chunk
+    sys.stdout.buffer.write(data)
+except Exception: pass
+s.close()
+" 2>/dev/null)
     if [ -n "$RESPONSE" ]; then
         echo "$RESPONSE"
     fi
@@ -330,7 +386,7 @@ fn write_post_tool_use_hook(dir: &std::path::Path, config: &Config) -> Result<()
 SOCKET="{socket}"
 if [ -S "$SOCKET" ]; then
     echo '{{"event":"tool_use","tool":"'$TOOL_NAME'","ts":'$(date +%s)'}}' \
-        | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null || true
+        | python3 -c "import sys,socket as S; s=S.socket(S.AF_UNIX); s.connect('$SOCKET'); s.sendall(sys.stdin.buffer.read()); s.close()" 2>/dev/null || true
 fi
 # Touch activity signal
 touch "{activity}"
@@ -342,6 +398,122 @@ touch "{activity}"
     Ok(())
 }
 
+fn write_user_prompt_submit_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
+    let socket = config.data_dir().join("daemon.sock");
+    // IMPORTANT: UserPromptSubmit is a blocking hook — stdout is injected into
+    // the user's message. This script must emit NOTHING to stdout.
+    //
+    // The Python heredoc (PYEOF) has no variable expansion ('PYEOF' is quoted),
+    // so Python reads the hook JSON from the IDREAM_INPUT env var instead of stdin.
+    // The socket path is passed via IDREAM_SOCKET. Python sends directly via
+    // socket.AF_UNIX — no socat dependency needed.
+    //
+    // The {{...}} below become literal {..} after Rust's format! processes the string,
+    // i.e. Python dict literals and the {2,} regex quantifier.
+    let script = format!(
+        r#"#!/bin/bash
+# i-dream: UserPromptSubmit hook — captures conversational sentiment signals
+# NOTE: stdout is injected into the user message by Claude Code.
+#       This script MUST emit nothing to stdout.
+SOCKET="{socket}"
+if [ ! -S "$SOCKET" ]; then exit 0; fi
+
+# Save stdin before it is consumed; pass prompt and socket path to Python via env vars
+HOOK_INPUT=$(cat)
+
+# Analyze and send a user_signal event to the daemon (best-effort, no stdout)
+IDREAM_INPUT="$HOOK_INPUT" IDREAM_SOCKET="$SOCKET" python3 << 'PYEOF' 2>/dev/null || true
+import sys, re, json, time, os, socket as _sock
+
+raw = os.environ.get("IDREAM_INPUT", "")
+sock_path = os.environ.get("IDREAM_SOCKET", "")
+if not raw or not sock_path:
+    sys.exit(0)
+try:
+    data = json.loads(raw)
+    prompt = data.get("prompt", "")
+except Exception:
+    sys.exit(0)
+
+if not prompt:
+    sys.exit(0)
+
+# ALL-CAPS words (≥2 letters) — proxy for emphasis or frustration
+uppercase_words = len(re.findall(r"\b[A-Z]{{2,}}\b", prompt))
+
+# Frustration and swear word detection
+swear_re = re.compile(
+    r"\b(wtf|what\s+the\s+f(?:uck)?|fuck(?:ing)?|shit|bullshit|damn(?:it)?|"
+    r"crap|imbecile|idiot|moron|stupid|dumb|awful|terrible|horrible|broken|"
+    r"worst|useless|garbage|trash|ridiculous|absurd|pathetic)\b",
+    re.IGNORECASE
+)
+swear_count = len(swear_re.findall(prompt))
+
+# Correction / pushback signals
+correction_re = re.compile(
+    r"(no,?\s+that|wrong[.! ]|undo\s+this|revert\s+this|not\s+right|"
+    r"not\s+what\s+i\s+want|i\s+said\b|try\s+again|go\s+back|start\s+over|"
+    r"you\s+misunderstood|not\s+correct|please\s+fix|you.?re\s+wrong|"
+    r"that.?s\s+wrong|no\s+no\b|stop\s+doing|i\s+didn.?t\s+ask)",
+    re.IGNORECASE
+)
+correction = bool(correction_re.search(prompt))
+
+# Positive feedback signals
+positive_re = re.compile(
+    r"(perfect[.! ]|exactly[.! ]|great\s+job|well\s+done|"
+    r"that.?s\s+(?:right|correct|perfect)|yes,?\s+that|"
+    r"good\s+work|nice\s+work|thank\s*(?:s|\s+you)|"
+    r"brilliant|excellent|nailed\s+it|love\s+it|that\s+works|"
+    r"awesome|fantastic|spot\s+on)",
+    re.IGNORECASE
+)
+positive = bool(positive_re.search(prompt))
+
+# Composite frustration score [0.0, 1.0]
+score = 0.0
+if swear_count > 0:     score += min(0.5, swear_count * 0.2)
+if uppercase_words > 0: score += min(0.3, uppercase_words * 0.1)
+if correction:          score += 0.3
+frustration_score = round(min(1.0, score), 2)
+
+ts = int(time.time())
+payload = json.dumps({{
+    "event": "user_signal",
+    "ts": ts,
+    "uppercase_words": uppercase_words,
+    "swear_count": swear_count,
+    "correction": correction,
+    "positive": positive,
+    "frustration_score": frustration_score
+}}).encode()
+
+try:
+    s = _sock.socket(_sock.AF_UNIX)
+    s.connect(sock_path)
+    s.sendall(payload)
+    s.close()
+except Exception:
+    pass
+PYEOF
+# Touch activity signal (always, regardless of socket availability)
+touch "{activity}"
+"#,
+        socket = socket.display(),
+        activity = expand_tilde(&config.idle.activity_signal).display(),
+    );
+    let path = dir.join("user-prompt-submit.sh");
+    std::fs::write(&path, &script)?;
+    // Mark executable so Claude Code can run it directly
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 fn write_stop_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
     let socket = config.data_dir().join("daemon.sock");
     let script = format!(
@@ -350,7 +522,7 @@ fn write_stop_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
 SOCKET="{socket}"
 if [ -S "$SOCKET" ]; then
     echo '{{"event":"session_end","ts":'$(date +%s)'}}' \
-        | socat - UNIX-CONNECT:"$SOCKET" 2>/dev/null || true
+        | python3 -c "import sys,socket as S; s=S.socket(S.AF_UNIX); s.connect('$SOCKET'); s.sendall(sys.stdin.buffer.read()); s.close()" 2>/dev/null || true
 fi
 "#,
         socket = socket.display(),

@@ -29,6 +29,11 @@ use tracing::{debug, error, info, warn};
 /// Relative path (under the data dir) of the hook-event log.
 const EVENTS_LOG: &str = "logs/events.jsonl";
 
+/// Dedicated log for UserSignal events from the UserPromptSubmit hook.
+/// Separate from EVENTS_LOG so the dreaming module can scan sentiment
+/// trends without filtering the general event stream.
+const SIGNALS_LOG: &str = "logs/signals.jsonl";
+
 /// Relative path of the metacog real-time tool-activity log. Written on
 /// each `ToolUse` hook event as a lightweight heartbeat — counterpart to
 /// the deep-sampling batch file `metacog/samples.jsonl`.
@@ -723,6 +728,15 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
         };
         if let Err(e) = store.append_jsonl(METACOG_ACTIVITY_LOG, &sample) {
             warn!("Failed to write metacog activity sample: {e:#}");
+        }
+    }
+
+    // `UserSignal` gets a secondary write to logs/signals.jsonl so the
+    // dreaming module can query sentiment trends independently of the
+    // general event stream. Best-effort like the metacog activity write.
+    if let HookEvent::UserSignal { .. } = &event {
+        if let Err(e) = store.append_jsonl(SIGNALS_LOG, &record) {
+            warn!("Failed to write user signal to signals log: {e:#}");
         }
     }
 

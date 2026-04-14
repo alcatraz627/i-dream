@@ -176,6 +176,55 @@ private struct MetacogAudit: Codable {
     }
 }
 
+// ─── Rich text builder ────────────────────────────────────────────────────────
+
+/// Fluent builder for NSAttributedString with semantic styling methods.
+/// Converts plain-string content from detail views into visually structured text.
+final class RichText {
+    private let buf = NSMutableAttributedString()
+
+    @discardableResult func header(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ])); return self
+    }
+    @discardableResult func subheader(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+        ])); return self
+    }
+    @discardableResult func body(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.labelColor,
+        ])); return self
+    }
+    @discardableResult func dim(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ])); return self
+    }
+    @discardableResult func mono(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+        ])); return self
+    }
+    @discardableResult func divider() -> RichText {
+        buf.append(NSAttributedString(string: String(repeating: "─", count: 60) + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: NSColor.separatorColor,
+        ])); return self
+    }
+    @discardableResult func spacer() -> RichText {
+        buf.append(NSAttributedString(string: "\n")); return self
+    }
+    func build() -> NSAttributedString { buf }
+}
+
 // ─── Icon choices ─────────────────────────────────────────────────────────────
 
 private let iconChoices: [(label: String, symbol: String)] = [
@@ -415,6 +464,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cachedPatterns: [Pattern]      = []
     private var cachedJournal:  [JournalEntry] = []
 
+    // Persistent resizable detail panel (replaces NSAlert popups)
+    private var detailPanel:    NSPanel?
+    private var detailFilePath: String?
+
     // Dreaming animation
     private var isCycling       = false
     private var cycleStartTime: Date?
@@ -573,16 +626,20 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         addSection(menu, "Knowledge Base  (tap to explore)")
         if let b = b {
-            addClickable(menu, "  Patterns",    "\(b.dreamsPatterns)",
-                         valueColor: .systemBlue, action: #selector(showPatternsDetail))
-            addClickable(menu, "  Associations", "\(b.associations)",
-                         valueColor: .systemBlue, action: #selector(showAssociationsDetail))
-            addClickable(menu, "  Sessions",
-                         "\(b.dreamsProcessed) dreams  ·  \(b.metacogProcessed) metacog",
-                         action: #selector(showSessionsDetail))
+            let pi = addClickable(menu, "  Patterns",    "\(b.dreamsPatterns)",
+                                  valueColor: .systemBlue, action: #selector(showPatternsDetail))
+            setIcon(pi, "brain")
+            let ai = addClickable(menu, "  Associations", "\(b.associations)",
+                                  valueColor: .systemBlue, action: #selector(showAssociationsDetail))
+            setIcon(ai, "link")
+            let si = addClickable(menu, "  Sessions",
+                                  "\(b.dreamsProcessed) dreams  ·  \(b.metacogProcessed) metacog",
+                                  action: #selector(showSessionsDetail))
+            setIcon(si, "book.fill")
             if b.metacogAudits > 0 {
-                addClickable(menu, "  Metacog audits", "\(b.metacogAudits)",
-                             action: #selector(showMetacogDetail))
+                let mi = addClickable(menu, "  Metacog audits", "\(b.metacogAudits)",
+                                      action: #selector(showMetacogDetail))
+                setIcon(mi, "checkmark.seal.fill")
             }
         }
 
@@ -627,31 +684,44 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ─ Daemon controls ────────────────────────────────────────────────────
         addSection(menu, "Daemon")
         if running {
-            add(menu, "Stop Daemon", #selector(stopDaemon))
+            let s = add(menu, "Stop Daemon", #selector(stopDaemon))
+            setIcon(s, "stop.fill")
         } else {
-            add(menu, "Start Daemon", #selector(startDaemon))
+            let s = add(menu, "Start Daemon", #selector(startDaemon))
+            setIcon(s, "play.fill")
         }
         let t = add(menu, "Trigger Dream Cycle", #selector(triggerCycle))
+        setIcon(t, "arrow.triangle.2.circlepath")
         t.isEnabled = running && !isCycling
 
         menu.addItem(.separator())
 
         // ─ Tools ──────────────────────────────────────────────────────────────
-        add(menu, "Open Dashboard", #selector(openDashboard))
-        add(menu, "Show How-To…",   #selector(showHowTo))
+        let dash = add(menu, "Open Dashboard", #selector(openDashboard))
+        setIcon(dash, "chart.bar.doc.horizontal.fill")
+
+        let howTo = add(menu, "Show How-To…", #selector(showHowTo))
+        setIcon(howTo, "questionmark.circle.fill")
+
+        let gh = add(menu, "View on GitHub", #selector(openGitHub))
+        setIcon(gh, "arrow.up.right.square")
 
         // Logs submenu
         let logsMenu = NSMenu()
         let openLogsTermItem = NSMenuItem(title: "Open in Terminal", action: #selector(openLogs), keyEquivalent: "")
         openLogsTermItem.target = self; openLogsTermItem.isEnabled = true
+        setIcon(openLogsTermItem, "terminal.fill")
         logsMenu.addItem(openLogsTermItem)
         let openLogsVSCItem = NSMenuItem(title: "Open in VS Code", action: #selector(openLogsInVSCode), keyEquivalent: "")
         openLogsVSCItem.target = self; openLogsVSCItem.isEnabled = true
+        setIcon(openLogsVSCItem, "chevron.left.forwardslash.chevron.right")
         logsMenu.addItem(openLogsVSCItem)
         let openDebugItem = NSMenuItem(title: "Open Debug Log", action: #selector(openDebugLog), keyEquivalent: "")
         openDebugItem.target = self; openDebugItem.isEnabled = true
+        setIcon(openDebugItem, "ant.fill")
         logsMenu.addItem(openDebugItem)
         let logsParent = NSMenuItem(title: "Logs", action: nil, keyEquivalent: "")
+        setIcon(logsParent, "doc.text.magnifyingglass")
         menu.addItem(logsParent); menu.setSubmenu(logsMenu, for: logsParent)
 
         menu.addItem(.separator())
@@ -672,15 +742,18 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             iconMenu.addItem(i)
         }
         let iconParent = NSMenuItem(title: "Change Icon", action: nil, keyEquivalent: "")
+        setIcon(iconParent, "paintbrush.pointed.fill")
         menu.addItem(iconParent); menu.setSubmenu(iconMenu, for: iconParent)
 
         menu.addItem(.separator())
 
         let r = add(menu, "Refresh", #selector(refresh))
+        setIcon(r, "arrow.clockwise")
         r.keyEquivalent = "r"
         let q = NSMenuItem(title: "Quit",
                            action: #selector(NSApplication.terminate(_:)),
                            keyEquivalent: "q")
+        setIcon(q, "power")
         menu.addItem(q)
     }
 
@@ -726,8 +799,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Like addRow but clickable — shows a subtle › arrow and has an action.
+    @discardableResult
     private func addClickable(_ menu: NSMenu, _ label: String, _ value: String,
-                               valueColor: NSColor? = nil, action: Selector) {
+                               valueColor: NSColor? = nil, action: Selector) -> NSMenuItem {
         let i    = NSMenuItem()
         let full = NSMutableAttributedString()
         let pad  = max(1, 24 - label.count)
@@ -742,7 +816,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .foregroundColor: NSColor.tertiaryLabelColor,
         ]))
         i.attributedTitle = full; i.action = action; i.target = self; i.isEnabled = true
-        menu.addItem(i)
+        menu.addItem(i); return i
     }
 
     private func addTwoLine(_ menu: NSMenu, top: String, bottom: String) {
@@ -774,43 +848,124 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // ── Detail popups ─────────────────────────────────────────────────────────
+    // ── SF Symbol icon helper ──────────────────────────────────────────────────
 
-    private func showScrollableDetail(title: String, content: String, filePath: String? = nil) {
-        let a = NSAlert()
-        a.messageText = title
-        if let fp = filePath {
-            a.addButton(withTitle: "Open File")
-            a.addButton(withTitle: "Close")
-            let resp = showScrollableAlertWithButtons(a, content: content)
-            if resp == .alertFirstButtonReturn {
-                NSWorkspace.shared.open(URL(fileURLWithPath: fp))
-            }
-        } else {
-            a.addButton(withTitle: "Close")
-            showScrollableAlertWithButtons(a, content: content)
+    private func setIcon(_ item: NSMenuItem, _ symbol: String) {
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            img.isTemplate = true
+            item.image = img
         }
     }
 
-    @discardableResult
-    private func showScrollableAlertWithButtons(_ a: NSAlert, content: String) -> NSApplication.ModalResponse {
-        let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 320))
-        sv.hasVerticalScroller = true; sv.hasHorizontalScroller = false
-        sv.autohidesScrollers  = true; sv.borderType = .noBorder
+    // ── Resizable detail panel ─────────────────────────────────────────────────
 
-        let tv = NSTextView(frame: sv.bounds)
-        tv.isEditable   = false; tv.isSelectable = true
-        tv.string       = content
-        tv.font         = NSFont.systemFont(ofSize: 12)
-        tv.textColor    = .labelColor; tv.backgroundColor = .clear
-        tv.textContainerInset = NSSize(width: 6, height: 6)
+    /// Present a floating, resizable NSPanel with rich attributed text content.
+    /// Replaces the old fixed-size NSAlert popups. If `filePath` is given, an
+    /// "Open File" button is shown in the toolbar.
+    private func showResizablePanel(title: String, content: NSAttributedString,
+                                     filePath: String? = nil) {
+        // Close and release any existing detail panel
+        detailPanel?.close()
+        detailPanel    = nil
+        detailFilePath = filePath
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing:     .buffered,
+            defer:       false
+        )
+        panel.title                = title
+        panel.isReleasedWhenClosed = false
+        panel.level                = .floating
+        panel.center()
+
+        // ── Layout: scroll view above a thin toolbar ────────────────────────
+        let root = NSView()
+        panel.contentView = root
+
+        let sv = NSScrollView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.hasVerticalScroller   = true
+        sv.hasHorizontalScroller = false
+        sv.autohidesScrollers    = true
+        sv.borderType            = .noBorder
+        root.addSubview(sv)
+
+        let tv = NSTextView()
+        tv.isEditable   = false
+        tv.isSelectable = true
+        tv.backgroundColor         = .textBackgroundColor
+        tv.textContainerInset      = NSSize(width: 14, height: 14)
         tv.isVerticallyResizable   = true
         tv.isHorizontallyResizable = false
-        tv.textContainer?.containerSize      = NSSize(width: 488, height: 1_000_000)
         tv.textContainer?.widthTracksTextView = true
+        tv.textStorage?.setAttributedString(content)
         sv.documentView = tv
-        a.accessoryView = sv
-        return a.runModal()
+
+        let bar = NSView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(bar)
+
+        // Subtle separator line above the toolbar
+        let sep = NSBox()
+        sep.translatesAutoresizingMaskIntoConstraints = false
+        sep.boxType = .separator
+        bar.addSubview(sep)
+
+        let closeBtn = NSButton(title: "Close", target: self,
+                                action: #selector(closeDetailPanel))
+        closeBtn.translatesAutoresizingMaskIntoConstraints = false
+        closeBtn.bezelStyle = .rounded
+        bar.addSubview(closeBtn)
+
+        var barConstraints: [NSLayoutConstraint] = [
+            sep.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            sep.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            sep.topAnchor.constraint(equalTo: bar.topAnchor),
+            sep.heightAnchor.constraint(equalToConstant: 1),
+            closeBtn.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
+            closeBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 4),
+        ]
+
+        if filePath != nil {
+            let openBtn = NSButton(title: "Open File", target: self,
+                                   action: #selector(openDetailFile))
+            openBtn.translatesAutoresizingMaskIntoConstraints = false
+            openBtn.bezelStyle = .rounded
+            bar.addSubview(openBtn)
+            barConstraints += [
+                openBtn.trailingAnchor.constraint(equalTo: closeBtn.leadingAnchor, constant: -8),
+                openBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 4),
+            ]
+        }
+
+        NSLayoutConstraint.activate(barConstraints + [
+            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            bar.heightAnchor.constraint(equalToConstant: 48),
+            sv.topAnchor.constraint(equalTo: root.topAnchor),
+            sv.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            sv.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            sv.bottomAnchor.constraint(equalTo: bar.topAnchor),
+        ])
+
+        detailPanel = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func closeDetailPanel() {
+        detailPanel?.close()
+        detailPanel    = nil
+        detailFilePath = nil
+    }
+
+    @objc private func openDetailFile() {
+        if let fp = detailFilePath {
+            NSWorkspace.shared.open(URL(fileURLWithPath: fp))
+        }
     }
 
     @objc private func showPatternsDetail() {
@@ -818,18 +973,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !patterns.isEmpty else {
             alert("Patterns", "No patterns have been extracted yet."); return
         }
-        var lines: [String] = ["Behavioral & Cognitive Patterns   (\(patterns.count) total)", ""]
+        let rt = RichText()
+        rt.header("Behavioral & Cognitive Patterns")
+        rt.dim("\(patterns.count) total patterns")
+        rt.spacer()
         for p in patterns.suffix(15).reversed() {
             let val   = p.valence == "positive" ? "+" : p.valence == "negative" ? "−" : "◦"
             let since = p.firstSeen.map { "  ·  first seen \(fmtDate($0))" } ?? ""
-            lines.append("\(val)  \(p.pattern)")
-            lines.append("     \(p.category)  ·  \(Int(p.confidence * 100))% confident\(since)")
-            lines.append("")
+            rt.subheader("\(val)  \(p.pattern)")
+            rt.dim("  \(p.category)  ·  \(Int(p.confidence * 100))% confident\(since)")
+            rt.spacer()
         }
-        if patterns.count > 15 { lines.append("… and \(patterns.count - 15) earlier patterns") }
-        showScrollableDetail(title: "Patterns (\(patterns.count))",
-                             content: lines.joined(separator: "\n"),
-                             filePath: subDir + "/dreams/patterns.json")
+        if patterns.count > 15 { rt.dim("… and \(patterns.count - 15) earlier patterns") }
+        showResizablePanel(title: "Patterns (\(patterns.count))",
+                           content: rt.build(),
+                           filePath: subDir + "/dreams/patterns.json")
     }
 
     @objc private func showAssociationsDetail() {
@@ -837,22 +995,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !assocs.isEmpty else {
             alert("Associations", "No cross-pattern hypotheses have been formed yet."); return
         }
-        var lines: [String] = ["Cross-Pattern Hypotheses   (\(assocs.count) total)", ""]
+        let rt = RichText()
+        rt.header("Cross-Pattern Hypotheses")
+        rt.dim("\(assocs.count) total associations")
         for (i, a) in assocs.reversed().enumerated() {
-            let act = a.actionable ? "  · actionable" : ""
-            lines.append("[\(assocs.count - i)]  \(Int(a.confidence * 100))% confident\(act)")
-            lines.append(a.hypothesis)
+            rt.spacer()
+            rt.dim("[\(assocs.count - i)]  \(Int(a.confidence * 100))% confident\(a.actionable ? "  · actionable" : "")")
+            rt.body(a.hypothesis)
             if let rule = a.suggestedRule, !rule.isEmpty {
-                lines.append("")
-                lines.append("  → Rule: \(rule)")
+                rt.dim("  → Rule: \(rule)")
             }
-            lines.append("")
-            lines.append(String(repeating: "─", count: 60))
-            lines.append("")
+            rt.divider()
         }
-        showScrollableDetail(title: "Associations — Hypotheses (\(assocs.count))",
-                             content: lines.joined(separator: "\n"),
-                             filePath: subDir + "/dreams/associations.json")
+        showResizablePanel(title: "Associations (\(assocs.count))",
+                           content: rt.build(),
+                           filePath: subDir + "/dreams/associations.json")
     }
 
     @objc private func showMetacogDetail() {
@@ -872,26 +1029,26 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         }
-        var lines: [String] = ["Metacognition Audit"]
-        if !dateStr.isEmpty { lines.append("From: \(dateStr)"); lines.append("") }
-
+        let rt = RichText()
+        rt.header("Metacognition Audit")
+        if !dateStr.isEmpty { rt.dim("From: \(dateStr)") }
+        rt.spacer()
         if let score = audit.calibrationScore {
-            lines.append("Calibration Score: \(String(format: "%.2f", score))  (1.0 = perfectly calibrated)")
-            lines.append("")
+            rt.subheader("Calibration Score")
+            rt.body(String(format: "%.2f  (1.0 = perfectly calibrated)", score))
+            rt.spacer()
         }
         if let biases = audit.biasesDetected, !biases.isEmpty {
-            lines.append("Biases Detected:")
-            biases.forEach { lines.append("  • \($0)") }
-            lines.append("")
+            rt.subheader("Biases Detected")
+            biases.forEach { rt.body("  • \($0)") }
+            rt.spacer()
         }
         if let recs = audit.recommendations, !recs.isEmpty {
-            lines.append("Recommendations:")
-            recs.forEach { lines.append("  • \($0)") }
+            rt.subheader("Recommendations")
+            recs.forEach { rt.body("  • \($0)") }
         }
         let auditPath = filename.map { subDir + "/metacog/audits/" + $0 }
-        showScrollableDetail(title: "Metacog Audit",
-                             content: lines.joined(separator: "\n"),
-                             filePath: auditPath)
+        showResizablePanel(title: "Metacog Audit", content: rt.build(), filePath: auditPath)
     }
 
     @objc private func showSessionsDetail() {
@@ -899,24 +1056,26 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !journal.isEmpty else {
             alert("Sessions", "No dream journal entries yet."); return
         }
-        var lines: [String] = ["Dream Journal   (\(journal.count) cycles total)", ""]
+        let rt = RichText()
+        rt.header("Dream Journal")
+        rt.dim("\(journal.count) total cycles")
         for entry in journal.suffix(20).reversed() {
-            lines.append(fmtDate(entry.timestamp))
+            rt.spacer()
+            rt.subheader(fmtDate(entry.timestamp))
             if entry.sessionsAnalyzed == 0 {
-                lines.append("  Skipped — no new sessions to consolidate")
+                rt.dim("  Skipped — no new sessions to consolidate")
             } else {
-                lines.append("  Sessions analyzed:   \(entry.sessionsAnalyzed)")
-                if entry.patternsExtracted > 0 { lines.append("  Patterns extracted:  \(entry.patternsExtracted)") }
-                if entry.associationsFound  > 0 { lines.append("  Associations found:  \(entry.associationsFound)") }
-                if entry.insightsPromoted   > 0 { lines.append("  Insights promoted:   \(entry.insightsPromoted)") }
-                lines.append("  Tokens used:         \(fmtNum(entry.tokensUsed))")
+                rt.body("  Sessions analyzed:   \(entry.sessionsAnalyzed)")
+                if entry.patternsExtracted > 0 { rt.body("  Patterns extracted:  \(entry.patternsExtracted)") }
+                if entry.associationsFound  > 0 { rt.body("  Associations found:  \(entry.associationsFound)") }
+                if entry.insightsPromoted   > 0 { rt.body("  Insights promoted:   \(entry.insightsPromoted)") }
+                rt.dim("  Tokens used:         \(fmtNum(entry.tokensUsed))")
             }
-            lines.append("")
         }
-        if journal.count > 20 { lines.append("… and \(journal.count - 20) earlier entries") }
-        showScrollableDetail(title: "Dream Journal (\(journal.count) cycles)",
-                             content: lines.joined(separator: "\n"),
-                             filePath: subDir + "/dreams/journal.jsonl")
+        if journal.count > 20 { rt.dim("… and \(journal.count - 20) earlier entries") }
+        showResizablePanel(title: "Dream Journal (\(journal.count) cycles)",
+                           content: rt.build(),
+                           filePath: subDir + "/dreams/journal.jsonl")
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
@@ -1041,52 +1200,64 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showHowTo() {
-        let text = """
-i-dream — Quick Reference
+        let rt = RichText()
+        rt.header("i-dream — How To")
+        rt.spacer()
+        rt.subheader("What It Does")
+        rt.body("i-dream processes your Claude Code sessions while you sleep.")
+        rt.body("It runs 3-phase dream cycles (SWS → REM → Wake) to extract patterns,")
+        rt.body("form associations, and promote long-term insights.")
+        rt.spacer()
+        rt.subheader("Daemon Controls")
+        rt.body("  Start Daemon        — launches the background process")
+        rt.body("  Stop Daemon         — gracefully stops the daemon")
+        rt.body("  Trigger Dream Cycle — run one cycle immediately (daemon must be running)")
+        rt.spacer()
+        rt.subheader("Knowledge Base  (tap rows to explore)")
+        rt.body("  Patterns        — behavioral patterns Claude has noticed about you")
+        rt.body("  Associations    — cross-pattern hypotheses (if A then B)")
+        rt.body("  Sessions        — dream journal: one entry per cycle")
+        rt.body("  Metacog Audits  — calibration scores and detected reasoning biases")
+        rt.spacer()
+        rt.subheader("Conversational Hooks")
+        rt.body("  UserPromptSubmit hook captures sentiment in each message:")
+        rt.body("  ALL-CAPS words, frustration/swear words, correction language,")
+        rt.body("  and positive feedback — stored in logs/signals.jsonl for the")
+        rt.body("  dreaming module to incorporate into session analysis.")
+        rt.spacer()
+        rt.subheader("Reading the Status Bar")
+        rt.mono("  ◉ N       — running, N cycles completed")
+        rt.mono("  ◉ 2m 15s  — dreaming right now (elapsed updates live)")
+        rt.mono("  (empty)   — daemon stopped")
+        rt.spacer()
+        rt.subheader("Dashboard")
+        rt.body("'Open Dashboard' regenerates an HTML report and opens it in your browser.")
+        rt.body("Shows cycle traces, file inventory, hook events, and module status.")
+        rt.spacer()
+        rt.subheader("Logs")
+        rt.body("  Logs → Open in Terminal  — live tail of the daemon log")
+        rt.body("  Logs → Open in VS Code   — open log file in editor")
+        rt.body("  Logs → Open Debug Log    — widget's own debug output (/tmp/i-dream-bar.log)")
+        rt.spacer()
+        rt.subheader("Data Location")
+        rt.mono("  ~/.claude/subconscious/")
+        rt.mono("  ├── dreams/      patterns.json, associations.json, journal.jsonl")
+        rt.mono("  ├── metacog/     audits/, calibration.jsonl")
+        rt.mono("  ├── logs/        i-dream.log.YYYY-MM-DD, signals.jsonl")
+        rt.mono("  └── state.json   cycle counts, token totals")
+        rt.spacer()
+        rt.subheader("Build / Install")
+        rt.mono("  bash tools/menubar/build.sh           # rebuild widget")
+        rt.mono("  bash tools/menubar/build.sh --install # register LaunchAgent")
+        rt.mono("  i-dream service install               # register daemon LaunchAgent")
+        rt.mono("  i-dream hooks install                 # install all hook scripts")
+        rt.spacer()
+        rt.dim("Full documentation: docs/05-how-to.md in the project repository.")
+        showResizablePanel(title: "i-dream — How To", content: rt.build())
+    }
 
-WHAT IT DOES
-i-dream is a background daemon that processes your Claude Code sessions
-while you sleep. It runs 3-phase dream cycles (SWS → REM → Wake) to
-extract patterns, form associations, and promote insights.
-
-DAEMON CONTROLS
-  Start Daemon     — launches the background process
-  Stop Daemon      — gracefully stops the daemon
-  Trigger Dream Cycle — run one cycle immediately (requires daemon running)
-
-KNOWLEDGE BASE  (tap rows to explore)
-  Patterns         — behavioral patterns Claude has noticed about you
-  Associations     — cross-pattern hypotheses (if A then B)
-  Sessions         — dream journal: one entry per cycle
-  Metacog Audits   — calibration scores and detected biases
-
-READING THE STATUS BAR
-  ◉ N              — running, N cycles completed
-  ◉ 2m 15s         — dreaming right now (elapsed updates live)
-  (empty)          — daemon stopped
-
-DASHBOARD
-  Open Dashboard regenerates a fresh HTML report and opens it in your
-  browser. Shows cycle traces, file inventory, module status, and config.
-
-LOGS
-  Logs → Open in Terminal  — live tail of the daemon log
-  Logs → Open in VS Code   — open log file in editor
-  Logs → Open Debug Log    — widget's own debug output
-
-DATA LOCATION
-  ~/.claude/subconscious/
-  ├── dreams/       patterns.json, associations.json, journal.jsonl
-  ├── metacog/      audits/, calibration.jsonl
-  ├── logs/         i-dream.log.YYYY-MM-DD
-  └── state.json    cycle counts, token totals
-
-BUILD / INSTALL
-  bash tools/menubar/build.sh           # rebuild widget
-  bash tools/menubar/build.sh --install # register LaunchAgent (auto-start)
-  i-dream service install               # register daemon LaunchAgent
-"""
-        showScrollableDetail(title: "i-dream — How To", content: text)
+    @objc private func openGitHub() {
+        NSWorkspace.shared.open(URL(string: "https://github.com/alcatraz627/i-dream")!)
     }
 
     private func alert(_ title: String, _ msg: String) {

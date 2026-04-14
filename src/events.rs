@@ -30,6 +30,22 @@ pub enum HookEvent {
     },
     /// The session ended (Stop hook). Used for consolidation timing.
     SessionEnd { ts: i64 },
+    /// A user prompt submission with sentiment analysis from the hook script.
+    /// Fired by the UserPromptSubmit hook before each user message so the
+    /// daemon can track correction/frustration signals across a session.
+    UserSignal {
+        ts: i64,
+        /// Count of ALL-CAPS words (≥2 letters) — a proxy for emphasis or frustration.
+        uppercase_words: u32,
+        /// Count of frustration/swear words matched by the hook regex.
+        swear_count: u32,
+        /// True if the prompt contained correction language ("that's wrong", "revert this").
+        correction: bool,
+        /// True if the prompt contained positive feedback ("perfect", "great job").
+        positive: bool,
+        /// Composite frustration score in [0.0, 1.0] derived from the signals above.
+        frustration_score: f64,
+    },
 }
 
 /// A stored record of a received hook event, with daemon-side timestamp.
@@ -84,6 +100,40 @@ mod tests {
         let payload = r#"{"event":"session_end","ts":1712345680}"#;
         let parsed: HookEvent = serde_json::from_str(payload).unwrap();
         assert_eq!(parsed, HookEvent::SessionEnd { ts: 1712345680 });
+    }
+
+    #[test]
+    fn user_signal_parses_from_shell_payload() {
+        // Wire format emitted by user-prompt-submit.sh via python3 analysis
+        let payload = r#"{"event":"user_signal","ts":1712345681,"uppercase_words":2,"swear_count":1,"correction":true,"positive":false,"frustration_score":0.5}"#;
+        let parsed: HookEvent = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            parsed,
+            HookEvent::UserSignal {
+                ts: 1712345681,
+                uppercase_words: 2,
+                swear_count: 1,
+                correction: true,
+                positive: false,
+                frustration_score: 0.5,
+            }
+        );
+    }
+
+    #[test]
+    fn user_signal_clean_prompt_roundtrip() {
+        // Sanity: a calm prompt yields all-zero signals
+        let event = HookEvent::UserSignal {
+            ts: 1000,
+            uppercase_words: 0,
+            swear_count: 0,
+            correction: false,
+            positive: true,
+            frustration_score: 0.0,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: HookEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, event);
     }
 
     #[test]

@@ -497,6 +497,17 @@ fn collect_recent_events(store: &Store) -> (Vec<EventSummary>, usize) {
                 crate::events::HookEvent::SessionStart { .. } => "session_start".into(),
                 crate::events::HookEvent::ToolUse { tool, .. } => format!("tool_use({tool})"),
                 crate::events::HookEvent::SessionEnd { .. } => "session_end".into(),
+                crate::events::HookEvent::UserSignal { frustration_score, correction, positive, .. } => {
+                    if positive {
+                        "user_signal(positive)".into()
+                    } else if correction {
+                        "user_signal(correction)".into()
+                    } else if frustration_score > 0.0 {
+                        format!("user_signal(frustration={frustration_score:.1})")
+                    } else {
+                        "user_signal".into()
+                    }
+                }
             };
             EventSummary {
                 received_at: rec.received_at,

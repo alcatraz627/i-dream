@@ -117,6 +117,14 @@ pub struct HooksConfig {
     pub post_tool_use: bool,
     pub stop: bool,
     pub pre_compact: bool,
+    /// Install the UserPromptSubmit hook for sentiment analysis (frustration,
+    /// corrections, positive feedback) on each user message.
+    #[serde(default = "default_true")]
+    pub user_prompt_submit: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_wake_threshold() -> f64 {
@@ -215,6 +223,7 @@ impl Default for Config {
                 post_tool_use: true,
                 stop: true,
                 pre_compact: true,
+                user_prompt_submit: true,
             },
             ingestion: IngestionConfig::default(),
         }
