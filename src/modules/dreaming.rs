@@ -336,7 +336,8 @@ Output as a JSON array of objects."#;
                 Err(e) => warn!("SWS: pattern JSON parse failed: {e:#}"),
             }
         } else {
-            warn!("SWS: no JSON block found in API response — patterns not saved");
+            let preview: String = response.content.chars().take(200).collect();
+            warn!("SWS: no JSON block found in API response — patterns not saved\n  response[:200]: {preview}");
         }
 
         // Load existing patterns for deduplication and cap enforcement.
@@ -618,7 +619,8 @@ Output as a JSON array of objects."#;
                 Err(e) => warn!("REM: association JSON parse failed: {e:#}"),
             }
         } else {
-            warn!("REM: no JSON block found in API response — associations not saved");
+            let preview: String = response.content.chars().take(200).collect();
+            warn!("REM: no JSON block found in API response — associations not saved\n  response[:200]: {preview}");
         }
 
         let assoc_count = new_assocs.len() as u64;

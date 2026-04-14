@@ -12,15 +12,17 @@ use crate::transcript;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use tracing::{info, warn};
 
 /// Per-module ledger of sessions we've already ingested. Stored at
 /// `metacog/processed.json` so repeated consolidation cycles don't
-/// re-sample the same transcripts.
+/// re-sample the same transcripts. Maps session_id → file size at last
+/// processing time — a session is re-queued when its current size exceeds
+/// the stored size (new turns appended to a live JSONL file).
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProcessedState {
-    sessions: HashSet<String>,
+    sessions: HashMap<String, u64>,
 }
 
 /// Result of a scan+sample pass. Used by [`MetacogModule::run`] and
@@ -28,7 +30,9 @@ struct ProcessedState {
 #[derive(Debug, Default)]
 pub struct SampleBatch {
     pub units: Vec<ExecutionUnit>,
-    pub sessions_seen: Vec<String>,
+    /// Sessions scanned this pass, each paired with the file size at scan
+    /// time. Passed to `persist_processed` to update the staleness ledger.
+    pub sessions_seen: Vec<(String, u64)>,
     pub sessions_scanned: u64,
 }
 
@@ -180,7 +184,12 @@ impl<'a> MetacogModule<'a> {
             if batch.sessions_scanned as usize >= max_sessions {
                 break;
             }
-            if processed.sessions.contains(&file.session_id) {
+            // Re-scan only if the file has grown since last processing.
+            // A stored size of 0 means we can't stat the file — include it
+            // to be safe. This mirrors the dreaming module's staleness check.
+            let current_size = std::fs::metadata(&file.path).map(|m| m.len()).unwrap_or(0);
+            let last_size = processed.sessions.get(&file.session_id).copied().unwrap_or(0);
+            if last_size > 0 && current_size <= last_size {
                 continue;
             }
 
@@ -207,7 +216,7 @@ impl<'a> MetacogModule<'a> {
             }
 
             batch.units.extend(sampled);
-            batch.sessions_seen.push(file.session_id.clone());
+            batch.sessions_seen.push((file.session_id.clone(), current_size));
             batch.sessions_scanned += 1;
         }
 
@@ -514,8 +523,11 @@ Output as JSON matching this shape:
 }
 
 impl<'a> MetacogModule<'a> {
-    /// Add newly-processed session IDs to the ledger and persist.
-    fn persist_processed(&self, sessions: &[String]) -> Result<()> {
+    /// Add newly-processed sessions (with their file sizes) to the ledger
+    /// and persist. Storing the file size at scan time enables the staleness
+    /// check in `load_new_samples` — a session is re-queued when its JSONL
+    /// file has grown, meaning new turns have been appended.
+    fn persist_processed(&self, sessions: &[(String, u64)]) -> Result<()> {
         if sessions.is_empty() {
             return Ok(());
         }
@@ -526,8 +538,8 @@ impl<'a> MetacogModule<'a> {
         } else {
             ProcessedState::default()
         };
-        for sid in sessions {
-            state.sessions.insert(sid.clone());
+        for (sid, size) in sessions {
+            state.sessions.insert(sid.clone(), *size);
         }
         self.store.write_json("metacog/processed.json", &state)?;
         Ok(())

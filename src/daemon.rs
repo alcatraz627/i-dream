@@ -17,7 +17,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -52,6 +53,11 @@ pub struct Daemon {
     /// critical sections are tiny field pokes with no `.await` inside.
     state: Mutex<DaemonState>,
     client: Option<ClaudeClient>,
+    /// Guard against concurrent consolidation cycles. The periodic timer
+    /// fires every `check_interval` minutes, but if the API call takes
+    /// longer than `check_interval`, two cycles can overlap and burn
+    /// double tokens. A CAS on this flag in `check_and_run` prevents it.
+    cycle_in_progress: Arc<AtomicBool>,
 }
 
 impl Daemon {
@@ -73,6 +79,7 @@ impl Daemon {
             store,
             state: Mutex::new(state),
             client,
+            cycle_in_progress: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -243,11 +250,29 @@ impl Daemon {
     }
 
     /// Check idle state and run consolidation if appropriate.
+    ///
+    /// Uses a CAS on `cycle_in_progress` to ensure at most one consolidation
+    /// cycle runs at a time. Without this guard, a slow API call (>check_interval)
+    /// causes the timer to fire again while the previous cycle is still running,
+    /// doubling or tripling token consumption.
     async fn check_and_run(&self) {
         match self.should_consolidate() {
             Ok(true) => {
+                // Atomically claim the cycle slot. If another cycle is
+                // already in progress, the compare_exchange fails (returns Err)
+                // and we skip silently — the running cycle will do the work.
+                if self
+                    .cycle_in_progress
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    debug!("Consolidation already in progress, skipping this check");
+                    return;
+                }
                 info!("Idle threshold reached, starting consolidation cycle");
-                if let Err(e) = self.run_consolidation().await {
+                let result = self.run_consolidation().await;
+                self.cycle_in_progress.store(false, Ordering::SeqCst);
+                if let Err(e) = result {
                     error!("Consolidation cycle failed: {e:#}");
                 }
             }
@@ -370,6 +395,13 @@ impl Daemon {
             .budget
             .max_tokens_per_cycle
             .saturating_sub(budget);
+        let cycle_num = {
+            let s = self
+                .state
+                .lock()
+                .map_err(|e| anyhow::anyhow!("daemon state mutex poisoned: {e}"))?;
+            s.total_cycles + 1
+        };
         self.update_state(|s| {
             s.last_consolidation = Some(Utc::now());
             s.total_cycles += 1;
@@ -377,7 +409,7 @@ impl Daemon {
         })?;
 
         info!(
-            "Consolidation cycle complete (tokens remaining: {budget}/{})",
+            "[cycle {cycle_num}] complete — used {used} tokens ({budget} remaining of {})",
             self.config.budget.max_tokens_per_cycle
         );
 
