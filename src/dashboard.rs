@@ -635,6 +635,7 @@ fn collect_file_inventory(data_dir: &Path) -> Vec<InventoryGroup> {
     // operator will notice a missing category.
     let known_dirs = [
         "dreams",
+        "dreams/traces",
         "metacog",
         "metacog/samples",
         "metacog/audits",
@@ -1156,6 +1157,21 @@ function showFileDialog(name, type, path, key) {{
   }}
   document.getElementById('fd-overlay').classList.add('open');
 }}
+// Open the file dialog for a lineage chip path (relative path like
+// "dreams/traces/foo.jsonl"). Derives the inventory key from the path
+// so FILE_CONTENTS can be looked up without a server round-trip.
+function showChipFile(relPath) {{
+  var parts = relPath.split('/');
+  var fname = parts[parts.length - 1];
+  var dir   = parts.slice(0, parts.length - 1).join('/') + '/';
+  var key   = dir + '::' + fname;
+  var ext   = fname.split('.').pop().toLowerCase();
+  var type  = ext === 'jsonl' ? 'JSONL' :
+              ext === 'json'  ? 'JSON'  :
+              ext === 'md'    ? 'Markdown' :
+              ext === 'log'   ? 'Log'  : 'Text';
+  showFileDialog(fname, type, relPath, key);
+}}
 function closeFileDialog() {{
   document.getElementById('fd-overlay').classList.remove('open');
 }}
@@ -1286,6 +1302,27 @@ function highlightLog(pre) {{
     return e;
   }}).join('\n');
 }}
+// Plain text highlight: colorises key=value metadata lines (model=, session=,
+// max_tokens= etc.) and section headings that appear in dream-cycle prompts.
+function highlightText(pre) {{
+  var lines = pre.textContent.split('\n');
+  pre.innerHTML = lines.map(function(line) {{
+    var e = _escHtml(line);
+    // Key=value pairs on a metadata line (e.g. "model=claude-opus-4-6, temp=0.9")
+    if (/^\s*\w[\w.-]*=/.test(line)) {{
+      return e.replace(/(\w[\w.-]*)=/g, '<span class="txt-key">$1</span>=');
+    }}
+    // Section dividers / separators
+    if (/^[-=]{{4,}}/.test(line.trim())) return '<span class="txt-sep">' + e + '</span>';
+    // Markdown-style headers that appear in injected prompts
+    if (/^#{{1,3}} /.test(line)) return '<span class="md-h">' + e + '</span>';
+    // File paths (standalone lines that look like paths)
+    if (/^\.?\/[\w./-]+\.(json|jsonl|md|rs|txt|log)/.test(line.trim())) {{
+      return '<span class="txt-path">' + e + '</span>';
+    }}
+    return e;
+  }}).join('\n');
+}}
 function applyFileDialogHighlight(type) {{
   var pre = document.getElementById('fd-content');
   if (!pre) return;
@@ -1293,6 +1330,7 @@ function applyFileDialogHighlight(type) {{
   if (type === 'JSONL')    {{ highlightJsonl(pre);    return; }}
   if (type === 'Markdown') {{ highlightMarkdown(pre); return; }}
   if (type === 'Log')      {{ highlightLog(pre);      return; }}
+  if (type === 'Text')     {{ highlightText(pre);     return; }}
 }}
 
 // ── i-dream widget (tabbed panel) ────────────────────────────────────
@@ -1423,6 +1461,7 @@ function initPayloadHighlights() {{
       else if (cls.includes('payload-jsonl'))    {{ highlightJsonl(pre);    }}
       else if (cls.includes('payload-markdown')) {{ highlightMarkdown(pre); }}
       else if (cls.includes('payload-log'))      {{ highlightLog(pre);      }}
+      else if (cls.includes('payload-text'))     {{ highlightText(pre);     }}
       pre.dataset.highlighted = '1';
     }});
   }});
@@ -1734,10 +1773,18 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
                 lineage.push_str(r#"<div class="trace-lineage">"#);
                 if !event.inputs.is_empty() {
                     for inp in &event.inputs {
-                        lineage.push_str(&format!(
-                            r#"<span class="trace-chip chip-in">{}</span>"#,
-                            html_escape(inp),
-                        ));
+                        if is_viewable_path(inp) {
+                            lineage.push_str(&format!(
+                                r#"<button class="trace-chip chip-in chip-link" onclick="showChipFile('{path}')" title="View {name}">{name}</button>"#,
+                                path = html_escape(inp),
+                                name = html_escape(inp),
+                            ));
+                        } else {
+                            lineage.push_str(&format!(
+                                r#"<span class="trace-chip chip-in">{}</span>"#,
+                                html_escape(inp),
+                            ));
+                        }
                     }
                 }
                 if !event.outputs.is_empty() {
@@ -1745,10 +1792,18 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
                         lineage.push_str(r#"<span class="trace-arrow">→</span>"#);
                     }
                     for outp in &event.outputs {
-                        lineage.push_str(&format!(
-                            r#"<span class="trace-chip chip-out">{}</span>"#,
-                            html_escape(outp),
-                        ));
+                        if is_viewable_path(outp) {
+                            lineage.push_str(&format!(
+                                r#"<button class="trace-chip chip-out chip-link" onclick="showChipFile('{path}')" title="View {name}">{name}</button>"#,
+                                path = html_escape(outp),
+                                name = html_escape(outp),
+                            ));
+                        } else {
+                            lineage.push_str(&format!(
+                                r#"<span class="trace-chip chip-out">{}</span>"#,
+                                html_escape(outp),
+                            ));
+                        }
                     }
                 }
                 lineage.push_str("</div>");
@@ -2060,12 +2115,26 @@ fn render_insights_widget(snap: &Snapshot) -> String {
 
     <!-- Dream tab -->
     <div class="iw-content" id="iw-tab-dream">
+      <p class="iw-help-text">i-dream consolidates your Claude Code sessions into patterns,
+        cross-session hypotheses, and promoted insights during nightly sleep cycles
+        (SWS → REM → Wake). Run manually with:</p>
+      <div class="iw-run-row">
+        <code class="iw-run-cmd" id="iw-run-cmd">i-dream run</code>
+        <button class="iw-copy-btn" onclick="navigator.clipboard.writeText('i-dream run').catch(function(){{}})" title="Copy">Copy</button>
+      </div>
       {dream}
       {insights}
+      <p class="iw-help-text iw-help-footer">
+        <a href="#dreams" onclick="document.getElementById('iw-widget').querySelector('.iw-panel').classList.remove('iw-open')">↑ Full trace log</a>
+        &nbsp;·&nbsp;
+        <a href="#files" onclick="document.getElementById('iw-widget').querySelector('.iw-panel').classList.remove('iw-open')">Store files</a>
+      </p>
     </div>
 
     <!-- Store tab -->
     <div class="iw-content" id="iw-tab-store" hidden>
+      <p class="iw-help-text">Store files accumulate over time. ⚠ marks files above 5 MB.
+        Use prune to remove old entries while keeping recent history.</p>
       <table class="iw-store-table">
         <thead><tr>
           <th>File</th><th>Entries</th><th>Size</th><th></th>
@@ -2096,6 +2165,11 @@ fn render_insights_widget(snap: &Snapshot) -> String {
 
     <!-- Tests tab -->
     <div class="iw-content" id="iw-tab-tests" hidden>
+      <p class="iw-help-text">Run the test suite to verify the daemon is healthy:</p>
+      <div class="iw-run-row">
+        <code class="iw-run-cmd">cargo test -p i-dream</code>
+        <button class="iw-copy-btn" onclick="navigator.clipboard.writeText('cargo test -p i-dream').catch(function(){{}})" title="Copy">Copy</button>
+      </div>
       {tests}
     </div>
   </div>
@@ -2825,6 +2899,14 @@ fn format_relative(ts: &DateTime<Utc>, now: &DateTime<Utc>) -> String {
 /// Format a byte count like `12 B`, `3.4 KB`, `1.2 MB`. Rounded to
 /// 1 decimal for human readability — the dashboard is not a forensic
 /// tool.
+/// Returns true if a lineage path has an extension that the file dialog
+/// can render (JSONL, JSON, Markdown, Log, plain text). Used to decide
+/// whether a trace chip should be a clickable link.
+fn is_viewable_path(path: &str) -> bool {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(ext.as_str(), "jsonl" | "json" | "md" | "log" | "txt")
+}
+
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
@@ -3181,6 +3263,13 @@ details.trace-card summary::-webkit-details-marker { display: none; }
 }
 .trace-chip.chip-in  { color: var(--dim); }
 .trace-chip.chip-out { color: var(--accent); border-color: rgba(122, 162, 247, 0.3); }
+.trace-chip.chip-link {
+  cursor: pointer; text-decoration: none;
+  background: none; border-width: 1px; border-style: solid;
+  font-family: var(--mono); font-size: 10px; padding: 2px 8px;
+  border-radius: 10px; background: var(--bg);
+}
+.trace-chip.chip-link:hover { opacity: 0.75; }
 .trace-arrow { color: var(--dim); font-family: var(--mono); padding: 0 2px; }
 
 /* Collapsed-by-default content viewer under a trace event. Spans the
@@ -3767,6 +3856,9 @@ code.inv-ext-txt    { color: var(--dim); }
 .log-warn  { color: var(--warn); background: rgba(224,175,104,0.06); display: block; }
 .log-info  { color: var(--dim); display: block; }
 .log-debug { color: var(--dim); opacity: 0.5; display: block; }
+.txt-key   { color: var(--accent); }
+.txt-sep   { color: var(--dim); opacity: 0.5; display: block; }
+.txt-path  { color: var(--ok); }
 
 /* ── i-dream widget (tabbed floating panel) ──────────────────── */
 .iw-widget {
@@ -3857,6 +3949,22 @@ code.inv-ext-txt    { color: var(--dim); }
   line-height: 1.55;
 }
 .iw-empty { padding: 16px; font-size: 12px; color: var(--dim); font-style: italic; }
+.iw-help-text {
+  font-size: 11px; color: var(--dim); margin: 0 0 8px; padding: 0 2px;
+  line-height: 1.5;
+}
+.iw-help-footer { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.iw-help-footer a { color: var(--accent); text-decoration: none; font-size: 11px; }
+.iw-help-footer a:hover { text-decoration: underline; }
+.iw-run-row {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; margin-bottom: 10px;
+}
+.iw-run-cmd {
+  flex: 1; font-family: var(--mono); font-size: 11px;
+  color: var(--ok); background: none; border: none; padding: 0;
+}
 
 /* ── Store tab ── */
 .iw-store-table {

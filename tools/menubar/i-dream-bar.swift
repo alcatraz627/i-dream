@@ -237,6 +237,30 @@ final class RichText {
             .foregroundColor: NSColor.labelColor,
         ])); return self
     }
+    @discardableResult func ok(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.systemGreen,
+        ])); return self
+    }
+    @discardableResult func warn(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.systemOrange,
+        ])); return self
+    }
+    @discardableResult func err(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.systemRed,
+        ])); return self
+    }
+    @discardableResult func accent(_ text: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.systemBlue,
+        ])); return self
+    }
     @discardableResult func divider() -> RichText {
         buf.append(NSAttributedString(string: String(repeating: "─", count: 60) + "\n", attributes: [
             .font: NSFont.systemFont(ofSize: 10),
@@ -1009,7 +1033,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         detailFilePath = filePath
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 680),
             styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
             backing:     .buffered,
             defer:       false
@@ -1023,8 +1047,8 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Auto Layout + NSScrollView/NSTextView inside NSPanel has sizing
         // issues — the unconstrained contentView collapses to zero width
         // before constraints resolve. autoresizingMask is the correct pattern.
-        let panW: CGFloat = 720
-        let panH: CGFloat = 520
+        let panW: CGFloat = 900
+        let panH: CGFloat = 680
         let barH: CGFloat = 48
 
         // Scroll view fills panel minus toolbar at bottom
@@ -1113,7 +1137,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for p in patterns.suffix(15).reversed() {
             let val   = p.valence == "positive" ? "+" : p.valence == "negative" ? "−" : "◦"
             let since = p.firstSeen.map { "  ·  first seen \(fmtDate($0))" } ?? ""
-            rt.subheader("\(val)  \(p.pattern)")
+            let label = "\(val)  \(p.pattern)"
+            if p.valence == "positive"      { rt.ok(label) }
+            else if p.valence == "negative" { rt.warn(label) }
+            else                            { rt.subheader(label) }
             rt.dim("  \(p.category)  ·  \(Int(p.confidence * 100))% confident\(since)")
             rt.spacer()
         }
@@ -1133,10 +1160,15 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.dim("\(assocs.count) total associations")
         for (i, a) in assocs.reversed().enumerated() {
             rt.spacer()
-            rt.dim("[\(assocs.count - i)]  \(Int(a.confidence * 100))% confident\(a.actionable ? "  · actionable" : "")")
-            rt.body(a.hypothesis)
+            let confPct = Int(a.confidence * 100)
+            let actionTag = a.actionable ? "  · actionable" : ""
+            rt.dim("[\(assocs.count - i)]  \(confPct)% confident\(actionTag)")
+            // Color hypothesis by confidence: ≥80% = green, ≥60% = body, <60% = dim
+            if confPct >= 80        { rt.ok(a.hypothesis) }
+            else if confPct >= 60   { rt.body(a.hypothesis) }
+            else                    { rt.dim(a.hypothesis) }
             if let rule = a.suggestedRule, !rule.isEmpty {
-                rt.dim("  → Rule: \(rule)")
+                rt.accent("  → Rule: \(rule)")
             }
             rt.divider()
         }
