@@ -444,7 +444,9 @@ impl<'a> Module for MetacogModule<'a> {
             batch.sessions_scanned
         );
 
-        let system_prompt = r#"You are analyzing execution units from Claude Code sessions
+        let system_prompt = r#"You are a background analysis subprocess. Output ONLY raw JSON — no markdown, no code fences, no decorative formatting, no "★ Insight" blocks or similar stylistic elements.
+
+You are analyzing execution units from Claude Code sessions
 for metacognitive assessment. For each unit, assess:
 
 1. Confidence calibration: Was expressed confidence appropriate for the outcome?

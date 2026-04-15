@@ -8,6 +8,7 @@ use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
     dreaming::DreamingModule,
     introspection::{IntrospectionModule, ReasoningPatterns},
+    intuition::IntuitionModule,
     metacog::{MetacogModule, ToolActivitySample},
     prospective::{Intention, Priority, ProspectiveModule, Trigger},
     Module,
@@ -132,8 +133,37 @@ impl Daemon {
     ///
     /// The listener is bound once before the loop so we can clean up
     /// the socket file deterministically on exit.
+    ///
+    /// PID file management lives here (not in `daemonize`) so the file
+    /// is written regardless of how the daemon is launched — whether via
+    /// `i-dream start --daemonize`, a launchd plist, or plain foreground
+    /// mode. Without this, `i-dream dashboard` and `i-dream status` see
+    /// a missing PID file and falsely report STOPPED.
     pub async fn run_foreground(&self) -> Result<()> {
         info!("i-dream daemon running in foreground (Ctrl+C to stop)");
+
+        // ── PID file ─────────────────────────────────────────────
+        let pid_path = self.config.data_dir().join("daemon.pid");
+        match read_pid_file(&pid_path) {
+            Some(existing) if is_process_alive(existing) => {
+                anyhow::bail!(
+                    "Daemon already running (PID {existing}). \
+                     Run `i-dream stop` first, or remove {} if you're sure it's stale.",
+                    pid_path.display()
+                );
+            }
+            Some(existing) => {
+                warn!(
+                    "Removing stale PID file at {} (PID {existing} is not alive)",
+                    pid_path.display()
+                );
+                let _ = std::fs::remove_file(&pid_path);
+            }
+            None => {}
+        }
+        let pid = std::process::id();
+        write_pid_file(&pid_path, pid)?;
+        info!("Daemon started with PID {pid}");
 
         let check_interval =
             Duration::from_secs(self.config.idle.check_interval_minutes * 60);
@@ -199,6 +229,15 @@ impl Daemon {
             debug!("Failed to remove socket file on shutdown: {e}");
         }
 
+        // Always attempt to clean the PID file on exit — whether the
+        // foreground loop returned Ok or Err. Best-effort: if the file
+        // already vanished (someone ran `i-dream stop`), that's fine.
+        if let Err(e) = std::fs::remove_file(&pid_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                debug!("Failed to remove PID file on shutdown: {e}");
+            }
+        }
+
         // Flush the in-memory state snapshot one last time so `status`
         // sees the final `last_activity` after a graceful SIGTERM.
         if let Err(e) = self.update_state(|_| {}) {
@@ -209,55 +248,14 @@ impl Daemon {
         result
     }
 
-    /// Acquire the PID file and run in the foreground.
+    /// Start the daemon — now just delegates to `run_foreground`, which
+    /// handles PID file management itself.
     ///
-    /// Despite the name, this function does NOT fork. It writes our PID
-    /// into `daemon.pid`, runs the foreground loop to completion, and
-    /// then cleans up the PID file on the way out. The backgrounding
-    /// (nohup/launchd/systemd) is delegated to whatever supervisor
-    /// starts the process.
-    ///
-    /// Refuses to start if `daemon.pid` points at a still-alive
-    /// process — otherwise we'd end up with two daemons racing on the
-    /// same Unix socket. A stale PID file (process is dead) is
-    /// silently cleaned.
+    /// Kept for backwards compatibility with callers that pass
+    /// `--daemonize`; the actual work (PID locking, socket binding, idle
+    /// loop) is all in `run_foreground`.
     pub async fn daemonize(&self) -> Result<()> {
-        let pid_path = self.config.data_dir().join("daemon.pid");
-
-        match read_pid_file(&pid_path) {
-            Some(existing) if is_process_alive(existing) => {
-                anyhow::bail!(
-                    "Daemon already running (PID {existing}). \
-                     Run `i-dream stop` first, or remove {} if you're sure it's stale.",
-                    pid_path.display()
-                );
-            }
-            Some(existing) => {
-                warn!(
-                    "Removing stale PID file at {} (PID {existing} is not alive)",
-                    pid_path.display()
-                );
-                let _ = std::fs::remove_file(&pid_path);
-            }
-            None => {}
-        }
-
-        let pid = std::process::id();
-        write_pid_file(&pid_path, pid)?;
-        info!("Daemon started with PID {pid}");
-
-        let result = self.run_foreground().await;
-
-        // Always attempt to clean the PID file on exit — whether the
-        // foreground loop returned Ok or Err. Best-effort: if the file
-        // already vanished (someone ran `i-dream stop`), that's fine.
-        if let Err(e) = std::fs::remove_file(&pid_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                debug!("Failed to remove PID file on shutdown: {e}");
-            }
-        }
-
-        result
+        self.run_foreground().await
     }
 
     /// Check idle state and run consolidation if appropriate.
@@ -394,7 +392,19 @@ impl Daemon {
             }
         }
 
-        // Phase 4: Housekeeping (no API budget)
+        // Phase 4: Intuition (no API budget — pure local transcript analysis)
+        if self.config.modules.intuition.enabled {
+            let module = IntuitionModule::new(&self.config, &self.store);
+            if module.should_run()? {
+                info!("Running intuition module (valence collection)");
+                match module.run(client, 0).await {
+                    Ok(_) => info!("Intuition complete"),
+                    Err(e) => error!("Intuition failed: {e:#}"),
+                }
+            }
+        }
+
+        // Phase 5: Housekeeping (no API budget)
         let prospective = ProspectiveModule::new(&self.config, &self.store);
         prospective.cleanup_expired()?;
 
@@ -753,8 +763,10 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
         HookEvent::SessionStart { .. } => build_session_start_response(store),
         _ => String::new(),
     };
-    writer.write_all(response.as_bytes()).await?;
-    writer.shutdown().await?;
+    if !response.is_empty() {
+        writer.write_all(response.as_bytes()).await?;
+        writer.shutdown().await?;
+    }
 
     Ok(())
 }
