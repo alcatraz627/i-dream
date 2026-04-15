@@ -57,7 +57,7 @@ pub struct Association {
 }
 
 /// Dream journal entry (appended after each dream cycle).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DreamEntry {
     pub id: String,
     pub timestamp: DateTime<Utc>,

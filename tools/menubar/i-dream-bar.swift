@@ -840,7 +840,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let i = NSMenuItem()
         i.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.7),
         ])
         i.isEnabled = false; menu.addItem(i)
     }
@@ -860,7 +860,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let full = NSMutableAttributedString()
         let pad  = max(1, 24 - label.count)
         full.append(NSAttributedString(string: "  \(label)" + String(repeating: " ", count: pad),
-                                       attributes: [.font: NSFont.systemFont(ofSize: 14)]))
+                                       attributes: [
+                                           .font: NSFont.systemFont(ofSize: 14),
+                                           .foregroundColor: NSColor.labelColor,
+                                       ]))
         full.append(NSAttributedString(string: value, attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
             .foregroundColor: valueColor ?? NSColor.labelColor,
@@ -893,10 +896,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let i    = NSMenuItem()
         let full = NSMutableAttributedString()
         full.append(NSAttributedString(string: top + "\n",
-                                       attributes: [.font: NSFont.systemFont(ofSize: 14)]))
+                                       attributes: [
+                                           .font: NSFont.systemFont(ofSize: 14),
+                                           .foregroundColor: NSColor.labelColor,
+                                       ]))
         full.append(NSAttributedString(string: bottom, attributes: [
-            .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.6),
         ]))
         i.attributedTitle = full; i.isEnabled = false; menu.addItem(i)
     }
@@ -904,7 +910,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func addDim(_ menu: NSMenu, _ title: String) {
         let i = NSMenuItem()
         i.attributedTitle = NSAttributedString(string: title, attributes: [
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.6),
             .font: NSFont.systemFont(ofSize: 13),
         ])
         i.isEnabled = false; menu.addItem(i)
@@ -1270,9 +1276,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.header("i-dream — How To")
         rt.spacer()
         rt.subheader("What It Does")
-        rt.body("i-dream processes your Claude Code sessions while you sleep.")
-        rt.body("It runs 3-phase dream cycles (SWS → REM → Wake) to extract patterns,")
-        rt.body("form associations, and promote long-term insights.")
+        rt.body("i-dream processes your Claude Code sessions while you're away.")
+        rt.body("Five modules run in the background, learning from every conversation:")
+        rt.spacer()
+        rt.body("  Dreaming        — 3-phase sleep cycle (SWS → REM → Wake). Extracts")
+        rt.body("                    behavioral patterns, forms cross-session associations,")
+        rt.body("                    and promotes high-confidence insights to long-term memory.")
+        rt.body("  Metacognition   — samples reasoning quality at 25% of tool calls.")
+        rt.body("                    Tracks calibration, bias flags, and reasoning depth.")
+        rt.body("  Intuition       — maintains a valence model of Claude's confidence.")
+        rt.body("                    Positive/negative signals decay over time; primes")
+        rt.body("                    session starts with relevant past outcomes.")
+        rt.body("  Introspection   — chains metacog audits into higher-order reports.")
+        rt.body("                    Weekly reports flag persistent reasoning patterns.")
+        rt.body("  Prospective     — captures intentions and follow-up items from sessions.")
+        rt.body("                    Surfaces matching reminders at session start.")
         rt.spacer()
         rt.subheader("Daemon Controls")
         rt.body("  Start Daemon        — launches the background process")
@@ -1285,11 +1303,19 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.body("  Sessions        — dream journal: one entry per cycle")
         rt.body("  Metacog Audits  — calibration scores and detected reasoning biases")
         rt.spacer()
-        rt.subheader("Conversational Hooks")
-        rt.body("  UserPromptSubmit hook captures sentiment in each message:")
-        rt.body("  ALL-CAPS words, frustration/swear words, correction language,")
-        rt.body("  and positive feedback — stored in logs/signals.jsonl for the")
-        rt.body("  dreaming module to incorporate into session analysis.")
+        rt.subheader("Hooks  (installed via  i-dream hooks install)")
+        rt.body("  SessionStart     — injects primed context (valence, prospective reminders)")
+        rt.body("                     and recent dream insights into the conversation.")
+        rt.body("  PostToolUse      — samples metacognition at 25% of tool calls.")
+        rt.body("  Stop             — triggers session consolidation when you end a session.")
+        rt.body("  PreCompact       — writes a lightweight checkpoint before context compaction.")
+        rt.body("  UserPromptSubmit — captures sentiment signals (ALL-CAPS, corrections,")
+        rt.body("                     frustration language, positive feedback) for dreaming.")
+        rt.spacer()
+        rt.subheader("Shell Log Integration")
+        rt.body("If diy-claude-mem is installed, SWS dream cycles automatically read")
+        rt.body("today's shell command history for the session — git/npm/docker command")
+        rt.body("counts feed the pattern extractor as behavioral tags.")
         rt.spacer()
         rt.subheader("Reading the Status Bar")
         rt.mono("  ◉ N       — running, N cycles completed")
@@ -1298,7 +1324,8 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.spacer()
         rt.subheader("Dashboard")
         rt.body("'Open Dashboard' regenerates an HTML report and opens it in your browser.")
-        rt.body("Shows cycle traces, file inventory, hook events, and module status.")
+        rt.body("Shows cycle traces, file inventory, hook events, module status,")
+        rt.body("and a per-cycle 'What Claude Realized' summary table.")
         rt.spacer()
         rt.subheader("Logs")
         rt.body("  Logs → Open in Terminal  — live tail of the daemon log")
@@ -1307,10 +1334,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.spacer()
         rt.subheader("Data Location")
         rt.mono("  ~/.claude/subconscious/")
-        rt.mono("  ├── dreams/      patterns.json, associations.json, journal.jsonl")
-        rt.mono("  ├── metacog/     audits/, calibration.jsonl")
-        rt.mono("  ├── logs/        i-dream.log.YYYY-MM-DD, signals.jsonl")
-        rt.mono("  └── state.json   cycle counts, token totals")
+        rt.mono("  ├── dreams/        patterns.json, associations.json, journal.jsonl")
+        rt.mono("  ├── metacog/       audits/, calibration.jsonl, introspection/")
+        rt.mono("  ├── intuition/     valence.jsonl, priming.jsonl")
+        rt.mono("  ├── prospective/   intentions.jsonl")
+        rt.mono("  ├── logs/          i-dream.log.YYYY-MM-DD, signals.jsonl")
+        rt.mono("  ├── config.toml    all module settings")
+        rt.mono("  └── state.json     cycle counts, token totals")
         rt.spacer()
         rt.subheader("Build / Install")
         rt.mono("  bash tools/menubar/build.sh           # rebuild widget")
@@ -1318,7 +1348,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.mono("  i-dream service install               # register daemon LaunchAgent")
         rt.mono("  i-dream hooks install                 # install all hook scripts")
         rt.spacer()
-        rt.dim("Full documentation: docs/05-how-to.md in the project repository.")
+        rt.dim("Full documentation: docs/ in the project repository.")
         showResizablePanel(title: "i-dream — How To", content: rt.build())
     }
 
