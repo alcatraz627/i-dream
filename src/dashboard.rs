@@ -68,8 +68,8 @@ const DASHBOARD_REL_PATH: &str = "dashboard.html";
 ///
 /// Returns the absolute path of the written HTML file so `main` can
 /// print it to the user.
-pub fn generate(config: &Config) -> Result<PathBuf> {
-    let snapshot = Snapshot::collect(config)?;
+pub fn generate(config: &Config, run_tests: bool) -> Result<PathBuf> {
+    let snapshot = Snapshot::collect(config, run_tests)?;
     let html = render_html(&snapshot);
 
     let out_path = config.data_dir().join(DASHBOARD_REL_PATH);
@@ -138,11 +138,43 @@ pub struct Snapshot {
     pub config_toml: String,
     /// Additional data files shown in the Config section.
     /// Each entry is `(display_title, content)`.
-    pub config_files: Vec<(String, String)>,
+    pub config_files: Vec<(String, String, String)>, // (title, content, lang)
     /// Recent dream journal entries, newest first (up to 10).
     /// Drives the "What Claude Realized" summary table at the top of
     /// the Dreams section — shows patterns/associations/insights per cycle.
     pub dream_journal: Vec<DreamEntry>,
+    /// Up to 5 most recent promoted insights from dreams/insights.md.
+    /// Each entry is the first sentence of one `### Insight` block, plain text.
+    pub latest_insights: Vec<String>,
+    /// Size warnings for JSONL stores that have grown large (> 5 MB).
+    /// Each entry is a human-readable warning string shown as a banner.
+    pub store_warnings: Vec<String>,
+    /// Per-file stats for the four JSONL stores, shown in the widget Store tab.
+    pub store_file_stats: Vec<StoreFileStat>,
+    /// Results of the test suite, if it was run at dashboard generation time.
+    pub test_results: Option<TestRunResult>,
+}
+
+/// Per-file stats for a JSONL store, shown in the widget Store tab.
+#[derive(Debug, Clone)]
+pub struct StoreFileStat {
+    pub label: &'static str,
+    pub rel_path: &'static str,
+    pub entries: usize,
+    pub size_bytes: u64,
+    pub over_threshold: bool,
+}
+
+/// Results of `cargo test`, baked into the dashboard at generation time
+/// when the `--run-tests` flag is passed.
+#[derive(Debug, Clone)]
+pub struct TestRunResult {
+    pub passed: usize,
+    pub failed: usize,
+    pub ignored: usize,
+    pub duration_secs: f64,
+    pub ran_at: DateTime<Utc>,
+    pub ok: bool,
 }
 
 /// High-level numbers pulled from various stores, shown as a tile
@@ -235,7 +267,7 @@ impl Snapshot {
     /// The only fatal paths are things that would leave the dashboard
     /// actively wrong — e.g. the data dir literally doesn't exist and
     /// can't be created.
-    pub fn collect(config: &Config) -> Result<Self> {
+    pub fn collect(config: &Config, run_tests: bool) -> Result<Self> {
         let data_dir = config.data_dir();
         std::fs::create_dir_all(&data_dir).with_context(|| {
             format!("Failed to ensure data dir exists at {}", data_dir.display())
@@ -262,6 +294,41 @@ impl Snapshot {
             entries
         };
 
+        let latest_insights = std::fs::read_to_string(store.path("dreams/insights.md"))
+            .ok()
+            .map(|c| parse_insight_summaries(&c, 5))
+            .unwrap_or_default();
+
+        // Per-file store stats + size warnings — threshold: 5 MB.
+        const WARN_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
+        const WATCHED: &[(&str, &str)] = &[
+            ("logs/events.jsonl",      "Hook events"),
+            ("metacog/activity.jsonl", "Metacog activity"),
+            ("logs/signals.jsonl",     "Signals"),
+            ("dreams/journal.jsonl",   "Dream journal"),
+        ];
+        let mut store_warnings = Vec::new();
+        let mut store_file_stats: Vec<StoreFileStat> = Vec::new();
+        for &(rel_path, label) in WATCHED {
+            let size  = store.file_size_bytes(rel_path).unwrap_or(0);
+            let count = store.count_jsonl(rel_path).unwrap_or(0);
+            let over  = size >= WARN_THRESHOLD_BYTES;
+            if over {
+                let mb = size as f64 / (1024.0 * 1024.0);
+                store_warnings.push(format!(
+                    "{label} is {mb:.1} MB — run `i-dream prune` to reclaim space."
+                ));
+            }
+            store_file_stats.push(StoreFileStat { label, rel_path, entries: count, size_bytes: size, over_threshold: over });
+        }
+
+        // Optional: run cargo test and bake results into the dashboard.
+        let test_results = if run_tests {
+            Some(run_cargo_tests())
+        } else {
+            None
+        };
+
         Ok(Snapshot {
             generated_at: Utc::now(),
             data_dir,
@@ -275,6 +342,10 @@ impl Snapshot {
             config_toml,
             config_files,
             dream_journal,
+            latest_insights,
+            store_warnings,
+            store_file_stats,
+            test_results,
         })
     }
 }
@@ -635,11 +706,93 @@ fn read_text_preview(path: &Path, max_bytes: usize) -> Option<String> {
     }
 }
 
+/// Run `cargo test` and parse the output into a `TestRunResult`.
+///
+/// Looks for `cargo` in PATH, then falls back to `~/.cargo/bin/cargo`.
+/// Times out after 120 seconds so a hanging test doesn't block the dashboard.
+fn run_cargo_tests() -> TestRunResult {
+    use std::process::Command as Cmd;
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let ran_at = Utc::now();
+
+    // Find cargo — prefer PATH, fall back to ~/.cargo/bin/cargo.
+    let cargo = if which_cargo_in_path() { "cargo".to_string() } else {
+        dirs::home_dir()
+            .map(|h| h.join(".cargo/bin/cargo").to_string_lossy().into_owned())
+            .unwrap_or_else(|| "cargo".into())
+    };
+
+    let result = Cmd::new(&cargo)
+        .args(["test", "--", "--test-output=immediate"])
+        .output();
+
+    let duration_secs = start.elapsed().as_secs_f64();
+
+    match result {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let combined = format!("{stdout}{stderr}");
+            parse_cargo_test_output(&combined, duration_secs, ran_at)
+        }
+        Err(e) => TestRunResult {
+            passed: 0, failed: 0, ignored: 0,
+            duration_secs, ran_at, ok: false,
+        },
+    }
+}
+
+fn which_cargo_in_path() -> bool {
+    std::process::Command::new("cargo")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Parse `cargo test` stdout/stderr to extract pass/fail/ignored counts.
+fn parse_cargo_test_output(output: &str, duration_secs: f64, ran_at: DateTime<Utc>) -> TestRunResult {
+    // cargo test emits lines like: "test result: ok. 263 passed; 0 failed; 1 ignored; ..."
+    let mut passed  = 0usize;
+    let mut failed  = 0usize;
+    let mut ignored = 0usize;
+    let mut found   = false;
+
+    for line in output.lines() {
+        let t = line.trim();
+        if t.starts_with("test result:") {
+            found = true;
+            // "test result: ok. 263 passed; 0 failed; 1 ignored;"
+            for part in t.split(';') {
+                let p = part.trim();
+                if let Some(n) = parse_leading_num(p, " passed") { passed  += n; }
+                if let Some(n) = parse_leading_num(p, " failed") { failed  += n; }
+                if let Some(n) = parse_leading_num(p, " ignored") { ignored += n; }
+            }
+        }
+    }
+
+    TestRunResult {
+        passed, failed, ignored, duration_secs, ran_at,
+        ok: found && failed == 0,
+    }
+}
+
+fn parse_leading_num(s: &str, suffix: &str) -> Option<usize> {
+    let s = s.trim();
+    if !s.ends_with(suffix.trim()) { return None; }
+    let num_part = &s[..s.len() - suffix.trim().len()];
+    // The number may be prefixed by other words: "263 passed" → num_part = "263"
+    num_part.split_whitespace().last()?.parse().ok()
+}
+
 /// Read known data files that sit alongside config (insights.md,
 /// .env hint, hooks). These are shown in a second tab of the Config
 /// section so the operator can inspect all relevant config at once.
-fn collect_config_files(data_dir: &Path) -> Vec<(String, String)> {
-    // Ordered list: (display title, path relative to data_dir).
+fn collect_config_files(data_dir: &Path) -> Vec<(String, String, String)> {
+    // Ordered list: (path relative to data_dir, display title).
     // Only show files that exist; tolerate all read failures.
     let candidates = [
         ("dreams/insights.md",    "insights.md"),
@@ -673,12 +826,207 @@ fn collect_config_files(data_dir: &Path) -> Vec<(String, String)> {
         } else {
             content
         };
-        out.push((title.to_string(), trimmed));
+        // Infer syntax-highlight language from file extension.
+        let lang = if rel.ends_with(".md") {
+            "md"
+        } else if rel.ends_with(".jsonl") {
+            "jsonl"
+        } else if rel.ends_with(".json") {
+            "json"
+        } else {
+            "toml"
+        };
+        out.push((title.to_string(), trimmed, lang.to_string()));
     }
     out
 }
 
 /// Map a filename to its type label for the file-detail dialog badge.
+/// Extract up to `max` insight summaries from the contents of dreams/insights.md.
+/// Each summary is the joined text of the `| ` pipe-prefixed lines immediately
+/// following a `### Insight` header.
+fn parse_insight_summaries(content: &str, max: usize) -> Vec<String> {
+    let mut results: Vec<String> = Vec::new();
+    let mut in_insight = false;
+    let mut pipe_lines: Vec<String> = Vec::new();
+
+    let flush = |pipe: &mut Vec<String>, out: &mut Vec<String>| {
+        if !pipe.is_empty() {
+            let s = pipe.join(" ");
+            let s = s.trim().to_string();
+            if !s.is_empty() {
+                out.push(s);
+            }
+            pipe.clear();
+        }
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("### Insight") {
+            flush(&mut pipe_lines, &mut results);
+            if results.len() >= max { break; }
+            in_insight = true;
+        } else if in_insight {
+            if line.starts_with("| ") {
+                pipe_lines.push(line[2..].trim_end().to_string());
+            } else if line.starts_with('|') {
+                pipe_lines.push(line[1..].trim().to_string());
+            } else if !trimmed.is_empty() && !pipe_lines.is_empty() {
+                // Non-pipe content after collecting lines — end of block body
+                flush(&mut pipe_lines, &mut results);
+                if results.len() >= max { break; }
+                in_insight = false;
+            }
+        }
+    }
+    flush(&mut pipe_lines, &mut results);
+    results.truncate(max);
+    results
+}
+
+/// Generate a brief human-readable summary sentence for one dream cycle.
+fn dream_cycle_summary(sessions: u64, patterns: u64, associations: u64, insights: u64) -> String {
+    if patterns == 0 && associations == 0 && insights == 0 {
+        return format!(
+            "Reviewed {} — nothing new surfaced",
+            if sessions == 1 { "1 session".to_string() } else { format!("{} sessions", sessions) }
+        );
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if patterns > 0 {
+        parts.push(format!("{} pattern{}", patterns, if patterns == 1 { "" } else { "s" }));
+    }
+    if associations > 0 {
+        parts.push(format!("{} association{}", associations, if associations == 1 { "" } else { "s" }));
+    }
+    if insights > 0 {
+        parts.push(format!("{} insight{}", insights, if insights == 1 { "" } else { "s" }));
+    }
+    let items = match parts.len() {
+        1 => parts[0].clone(),
+        2 => format!("{} · {}", parts[0], parts[1]),
+        _ => format!("{} · {} · {}", parts[0], parts[1], parts[2]),
+    };
+    format!("Found {}", items)
+}
+
+/// Render a compact SVG bar chart of dream cycle activity (patterns+assoc+insights per cycle).
+/// Entries are newest-first; the chart renders oldest-first (left → right timeline).
+fn render_dream_chart(entries: &[crate::modules::dreaming::DreamEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let ordered: Vec<_> = entries.iter().rev().collect(); // oldest first
+    let n = ordered.len();
+    let bar_w = 28u32;
+    let gap = 6u32;
+    let pad_left = 8u32;
+    let pad_right = 8u32;
+    let bar_max_h = 50u32;
+    let svg_h = 72u32;
+    let total_w = pad_left + (bar_w + gap) * n as u32 - gap + pad_right;
+
+    // Find max output value for scaling
+    let max_val = ordered.iter()
+        .map(|e| e.patterns_extracted + e.associations_found + e.insights_promoted)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+
+    let baseline_y = svg_h - 14; // leave room for tick labels at bottom
+
+    let mut bars = String::new();
+    for (i, entry) in ordered.iter().enumerate() {
+        let total = entry.patterns_extracted + entry.associations_found + entry.insights_promoted;
+        let h = if total == 0 {
+            4u32
+        } else {
+            ((total * bar_max_h as u64 / max_val) as u32).max(4)
+        };
+        let x = pad_left + i as u32 * (bar_w + gap);
+        let y = baseline_y - h;
+        let cls = if entry.insights_promoted > 0 {
+            "dc-bar dc-has-insights"
+        } else if total == 0 {
+            "dc-bar dc-empty"
+        } else {
+            "dc-bar"
+        };
+        let title = format!("{}: {} pat · {} assoc · {} ins",
+            entry.timestamp.format("%m/%d"),
+            entry.patterns_extracted, entry.associations_found, entry.insights_promoted
+        );
+        bars.push_str(&format!(
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" rx=\"3\" class=\"{cls}\"><title>{t}</title></rect>",
+            x=x, y=y, w=bar_w, h=h, cls=cls, t=html_escape(&title),
+        ));
+        // Date tick every ~3 bars or first/last
+        if i == 0 || i == n - 1 || (n > 4 && i % 3 == 0) {
+            bars.push_str(&format!(
+                "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" class=\"dc-tick\">{}</text>",
+                x + bar_w / 2, svg_h - 2,
+                html_escape(&entry.timestamp.format("%m/%d").to_string()),
+            ));
+        }
+    }
+
+    format!(
+        r#"<div class="dream-chart-wrap">
+<div class="dream-chart-label">Dream activity — outputs per cycle (green = promoted insights)</div>
+<svg class="dream-chart-svg" viewBox="0 0 {w} {h}" preserveAspectRatio="none">
+  <line x1="{pl}" y1="{bl}" x2="{tw}" y2="{bl}" class="dc-axis"/>
+  {bars}
+</svg></div>"#,
+        w = total_w, h = svg_h,
+        pl = pad_left, bl = baseline_y, tw = total_w - pad_right,
+        bars = bars,
+    )
+}
+
+/// Render a compact horizontal-bar event distribution chart for the events section.
+fn render_event_chart(events: &[EventSummary]) -> String {
+    if events.is_empty() {
+        return String::new();
+    }
+    // Count by category
+    let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    for ev in events {
+        let cat = if ev.label.starts_with("tool_use(") {
+            "tool_use"
+        } else if ev.label == "session_start" {
+            "session_start"
+        } else if ev.label == "session_end" {
+            "session_end"
+        } else if ev.label == "user_signal" {
+            "user_signal"
+        } else {
+            "other"
+        };
+        *counts.entry(cat).or_insert(0) += 1;
+    }
+    let order = ["tool_use", "session_start", "session_end", "user_signal", "other"];
+    let colors = ["var(--accent)", "var(--ok)", "var(--err)", "var(--warn)", "var(--dim)"];
+    let max = counts.values().copied().max().unwrap_or(1).max(1);
+
+    let mut rows = String::new();
+    for (&cat, &color) in order.iter().zip(colors.iter()) {
+        let count = counts.get(cat).copied().unwrap_or(0);
+        if count == 0 { continue; }
+        let pct = (count * 100 / max).min(100);
+        rows.push_str(&format!(
+            r#"<div class="event-chart-row">
+  <span class="event-chart-label">{cat}</span>
+  <div class="event-chart-bar-wrap"><div class="event-chart-bar" style="width:{pct}%;background:{color}"></div></div>
+  <span class="event-chart-count">{count}</span>
+</div>"#,
+            cat=html_escape(cat), pct=pct, color=color, count=count,
+        ));
+    }
+
+    format!(r#"<div class="event-chart-wrap">{rows}</div>"#, rows=rows)
+}
+
 fn file_type_label(name: &str) -> &'static str {
     match name.rsplit('.').next().unwrap_or("") {
         "jsonl" => "JSONL",
@@ -704,6 +1052,7 @@ pub fn render_html(snap: &Snapshot) -> String {
 
     body.push_str(&render_header(snap));
     body.push_str(&render_summary_strip(snap));
+    body.push_str(&render_store_warnings(snap));
     body.push_str(&render_status_card(snap));
     body.push_str(&render_module_grid(snap));
     body.push_str(&render_dream_traces_section(snap));
@@ -711,6 +1060,7 @@ pub fn render_html(snap: &Snapshot) -> String {
     body.push_str(&render_architecture_section());
     body.push_str(&render_inventory_section(snap));
     body.push_str(&render_config_section(snap));
+    body.push_str(&render_insights_widget(snap));
 
     // Shell the body inside the full document with navbar, footer, theme toggle.
     // NOTE: We use r##"..."## (double-hash delimiter) because the navbar HTML
@@ -732,7 +1082,7 @@ pub fn render_html(snap: &Snapshot) -> String {
 <script>
 (function(){{
   var t = localStorage.getItem('idream-theme');
-  if (t === 'light') document.body.classList.add('light');
+  if (t === 'light') document.documentElement.classList.add('light');
 }})();
 // File content registry — populated by inline scripts in the inventory section.
 // Defined here in <head> so those scripts can call registerFileContent() safely.
@@ -754,7 +1104,7 @@ function registerFileContent(key, content) {{
     <a href="#files">Files</a>
     <a href="#config">Config</a>
   </div>
-  <button class="theme-toggle" onclick="var l=document.body.classList.toggle('light');localStorage.setItem('idream-theme',l?'light':'dark')" aria-label="Toggle theme">☀ / ☾</button>
+  <button class="theme-toggle" onclick="var l=document.documentElement.classList.toggle('light');localStorage.setItem('idream-theme',l?'light':'dark')" aria-label="Toggle theme">☀ / ☾</button>
 </nav>
 <main>
 {body}
@@ -787,11 +1137,12 @@ function showFileDialog(name, type, path, key) {{
   document.getElementById('fd-name').textContent = name;
   document.getElementById('fd-badge').textContent = type;
   document.getElementById('fd-path').textContent = path;
-  var content = (key && FILE_CONTENTS[key]) || null;
+  var content = (key && typeof FILE_CONTENTS !== 'undefined' && FILE_CONTENTS[key]) || null;
   var wrap = document.getElementById('fd-content-wrap');
   var noContent = document.getElementById('fd-no-content');
   if (content) {{
     document.getElementById('fd-content').textContent = content;
+    applyFileDialogHighlight(type);
     wrap.style.display = '';
     noContent.style.display = 'none';
   }} else {{
@@ -873,9 +1224,156 @@ function highlightToml(pre) {{
     }}).join('\n');
   pre.innerHTML = html;
 }}
-function applyTomlHighlight() {{
-  document.querySelectorAll('pre.config').forEach(highlightToml);
+function applyConfigHighlights() {{
+  document.querySelectorAll('pre.config').forEach(function(pre) {{
+    var lang = pre.getAttribute('data-lang') || 'toml';
+    if (lang === 'md')   {{ highlightMarkdown(pre); }}
+    else if (lang === 'json')  {{ highlightJson(pre); }}
+    else if (lang === 'jsonl') {{ highlightJsonl(pre); }}
+    else {{ highlightToml(pre); }}
+  }});
 }}
+
+// ── File dialog syntax highlighting ──────────────────────────────────
+function _escHtml(s) {{
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}}
+function highlightJson(pre) {{
+  var lines = pre.textContent.split('\n');
+  pre.innerHTML = lines.map(function(line) {{
+    return _escHtml(line)
+      .replace(/"([^"\\]*(?:\\.[^"\\]*)*)"\s*:/g, '<span class="json-key">"$1"</span>:')
+      .replace(/:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/g, function(m, v) {{ return m.replace(_escHtml('"'+v+'"'), '<span class="json-str">&quot;' + _escHtml(v) + '&quot;</span>'); }})
+      .replace(/:\s*(true|false|null)\b/g, ': <span class="json-kw">$1</span>')
+      .replace(/:\s*(-?[\d]+(?:\.[\d]+)?(?:[eE][+-]?[\d]+)?)\b/g, ': <span class="json-num">$1</span>');
+  }}).join('\n');
+}}
+function highlightJsonl(pre) {{
+  var lines = pre.textContent.split('\n');
+  pre.innerHTML = lines.map(function(line) {{
+    if (!line.trim()) return line;
+    return _escHtml(line)
+      .replace(/"([^"\\]*(?:\\.[^"\\]*)*)"\s*:/g, '<span class="json-key">"$1"</span>:')
+      .replace(/:\s*(true|false|null)\b/g, ': <span class="json-kw">$1</span>')
+      .replace(/:\s*(-?[\d]+(?:\.[\d]+)?)\b/g, ': <span class="json-num">$1</span>');
+  }}).join('\n');
+}}
+function highlightMarkdown(pre) {{
+  var lines = pre.textContent.split('\n');
+  pre.innerHTML = lines.map(function(line) {{
+    var e = _escHtml(line);
+    if (/^#{{1,3}} /.test(line)) return '<span class="md-h">' + e + '</span>';
+    if (/^(\*{{3}}|-{{3,}}|_{{3,}})$/.test(line.trim())) return '<span class="md-hr">' + e + '</span>';
+    if (/^\s*[-*+] /.test(line)) return '<span class="md-li">' + e + '</span>';
+    if (/^\|/.test(line)) return '<span class="md-table">' + e + '</span>';
+    if (/^```/.test(line) || /^    /.test(line)) return '<span class="md-code">' + e + '</span>';
+    return e.replace(/\*\*([^*]+)\*\*/g, '<span class="md-bold">**$1**</span>');
+  }}).join('\n');
+}}
+function highlightLog(pre) {{
+  var lines = pre.textContent.split('\n');
+  pre.innerHTML = lines.map(function(line) {{
+    var e = _escHtml(line);
+    if (/\bERROR\b|\bFATAL\b|\bPANIC\b/.test(line)) return '<span class="log-err">' + e + '</span>';
+    if (/\bWARN\b|\bWARNING\b/.test(line)) return '<span class="log-warn">' + e + '</span>';
+    if (/\bINFO\b/.test(line)) return '<span class="log-info">' + e + '</span>';
+    if (/\bDEBUG\b|\bTRACE\b/.test(line)) return '<span class="log-debug">' + e + '</span>';
+    return e;
+  }}).join('\n');
+}}
+function applyFileDialogHighlight(type) {{
+  var pre = document.getElementById('fd-content');
+  if (!pre) return;
+  if (type === 'JSON')     {{ highlightJson(pre);     return; }}
+  if (type === 'JSONL')    {{ highlightJsonl(pre);    return; }}
+  if (type === 'Markdown') {{ highlightMarkdown(pre); return; }}
+  if (type === 'Log')      {{ highlightLog(pre);      return; }}
+}}
+
+// ── i-dream widget (tabbed panel) ────────────────────────────────────
+function iwToggle() {{
+  var panel = document.getElementById('iw-panel');
+  if (panel) panel.classList.toggle('iw-open');
+}}
+function iwTab(btn, name) {{
+  // Deactivate all tabs + hide all content
+  document.querySelectorAll('.iw-tab').forEach(function(b) {{ b.classList.remove('iw-tab-active'); }});
+  document.querySelectorAll('.iw-content').forEach(function(c) {{ c.hidden = true; }});
+  // Activate selected
+  btn.classList.add('iw-tab-active');
+  var el = document.getElementById('iw-tab-' + name);
+  if (el) {{ el.hidden = false; }}
+  // Initialise prune command on first Store-tab open
+  if (name === 'store') iwUpdatePruneCmd();
+}}
+function iwUpdatePruneCmd() {{
+  var sel  = document.getElementById('iw-prune-age');
+  var dateEl = document.getElementById('iw-prune-date');
+  var cmdEl  = document.getElementById('iw-prune-cmd');
+  if (!sel || !cmdEl) return;
+  // Show/hide custom date input
+  var isCustom = (sel.value === 'custom');
+  dateEl.style.display = isCustom ? 'block' : 'none';
+  // Collect entry counts from data attributes on table rows
+  var rows = document.querySelectorAll('.iw-store-row');
+  var counts = {{}};
+  rows.forEach(function(r) {{ counts[r.dataset.path] = parseInt(r.dataset.entries, 10) || 0; }});
+  // Determine how many days to keep
+  var days = 0;
+  if (isCustom) {{
+    var dateVal = dateEl.value; // "YYYY-MM-DD"
+    if (dateVal) {{
+      var cut = new Date(dateVal);
+      var now = new Date();
+      days = Math.round((now - cut) / 86400000);
+    }}
+  }} else {{
+    days = parseInt(sel.value, 10);
+  }}
+  if (days <= 0) {{ cmdEl.textContent = 'i-dream prune'; return; }}
+  // Estimate keep-N by assuming a uniform event distribution over the last 90 days
+  // (conservative: days we have data for ≥ days requested → use fraction of total)
+  function keepN(total, keepDays) {{
+    if (total === 0) return 0;
+    // Assume all entries span a rolling 90-day window (worst case)
+    var fraction = Math.min(keepDays / 90, 1);
+    return Math.max(1, Math.ceil(total * fraction));
+  }}
+  var e  = counts['logs/events.jsonl']      || 0;
+  var a  = counts['metacog/activity.jsonl'] || 0;
+  var s  = counts['logs/signals.jsonl']     || 0;
+  var j  = counts['dreams/journal.jsonl']   || 0;
+  var cmd = 'i-dream prune'
+    + ' --keep-events '   + keepN(e, days)
+    + ' --keep-activity ' + keepN(a, days)
+    + ' --keep-signals '  + keepN(s, days)
+    + ' --keep-journal '  + keepN(j, days);
+  cmdEl.textContent = cmd;
+}}
+function iwCopyPrune() {{
+  var cmdEl = document.getElementById('iw-prune-cmd');
+  if (!cmdEl) return;
+  var text = cmdEl.textContent;
+  if (navigator.clipboard) {{
+    navigator.clipboard.writeText(text).then(function() {{
+      var btn = document.querySelector('.iw-copy-btn');
+      if (btn) {{ btn.textContent = 'Copied!'; setTimeout(function() {{ btn.textContent = 'Copy'; }}, 1500); }}
+    }});
+  }} else {{
+    // Fallback: select the code element text
+    var range = document.createRange();
+    range.selectNode(cmdEl);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+  }}
+}}
+// Close panel when Escape is pressed
+document.addEventListener('keydown', function(e) {{
+  if (e.key === 'Escape') {{
+    var panel = document.getElementById('iw-panel');
+    if (panel) panel.classList.remove('iw-open');
+  }}
+}});
 
 // ── Architecture node tooltips ───────────────────────────────────────
 function initArchNodes() {{
@@ -906,9 +1404,25 @@ function initArchNodes() {{
 
 document.addEventListener('DOMContentLoaded', function() {{
   initEventsPagination();
-  applyTomlHighlight();
+  applyConfigHighlights();
   initArchNodes();
+  initSvgNodes();
+  localizeEventTimestamps();
+  iwUpdatePruneCmd();
 }});
+
+function localizeEventTimestamps() {{
+  document.querySelectorAll('td.ts[data-ts]').forEach(function(td) {{
+    var iso = td.getAttribute('data-ts');
+    if (!iso) return;
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return;
+    var time = d.toLocaleTimeString(undefined, {{ hour: '2-digit', minute: '2-digit', second: '2-digit' }});
+    var date = d.toLocaleDateString(undefined, {{ month: 'short', day: 'numeric', year: 'numeric' }});
+    td.textContent = time + ', ' + date;
+    td.title = iso;
+  }});
+}}
 </script>
 </body>
 </html>
@@ -931,6 +1445,25 @@ fn render_header(snap: &Snapshot) -> String {
 "#,
         ts = snap.generated_at.format("%Y-%m-%d %H:%M:%S"),
         dir = html_escape(&snap.data_dir.display().to_string()),
+    )
+}
+
+/// Warning banner shown when any JSONL store has grown large.
+/// Returns an empty string when there are no warnings.
+fn render_store_warnings(snap: &Snapshot) -> String {
+    if snap.store_warnings.is_empty() {
+        return String::new();
+    }
+    let items: String = snap
+        .store_warnings
+        .iter()
+        .map(|w| format!("<li>{}</li>", html_escape(w)))
+        .collect();
+    format!(
+        r#"<div class="store-warning-banner">
+  <span class="store-warning-icon">⚠</span>
+  <ul class="store-warning-list">{items}</ul>
+</div>"#
     )
 }
 
@@ -1064,6 +1597,9 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
         n = snap.dream_traces.len(),
     );
 
+    // ── Dream activity bar chart ──────────────────────────────────────
+    out.push_str(&render_dream_chart(&snap.dream_journal));
+
     // ── "What Claude Realized" journal summary ───────────────────────
     // Shows per-cycle outcome stats (patterns extracted, associations
     // formed, insights promoted) from the dream journal. More entries
@@ -1077,6 +1613,7 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
 <thead><tr>
   <th>When</th><th>Sessions</th>
   <th>Patterns</th><th>Associations</th><th>Insights</th>
+  <th>Summary</th>
   <th class="right">Tokens</th>
 </tr></thead>
 <tbody>
@@ -1089,6 +1626,13 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
             let pat_val   = if entry.patterns_extracted  > 0 { format!("+{}", entry.patterns_extracted)  } else { "—".into() };
             let assoc_val = if entry.associations_found  > 0 { format!("+{}", entry.associations_found)  } else { "—".into() };
             let ins_val   = if entry.insights_promoted   > 0 { format!("+{}", entry.insights_promoted)   } else { "—".into() };
+            // Build human-readable summary sentence
+            let summary = dream_cycle_summary(
+                entry.sessions_analyzed,
+                entry.patterns_extracted,
+                entry.associations_found,
+                entry.insights_promoted,
+            );
             out.push_str(&format!(
                 r#"<tr>
   <td class="ts">{ts}</td>
@@ -1096,6 +1640,7 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
   <td class="num{pc}">{pat}</td>
   <td class="num{ac}">{assoc}</td>
   <td class="num{ic}">{ins}</td>
+  <td class="dream-summary">{summary}</td>
   <td class="num muted">{tokens}</td>
 </tr>
 "#,
@@ -1107,6 +1652,7 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
                 ac      = assoc_cls,
                 ins     = ins_val,
                 ic      = ins_cls,
+                summary = html_escape(&summary),
                 tokens  = format_tokens(entry.tokens_used),
             ));
         }
@@ -1323,15 +1869,19 @@ fn render_events_section(snap: &Snapshot) -> String {
     if snap.recent_events.is_empty() {
         out.push_str(r#"<p class="empty">No hook events recorded yet.</p>"#);
     } else {
-        out.push_str(r#"<table class="events"><thead><tr><th>Time (UTC)</th><th>Type</th><th>Detail</th></tr></thead><tbody id="events-tbody">"#);
+        out.push_str(&render_event_chart(&snap.recent_events));
+        out.push_str(r#"<table class="events"><thead><tr><th>Time</th><th>Type</th><th>Detail</th></tr></thead><tbody id="events-tbody">"#);
         for ev in &snap.recent_events {
             let cls = event_row_class(&ev.label);
             let label_cell = event_label_badge(&ev.label);
             let detail_cell = event_detail(&ev.label);
+            let iso_ts = ev.received_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let utc_ts = ev.received_at.format("%Y-%m-%d %H:%M:%S UTC").to_string();
             out.push_str(&format!(
-                r#"<tr class="{cls}"><td class="ts">{ts}</td><td class="ev-type-cell">{badge}</td><td class="ev-detail">{detail}</td></tr>"#,
+                r#"<tr class="{cls}"><td class="ts" data-ts="{iso}">{utc}</td><td class="ev-type-cell">{badge}</td><td class="ev-detail">{detail}</td></tr>"#,
                 cls    = cls,
-                ts     = ev.received_at.format("%Y-%m-%d %H:%M:%S"),
+                iso    = html_escape(&iso_ts),
+                utc    = html_escape(&utc_ts),
                 badge  = label_cell,
                 detail = detail_cell,
             ));
@@ -1356,14 +1906,570 @@ fn event_label_badge(label: &str) -> String {
     format!(r#"<span class="ev-badge {cls}">{}</span>"#, html_escape(display))
 }
 
+/// Floating insights widget — tabbed bottom-right panel with three views:
+///   Dream — latest cycle + promoted insights
+///   Store — per-file entry counts, sizes, prune command generator
+///   Tests — test-suite pass/fail (if run at generation time)
+fn render_insights_widget(snap: &Snapshot) -> String {
+    // ── Tab: Dream ────────────────────────────────────────────
+    let dream_html = if let Some(entry) = snap.dream_journal.first() {
+        let summary = dream_cycle_summary(
+            entry.sessions_analyzed,
+            entry.patterns_extracted,
+            entry.associations_found,
+            entry.insights_promoted,
+        );
+        format!(
+            r#"<div class="iw-dream-card">
+  <div class="iw-dream-date">Latest Dream · {date}</div>
+  <div class="iw-dream-body">{summary}</div>
+  <div class="iw-dream-stats">
+    <span class="iw-stat"><span class="iw-stat-n">{pat}</span> patterns</span>
+    <span class="iw-stat"><span class="iw-stat-n">{assoc}</span> associations</span>
+    <span class="iw-stat iw-stat-ok"><span class="iw-stat-n">{ins}</span> insights</span>
+  </div>
+</div>"#,
+            date  = entry.timestamp.format("%b %d, %Y"),
+            summary = html_escape(&summary),
+            pat   = entry.patterns_extracted,
+            assoc = entry.associations_found,
+            ins   = entry.insights_promoted,
+        )
+    } else {
+        r#"<p class="iw-empty">No dream cycles yet.</p>"#.into()
+    };
+
+    let insights_html = if snap.latest_insights.is_empty() {
+        r#"<p class="iw-empty">No promoted insights yet.</p>"#.into()
+    } else {
+        let items: String = snap
+            .latest_insights
+            .iter()
+            .map(|s| format!(r#"<li class="iw-insight-item">{}</li>"#, html_escape(s)))
+            .collect();
+        format!(
+            r#"<div class="iw-insight-list">
+  <div class="iw-section-hdr">Promoted Insights</div>
+  <ul>{items}</ul>
+</div>"#
+        )
+    };
+
+    // ── Tab: Store ────────────────────────────────────────────
+    // Bake store counts into data attributes so JS can compute keep-N values.
+    let store_rows: String = snap.store_file_stats.iter().map(|f| {
+        let size_str = format_bytes(f.size_bytes);
+        let icon = if f.over_threshold { r#"<span class="iw-warn-icon" title="Large file">⚠</span>"# }
+                   else               { r#"<span class="iw-ok-icon">✓</span>"# };
+        let entries_fmt = format_count(f.entries);
+        format!(
+            r#"<tr class="iw-store-row" data-path="{path}" data-entries="{entries}">
+  <td class="iw-store-label">{label}</td>
+  <td class="iw-store-n">{entries_fmt}</td>
+  <td class="iw-store-sz">{size}</td>
+  <td class="iw-store-status">{icon}</td>
+</tr>"#,
+            path    = html_escape(f.rel_path),
+            entries = f.entries,
+            label   = html_escape(f.label),
+            entries_fmt = html_escape(&entries_fmt),
+            size    = html_escape(&size_str),
+            icon    = icon,
+        )
+    }).collect();
+
+    // ── Tab: Tests ────────────────────────────────────────────
+    let tests_html = match &snap.test_results {
+        Some(r) => {
+            let (status_cls, status_icon, status_txt) = if r.ok {
+                ("iw-test-ok",   "✓", "All tests passed")
+            } else {
+                ("iw-test-fail", "✗", "Tests failed")
+            };
+            format!(
+                r#"<div class="iw-test-result {cls}">
+  <span class="iw-test-icon">{icon}</span>
+  <span class="iw-test-status">{status}</span>
+</div>
+<div class="iw-test-counts">
+  <span class="iw-tc iw-tc-pass">{passed} passed</span>
+  <span class="iw-tc iw-tc-fail">{failed} failed</span>
+  <span class="iw-tc iw-tc-skip">{ignored} ignored</span>
+</div>
+<div class="iw-test-meta">
+  <span class="iw-test-dur">⏱ {dur:.2}s</span>
+  <span class="iw-test-ran">Run at {ts}</span>
+</div>"#,
+                cls    = status_cls,
+                icon   = status_icon,
+                status = status_txt,
+                passed = r.passed,
+                failed = r.failed,
+                ignored = r.ignored,
+                dur    = r.duration_secs,
+                ts     = r.ran_at.format("%H:%M:%S UTC"),
+            )
+        }
+        None => r#"<div class="iw-test-notrun">
+  <p>Tests were not run at dashboard generation time.</p>
+  <p>Regenerate with:</p>
+  <code class="iw-test-cmd">i-dream dashboard --run-tests</code>
+</div>"#.into(),
+    };
+
+    format!(
+        r##"<div class="iw-widget" id="iw-widget">
+  <button class="iw-fab" onclick="iwToggle()" title="i-dream panel">💡</button>
+  <div class="iw-panel" id="iw-panel">
+    <div class="iw-panel-header">
+      <span class="iw-panel-title">i-dream</span>
+      <button class="iw-close" onclick="iwToggle()" title="Close">×</button>
+    </div>
+    <div class="iw-tabs" role="tablist">
+      <button class="iw-tab iw-tab-active" onclick="iwTab(this,'dream')" data-tab="dream">Dream</button>
+      <button class="iw-tab" onclick="iwTab(this,'store')" data-tab="store">Store</button>
+      <button class="iw-tab" onclick="iwTab(this,'tests')" data-tab="tests">Tests</button>
+    </div>
+
+    <!-- Dream tab -->
+    <div class="iw-content" id="iw-tab-dream">
+      {dream}
+      {insights}
+    </div>
+
+    <!-- Store tab -->
+    <div class="iw-content" id="iw-tab-store" hidden>
+      <table class="iw-store-table">
+        <thead><tr>
+          <th>File</th><th>Entries</th><th>Size</th><th></th>
+        </tr></thead>
+        <tbody>{store_rows}</tbody>
+      </table>
+      <div class="iw-section-hdr iw-prune-hdr">Prune records</div>
+      <div class="iw-prune-form">
+        <label class="iw-prune-label">Remove entries older than</label>
+        <div class="iw-prune-controls">
+          <select id="iw-prune-age" onchange="iwUpdatePruneCmd()">
+            <option value="7d">1 week</option>
+            <option value="14d">2 weeks</option>
+            <option value="30d" selected>1 month</option>
+            <option value="90d">3 months</option>
+            <option value="180d">6 months</option>
+            <option value="custom">Custom date…</option>
+          </select>
+          <input type="date" id="iw-prune-date" class="iw-date-input" style="display:none" oninput="iwUpdatePruneCmd()">
+        </div>
+        <div class="iw-prune-cmd-wrap">
+          <code class="iw-prune-cmd" id="iw-prune-cmd">i-dream prune</code>
+          <button class="iw-copy-btn" onclick="iwCopyPrune()" title="Copy to clipboard">Copy</button>
+        </div>
+        <p class="iw-prune-note">Keeps most-recent entries; removes oldest. Estimates assume uniform event rate.</p>
+      </div>
+    </div>
+
+    <!-- Tests tab -->
+    <div class="iw-content" id="iw-tab-tests" hidden>
+      {tests}
+    </div>
+  </div>
+</div>"##,
+        dream   = dream_html,
+        insights = insights_html,
+        store_rows = store_rows,
+        tests   = tests_html,
+    )
+}
+
+/// Format a byte count as a human-readable string (KB / MB).
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Format a large integer with thousands separators.
+fn format_count(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 { out.push(','); }
+        out.push(c);
+    }
+    out.chars().rev().collect()
+}
+
 /// Render an interactive architecture diagram with clickable nodes.
 /// Each node carries a `data-desc` attribute which the JS detail panel reads.
+/// Also renders a rich SVG flow diagram tab.
 fn render_architecture_section() -> String {
     // The ASCII diagram is kept for backward-compat with tests; hidden visually.
+    // SVG flow diagram: 820×520 viewBox, 4 horizontal layers top→bottom.
+    // Each node is wrapped in a <g data-svgid="..."> so JS can attach
+    // click/hover handlers and look up richer info from SVG_NODE_INFO.
+    let svg_diagram = r#"<svg class="arch-svg-diagram" viewBox="0 0 820 520" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="i-dream architecture flow diagram">
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="var(--accent)" opacity="0.7"/>
+    </marker>
+    <marker id="arr-dim" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="var(--dim)" opacity="0.6"/>
+    </marker>
+  </defs>
+
+  <!-- ── Layer labels ── -->
+  <text x="8" y="52" class="arch-svg-layer-label">Claude Code</text>
+  <text x="8" y="188" class="arch-svg-layer-label">Daemon</text>
+  <text x="8" y="322" class="arch-svg-layer-label">Modules</text>
+  <text x="8" y="458" class="arch-svg-layer-label">Store</text>
+
+  <!-- ── Layer bands ── -->
+  <rect x="90" y="18" width="720" height="68" rx="6" class="arch-svg-bg arch-svg-bg-hook"/>
+  <rect x="90" y="154" width="720" height="68" rx="6" class="arch-svg-bg arch-svg-bg-daemon"/>
+  <rect x="90" y="290" width="720" height="68" rx="6" class="arch-svg-bg arch-svg-bg-module"/>
+  <rect x="90" y="426" width="720" height="68" rx="6" class="arch-svg-bg arch-svg-bg-store"/>
+
+  <!-- ── Layer 1: Claude Code hooks ── -->
+  <g class="arch-svg-group" data-svgid="session_start">
+    <rect x="102" y="28" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-hook"/>
+    <text x="160" y="48" class="arch-svg-node-title">session_start</text>
+    <text x="160" y="64" class="arch-svg-node-sub">hook ▶</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="post_tool_use">
+    <rect x="234" y="28" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-hook"/>
+    <text x="292" y="48" class="arch-svg-node-title">post_tool_use</text>
+    <text x="292" y="64" class="arch-svg-node-sub">hook ⚙</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="user_prompt">
+    <rect x="366" y="28" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-hook"/>
+    <text x="424" y="48" class="arch-svg-node-title">user_prompt</text>
+    <text x="424" y="64" class="arch-svg-node-sub">hook 💬</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="stop">
+    <rect x="498" y="28" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-hook"/>
+    <text x="556" y="48" class="arch-svg-node-title">stop</text>
+    <text x="556" y="64" class="arch-svg-node-sub">hook ■</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="pre_compact">
+    <rect x="630" y="28" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-hook"/>
+    <text x="688" y="48" class="arch-svg-node-title">pre_compact</text>
+    <text x="688" y="64" class="arch-svg-node-sub">hook ⬛</text>
+  </g>
+
+  <!-- ── Arrows: hooks → daemon (hook server) ── -->
+  <line x1="160" y1="76" x2="192" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr)"/>
+  <line x1="292" y1="76" x2="220" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr)"/>
+  <line x1="424" y1="76" x2="245" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr)"/>
+  <line x1="556" y1="76" x2="264" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.35" marker-end="url(#arr)"/>
+  <line x1="688" y1="76" x2="690" y2="154" stroke="var(--dim)"    stroke-width="1.5" opacity="0.5" marker-end="url(#arr-dim)" stroke-dasharray="4 3"/>
+  <text x="222" y="120" class="arch-svg-edge-label">JSON over daemon.sock</text>
+
+  <!-- ── Layer 2: Daemon ── -->
+  <g class="arch-svg-group" data-svgid="hook_server">
+    <rect x="102" y="164" width="130" height="48" rx="5" class="arch-svg-node arch-svg-node-daemon"/>
+    <text x="167" y="184" class="arch-svg-node-title">hook server</text>
+    <text x="167" y="200" class="arch-svg-node-sub">event bus 🔌</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="scheduler">
+    <rect x="254" y="164" width="130" height="48" rx="5" class="arch-svg-node arch-svg-node-daemon"/>
+    <text x="319" y="184" class="arch-svg-node-title">scheduler</text>
+    <text x="319" y="200" class="arch-svg-node-sub">idle trigger ⏱</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="module_runner">
+    <rect x="406" y="164" width="130" height="48" rx="5" class="arch-svg-node arch-svg-node-daemon"/>
+    <text x="471" y="184" class="arch-svg-node-title">module runner</text>
+    <text x="471" y="200" class="arch-svg-node-sub">SWS/REM/Wake 🧠</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="checkpoint" style="opacity:0.7">
+    <rect x="558" y="164" width="130" height="48" rx="5" class="arch-svg-node arch-svg-node-daemon"/>
+    <text x="623" y="184" class="arch-svg-node-title">checkpoint</text>
+    <text x="623" y="200" class="arch-svg-node-sub">pre-compact 📸</text>
+  </g>
+
+  <!-- hook server → scheduler; scheduler → module runner -->
+  <line x1="232" y1="188" x2="254" y2="188" stroke="var(--dim)" stroke-width="1.5" opacity="0.6" marker-end="url(#arr-dim)"/>
+  <line x1="384" y1="188" x2="406" y2="188" stroke="var(--ok)" stroke-width="1.5" opacity="0.7" marker-end="url(#arr)"/>
+  <text x="372" y="183" class="arch-svg-edge-label">idle</text>
+
+  <!-- ── Arrows: module runner → each module ── -->
+  <line x1="420" y1="212" x2="168" y2="290" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" marker-end="url(#arr)"/>
+  <line x1="450" y1="212" x2="300" y2="290" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" marker-end="url(#arr)"/>
+  <line x1="471" y1="212" x2="432" y2="290" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" marker-end="url(#arr)"/>
+  <line x1="500" y1="212" x2="564" y2="290" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" marker-end="url(#arr)"/>
+  <line x1="520" y1="212" x2="696" y2="290" stroke="var(--accent)" stroke-width="1.5" opacity="0.55" marker-end="url(#arr)"/>
+  <text x="358" y="254" class="arch-svg-edge-label">runs modules in sequence</text>
+
+  <!-- ── Layer 3: Modules ── -->
+  <g class="arch-svg-group" data-svgid="dreaming">
+    <rect x="102" y="300" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-module"/>
+    <text x="160" y="320" class="arch-svg-node-title">Dreaming</text>
+    <text x="160" y="336" class="arch-svg-node-sub">🌙 SWS/REM/Wake</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="metacog">
+    <rect x="234" y="300" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-module"/>
+    <text x="292" y="320" class="arch-svg-node-title">Metacog</text>
+    <text x="292" y="336" class="arch-svg-node-sub">🔬 calibration</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="intuition">
+    <rect x="366" y="300" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-module"/>
+    <text x="424" y="320" class="arch-svg-node-title">Intuition</text>
+    <text x="424" y="336" class="arch-svg-node-sub">💡 valence</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="introspection">
+    <rect x="498" y="300" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-module"/>
+    <text x="556" y="320" class="arch-svg-node-title">Introspection</text>
+    <text x="556" y="336" class="arch-svg-node-sub">📊 patterns</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="prospective">
+    <rect x="630" y="300" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-module"/>
+    <text x="688" y="320" class="arch-svg-node-title">Prospective</text>
+    <text x="688" y="336" class="arch-svg-node-sub">🎯 intentions</text>
+  </g>
+
+  <!-- ── Arrows: modules → store ── -->
+  <line x1="160" y1="348" x2="160" y2="426" stroke="var(--dim)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr-dim)"/>
+  <line x1="292" y1="348" x2="292" y2="426" stroke="var(--dim)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr-dim)"/>
+  <line x1="424" y1="348" x2="424" y2="426" stroke="var(--dim)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr-dim)"/>
+  <line x1="556" y1="348" x2="556" y2="426" stroke="var(--dim)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr-dim)"/>
+  <line x1="688" y1="348" x2="688" y2="426" stroke="var(--dim)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr-dim)"/>
+
+  <!-- ── Layer 4: Store ── -->
+  <g class="arch-svg-group" data-svgid="dreams_store">
+    <rect x="102" y="436" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-store"/>
+    <text x="160" y="456" class="arch-svg-node-title">dreams/</text>
+    <text x="160" y="472" class="arch-svg-node-sub">journal · insights</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="metacog_store">
+    <rect x="234" y="436" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-store"/>
+    <text x="292" y="456" class="arch-svg-node-title">metacog/</text>
+    <text x="292" y="472" class="arch-svg-node-sub">calibration</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="valence_store">
+    <rect x="366" y="436" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-store"/>
+    <text x="424" y="456" class="arch-svg-node-title">valence/</text>
+    <text x="424" y="472" class="arch-svg-node-sub">memory</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="introspection_store">
+    <rect x="498" y="436" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-store"/>
+    <text x="556" y="456" class="arch-svg-node-title">introspection/</text>
+    <text x="556" y="472" class="arch-svg-node-sub">patterns</text>
+  </g>
+  <g class="arch-svg-group" data-svgid="intentions_store">
+    <rect x="630" y="436" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-store"/>
+    <text x="688" y="456" class="arch-svg-node-title">intentions/</text>
+    <text x="688" y="472" class="arch-svg-node-sub">registry</text>
+  </g>
+
+  <!-- ── Feedback: insights → session_start (surface priming) ── -->
+  <path d="M 160 484 Q 60 484 60 52 Q 60 18 102 18" fill="none" stroke="var(--ok)" stroke-width="1.5" opacity="0.45" stroke-dasharray="5 3" marker-end="url(#arr)"/>
+  <text x="14" y="270" class="arch-svg-edge-label" transform="rotate(-90,14,270)">surface priming</text>
+
+  <!-- ── Feedback: metacog calibration context loop ── -->
+  <path d="M 292 484 Q 292 510 750 510 Q 790 510 790 52 Q 790 18 746 18" fill="none" stroke="var(--warn)" stroke-width="1" opacity="0.3" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+</svg>"#;
+
+    // SVG node info + initSvgNodes — kept as a raw string so JS braces
+    // don't need escaping inside format!().
+    let svg_js = r##"<script>
+var SVG_NODE_INFO = {
+  session_start: {
+    title: 'session_start', layer: 'Claude Code hook',
+    desc: 'Fired at the start of every Claude Code session. Reads primed intuitions from valence memory and pending intentions from the intentions registry, then injects them into the session context via additionalContext. Also records a session_start event on daemon.sock.',
+    related: ['hook_server', 'intuition', 'prospective', 'dreams_store']
+  },
+  post_tool_use: {
+    title: 'post_tool_use', layer: 'Claude Code hook',
+    desc: 'Fired after every tool call completes (Read, Edit, Write, Bash, etc.). Sends {event:"tool_use", tool:"<name>", ts:<unix>} to daemon.sock. Used by the Metacog module for tool-chain sampling and by the scheduler to update the last-activity timestamp.',
+    related: ['hook_server', 'metacog', 'scheduler']
+  },
+  user_prompt: {
+    title: 'user_prompt_submit', layer: 'Claude Code hook',
+    desc: 'Fired before each user message is submitted. Analyses the raw prompt text for frustration signals (ALL-CAPS words, swear words), correction language ("that\'s wrong", "revert"), and positive feedback ("perfect"). Sends a user_signal event with frustration_score to daemon.sock.',
+    related: ['hook_server', 'intuition', 'valence_store']
+  },
+  stop: {
+    title: 'stop', layer: 'Claude Code hook',
+    desc: 'Fired when the session ends (Stop hook). Records a session_end event. The daemon uses this to mark the session boundary and may trigger an early consolidation cycle if the Dreaming module is due.',
+    related: ['hook_server', 'dreaming']
+  },
+  pre_compact: {
+    title: 'pre_compact', layer: 'Claude Code hook',
+    desc: 'Fired before every auto-compaction event. Writes a lightweight _precompact-checkpoint.claude.md and a WAL CHECKPOINT so /catchup can restore context after the context window is cleared. Deliberately fast — no LLM calls.',
+    related: ['checkpoint']
+  },
+  hook_server: {
+    title: 'hook server', layer: 'Daemon',
+    desc: 'Unix domain socket server listening on daemon.sock. Receives all hook events from every Claude Code session running on this machine. Deserialises JSON payloads into HookEvent variants, dispatches to module handlers, and appends a HookEventRecord to logs/events.jsonl.',
+    related: ['session_start', 'post_tool_use', 'user_prompt', 'stop', 'scheduler']
+  },
+  scheduler: {
+    title: 'scheduler', layer: 'Daemon',
+    desc: 'Wakes every check_interval_minutes (config, default 15 min). Computes idle time as now − last_activity. When idle ≥ threshold_hours (default 4h) and no cycle is running, fires the module runner. Also enforces max_runtime_minutes per cycle.',
+    related: ['hook_server', 'module_runner']
+  },
+  module_runner: {
+    title: 'module runner', layer: 'Daemon',
+    desc: 'Orchestrates the dream cycle. Runs enabled modules in SWS → REM → Wake order. Each module is a separate async task; budget is shared via a token counter. Respects max_tokens_per_cycle and max_runtime_minutes from config.',
+    related: ['scheduler', 'dreaming', 'metacog', 'intuition', 'introspection', 'prospective']
+  },
+  checkpoint: {
+    title: 'checkpoint', layer: 'Daemon (pre-compact path)',
+    desc: 'Separate lightweight path triggered by the pre_compact hook (not by the scheduler). Writes _precompact-checkpoint.claude.md and appends a WAL checkpoint entry. No LLM calls — pure file I/O so it completes before the compaction window closes.',
+    related: ['pre_compact']
+  },
+  dreaming: {
+    title: 'Dreaming module', layer: 'Module',
+    desc: '3-phase sleep cycle modelled on biological sleep. SWS (slow-wave): reads recent session transcripts, extracts patterns and associations. REM: recombines patterns creatively to find novel connections. Wake: verifies associations with a second LLM pass and promotes high-confidence ones to dreams/insights.md.',
+    related: ['module_runner', 'stop', 'dreams_store']
+  },
+  metacog: {
+    title: 'Metacog module', layer: 'Module',
+    desc: 'Metacognitive calibration. Samples tool-use chains from recent sessions (sampling_rate in config). Sends samples to the LLM asking "how confident was I here, and was that confidence justified?". Stores calibration entries in metacog/calibration.jsonl.',
+    related: ['module_runner', 'post_tool_use', 'metacog_store']
+  },
+  intuition: {
+    title: 'Intuition module', layer: 'Module',
+    desc: 'Valence memory. Maintains a weighted list of patterns that produced good or bad outcomes, with exponential decay (halflife configurable). At session_start, the top-N patterns with highest weight are injected as priming context. user_signal frustration scores feed the valence decay.',
+    related: ['module_runner', 'session_start', 'user_prompt', 'valence_store']
+  },
+  introspection: {
+    title: 'Introspection module', layer: 'Module',
+    desc: 'Reasoning-chain analysis. Aggregates tool-use sequences across sessions and identifies systematic patterns — which chains succeed, which fail, where confidence is miscalibrated. Generates periodic self-analysis reports and stores them in introspection/reports/.',
+    related: ['module_runner', 'introspection_store']
+  },
+  prospective: {
+    title: 'Prospective module', layer: 'Module',
+    desc: 'Future-intent registry. Stores intentions written by the user or by other modules (e.g. "next time I touch auth, check the session token storage"). At session_start, matches open intentions against the incoming session context (file paths, topic keywords) and surfaces matching ones.',
+    related: ['module_runner', 'session_start', 'intentions_store']
+  },
+  dreams_store: {
+    title: 'dreams/ store', layer: 'Store',
+    desc: 'Filesystem store for the Dreaming module. Contains: journal.jsonl (one entry per dream cycle with metadata), traces/ (per-cycle LLM trace files for debugging), processed.json (list of already-consolidated session IDs), insights.md (promoted high-confidence insights in Markdown).',
+    related: ['dreaming', 'session_start']
+  },
+  metacog_store: {
+    title: 'metacog/ store', layer: 'Store',
+    desc: 'Filesystem store for the Metacog module. Contains: calibration.jsonl (sampled tool chains + LLM confidence analysis), samples/ (raw tool-use chain snapshots before analysis), audits/ (full LLM audit response objects for post-hoc inspection).',
+    related: ['metacog', 'post_tool_use']
+  },
+  valence_store: {
+    title: 'valence/ store', layer: 'Store',
+    desc: 'Filesystem store for the Intuition module. Contains: memory.jsonl (pattern entries with weight, decay rate, and last-seen timestamp), surface-log.jsonl (log of which patterns were injected into which sessions, for traceability).',
+    related: ['intuition', 'user_prompt']
+  },
+  introspection_store: {
+    title: 'introspection/ store', layer: 'Store',
+    desc: 'Filesystem store for the Introspection module. Contains: patterns.json (aggregated chain-pattern dictionary with success/failure counts), chains/ (raw tool-use sequence samples), reports/ (periodic LLM self-analysis reports in Markdown).',
+    related: ['introspection']
+  },
+  intentions_store: {
+    title: 'intentions/ store', layer: 'Store',
+    desc: 'Filesystem store for the Prospective module. Contains: registry.jsonl (active intentions with trigger conditions, priority, and expiry), fired.jsonl (log of intentions that were matched and surfaced, with the session context that triggered them).',
+    related: ['prospective', 'session_start']
+  }
+};
+
+function initSvgNodes() {
+  var groups = document.querySelectorAll('.arch-svg-group');
+  if (!groups.length) return;
+
+  function clearHighlights() {
+    groups.forEach(function(g) {
+      g.classList.remove('arch-svg-dimmed', 'arch-svg-related', 'arch-svg-selected');
+    });
+  }
+
+  function applyHover(id) {
+    var info = SVG_NODE_INFO[id];
+    var related = info ? info.related : [];
+    groups.forEach(function(g) {
+      var gid = g.getAttribute('data-svgid');
+      if (gid === id) {
+        // hovered node — leave at full brightness
+      } else if (related.indexOf(gid) !== -1) {
+        g.classList.add('arch-svg-related');
+      } else {
+        g.classList.add('arch-svg-dimmed');
+      }
+    });
+  }
+
+  function showDetail(id) {
+    var info = SVG_NODE_INFO[id];
+    if (!info) return;
+    var relLinks = (info.related || []).map(function(rid) {
+      var ri = SVG_NODE_INFO[rid];
+      var label = ri ? ri.title : rid;
+      return '<a href="#" class="arch-svg-rel-link" data-svgid="' + rid + '">' + label + '</a>';
+    }).join('  ·  ');
+    var html = '<div class="arch-detail-title">' + info.title + '</div>'
+      + '<div class="arch-detail-layer">' + info.layer + '</div>'
+      + '<div class="arch-detail-desc">' + info.desc + '</div>'
+      + (relLinks ? '<div class="arch-detail-related"><span class="arch-detail-related-label">Connected to: </span>' + relLinks + '</div>' : '');
+    document.getElementById('arch-detail-content').innerHTML = html;
+    document.getElementById('arch-detail').style.display = 'block';
+
+    // attach click handlers to related links
+    document.querySelectorAll('.arch-svg-rel-link').forEach(function(a) {
+      a.addEventListener('click', function(e) {
+        e.preventDefault();
+        var rid = this.getAttribute('data-svgid');
+        clearHighlights();
+        document.querySelectorAll('.arch-svg-group[data-svgid="' + rid + '"]')
+          .forEach(function(g) { g.classList.add('arch-svg-selected'); });
+        applyHover(rid);
+        showDetail(rid);
+      });
+    });
+  }
+
+  groups.forEach(function(g) {
+    var id = g.getAttribute('data-svgid');
+
+    g.addEventListener('mouseenter', function() {
+      clearHighlights();
+      applyHover(id);
+    });
+    g.addEventListener('mouseleave', function() {
+      // Only clear hover highlights if no node is selected
+      if (!document.querySelector('.arch-svg-selected')) {
+        clearHighlights();
+      } else {
+        // Restore dimming relative to selected node
+        var sel = document.querySelector('.arch-svg-selected');
+        if (sel) applyHover(sel.getAttribute('data-svgid'));
+      }
+    });
+    g.addEventListener('click', function() {
+      clearHighlights();
+      g.classList.add('arch-svg-selected');
+      applyHover(id);
+      showDetail(id);
+    });
+  });
+
+  document.getElementById('arch-detail-close').addEventListener('click', function() {
+    document.getElementById('arch-detail').style.display = 'none';
+    clearHighlights();
+  });
+}
+</script>"##;
+
     format!(
         r#"<section id="arch">
 <h2>Architecture</h2>
 <pre class="diagram" style="display:none">{ascii}</pre>
+<div class="arch-view-tabs">
+  <button class="arch-tab arch-tab-active" onclick="showArchTab('grid',this)">Interactive Grid</button>
+  <button class="arch-tab" onclick="showArchTab('flow',this)">Flow Diagram</button>
+</div>
+<div id="arch-tab-flow" class="arch-tab-panel" style="display:none">
+  {svg}
+</div>
+<div id="arch-tab-grid" class="arch-tab-panel">
 <div class="arch-wrap">
   <div class="arch-diagram">
 
@@ -1499,15 +2605,27 @@ fn render_architecture_section() -> String {
     </div>
 
   </div><!-- /arch-diagram -->
-
-  <div id="arch-detail" class="arch-detail" style="display:none">
-    <button id="arch-detail-close" class="arch-detail-close">×</button>
-    <div id="arch-detail-content"></div>
-  </div>
 </div><!-- /arch-wrap -->
+</div><!-- /arch-tab-grid -->
+
+<div id="arch-detail" class="arch-detail" style="display:none">
+  <button id="arch-detail-close" class="arch-detail-close">×</button>
+  <div id="arch-detail-content"></div>
+</div>
 </section>
+{svg_js}
+<script>
+function showArchTab(name, btn) {{
+  document.getElementById('arch-tab-grid').style.display = name === 'grid' ? '' : 'none';
+  document.getElementById('arch-tab-flow').style.display = name === 'flow' ? '' : 'none';
+  document.querySelectorAll('.arch-tab').forEach(function(b) {{ b.classList.remove('arch-tab-active'); }});
+  btn.classList.add('arch-tab-active');
+}}
+</script>
 "#,
-        ascii = html_escape(ARCHITECTURE_DIAGRAM),
+        ascii  = html_escape(ARCHITECTURE_DIAGRAM),
+        svg    = svg_diagram,
+        svg_js = svg_js,
     )
 }
 
@@ -1574,13 +2692,15 @@ fn render_inventory_section(snap: &Snapshot) -> String {
                     .display()
                     .to_string();
                 let file_type = file_type_label(&file.name);
+                let ext_class = file.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
                 let key = format!("{}::{}", group.title, file.name);
                 out.push_str(&format!(
-                    "<li class=\"inv-file\" data-name=\"{name}\" data-type=\"{ftype}\" data-path=\"{path}\" data-key=\"{key}\" onclick=\"showFileDialog(this.dataset.name,this.dataset.type,this.dataset.path,this.dataset.key)\"><code class=\"inv-file-name\">{name}</code><span class=\"file-meta\">{mtime}<span class=\"size\">{size}</span></span></li>",
+                    "<li class=\"inv-file\" data-name=\"{name}\" data-type=\"{ftype}\" data-path=\"{path}\" data-key=\"{key}\" onclick=\"showFileDialog(this.dataset.name,this.dataset.type,this.dataset.path,this.dataset.key)\"><code class=\"inv-file-name inv-ext-{ext}\">{name}</code><span class=\"file-meta\">{mtime}<span class=\"size\">{size}</span></span></li>",
                     name  = html_escape(&file.name),
                     ftype = html_escape(file_type),
                     path  = html_escape(&full_path),
                     key   = html_escape(&key),
+                    ext   = html_escape(&ext_class),
                     mtime = mtime_html,
                     size  = format_size(file.size),
                 ));
@@ -1604,11 +2724,12 @@ fn render_config_section(snap: &Snapshot) -> String {
         toml = html_escape(&snap.config_toml),
     );
 
-    for (title, content) in &snap.config_files {
+    for (title, content, lang) in &snap.config_files {
         out.push_str(&format!(
-            "<details><summary>Show {title}</summary>\n<pre class=\"config\">{content}</pre>\n</details>\n",
+            "<details><summary>Show {title}</summary>\n<pre class=\"config\" data-lang=\"{lang}\">{content}</pre>\n</details>\n",
             title   = html_escape(title),
             content = html_escape(content),
+            lang    = lang,
         ));
     }
 
@@ -1751,8 +2872,19 @@ const DASHBOARD_CSS: &str = r#"
   --err: #f7768e;
   --purple: #bb9af7;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Badge color tokens — adapt in body.light for proper light-mode contrast */
+  --badge-ok-bg: rgba(158, 206, 106, 0.15);
+  --badge-ok-border: rgba(158, 206, 106, 0.35);
+  --badge-err-bg: rgba(247, 118, 142, 0.15);
+  --badge-err-border: rgba(247, 118, 142, 0.35);
+  --badge-accent-bg: rgba(122, 162, 247, 0.15);
+  --badge-accent-border: rgba(122, 162, 247, 0.35);
+  --badge-dim-bg: rgba(138, 145, 158, 0.12);
+  --badge-dim-border: rgba(138, 145, 158, 0.3);
+  --badge-warn-bg: rgba(224, 175, 104, 0.15);
+  --badge-warn-border: rgba(224, 175, 104, 0.35);
 }
-body.light {
+html.light {
   --bg: #f7f8fa;
   --surface: #ffffff;
   --surface-elevated: #f0f2f5;
@@ -1764,6 +2896,17 @@ body.light {
   --warn: #c97700;
   --err: #c5221f;
   --purple: #7c3aed;
+  /* Light-mode badge tokens use the actual light color values at higher opacity */
+  --badge-ok-bg: rgba(30, 142, 62, 0.10);
+  --badge-ok-border: rgba(30, 142, 62, 0.30);
+  --badge-err-bg: rgba(197, 34, 31, 0.10);
+  --badge-err-border: rgba(197, 34, 31, 0.30);
+  --badge-accent-bg: rgba(58, 91, 220, 0.10);
+  --badge-accent-border: rgba(58, 91, 220, 0.30);
+  --badge-dim-bg: rgba(95, 102, 112, 0.10);
+  --badge-dim-border: rgba(95, 102, 112, 0.25);
+  --badge-warn-bg: rgba(201, 119, 0, 0.10);
+  --badge-warn-border: rgba(201, 119, 0, 0.30);
 }
 * { box-sizing: border-box; }
 body {
@@ -1832,47 +2975,59 @@ h3 {
   text-transform: uppercase;
   border: 1px solid transparent;
 }
-.badge-running { background: rgba(158, 206, 106, 0.15); color: var(--ok); border-color: rgba(158, 206, 106, 0.3); }
-.badge-stopped { background: rgba(247, 118, 142, 0.15); color: var(--err); border-color: rgba(247, 118, 142, 0.3); }
-.badge-on      { background: rgba(122, 162, 247, 0.15); color: var(--accent); border-color: rgba(122, 162, 247, 0.3); }
-.badge-off     { background: rgba(138, 145, 158, 0.15); color: var(--dim); border-color: rgba(138, 145, 158, 0.3); }
-.badge-warn    { background: rgba(224, 175, 104, 0.15); color: var(--warn); border-color: rgba(224, 175, 104, 0.3); }
+.badge-running { background: var(--badge-ok-bg);     color: var(--ok);     border-color: var(--badge-ok-border); }
+.badge-stopped { background: var(--badge-err-bg);    color: var(--err);    border-color: var(--badge-err-border); }
+.badge-on      { background: var(--badge-accent-bg); color: var(--accent); border-color: var(--badge-accent-border); }
+.badge-off     { background: var(--badge-dim-bg);    color: var(--dim);    border-color: var(--badge-dim-border); }
+.badge-warn    { background: var(--badge-warn-bg);   color: var(--warn);   border-color: var(--badge-warn-border); }
 
 /* ── KPI summary strip ─────────────────────────────────────── */
 .summary-section { margin-bottom: 8px; }
 .kpi-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
 }
 .kpi-tile {
   background: var(--surface);
   border: 1px solid var(--border);
+  border-top: 3px solid var(--accent);
   border-radius: 8px;
   padding: 14px 16px;
-  position: relative;
-  overflow: hidden;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
 }
-.kpi-tile::before {
-  content: "";
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 3px;
-  background: var(--accent);
-  opacity: 0.6;
+.kpi-icon {
+  font-size: 18px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 3px;
+  opacity: 0.65;
 }
-.kpi-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: var(--dim);
-  margin-bottom: 4px;
-}
+.kpi-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .kpi-value {
   font-family: var(--mono);
   font-size: 20px;
   font-weight: 600;
   color: var(--text);
+  line-height: 1.1;
+}
+.kpi-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--dim);
+}
+.kpi-sub {
+  font-size: 10px;
+  color: var(--dim);
+  opacity: 0.7;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .module-grid {
@@ -2140,21 +3295,7 @@ details.inv-group li code {
 
 details summary { cursor: pointer; color: var(--accent); }
 
-.theme-toggle {
-  position: fixed;
-  top: 12px;
-  right: 16px;
-  background: var(--surface);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 12px;
-  font-size: 14px;
-  cursor: pointer;
-  z-index: 100;
-  font-family: var(--mono);
-}
-.theme-toggle:hover { background: var(--surface-elevated); }
+/* .theme-toggle is defined with the nav rules below — no legacy fixed-position rule */
 
 /* ── Inventory file rows (clickable) ────────────────────────── */
 li.inv-file {
@@ -2238,6 +3379,23 @@ li.inv-file code.inv-file-name {
 }
 .fd-no-content { margin-top: 14px; font-size: 13px; }
 
+/* ── Store size warning banner ───────────────────────────────── */
+.store-warning-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: rgba(255, 180, 0, 0.08);
+  border: 1px solid rgba(255, 180, 0, 0.35);
+  border-radius: 6px;
+  padding: 10px 16px;
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: var(--text);
+}
+.store-warning-icon { font-size: 16px; flex-shrink: 0; line-height: 1.4; }
+.store-warning-list { margin: 0; padding: 0; list-style: none; }
+.store-warning-list li + li { margin-top: 4px; }
+
 /* ── Top navbar ──────────────────────────────────────────────── */
 .topnav {
   position: fixed;
@@ -2276,7 +3434,6 @@ li.inv-file code.inv-file-name {
   transition: color 0.1s, background 0.1s;
 }
 .topnav-links a:hover { color: var(--text); background: var(--surface-elevated); }
-/* override the fixed-position legacy .theme-toggle — now it's inline in the nav */
 .theme-toggle {
   position: static;
   background: var(--surface-elevated);
@@ -2473,27 +3630,13 @@ tr.ev-frustration:hover    { background: rgba(247, 118, 142, 0.05); }
 }
 .arch-detail-close:hover { color: var(--text); }
 
-/* ── KPI tile layout (icon + body column) ────────────────────── */
-.kpi-tile {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.kpi-icon {
-  font-size: 22px;
-  line-height: 1;
-  flex-shrink: 0;
-  opacity: 0.7;
-}
-.kpi-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.kpi-sub {
-  font-size: 10px;
-  color: var(--dim);
-  letter-spacing: 0.3px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+/* ── File extension coloring in inventory ────────────────────── */
+code.inv-ext-json   { color: var(--ok); }
+code.inv-ext-jsonl  { color: var(--ok); }
+code.inv-ext-md     { color: var(--accent); }
+code.inv-ext-log    { color: var(--dim); }
+code.inv-ext-toml   { color: var(--warn); }
+code.inv-ext-txt    { color: var(--dim); }
 
 /* ── TOML syntax highlighting (applied by highlightToml()) ───── */
 .toml-comment { color: var(--dim); font-style: italic; }
@@ -2561,6 +3704,274 @@ tr.ev-frustration:hover    { background: rgba(247, 118, 142, 0.05); }
 .dream-journal-table .num.hi-pat    { color: var(--accent); }
 .dream-journal-table .num.hi-assoc  { color: var(--ok); }
 .dream-journal-table .num.hi-insight{ color: var(--warn); }
+/* Dream cycle narrative summary cell */
+.dream-summary { font-size: 12px; color: var(--dim); font-style: italic; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+
+/* ── Dream activity chart ────────────────────────────────────── */
+.dream-chart-wrap { margin-bottom: 16px; }
+.dream-chart-label { font-size: 11px; color: var(--dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.dream-chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
+.dc-bar { fill: var(--accent); opacity: 0.7; }
+.dc-bar.dc-has-insights { fill: var(--ok); opacity: 0.85; }
+.dc-bar.dc-empty { fill: var(--border); opacity: 1; }
+.dc-axis { stroke: var(--border); stroke-width: 1; }
+.dc-tick { fill: var(--dim); font-size: 9px; font-family: var(--mono); }
+
+/* ── Event distribution chart ────────────────────────────────── */
+.event-chart-wrap { margin-bottom: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.event-chart-row { display: flex; align-items: center; gap: 8px; min-width: 200px; }
+.event-chart-label { font-size: 11px; color: var(--dim); width: 110px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); }
+.event-chart-bar-wrap { flex: 1; height: 12px; background: var(--surface-elevated); border-radius: 3px; overflow: hidden; }
+.event-chart-bar { height: 100%; border-radius: 3px; transition: width 0.3s; }
+.event-chart-count { font-size: 11px; color: var(--dim); font-family: var(--mono); width: 30px; }
+
+/* ── File dialog syntax highlighting ────────────────────────── */
+.json-key  { color: var(--accent); }
+.json-str  { color: var(--ok); }
+.json-kw   { color: var(--warn); }
+.json-num  { color: var(--purple); }
+.md-h      { color: var(--accent); font-weight: 600; }
+.md-hr     { color: var(--border); }
+.md-li     { color: var(--text); }
+.md-table  { color: var(--dim); }
+.md-code   { color: var(--ok); }
+.md-bold   { color: var(--warn); }
+.log-err   { color: var(--err); background: rgba(247,118,142,0.08); display: block; }
+.log-warn  { color: var(--warn); background: rgba(224,175,104,0.06); display: block; }
+.log-info  { color: var(--dim); display: block; }
+.log-debug { color: var(--dim); opacity: 0.5; display: block; }
+
+/* ── i-dream widget (tabbed floating panel) ──────────────────── */
+.iw-widget {
+  position: fixed; bottom: 56px; right: 16px; z-index: 500;
+  display: flex; flex-direction: column; align-items: flex-end;
+}
+/* FAB button */
+.iw-fab {
+  background: var(--accent); color: #fff;
+  border: none; border-radius: 24px;
+  padding: 8px 18px; font-size: 13px; cursor: pointer;
+  font-family: var(--mono); box-shadow: 0 2px 12px rgba(0,0,0,0.35);
+  display: flex; align-items: center; gap: 6px;
+  transition: opacity 0.15s;
+}
+.iw-fab:hover { opacity: 0.9; }
+/* Panel */
+.iw-panel {
+  display: none; flex-direction: column;
+  background: var(--surface-elevated); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+  width: 380px; max-height: 520px;
+  margin-bottom: 10px; overflow: hidden;
+}
+.iw-panel.iw-open { display: flex; }
+/* Panel header bar */
+.iw-panel-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.iw-panel-title {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.5px;
+  color: var(--accent); text-transform: uppercase; font-family: var(--mono);
+}
+.iw-close {
+  background: none; border: none; color: var(--dim); font-size: 18px;
+  cursor: pointer; padding: 0 2px; line-height: 1;
+}
+.iw-close:hover { color: var(--text); }
+/* Tab bar */
+.iw-tabs {
+  display: flex; border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.iw-tab {
+  flex: 1; padding: 7px 0; background: none; border: none;
+  font-size: 12px; font-weight: 500; color: var(--dim);
+  cursor: pointer; transition: color 0.12s; font-family: var(--mono);
+}
+.iw-tab:hover { color: var(--text); }
+.iw-tab.iw-tab-active {
+  color: var(--accent); border-bottom: 2px solid var(--accent);
+  margin-bottom: -1px; font-weight: 700;
+}
+/* Tab content area (scrollable) */
+.iw-content { overflow-y: auto; flex: 1; }
+
+/* ── Dream tab ── */
+.iw-dream-card {
+  margin: 12px 12px 0; padding: 12px; background: var(--surface);
+  border-left: 3px solid var(--accent); border-radius: 6px;
+  border: 1px solid var(--border); border-left-width: 3px;
+}
+.iw-dream-date {
+  font-size: 10px; font-weight: 700; color: var(--accent);
+  text-transform: uppercase; letter-spacing: 0.6px;
+  margin-bottom: 6px; font-family: var(--mono);
+}
+.iw-dream-body { font-size: 12px; color: var(--text); line-height: 1.55; }
+.iw-dream-stats {
+  display: flex; gap: 12px; margin-top: 8px;
+  font-size: 11px; color: var(--dim); font-family: var(--mono);
+}
+.iw-stat-n { color: var(--text); font-weight: 600; }
+.iw-stat-ok .iw-stat-n { color: var(--ok); }
+.iw-insight-list { padding: 10px 12px 12px; }
+.iw-section-hdr {
+  font-size: 10px; font-weight: 700; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.7px;
+  margin: 10px 0 6px;
+}
+.iw-insight-list ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.iw-insight-item {
+  padding: 8px 10px; background: var(--surface); border-radius: 5px;
+  border-left: 3px solid var(--ok); font-size: 12px; color: var(--text);
+  line-height: 1.55;
+}
+.iw-empty { padding: 16px; font-size: 12px; color: var(--dim); font-style: italic; }
+
+/* ── Store tab ── */
+.iw-store-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  margin: 10px 0 0;
+}
+.iw-store-table th {
+  text-align: left; padding: 6px 12px; font-size: 10px;
+  color: var(--dim); font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.5px; border-bottom: 1px solid var(--border);
+}
+.iw-store-row td { padding: 7px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.iw-store-label { font-family: var(--mono); font-size: 11px; color: var(--text); }
+.iw-store-n { font-family: var(--mono); font-size: 12px; color: var(--text); text-align: right; }
+.iw-store-sz { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: right; }
+.iw-store-status { text-align: center; }
+/* Status icons — use darker, more saturated colors for contrast on light panel bg */
+.iw-ok-icon  { color: #1a7a32; font-size: 13px; }
+.iw-warn-icon { color: #c97700; font-size: 13px; cursor: help; }
+html.light .iw-ok-icon  { color: #0f5c24; }
+html.light .iw-warn-icon { color: #9a5800; }
+
+/* Prune section */
+.iw-prune-hdr { padding: 0 12px; }
+.iw-prune-form { padding: 0 12px 14px; }
+.iw-prune-label { font-size: 11px; color: var(--dim); display: block; margin-bottom: 6px; }
+.iw-prune-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.iw-prune-controls select,
+.iw-date-input {
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--text); border-radius: 5px; padding: 4px 8px;
+  font-size: 12px; font-family: var(--mono); cursor: pointer;
+}
+.iw-date-input { width: 130px; }
+.iw-prune-cmd-wrap {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 10px;
+}
+.iw-prune-cmd {
+  flex: 1; font-family: var(--mono); font-size: 11px;
+  color: var(--accent); word-break: break-all; line-height: 1.4;
+}
+/* Darker accent for better readability on light panel bg */
+html.light .iw-prune-cmd { color: #1e3a9a; }
+.iw-copy-btn {
+  background: var(--accent); color: #fff; border: none;
+  border-radius: 4px; padding: 3px 10px; font-size: 11px;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.iw-copy-btn:hover { opacity: 0.85; }
+.iw-prune-note { font-size: 10px; color: var(--dim); margin: 6px 0 0; font-style: italic; }
+
+/* ── Tests tab ── */
+.iw-test-result {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px 10px;
+}
+.iw-test-icon { font-size: 22px; line-height: 1; }
+.iw-test-status { font-size: 14px; font-weight: 700; }
+.iw-test-ok   .iw-test-icon   { color: #1a7a32; }
+.iw-test-ok   .iw-test-status { color: #1a7a32; }
+.iw-test-fail .iw-test-icon   { color: #c5221f; }
+.iw-test-fail .iw-test-status { color: #c5221f; }
+html.light .iw-test-ok   .iw-test-icon,
+html.light .iw-test-ok   .iw-test-status { color: #0f5c24; }
+html.light .iw-test-fail .iw-test-icon,
+html.light .iw-test-fail .iw-test-status { color: #a01a17; }
+.iw-test-counts {
+  display: flex; gap: 12px; padding: 0 16px 10px;
+  font-size: 12px; font-family: var(--mono);
+}
+.iw-tc-pass { color: #1a7a32; font-weight: 600; }
+.iw-tc-fail { color: #c5221f; font-weight: 600; }
+.iw-tc-skip { color: var(--dim); }
+html.light .iw-tc-pass { color: #0f5c24; }
+html.light .iw-tc-fail { color: #a01a17; }
+.iw-test-meta {
+  display: flex; gap: 14px; padding: 0 16px 14px;
+  font-size: 11px; color: var(--dim); font-family: var(--mono);
+}
+.iw-test-notrun {
+  padding: 14px 16px; font-size: 12px; color: var(--dim);
+}
+.iw-test-notrun p { margin: 0 0 6px; }
+.iw-test-cmd {
+  display: inline-block; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 4px 8px; font-size: 11px; color: var(--accent);
+  font-family: var(--mono); margin-top: 4px;
+}
+html.light .iw-test-cmd { color: #1e3a9a; }
+/* ── Architecture tabs ──────────────────────────────────────────── */
+.arch-view-tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+.arch-tab {
+  padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--dim); font-size: 13px;
+  cursor: pointer; transition: background 0.15s, color 0.15s;
+}
+.arch-tab:hover { background: var(--surface-elevated); color: var(--text); }
+.arch-tab-active { background: var(--accent) !important; color: #fff !important; border-color: var(--accent) !important; font-weight: 600; }
+.arch-tab-panel { width: 100%; }
+/* ── SVG flow diagram ───────────────────────────────────────────── */
+.arch-svg-diagram {
+  display: block; width: 100%; max-width: 820px; height: auto;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); overflow: visible;
+}
+.arch-svg-bg { fill: var(--surface-elevated); }
+.arch-svg-bg-hook   { fill: rgba(122, 162, 247, 0.07); }
+.arch-svg-bg-daemon { fill: rgba(187, 154, 247, 0.07); }
+.arch-svg-bg-module { fill: rgba(158, 206, 106, 0.07); }
+.arch-svg-bg-store  { fill: rgba(138, 145, 158, 0.07); }
+.arch-svg-node { fill: var(--surface-elevated); stroke: var(--border); stroke-width: 1; }
+.arch-svg-node-hook   { stroke: rgba(122, 162, 247, 0.45); }
+.arch-svg-node-daemon { stroke: rgba(187, 154, 247, 0.45); }
+.arch-svg-node-module { stroke: rgba(158, 206, 106, 0.45); }
+.arch-svg-node-store  { stroke: rgba(138, 145, 158, 0.35); }
+.arch-svg-node-title { fill: var(--text); font-size: 11px; font-weight: 600; text-anchor: middle; font-family: ui-sans-serif, system-ui, sans-serif; }
+.arch-svg-node-sub   { fill: var(--dim); font-size: 9px; text-anchor: middle; font-family: ui-sans-serif, system-ui, sans-serif; }
+.arch-svg-layer-label { fill: var(--dim); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; font-family: ui-sans-serif, system-ui, sans-serif; }
+.arch-svg-edge-label { fill: var(--dim); font-size: 9px; text-anchor: middle; font-family: ui-sans-serif, system-ui, sans-serif; }
+
+/* ── SVG node interactivity ─────────────────────────────────── */
+.arch-svg-group { cursor: pointer; }
+.arch-svg-group text { pointer-events: none; }
+.arch-svg-group:hover .arch-svg-node { stroke-width: 2.5; }
+.arch-svg-dimmed .arch-svg-node { opacity: 0.15; }
+.arch-svg-dimmed .arch-svg-node-title,
+.arch-svg-dimmed .arch-svg-node-sub { opacity: 0.15; }
+.arch-svg-related .arch-svg-node { stroke: var(--ok) !important; stroke-width: 2; opacity: 1; }
+.arch-svg-selected .arch-svg-node { stroke: var(--accent) !important; stroke-width: 2.5; opacity: 1; }
+.arch-svg-selected .arch-svg-node-title { fill: var(--accent); }
+
+/* ── SVG arch-detail panel (shared with grid) ───────────────── */
+.arch-detail-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+.arch-detail-layer { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; font-family: var(--mono); }
+.arch-detail-desc  { font-size: 12px; color: var(--text); line-height: 1.65; margin-bottom: 12px; }
+.arch-detail-related { font-size: 11px; color: var(--dim); line-height: 1.8; }
+.arch-detail-related-label { font-weight: 600; }
+.arch-svg-rel-link { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); cursor: pointer; }
+.arch-svg-rel-link:hover { opacity: 0.8; }
 "#;
 
 // ─── tests ───────────────────────────────────────────────────────────
@@ -2687,6 +4098,13 @@ mod tests {
             config_toml: "[daemon]\nlog_level = \"info\"\n".into(),
             config_files: vec![],
             dream_journal: vec![],
+            latest_insights: vec![
+                "The user runs a session persistence protocol — core dump, catchup, continue — treating conversation state as data needing ETL across context windows.".into(),
+                "High tool-use sessions (50–103 tools) are the primary source of orphaned processes; treat cleanup as a GC problem proportional to task complexity.".into(),
+            ],
+            store_warnings: vec![],
+            store_file_stats: vec![],
+            test_results: None,
         }
     }
 
@@ -2768,7 +4186,7 @@ mod tests {
         // the CSS defines dark colors on `:root` with `body.light`
         // as the override.
         assert!(html.contains("<body>"), "body should start without a class");
-        assert!(html.contains("body.light"), "CSS must define a .light override");
+        assert!(html.contains("html.light"), "CSS must define a .light override on <html>");
     }
 
     #[test]

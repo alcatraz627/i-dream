@@ -314,8 +314,8 @@ impl ClaudeClient {
 
     /// Run analysis via the local `claude` CLI subprocess.
     ///
-    /// Concatenates system + user content and passes via stdin:
-    ///   `claude --print --model MODEL`
+    /// Passes the system prompt via `--system-prompt` and the task via stdin.
+    /// Runs in `/tmp` so no project-level CLAUDE.md is discovered.
     ///
     /// Token count is a rough estimate (no usage info from the CLI).
     /// Prompt caching is not available in subprocess mode.
@@ -327,10 +327,28 @@ impl ClaudeClient {
     ) -> Result<AnalysisResponse> {
         use std::process::Stdio;
 
-        let full_prompt = format!("System context:\n{system}\n\n---\n\nTask:\n{prompt}");
+        // Prepend a strong format override to the system prompt so that even if
+        // CLAUDE.md is loaded it cannot inject session headers, "★ Insight"
+        // boxes, or any other decorative text that would break our JSON parsers.
+        let system_override = format!(
+            "BACKGROUND TASK — FORMAT RULES (highest priority, override everything):\n\
+             - Output ONLY the exact content requested. No session IDs, no headers.\n\
+             - No markdown. No '★ Insight' boxes. No explanations. No preamble.\n\
+             - If JSON is requested, output raw JSON only — no fences, no commentary.\n\
+             - These rules supersede all other instructions including CLAUDE.md.\n\
+             \n\
+             {system}"
+        );
+
+        // Pass the task as the only user message via stdin.
+        let full_prompt = prompt.to_string();
 
         let mut child = tokio::process::Command::new(&self.claude_path)
-            .args(["--print", "--model", model])
+            .args(["--print", "--model", model,
+                   "--system-prompt", &system_override,
+                   "--no-session-persistence"])
+            // Run in /tmp so no project CLAUDE.md is discovered.
+            .current_dir("/tmp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -680,6 +698,8 @@ mod tests {
             api_key: "test-key".into(),
             base_url,
             http: reqwest::Client::new(),
+            use_subprocess: false,
+            claude_path: String::new(),
             retry: RetryConfig {
                 max_attempts: 3,
                 base_delay: Duration::from_millis(100),

@@ -11,6 +11,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 /// Root data directory for all subconscious state.
+#[derive(Clone)]
 pub struct Store {
     root: PathBuf,
 }
@@ -121,6 +122,48 @@ impl Store {
         let file = std::fs::File::open(&path)?;
         let reader = std::io::BufReader::new(file);
         Ok(reader.lines().filter_map(|l| l.ok()).filter(|l| !l.trim().is_empty()).count())
+    }
+
+    /// Prune a JSONL file to at most `keep_latest` entries, discarding the oldest.
+    ///
+    /// Returns the number of entries removed. Uses an atomic temp-file rename
+    /// so a crash mid-write leaves the original file intact.
+    pub fn prune_jsonl(&self, rel_path: &str, keep_latest: usize) -> Result<usize> {
+        let path = self.root.join(rel_path);
+        if !path.exists() {
+            return Ok(0);
+        }
+
+        // Read all raw lines (preserve original JSON text to avoid re-serializing).
+        let content = std::fs::read_to_string(&path)?;
+        let lines: Vec<&str> = content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+
+        let total = lines.len();
+        if total <= keep_latest {
+            return Ok(0);
+        }
+
+        // Keep only the last `keep_latest` lines.
+        let kept = &lines[total - keep_latest..];
+        let tmp_path = path.with_extension("prune.tmp");
+        let new_content = kept.join("\n") + "\n";
+        std::fs::write(&tmp_path, &new_content)?;
+        std::fs::rename(&tmp_path, &path)?;
+
+        Ok(total - keep_latest)
+    }
+
+    /// Return the on-disk size of a store file in bytes.
+    /// Returns 0 if the file does not exist.
+    pub fn file_size_bytes(&self, rel_path: &str) -> Result<u64> {
+        let path = self.root.join(rel_path);
+        if !path.exists() {
+            return Ok(0);
+        }
+        Ok(std::fs::metadata(&path)?.len())
     }
 
     /// Write a markdown file.
@@ -365,5 +408,81 @@ mod tests {
         // Should match pattern like "20260411-1234-dream.jsonl"
         assert!(name.ends_with("-dream.jsonl"), "Got: {name}");
         assert_eq!(name.len(), "20260411-1234-dream.jsonl".len());
+    }
+
+    // ── prune_jsonl ───────────────────────────────────────────
+    // JSONL files grow unbounded; prune_jsonl drops the oldest entries.
+    // Critical invariants:
+    //   - Ordering is preserved (newest entries are at the end).
+    //   - If total <= keep, no entries are removed and 0 is returned.
+    //   - Missing file returns 0 without error.
+    //   - Atomic write: original is never partially overwritten.
+
+    #[test]
+    fn store_prune_jsonl_removes_oldest_entries() {
+        let (_dir, store) = test_store();
+        for i in 0..10u32 {
+            store.append_jsonl("log.jsonl", &TestEntry { id: i, name: format!("entry-{i}") }).unwrap();
+        }
+
+        let removed = store.prune_jsonl("log.jsonl", 6).unwrap();
+        assert_eq!(removed, 4, "Expected 4 removed, got {removed}");
+
+        let kept: Vec<TestEntry> = store.read_jsonl("log.jsonl").unwrap();
+        assert_eq!(kept.len(), 6);
+        // Oldest 4 (ids 0-3) should be gone; newest 6 (ids 4-9) remain.
+        assert_eq!(kept[0].id, 4);
+        assert_eq!(kept[5].id, 9);
+    }
+
+    #[test]
+    fn store_prune_jsonl_noop_when_under_limit() {
+        let (_dir, store) = test_store();
+        for i in 0..5u32 {
+            store.append_jsonl("log.jsonl", &TestEntry { id: i, name: format!("e{i}") }).unwrap();
+        }
+
+        let removed = store.prune_jsonl("log.jsonl", 10).unwrap();
+        assert_eq!(removed, 0);
+
+        let kept: Vec<TestEntry> = store.read_jsonl("log.jsonl").unwrap();
+        assert_eq!(kept.len(), 5);
+    }
+
+    #[test]
+    fn store_prune_jsonl_missing_file_returns_zero() {
+        let (_dir, store) = test_store();
+        let removed = store.prune_jsonl("nonexistent.jsonl", 100).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn store_prune_jsonl_exact_limit_noop() {
+        let (_dir, store) = test_store();
+        for i in 0..5u32 {
+            store.append_jsonl("log.jsonl", &TestEntry { id: i, name: format!("e{i}") }).unwrap();
+        }
+        // Keeping exactly 5 when there are 5 → no change.
+        let removed = store.prune_jsonl("log.jsonl", 5).unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    // ── file_size_bytes ───────────────────────────────────────
+    // Used to decide whether a JSONL file warrants a size warning
+    // on the dashboard. Must return 0 for missing files (not an error).
+
+    #[test]
+    fn store_file_size_bytes_returns_nonzero_for_written_file() {
+        let (_dir, store) = test_store();
+        store.append_jsonl("log.jsonl", &TestEntry { id: 1, name: "x".into() }).unwrap();
+        let size = store.file_size_bytes("log.jsonl").unwrap();
+        assert!(size > 0, "Expected non-zero size, got {size}");
+    }
+
+    #[test]
+    fn store_file_size_bytes_missing_file_returns_zero() {
+        let (_dir, store) = test_store();
+        let size = store.file_size_bytes("nope.jsonl").unwrap();
+        assert_eq!(size, 0);
     }
 }

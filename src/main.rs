@@ -89,9 +89,9 @@ async fn main() -> Result<()> {
             service::manage(action)?;
         }
 
-        Command::Dashboard { no_open } => {
+        Command::Dashboard { no_open, run_tests } => {
             let config = config::Config::load(&cli.config)?;
-            let path = dashboard::generate(&config)?;
+            let path = dashboard::generate(&config, run_tests)?;
             println!("Dashboard written to {}", path.display());
             if !no_open {
                 dashboard::open_in_browser(&path)?;
@@ -101,6 +101,41 @@ async fn main() -> Result<()> {
         Command::Config => {
             let config = config::Config::load(&cli.config)?;
             println!("{}", toml::to_string_pretty(&config)?);
+        }
+
+        Command::Prune {
+            dry_run,
+            keep_events,
+            keep_activity,
+            keep_signals,
+            keep_journal,
+        } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+
+            let targets = [
+                ("logs/events.jsonl",       keep_events,   "hook events"),
+                ("metacog/activity.jsonl",  keep_activity, "metacog activity"),
+                ("logs/signals.jsonl",      keep_signals,  "signals"),
+                ("dreams/journal.jsonl",    keep_journal,  "dream journal"),
+            ];
+
+            let mut total_removed = 0usize;
+            for (path, keep, label) in &targets {
+                let current = store.count_jsonl(path)?;
+                let would_remove = current.saturating_sub(*keep);
+                if dry_run {
+                    println!("[dry-run] {label}: {current} entries → would remove {would_remove}");
+                } else {
+                    let removed = store.prune_jsonl(path, *keep)?;
+                    println!("{label}: removed {removed} of {current} entries ({} remain)", current - removed);
+                    total_removed += removed;
+                }
+            }
+
+            if !dry_run {
+                println!("\nTotal entries removed: {total_removed}");
+            }
         }
     }
 

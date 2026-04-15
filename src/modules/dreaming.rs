@@ -128,21 +128,23 @@ fn default_category() -> String {
 /// looks like a JSON array or object) so we handle every response style the
 /// model has been observed to use.
 fn parse_json_codeblock(content: &str) -> Option<String> {
-    // Primary: ```json ... ```
+    // Primary: ```json ... ``` (closing fence optional — LLMs sometimes omit it
+    // at high temperature or when the response is very long)
     if let Some(start) = content.find("```json") {
         let after = &content[start + 7..];
-        if let Some(end) = after.find("```") {
-            return Some(after[..end].trim().to_string());
+        let end = after.find("```").unwrap_or(after.len());
+        let candidate = after[..end].trim();
+        if candidate.starts_with('[') || candidate.starts_with('{') {
+            return Some(candidate.to_string());
         }
     }
     // Fallback: bare ``` ... ```
     if let Some(start) = content.find("```") {
         let after = &content[start + 3..];
-        if let Some(end) = after.find("```") {
-            let candidate = after[..end].trim();
-            if candidate.starts_with('[') || candidate.starts_with('{') {
-                return Some(candidate.to_string());
-            }
+        let end = after.find("```").unwrap_or(after.len());
+        let candidate = after[..end].trim();
+        if candidate.starts_with('[') || candidate.starts_with('{') {
+            return Some(candidate.to_string());
         }
     }
     // Last resort: the whole content if it already looks like JSON

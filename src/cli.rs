@@ -66,10 +66,40 @@ pub enum Command {
         /// Suppress opening the dashboard in the default browser.
         #[arg(long)]
         no_open: bool,
+        /// Run the test suite and bake pass/fail results into the dashboard.
+        #[arg(long)]
+        run_tests: bool,
     },
 
     /// Show current configuration
     Config,
+
+    /// Prune oldest entries from JSONL stores to reclaim disk space.
+    ///
+    /// Removes the oldest events/activity/signals/journal entries so each
+    /// file stays within its keep limit. Use --dry-run to preview counts
+    /// without making changes.
+    Prune {
+        /// Preview what would be removed without actually modifying any files.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Maximum hook events to keep in logs/events.jsonl.
+        #[arg(long, default_value_t = 10_000)]
+        keep_events: usize,
+
+        /// Maximum metacog activity entries to keep in metacog/activity.jsonl.
+        #[arg(long, default_value_t = 10_000)]
+        keep_activity: usize,
+
+        /// Maximum signal entries to keep in logs/signals.jsonl.
+        #[arg(long, default_value_t = 5_000)]
+        keep_signals: usize,
+
+        /// Maximum dream journal entries to keep in dreams/journal.jsonl.
+        #[arg(long, default_value_t = 100)]
+        keep_journal: usize,
+    },
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]

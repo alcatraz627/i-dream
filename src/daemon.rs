@@ -212,9 +212,15 @@ impl Daemon {
                             // we count "connection received" as activity
                             // whether or not the event parses.
                             self.touch_last_activity();
-                            if let Err(e) = handle_hook_connection(stream, &self.store).await {
-                                warn!("Hook event handler failed: {e:#}");
-                            }
+                            // Spawn the handler so the accept loop stays
+                            // responsive to the next connection and to
+                            // consolidation-timer wakeups.
+                            let store = self.store.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_hook_connection(stream, &store).await {
+                                    warn!("Hook event handler failed: {e:#}");
+                                }
+                            });
                         }
                         Err(e) => {
                             error!("Socket accept failed: {e:#}");
@@ -685,20 +691,37 @@ fn pid_file_path() -> PathBuf {
         .join(".claude/subconscious/daemon.pid")
 }
 
-/// Remove any stale socket file before binding.
+/// Remove any stale socket file before binding, but only if no live daemon
+/// is already listening on it.
 ///
-/// Unix socket files persist on disk — if a previous daemon crashed
-/// without cleaning up, `bind()` will fail with `EADDRINUSE`. Removing
-/// the file is safe because we're the only writer and the old process
-/// is gone (otherwise the PID-file check in `stop()` would have caught it).
+/// Strategy:
+///   1. If the socket file exists, try connecting to it.
+///   2. If the connect succeeds, a daemon is alive — return an error so the
+///      caller knows not to proceed (duplicate-start prevention).
+///   3. If the connect fails (ECONNREFUSED / ENOENT / similar), the socket
+///      is stale — remove it and proceed normally.
+///   4. If no file exists, just ensure the parent directory is present.
 fn bind_socket(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     if path.exists() {
-        std::fs::remove_file(path).with_context(|| {
-            format!("Failed to remove stale socket at {}", path.display())
-        })?;
+        // Probe: if another daemon is listening, connecting will succeed.
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => {
+                anyhow::bail!(
+                    "A daemon is already running on socket {}. \
+                     Use `i-dream stop` first.",
+                    path.display()
+                );
+            }
+            Err(_) => {
+                // Socket file is stale — safe to remove.
+                std::fs::remove_file(path).with_context(|| {
+                    format!("Failed to remove stale socket at {}", path.display())
+                })?;
+            }
+        }
     }
     Ok(())
 }
