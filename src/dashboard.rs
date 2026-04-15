@@ -843,44 +843,49 @@ fn collect_config_files(data_dir: &Path) -> Vec<(String, String, String)> {
 
 /// Map a filename to its type label for the file-detail dialog badge.
 /// Extract up to `max` insight summaries from the contents of dreams/insights.md.
-/// Each summary is the joined text of the `| ` pipe-prefixed lines immediately
-/// following a `### Insight` header.
+///
+/// Wake writes each insight as:
+/// ```
+/// ### Insight (conf=0.82)
+/// > The insight text, possibly spanning multiple `> ` lines.
+/// ```
+/// We collect all consecutive `> ` blockquote lines that immediately follow a
+/// `### Insight` header and join them into one summary string.
 fn parse_insight_summaries(content: &str, max: usize) -> Vec<String> {
     let mut results: Vec<String> = Vec::new();
     let mut in_insight = false;
-    let mut pipe_lines: Vec<String> = Vec::new();
+    let mut quote_lines: Vec<String> = Vec::new();
 
-    let flush = |pipe: &mut Vec<String>, out: &mut Vec<String>| {
-        if !pipe.is_empty() {
-            let s = pipe.join(" ");
-            let s = s.trim().to_string();
+    let flush = |lines: &mut Vec<String>, out: &mut Vec<String>| {
+        if !lines.is_empty() {
+            let s = lines.join(" ").trim().to_string();
             if !s.is_empty() {
                 out.push(s);
             }
-            pipe.clear();
+            lines.clear();
         }
     };
 
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("### Insight") {
-            flush(&mut pipe_lines, &mut results);
+            flush(&mut quote_lines, &mut results);
             if results.len() >= max { break; }
             in_insight = true;
         } else if in_insight {
-            if line.starts_with("| ") {
-                pipe_lines.push(line[2..].trim_end().to_string());
-            } else if line.starts_with('|') {
-                pipe_lines.push(line[1..].trim().to_string());
-            } else if !trimmed.is_empty() && !pipe_lines.is_empty() {
-                // Non-pipe content after collecting lines — end of block body
-                flush(&mut pipe_lines, &mut results);
+            if line.starts_with("> ") {
+                quote_lines.push(line[2..].trim_end().to_string());
+            } else if line.starts_with('>') {
+                quote_lines.push(line[1..].trim().to_string());
+            } else if !trimmed.is_empty() && !quote_lines.is_empty() {
+                // Non-blockquote content after collecting lines — end of quote block
+                flush(&mut quote_lines, &mut results);
                 if results.len() >= max { break; }
                 in_insight = false;
             }
         }
     }
-    flush(&mut pipe_lines, &mut results);
+    flush(&mut quote_lines, &mut results);
     results.truncate(max);
     results
 }
