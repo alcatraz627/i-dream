@@ -17,7 +17,22 @@ private let statePath = subDir + "/state.json"
 private let pidPath   = subDir + "/daemon.pid"
 private let iDream    = home + "/.cargo/bin/i-dream"
 private let debugLog  = "/tmp/i-dream-bar.log"
-private let tracesDir = subDir + "/dreams/traces"
+private let tracesDir   = subDir + "/dreams/traces"
+private let activityFile = subDir + "/.last-activity"
+private let signalsFile  = subDir + "/logs/signals.jsonl"
+
+/// Falls back to the mtime of .last-activity since state.json always has
+/// last_activity = null (the daemon writes the file but not the JSON field).
+private func lastActivityDate() -> Date? {
+    let attrs = try? FileManager.default.attributesOfItem(atPath: activityFile)
+    return attrs?[.modificationDate] as? Date
+}
+
+/// Count of user-signal entries written by the UserPromptSubmit hook.
+private func signalsCount() -> Int {
+    guard let content = try? String(contentsOfFile: signalsFile, encoding: .utf8) else { return 0 }
+    return content.components(separatedBy: "\n").filter { !$0.isEmpty }.count
+}
 
 private func todayLogPath() -> String {
     let fmt = DateFormatter()
@@ -185,31 +200,31 @@ final class RichText {
 
     @discardableResult func header(_ text: String) -> RichText {
         buf.append(NSAttributedString(string: text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
+            .font: NSFont.systemFont(ofSize: 16, weight: .semibold),
             .foregroundColor: NSColor.labelColor,
         ])); return self
     }
     @discardableResult func subheader(_ text: String) -> RichText {
         buf.append(NSAttributedString(string: text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
             .foregroundColor: NSColor.labelColor,
         ])); return self
     }
     @discardableResult func body(_ text: String) -> RichText {
         buf.append(NSAttributedString(string: text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: NSFont.systemFont(ofSize: 13),
             .foregroundColor: NSColor.labelColor,
         ])); return self
     }
     @discardableResult func dim(_ text: String) -> RichText {
         buf.append(NSAttributedString(string: text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 11),
+            .font: NSFont.systemFont(ofSize: 12),
             .foregroundColor: NSColor.secondaryLabelColor,
         ])); return self
     }
     @discardableResult func mono(_ text: String) -> RichText {
         buf.append(NSAttributedString(string: text + "\n", attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
             .foregroundColor: NSColor.labelColor,
         ])); return self
     }
@@ -617,7 +632,24 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             addRow(menu, "Cycles",      "\(s.totalCycles)",        valueColor: .systemBlue)
             addRow(menu, "Tokens used", fmtNum(s.totalTokensUsed), valueColor: .systemBlue)
             addRow(menu, "Last run",    fmtDateWithAge(s.lastConsolidation))
-            addRow(menu, "Last active", s.lastActivity != nil ? fmtDateWithAge(s.lastActivity) : "—")
+            // last_activity in state.json is always null — read file mtime instead
+            let lastAct = lastActivityDate()
+            let lastActStr: String = lastAct.map { d in
+                let d2 = Date().timeIntervalSince(d)
+                let ago: String
+                switch d2 {
+                case ..<60:    ago = "just now"
+                case ..<3600:  ago = "\(Int(d2 / 60))m ago"
+                case ..<86400: ago = "\(Int(d2 / 3600))h ago"
+                default:       ago = "\(Int(d2 / 86400))d ago"
+                }
+                return "\(fmtDateDirect(d))  (\(ago))"
+            } ?? "—"
+            addRow(menu, "Last active", lastActStr)
+            let sigs = signalsCount()
+            if sigs > 0 {
+                addRow(menu, "User signals", "\(sigs)", valueColor: .systemPurple)
+            }
         } else {
             addDim(menu, "  state.json not found")
         }
@@ -650,15 +682,15 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Show last cycle summary
             if let latest = cachedJournal.last {
                 let parts = [
-                    latest.sessionsAnalyzed > 0 ? "\(latest.sessionsAnalyzed) sess" : nil,
-                    latest.patternsExtracted > 0 ? "\(latest.patternsExtracted) pat" : nil,
-                    latest.associationsFound > 0 ? "\(latest.associationsFound) assoc" : nil,
-                    latest.insightsPromoted  > 0 ? "\(latest.insightsPromoted) ins" : nil,
+                    latest.sessionsAnalyzed > 0 ? "\(latest.sessionsAnalyzed) sessions" : nil,
+                    latest.patternsExtracted > 0 ? "\(latest.patternsExtracted) patterns" : nil,
+                    latest.associationsFound > 0 ? "\(latest.associationsFound) associations" : nil,
+                    latest.insightsPromoted  > 0 ? "\(latest.insightsPromoted) insights" : nil,
                 ].compactMap { $0 }.joined(separator: "  ·  ")
                 let summary = parts.isEmpty ? "skipped — no sessions" : parts
                 addTwoLine(menu,
                            top:    "  Last cycle  \(fmtDate(latest.timestamp))",
-                           bottom: "  \(summary)  ·  \(fmtNum(latest.tokensUsed)) tkns")
+                           bottom: "  \(summary)  ·  \(fmtNum(latest.tokensUsed)) tokens")
             }
             // Show recent pattern learnings (actual text)
             if !cachedPatterns.isEmpty {
@@ -769,7 +801,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func addSection(_ menu: NSMenu, _ title: String) {
         let i = NSMenuItem()
         i.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
-            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
             .foregroundColor: NSColor.secondaryLabelColor,
         ])
         i.isEnabled = false; menu.addItem(i)
@@ -790,9 +822,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let full = NSMutableAttributedString()
         let pad  = max(1, 24 - label.count)
         full.append(NSAttributedString(string: "  \(label)" + String(repeating: " ", count: pad),
-                                       attributes: [.font: NSFont.systemFont(ofSize: 12)]))
+                                       attributes: [.font: NSFont.systemFont(ofSize: 13)]))
         full.append(NSAttributedString(string: value, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
             .foregroundColor: valueColor ?? NSColor.labelColor,
         ]))
         i.attributedTitle = full; i.isEnabled = false; menu.addItem(i)
@@ -806,13 +838,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let full = NSMutableAttributedString()
         let pad  = max(1, 24 - label.count)
         full.append(NSAttributedString(string: "\(label)" + String(repeating: " ", count: pad),
-                                       attributes: [.font: NSFont.systemFont(ofSize: 12)]))
+                                       attributes: [.font: NSFont.systemFont(ofSize: 13)]))
         full.append(NSAttributedString(string: value, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
             .foregroundColor: valueColor ?? NSColor.labelColor,
         ]))
         full.append(NSAttributedString(string: "  ›", attributes: [
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: NSFont.systemFont(ofSize: 13),
             .foregroundColor: NSColor.tertiaryLabelColor,
         ]))
         i.attributedTitle = full; i.action = action; i.target = self; i.isEnabled = true
@@ -823,9 +855,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let i    = NSMenuItem()
         let full = NSMutableAttributedString()
         full.append(NSAttributedString(string: top + "\n",
-                                       attributes: [.font: NSFont.systemFont(ofSize: 11)]))
+                                       attributes: [.font: NSFont.systemFont(ofSize: 13)]))
         full.append(NSAttributedString(string: bottom, attributes: [
-            .font: NSFont.systemFont(ofSize: 10),
+            .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.secondaryLabelColor,
         ]))
         i.attributedTitle = full; i.isEnabled = false; menu.addItem(i)
@@ -835,7 +867,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let i = NSMenuItem()
         i.attributedTitle = NSAttributedString(string: title, attributes: [
             .foregroundColor: NSColor.secondaryLabelColor,
-            .font: NSFont.systemFont(ofSize: 11),
+            .font: NSFont.systemFont(ofSize: 12),
         ])
         i.isEnabled = false; menu.addItem(i)
     }
@@ -884,7 +916,11 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let root = NSView()
         panel.contentView = root
 
-        let sv = NSScrollView()
+        // Give sv an explicit frame so contentSize is non-zero when the text
+        // view is configured as documentView. Without this, NSScrollView()
+        // with translatesAutoresizingMaskIntoConstraints=false has zero
+        // contentSize at construction time and the text view gets no size.
+        let sv = NSScrollView(frame: NSRect(x: 0, y: 48, width: 720, height: 472))
         sv.translatesAutoresizingMaskIntoConstraints = false
         sv.hasVerticalScroller   = true
         sv.hasHorizontalScroller = false
@@ -892,16 +928,25 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sv.borderType            = .noBorder
         root.addSubview(sv)
 
-        let tv = NSTextView()
-        tv.isEditable   = false
-        tv.isSelectable = true
-        tv.backgroundColor         = .textBackgroundColor
-        tv.textContainerInset      = NSSize(width: 14, height: 14)
+        let contentSize = sv.contentSize
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0,
+                                         width: contentSize.width,
+                                         height: contentSize.height))
+        tv.minSize             = NSSize(width: 0, height: contentSize.height)
+        tv.maxSize             = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                       height: CGFloat.greatestFiniteMagnitude)
+        tv.autoresizingMask    = .width
+        tv.isEditable          = false
+        tv.isSelectable        = true
+        tv.backgroundColor     = .textBackgroundColor
+        tv.textContainerInset  = NSSize(width: 14, height: 14)
         tv.isVerticallyResizable   = true
         tv.isHorizontallyResizable = false
+        tv.textContainer?.containerSize = NSSize(width: contentSize.width,
+                                                  height: CGFloat.greatestFiniteMagnitude)
         tv.textContainer?.widthTracksTextView = true
-        tv.textStorage?.setAttributedString(content)
         sv.documentView = tv
+        tv.textStorage?.setAttributedString(content)
 
         let bar = NSView()
         bar.translatesAutoresizingMaskIntoConstraints = false
@@ -1177,7 +1222,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                       "Tokens used:  \(fmtNum(s.totalTokensUsed))", "",
                       "Last run:     \(fmtDate(s.lastConsolidation))",
                       "              (\(timeAgo(s.lastConsolidation)))",
-                      "Last active:  \(fmtDate(s.lastActivity))"]
+                      "Last active:  \(lastActivityDate().map { fmtDateDirect($0) } ?? "—")"]
         }
         if let b = cachedBoard {
             lines += ["", "Patterns:     \(b.dreamsPatterns)",

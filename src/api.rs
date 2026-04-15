@@ -26,6 +26,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{debug, warn};
+use tokio::io::AsyncWriteExt as _;
 
 /// Retry policy for transient Claude API errors.
 ///
@@ -78,6 +79,10 @@ pub struct ClaudeClient {
     base_url: String,
     http: reqwest::Client,
     retry: RetryConfig,
+    /// When true, shells out to `claude --print` instead of hitting the API.
+    use_subprocess: bool,
+    /// Path to the `claude` binary (only used when `use_subprocess = true`).
+    claude_path: String,
 }
 
 #[derive(Debug)]
@@ -142,7 +147,26 @@ impl ClaudeClient {
             base_url: "https://api.anthropic.com".into(),
             http: reqwest::Client::new(),
             retry: RetryConfig::default(),
+            use_subprocess: false,
+            claude_path: String::new(),
         })
+    }
+
+    /// Construct a client that delegates analysis to the local `claude` CLI
+    /// instead of the Anthropic API. Billing goes through the Claude.ai
+    /// subscription; no `ANTHROPIC_API_KEY` required.
+    ///
+    /// `claude_path` is the path to the binary — use `"claude"` if it's on
+    /// the daemon's PATH, or a full path like `"/Users/you/.local/bin/claude"`.
+    pub fn new_subprocess(claude_path: impl Into<String>) -> Self {
+        Self {
+            api_key: String::new(),
+            base_url: String::new(),
+            http: reqwest::Client::new(),
+            retry: RetryConfig::default(),
+            use_subprocess: true,
+            claude_path: claude_path.into(),
+        }
     }
 
     /// Override the default retry policy. Primarily for tests that
@@ -167,6 +191,10 @@ impl ClaudeClient {
         max_tokens: u32,
         temperature: f64,
     ) -> Result<AnalysisResponse> {
+        if self.use_subprocess {
+            return self.analyze_subprocess(system, prompt, model).await;
+        }
+
         let request = ApiRequest {
             model: model.into(),
             max_tokens,
@@ -281,6 +309,70 @@ impl ClaudeClient {
         Ok(AnalysisResponse {
             content,
             tokens_used: body.usage.input_tokens + body.usage.output_tokens,
+        })
+    }
+
+    /// Run analysis via the local `claude` CLI subprocess.
+    ///
+    /// Concatenates system + user content and passes via stdin:
+    ///   `claude --print --model MODEL`
+    ///
+    /// Token count is a rough estimate (no usage info from the CLI).
+    /// Prompt caching is not available in subprocess mode.
+    async fn analyze_subprocess(
+        &self,
+        system: &str,
+        prompt: &str,
+        model: &str,
+    ) -> Result<AnalysisResponse> {
+        use std::process::Stdio;
+
+        let full_prompt = format!("System context:\n{system}\n\n---\n\nTask:\n{prompt}");
+
+        let mut child = tokio::process::Command::new(&self.claude_path)
+            .args(["--print", "--model", model])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!(
+                "Failed to spawn '{}' — is the claude CLI installed? \
+                 Set budget.claude_code_cli_path in config if it's not on PATH.",
+                self.claude_path
+            ))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(full_prompt.as_bytes())
+                .await
+                .context("Failed to write to claude CLI stdin")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .await
+            .context("Failed to wait for claude CLI")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "claude CLI exited with {}: {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let content = String::from_utf8(output.stdout)
+            .context("claude CLI output is not valid UTF-8")?
+            .trim()
+            .to_string();
+
+        // Rough estimate — subprocess mode has no usage metadata
+        let tokens_used = ((full_prompt.len() + content.len()) / 4) as u64;
+
+        Ok(AnalysisResponse {
+            content,
+            tokens_used,
         })
     }
 }

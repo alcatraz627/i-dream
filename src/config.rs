@@ -52,6 +52,20 @@ pub struct BudgetConfig {
     pub max_runtime_minutes: u64,
     pub model: String,
     pub model_heavy: String,
+    /// Use the local `claude` CLI instead of the Anthropic API directly.
+    /// Billing goes through your Claude.ai subscription rather than API credits.
+    /// Set `claude_code_cli_path` if `claude` is not on the daemon's PATH.
+    #[serde(default)]
+    pub use_claude_code_cli: bool,
+    /// Path to the `claude` binary. Defaults to `"claude"` (uses PATH).
+    /// Override with the full path if the daemon doesn't inherit your shell PATH,
+    /// e.g. `"/Users/you/.local/bin/claude"`.
+    #[serde(default = "default_claude_path")]
+    pub claude_code_cli_path: String,
+}
+
+fn default_claude_path() -> String {
+    "claude".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -179,6 +193,8 @@ impl Default for Config {
                 max_runtime_minutes: 10,
                 model: "claude-sonnet-4-6".into(),
                 model_heavy: "claude-opus-4-6".into(),
+                use_claude_code_cli: false,
+                claude_code_cli_path: "claude".into(),
             },
             modules: ModulesConfig {
                 dreaming: DreamingConfig {

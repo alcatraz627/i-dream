@@ -76,8 +76,14 @@ impl Daemon {
             DaemonState::default()
         };
 
-        // API client is optional — some commands don't need it
-        let client = ClaudeClient::new().ok();
+        // API client is optional — some commands don't need it.
+        // When use_claude_code_cli is set, shell out to `claude --print`
+        // instead of the direct API (no ANTHROPIC_API_KEY needed).
+        let client = if config.budget.use_claude_code_cli {
+            Some(ClaudeClient::new_subprocess(&config.budget.claude_code_cli_path))
+        } else {
+            ClaudeClient::new().ok()
+        };
 
         Ok(Self {
             config,
@@ -314,7 +320,7 @@ impl Daemon {
         let client = self
             .client
             .as_ref()
-            .context("ANTHROPIC_API_KEY not set — cannot run analysis")?;
+            .context("API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli")?;
 
         let mut budget = self.config.budget.max_tokens_per_cycle;
         let deadline = tokio::time::Instant::now()
@@ -432,7 +438,7 @@ impl Daemon {
         let client = self
             .client
             .as_ref()
-            .context("ANTHROPIC_API_KEY not set")?;
+            .context("API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli")?;
 
         let module = DreamingModule::new(&self.config, &self.store);
         let budget = self.config.budget.max_tokens_per_cycle;
