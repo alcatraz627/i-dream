@@ -692,14 +692,28 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                            top:    "  Last cycle  \(fmtDate(latest.timestamp))",
                            bottom: "  \(summary)  ·  \(fmtNum(latest.tokensUsed)) tokens")
             }
-            // Show recent pattern learnings (actual text)
+            // Show recent pattern learnings (actual text) — click to copy full text
             if !cachedPatterns.isEmpty {
                 for p in cachedPatterns {
-                    let text = p.pattern.count > 82 ? String(p.pattern.prefix(79)) + "…" : p.pattern
+                    let truncated = p.pattern.count > 82 ? String(p.pattern.prefix(79)) + "…" : p.pattern
                     let sym  = valenceSymbol(p.valence)
-                    addTwoLine(menu,
-                               top:    "  \(sym) \"\(text)\"",
-                               bottom: "  \(p.category)  ·  \(Int(p.confidence * 100))% confident")
+                    let item = NSMenuItem()
+                    let full = NSMutableAttributedString()
+                    full.append(NSAttributedString(string: "  \(sym) \"\(truncated)\"\n",
+                                                   attributes: [.font: NSFont.systemFont(ofSize: 14)]))
+                    full.append(NSAttributedString(string: "  \(p.category)  ·  \(Int(p.confidence * 100))% confident  ·  ⌘C to copy",
+                                                   attributes: [
+                                                       .font: NSFont.systemFont(ofSize: 12),
+                                                       .foregroundColor: NSColor.secondaryLabelColor,
+                                                   ]))
+                    item.attributedTitle = full
+                    item.action = #selector(copyItemText(_:))
+                    item.target = self
+                    item.isEnabled = true
+                    // Store the full (untruncated) pattern for clipboard
+                    item.representedObject = "\(sym) \(p.pattern)\nCategory: \(p.category) | Confidence: \(Int(p.confidence * 100))%"
+                    setIcon(item, "doc.on.clipboard")
+                    menu.addItem(item)
                 }
             }
         }
@@ -708,7 +722,26 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let err = b?.lastError {
             menu.addItem(.separator())
             addSection(menu, "⚠  Last Error  (today)")
-            addDim(menu, "  " + err)
+            let errItem = NSMenuItem()
+            let errFull = NSMutableAttributedString()
+            let truncErr = err.count > 90 ? String(err.prefix(87)) + "…" : err
+            errFull.append(NSAttributedString(string: "  " + truncErr + "\n",
+                                              attributes: [
+                                                  .foregroundColor: NSColor.systemRed,
+                                                  .font: NSFont.systemFont(ofSize: 13),
+                                              ]))
+            errFull.append(NSAttributedString(string: "  click to copy",
+                                              attributes: [
+                                                  .font: NSFont.systemFont(ofSize: 11),
+                                                  .foregroundColor: NSColor.tertiaryLabelColor,
+                                              ]))
+            errItem.attributedTitle = errFull
+            errItem.action = #selector(copyItemText(_:))
+            errItem.target = self
+            errItem.isEnabled = true
+            errItem.representedObject = err
+            setIcon(errItem, "doc.on.clipboard")
+            menu.addItem(errItem)
         }
 
         menu.addItem(.separator())
@@ -737,6 +770,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let gh = add(menu, "View on GitHub", #selector(openGitHub))
         setIcon(gh, "arrow.up.right.square")
+
+        let cfg = add(menu, "Edit Config in VS Code", #selector(openConfigInVSCode))
+        setIcon(cfg, "gearshape.fill")
 
         // Logs submenu
         let logsMenu = NSMenu()
@@ -793,22 +829,24 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @discardableResult
     private func add(_ menu: NSMenu, _ title: String, _ sel: Selector) -> NSMenuItem {
-        let i = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-        i.target = self; i.isEnabled = true
+        let i = NSMenuItem()
+        i.attributedTitle = NSAttributedString(string: title,
+                                               attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        i.action = sel; i.target = self; i.isEnabled = true
         menu.addItem(i); return i
     }
 
     private func addSection(_ menu: NSMenu, _ title: String) {
         let i = NSMenuItem()
         i.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
-            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: NSColor.secondaryLabelColor,
         ])
         i.isEnabled = false; menu.addItem(i)
     }
 
     private func addColored(_ menu: NSMenu, _ title: String,
-                            color: NSColor, font: NSFont = .systemFont(ofSize: 13)) {
+                            color: NSColor, font: NSFont = .systemFont(ofSize: 15)) {
         let i = NSMenuItem()
         i.attributedTitle = NSAttributedString(string: title, attributes: [
             .font: font, .foregroundColor: color,
@@ -822,9 +860,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let full = NSMutableAttributedString()
         let pad  = max(1, 24 - label.count)
         full.append(NSAttributedString(string: "  \(label)" + String(repeating: " ", count: pad),
-                                       attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+                                       attributes: [.font: NSFont.systemFont(ofSize: 14)]))
         full.append(NSAttributedString(string: value, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
             .foregroundColor: valueColor ?? NSColor.labelColor,
         ]))
         i.attributedTitle = full; i.isEnabled = false; menu.addItem(i)
@@ -838,13 +876,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let full = NSMutableAttributedString()
         let pad  = max(1, 24 - label.count)
         full.append(NSAttributedString(string: "\(label)" + String(repeating: " ", count: pad),
-                                       attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+                                       attributes: [.font: NSFont.systemFont(ofSize: 14)]))
         full.append(NSAttributedString(string: value, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
             .foregroundColor: valueColor ?? NSColor.labelColor,
         ]))
         full.append(NSAttributedString(string: "  ›", attributes: [
-            .font: NSFont.systemFont(ofSize: 13),
+            .font: NSFont.systemFont(ofSize: 14),
             .foregroundColor: NSColor.tertiaryLabelColor,
         ]))
         i.attributedTitle = full; i.action = action; i.target = self; i.isEnabled = true
@@ -855,9 +893,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let i    = NSMenuItem()
         let full = NSMutableAttributedString()
         full.append(NSAttributedString(string: top + "\n",
-                                       attributes: [.font: NSFont.systemFont(ofSize: 13)]))
+                                       attributes: [.font: NSFont.systemFont(ofSize: 14)]))
         full.append(NSAttributedString(string: bottom, attributes: [
-            .font: NSFont.systemFont(ofSize: 11),
+            .font: NSFont.systemFont(ofSize: 12),
             .foregroundColor: NSColor.secondaryLabelColor,
         ]))
         i.attributedTitle = full; i.isEnabled = false; menu.addItem(i)
@@ -867,7 +905,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let i = NSMenuItem()
         i.attributedTitle = NSAttributedString(string: title, attributes: [
             .foregroundColor: NSColor.secondaryLabelColor,
-            .font: NSFont.systemFont(ofSize: 12),
+            .font: NSFont.systemFont(ofSize: 13),
         ])
         i.isEnabled = false; menu.addItem(i)
     }
@@ -883,7 +921,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // ── SF Symbol icon helper ──────────────────────────────────────────────────
 
     private func setIcon(_ item: NSMenuItem, _ symbol: String) {
-        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+        if var img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
+            let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+            img = img.withSymbolConfiguration(cfg) ?? img
             img.isTemplate = true
             item.image = img
         }
@@ -912,21 +952,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.level                = .floating
         panel.center()
 
-        // ── Layout: scroll view above a thin toolbar ────────────────────────
-        let root = NSView()
-        panel.contentView = root
+        // ── Layout: frame-based (no Auto Layout) ────────────────────────────
+        // Auto Layout + NSScrollView/NSTextView inside NSPanel has sizing
+        // issues — the unconstrained contentView collapses to zero width
+        // before constraints resolve. autoresizingMask is the correct pattern.
+        let panW: CGFloat = 720
+        let panH: CGFloat = 520
+        let barH: CGFloat = 48
 
-        // Give sv an explicit frame so contentSize is non-zero when the text
-        // view is configured as documentView. Without this, NSScrollView()
-        // with translatesAutoresizingMaskIntoConstraints=false has zero
-        // contentSize at construction time and the text view gets no size.
-        let sv = NSScrollView(frame: NSRect(x: 0, y: 48, width: 720, height: 472))
-        sv.translatesAutoresizingMaskIntoConstraints = false
+        // Scroll view fills panel minus toolbar at bottom
+        let sv = NSScrollView(frame: NSRect(x: 0, y: barH, width: panW, height: panH - barH))
+        sv.autoresizingMask      = [.width, .height]
         sv.hasVerticalScroller   = true
         sv.hasHorizontalScroller = false
         sv.autohidesScrollers    = true
         sv.borderType            = .noBorder
-        root.addSubview(sv)
 
         let contentSize = sv.contentSize
         let tv = NSTextView(frame: NSRect(x: 0, y: 0,
@@ -943,58 +983,39 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tv.isVerticallyResizable   = true
         tv.isHorizontallyResizable = false
         tv.textContainer?.containerSize = NSSize(width: contentSize.width,
-                                                  height: CGFloat.greatestFiniteMagnitude)
+                                                 height: CGFloat.greatestFiniteMagnitude)
         tv.textContainer?.widthTracksTextView = true
         sv.documentView = tv
         tv.textStorage?.setAttributedString(content)
 
-        let bar = NSView()
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(bar)
+        // Toolbar bar at bottom
+        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: barH))
+        bar.autoresizingMask = [.width]
 
-        // Subtle separator line above the toolbar
-        let sep = NSBox()
-        sep.translatesAutoresizingMaskIntoConstraints = false
-        sep.boxType = .separator
+        // Thin separator at top edge of bar
+        let sep = NSBox(frame: NSRect(x: 0, y: barH - 1, width: panW, height: 1))
+        sep.boxType          = .separator
+        sep.autoresizingMask = [.width]
         bar.addSubview(sep)
 
         let closeBtn = NSButton(title: "Close", target: self,
                                 action: #selector(closeDetailPanel))
-        closeBtn.translatesAutoresizingMaskIntoConstraints = false
+        closeBtn.frame      = NSRect(x: panW - 92, y: 8, width: 80, height: 32)
+        closeBtn.autoresizingMask = [.minXMargin]
         closeBtn.bezelStyle = .rounded
         bar.addSubview(closeBtn)
-
-        var barConstraints: [NSLayoutConstraint] = [
-            sep.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
-            sep.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
-            sep.topAnchor.constraint(equalTo: bar.topAnchor),
-            sep.heightAnchor.constraint(equalToConstant: 1),
-            closeBtn.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
-            closeBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 4),
-        ]
 
         if filePath != nil {
             let openBtn = NSButton(title: "Open File", target: self,
                                    action: #selector(openDetailFile))
-            openBtn.translatesAutoresizingMaskIntoConstraints = false
+            openBtn.frame      = NSRect(x: panW - 184, y: 8, width: 84, height: 32)
+            openBtn.autoresizingMask = [.minXMargin]
             openBtn.bezelStyle = .rounded
             bar.addSubview(openBtn)
-            barConstraints += [
-                openBtn.trailingAnchor.constraint(equalTo: closeBtn.leadingAnchor, constant: -8),
-                openBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor, constant: 4),
-            ]
         }
 
-        NSLayoutConstraint.activate(barConstraints + [
-            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            bar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            bar.heightAnchor.constraint(equalToConstant: 48),
-            sv.topAnchor.constraint(equalTo: root.topAnchor),
-            sv.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            sv.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            sv.bottomAnchor.constraint(equalTo: bar.topAnchor),
-        ])
+        panel.contentView?.addSubview(sv)
+        panel.contentView?.addSubview(bar)
 
         detailPanel = panel
         NSApp.activate(ignoringOtherApps: true)
@@ -1303,6 +1324,27 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openGitHub() {
         NSWorkspace.shared.open(URL(string: "https://github.com/alcatraz627/i-dream")!)
+    }
+
+    /// Copy the text stored in sender.representedObject to the clipboard.
+    /// Used by pattern and error menu items so their full text can be pasted into Claude.
+    @objc private func copyItemText(_ sender: NSMenuItem) {
+        guard let text = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    @objc private func openConfigInVSCode() {
+        let configPath = home + "/.claude/subconscious/config.toml"
+        // Ensure the file exists (create default if not)
+        if !FileManager.default.fileExists(atPath: configPath) {
+            try? "# i-dream config — edit then restart the daemon\n".write(
+                toFile: configPath, atomically: true, encoding: .utf8)
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = ["open", "-a", "Visual Studio Code", configPath]
+        try? task.run()
     }
 
     private func alert(_ title: String, _ msg: String) {
