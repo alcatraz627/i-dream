@@ -110,6 +110,15 @@ private func fmtNum(_ n: Int) -> String {
     }
 }
 
+private func fmtBytes(_ n: UInt64) -> String {
+    switch n {
+    case 1_073_741_824...: return String(format: "%.1f GB", Double(n) / 1_073_741_824)
+    case 1_048_576...:     return String(format: "%.1f MB", Double(n) / 1_048_576)
+    case 1_024...:         return String(format: "%.0f KB", Double(n) / 1_024)
+    default:               return "\(n) B"
+    }
+}
+
 private func fmtElapsed(_ secs: TimeInterval) -> String {
     let s = Int(secs)
     return s < 60 ? "\(s)s" : "\(s / 60)m \(s % 60)s"
@@ -401,6 +410,37 @@ private func allAssociations() -> [Association] {
     return arr
 }
 
+// ─── Store health ─────────────────────────────────────────────────────────────
+
+private struct StoreFile {
+    let label:     String
+    let path:      String
+    let entries:   Int
+    let sizeBytes: UInt64
+    /// Matches the dashboard's 5 MB warning threshold.
+    var isLarge: Bool { sizeBytes >= 5 * 1024 * 1024 }
+}
+
+private func countJsonlLines(at path: String) -> Int {
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return 0 }
+    return content.components(separatedBy: "\n").filter { !$0.isEmpty }.count
+}
+
+private func readStoreFiles() -> [StoreFile] {
+    let watched: [(String, String)] = [
+        ("Hook events",      subDir + "/logs/events.jsonl"),
+        ("Metacog activity", subDir + "/metacog/activity.jsonl"),
+        ("Signals",          subDir + "/logs/signals.jsonl"),
+        ("Dream journal",    subDir + "/dreams/journal.jsonl"),
+    ]
+    return watched.map { label, path in
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let size  = (attrs?[.size] as? UInt64) ?? 0
+        return StoreFile(label: label, path: path,
+                         entries: countJsonlLines(at: path), sizeBytes: size)
+    }
+}
+
 private func readLatestAudit() -> (audit: MetacogAudit?, filename: String?) {
     let auditsDir = subDir + "/metacog/audits"
     guard let files = try? FileManager.default.contentsOfDirectory(atPath: auditsDir) else {
@@ -473,11 +513,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var timer: Timer?
 
-    private var cachedRunning  = false
-    private var cachedState:   DaemonState?
-    private var cachedBoard:   BoardData?
-    private var cachedPatterns: [Pattern]      = []
-    private var cachedJournal:  [JournalEntry] = []
+    private var cachedRunning     = false
+    private var cachedState:      DaemonState?
+    private var cachedBoard:      BoardData?
+    private var cachedPatterns:   [Pattern]      = []
+    private var cachedJournal:    [JournalEntry] = []
+    private var cachedStoreFiles: [StoreFile]    = []
 
     // Persistent resizable detail panel (replaces NSAlert popups)
     private var detailPanel:    NSPanel?
@@ -519,22 +560,24 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Called by AppKit right before the menu is shown — always up-to-date.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        cachedRunning  = isDaemonRunning()
-        cachedState    = readState()
-        cachedBoard    = readBoard()
-        cachedPatterns = recentPatterns()
-        cachedJournal  = recentJournal()
+        cachedRunning     = isDaemonRunning()
+        cachedState       = readState()
+        cachedBoard       = readBoard()
+        cachedPatterns    = recentPatterns()
+        cachedJournal     = recentJournal()
+        cachedStoreFiles  = readStoreFiles()
         updateButton()
         menu.removeAllItems()
         populateMenuItems(menu)
     }
 
     @objc func refresh() {
-        cachedRunning  = isDaemonRunning()
-        cachedState    = readState()
-        cachedBoard    = readBoard()
-        cachedPatterns = recentPatterns()
-        cachedJournal  = recentJournal()
+        cachedRunning     = isDaemonRunning()
+        cachedState       = readState()
+        cachedBoard       = readBoard()
+        cachedPatterns    = recentPatterns()
+        cachedJournal     = recentJournal()
+        cachedStoreFiles  = readStoreFiles()
         dlog("refresh: running=\(cachedRunning) cycles=\(cachedState?.totalCycles ?? -1)")
         checkCycleCompletion()
         updateButton()
@@ -742,6 +785,24 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             errItem.representedObject = err
             setIcon(errItem, "doc.on.clipboard")
             menu.addItem(errItem)
+        }
+
+        // ─ Store Health ───────────────────────────────────────────────────────
+        if !cachedStoreFiles.isEmpty {
+            menu.addItem(.separator())
+            let hasWarnings = cachedStoreFiles.contains { $0.isLarge }
+            addSection(menu, hasWarnings ? "⚠  Store Health" : "Store Health")
+            for f in cachedStoreFiles {
+                let prefix     = f.isLarge ? "⚠ " : "✓ "
+                let valueColor: NSColor = f.isLarge ? .systemOrange : .secondaryLabelColor
+                addRow(menu, "  \(prefix)\(f.label)",
+                       "\(f.entries) entries · \(fmtBytes(f.sizeBytes))",
+                       valueColor: valueColor)
+            }
+            if hasWarnings {
+                let pruneItem = add(menu, "  Run Prune in Terminal…", #selector(runPrune))
+                setIcon(pruneItem, "arrow.3.trianglepath")
+            }
         }
 
         menu.addItem(.separator())
@@ -1191,6 +1252,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         try? p.run(); p.waitUntilExit()
         dlog("stop exit=\(p.terminationStatus)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.refresh() }
+    }
+
+    @objc private func runPrune() {
+        dlog("runPrune")
+        openInTerminal("\(iDream) prune")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.refresh() }
     }
 
     @objc private func triggerCycle() {
