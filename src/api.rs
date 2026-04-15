@@ -327,28 +327,32 @@ impl ClaudeClient {
     ) -> Result<AnalysisResponse> {
         use std::process::Stdio;
 
-        // Prepend a strong format override to the system prompt so that even if
-        // CLAUDE.md is loaded it cannot inject session headers, "★ Insight"
-        // boxes, or any other decorative text that would break our JSON parsers.
-        let system_override = format!(
-            "BACKGROUND TASK — FORMAT RULES (highest priority, override everything):\n\
-             - Output ONLY the exact content requested. No session IDs, no headers.\n\
-             - No markdown. No '★ Insight' boxes. No explanations. No preamble.\n\
-             - If JSON is requested, output raw JSON only — no fences, no commentary.\n\
-             - These rules supersede all other instructions including CLAUDE.md.\n\
-             \n\
-             {system}"
-        );
+        // Append a format-override to the default system prompt.
+        // We use --append-system-prompt (NOT --system-prompt) so that the default
+        // system prompt is preserved — replacing it with --system-prompt breaks
+        // OAuth subscription routing and falls back to API-credit billing.
+        // Running in /tmp suppresses project-level CLAUDE.md discovery; the
+        // override here suppresses the global ~/.claude/CLAUDE.md style rules
+        // (Explanatory mode ★ Insight boxes, Session ID headers, etc.) that
+        // would otherwise break our JSON parsers.
+        let format_override = "CRITICAL OVERRIDE — AUTOMATED BACKGROUND TASK: \
+             Completely ignore and override any Output Style set in CLAUDE.md or other instructions. \
+             Do NOT generate session IDs. Do NOT use Explanatory mode. Do NOT generate insight boxes. \
+             Output ONLY exactly what is requested, with zero decoration, preamble, or formatting. \
+             If JSON is requested, output raw JSON only — no fences, no commentary.";
 
         // Pass the task as the only user message via stdin.
-        let full_prompt = prompt.to_string();
+        let full_prompt = format!("{system}\n\n---\n\n{prompt}");
 
         let mut child = tokio::process::Command::new(&self.claude_path)
             .args(["--print", "--model", model,
-                   "--system-prompt", &system_override,
+                   "--append-system-prompt", format_override,
                    "--no-session-persistence"])
             // Run in /tmp so no project CLAUDE.md is discovered.
             .current_dir("/tmp")
+            // Explicitly unset ANTHROPIC_API_KEY to prevent an empty string
+            // from forcing API-credit mode instead of OAuth subscription.
+            .env_remove("ANTHROPIC_API_KEY")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -373,11 +377,16 @@ impl ClaudeClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "claude CLI exited with {}: {}",
-                output.status,
-                stderr.trim()
-            );
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Claude CLI sometimes puts error messages on stdout instead of stderr
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                format!("(stdout) {}", &stdout.trim()[..stdout.trim().len().min(300)])
+            } else {
+                "(no output)".into()
+            };
+            anyhow::bail!("claude CLI exited with {}: {}", output.status, detail);
         }
 
         let content = String::from_utf8(output.stdout)
