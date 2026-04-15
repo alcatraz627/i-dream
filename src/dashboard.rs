@@ -1407,9 +1407,31 @@ function initArchNodes() {{
   }});
 }}
 
+// ── Lazy payload highlighting ─────────────────────────────────────
+// Payload <pre> elements live inside <details> that are closed by
+// default. Highlighting on DOMContentLoaded would process all of them
+// eagerly (potentially dozens of 2 KB JSON blobs). Instead, attach a
+// toggle listener to each details and highlight only on first open.
+function initPayloadHighlights() {{
+  document.querySelectorAll('details.trace-payload').forEach(function(details) {{
+    details.addEventListener('toggle', function() {{
+      if (!details.open) return;
+      var pre = details.querySelector('pre.payload-body');
+      if (!pre || pre.dataset.highlighted) return;
+      var cls = pre.className;
+      if      (cls.includes('payload-json'))     {{ highlightJson(pre);     }}
+      else if (cls.includes('payload-jsonl'))    {{ highlightJsonl(pre);    }}
+      else if (cls.includes('payload-markdown')) {{ highlightMarkdown(pre); }}
+      else if (cls.includes('payload-log'))      {{ highlightLog(pre);      }}
+      pre.dataset.highlighted = '1';
+    }});
+  }});
+}}
+
 document.addEventListener('DOMContentLoaded', function() {{
   initEventsPagination();
   applyConfigHighlights();
+  initPayloadHighlights();
   initArchNodes();
   initSvgNodes();
   localizeEventTimestamps();
@@ -3710,7 +3732,7 @@ code.inv-ext-txt    { color: var(--dim); }
 .dream-journal-table .num.hi-assoc  { color: var(--ok); }
 .dream-journal-table .num.hi-insight{ color: var(--warn); }
 /* Dream cycle narrative summary cell */
-.dream-summary { font-size: 12px; color: var(--dim); font-style: italic; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.dream-summary { font-size: 12px; color: var(--dim); font-style: italic; }
 
 /* ── Dream activity chart ────────────────────────────────────── */
 .dream-chart-wrap { margin-bottom: 16px; }
