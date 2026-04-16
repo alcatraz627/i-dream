@@ -7,10 +7,12 @@ use crate::dream_trace::{DreamTracer, EventKind, Phase as TracePhase};
 use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
     dreaming::DreamingModule,
+    insight_digest::InsightDigestModule,
     introspection::{IntrospectionModule, ReasoningPatterns},
     intuition::IntuitionModule,
     metacog::{MetacogModule, ToolActivitySample},
     prospective::{Intention, Priority, ProspectiveModule, Trigger},
+    user_settings::UserSettings,
     Module,
 };
 use crate::store::Store;
@@ -313,10 +315,22 @@ impl Daemon {
             Utc::now() - chrono::Duration::hours(self.config.idle.threshold_hours as i64 + 1)
         };
 
-        let idle_duration = Utc::now() - last_activity;
-        let threshold = chrono::Duration::hours(self.config.idle.threshold_hours as i64);
+        // Re-read user settings on every check so widget frequency changes
+        // take effect without a daemon restart.
+        let settings = UserSettings::load(&self.config.data_dir());
+        let threshold_hours = settings.effective_threshold_hours(self.config.idle.threshold_hours);
+        let threshold_secs = (threshold_hours * 3600.0) as i64;
 
-        Ok(idle_duration > threshold)
+        let idle_secs = (Utc::now() - last_activity).num_seconds();
+
+        let next_dream_secs = threshold_secs - idle_secs;
+        if next_dream_secs > 0 {
+            let h = next_dream_secs / 3600;
+            let m = (next_dream_secs % 3600) / 60;
+            debug!("Next dream in {h}h {m}m (threshold: {threshold_hours:.1}h)");
+        }
+
+        Ok(idle_secs >= threshold_secs)
     }
 
     /// Run the full consolidation cycle, respecting budget and timeouts.
@@ -410,7 +424,29 @@ impl Daemon {
             }
         }
 
-        // Phase 5: Housekeeping (no API budget)
+        // Phase 5: Insight Digest (3h cooldown, capped at 512 tokens)
+        if budget > 0 {
+            let module = InsightDigestModule::new(&self.config, &self.store);
+            if module.should_run()? {
+                let digest_budget = budget.min(512);
+                info!("Running insight digest (budget: {digest_budget} tokens)");
+                match tokio::time::timeout(
+                    deadline - tokio::time::Instant::now(),
+                    module.run(client, digest_budget),
+                )
+                .await
+                {
+                    Ok(Ok(tokens)) => {
+                        budget = budget.saturating_sub(tokens);
+                        info!("Insight digest complete ({tokens} tokens used)");
+                    }
+                    Ok(Err(e)) => error!("Insight digest failed: {e:#}"),
+                    Err(_) => warn!("Insight digest timed out"),
+                }
+            }
+        }
+
+        // Phase 6: Housekeeping (no API budget)
         let prospective = ProspectiveModule::new(&self.config, &self.store);
         prospective.cleanup_expired()?;
 
@@ -461,7 +497,11 @@ impl Daemon {
 
         match phase {
             DreamPhase::All => {
-                module.run(client, budget).await?;
+                // Run the full consolidation pipeline (all modules) so
+                // manual dream cycles don't silently skip InsightDigest,
+                // Metacog, and Intuition.
+                self.run_consolidation().await?;
+                return Ok(());
             }
             DreamPhase::Sws => {
                 let tracer = DreamTracer::new(&self.store);

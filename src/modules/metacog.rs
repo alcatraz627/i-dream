@@ -534,12 +534,63 @@ Output as JSON matching this shape:
 
         self.persist_processed(&batch.sessions_seen)?;
 
+        // Prune samples.jsonl — keep only entries from the last 30 days.
+        // Without this the file grows without bound; 8k+ entries → 21 MB
+        // seen in practice, and the truncation warning fires every cycle.
+        if let Err(e) = self.trim_old_samples(30) {
+            warn!("metacog sample pruning failed (non-fatal): {e:#}");
+        }
+
         info!("Metacog analysis complete ({} tokens)", response.tokens_used);
         Ok(response.tokens_used)
     }
 }
 
 impl<'a> MetacogModule<'a> {
+    /// Remove samples older than `keep_days` from `metacog/samples.jsonl`.
+    /// Rewrites the file in-place. No-ops if the file doesn't exist or is
+    /// already within the retention window.
+    fn trim_old_samples(&self, keep_days: i64) -> Result<()> {
+        let path = self.store.path("metacog/samples.jsonl");
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        let cutoff = Utc::now() - chrono::Duration::days(keep_days);
+
+        let kept: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                // Keep lines whose timestamp field is on or after the cutoff.
+                // Lines that don't parse (e.g. blank lines, corrupt entries)
+                // are kept rather than silently discarded.
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+                    if let Some(ts_str) = val.get("timestamp").and_then(|v| v.as_str()) {
+                        if let Ok(ts) = ts_str.parse::<DateTime<Utc>>() {
+                            return ts >= cutoff;
+                        }
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let original_count = content.lines().count();
+        let kept_count = kept.len();
+        if kept_count < original_count {
+            let new_content = kept.join("\n") + if kept.is_empty() { "" } else { "\n" };
+            std::fs::write(&path, new_content)?;
+            info!(
+                "Metacog samples pruned: {original_count} → {kept_count} entries \
+                 (removed {} entries older than {keep_days} days)",
+                original_count - kept_count
+            );
+        }
+
+        Ok(())
+    }
+
     /// Add newly-processed sessions (with their file sizes) to the ledger
     /// and persist. Storing the file size at scan time enables the staleness
     /// check in `load_new_samples` — a session is re-queued when its JSONL

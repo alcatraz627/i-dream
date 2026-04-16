@@ -349,18 +349,45 @@ Output as a JSON array of objects."#;
             Vec::new()
         };
 
-        // Deduplicate: build normalized-text fingerprints of existing patterns
-        // so near-duplicate phrasings (same meaning, different wording) are filtered out.
-        let existing_keys: HashSet<String> =
-            all.iter().map(|p| normalize_pattern(&p.pattern)).collect();
-        let unique_new: Vec<ExtractedPattern> = new_patterns
-            .into_iter()
-            .filter(|p| !existing_keys.contains(&normalize_pattern(&p.pattern)))
+        // Deduplicate: for patterns whose normalized text matches an existing entry,
+        // increment the existing entry's occurrence count and update last_seen/sources
+        // rather than silently dropping the new observation. This lets high-frequency
+        // patterns accumulate signal across cycles instead of staying at occurrences=1.
+        let now_str = now.clone();
+        let mut existing_key_to_idx: HashMap<String, usize> = all
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (normalize_pattern(&p.pattern), i))
             .collect();
-        let patterns_count = unique_new.len() as u64;
 
-        if patterns_count > 0 {
-            all.extend(unique_new);
+        let mut truly_new: Vec<ExtractedPattern> = Vec::new();
+        let mut had_merges = false;
+        for p in new_patterns {
+            let key = normalize_pattern(&p.pattern);
+            if let Some(&idx) = existing_key_to_idx.get(&key) {
+                // Merge: bump occurrence counter and refresh last_seen.
+                all[idx].occurrences += 1;
+                all[idx].last_seen = now_str.clone();
+                // Absorb confidence if this observation is more confident.
+                if p.confidence > all[idx].confidence {
+                    all[idx].confidence = p.confidence;
+                }
+                // Union the source sessions.
+                for sid in &p.source_sessions {
+                    if !all[idx].source_sessions.contains(sid) {
+                        all[idx].source_sessions.push(sid.clone());
+                    }
+                }
+                had_merges = true;
+            } else {
+                existing_key_to_idx.insert(key, all.len() + truly_new.len());
+                truly_new.push(p);
+            }
+        }
+        let patterns_count = truly_new.len() as u64;
+
+        if had_merges || !truly_new.is_empty() {
+            all.extend(truly_new);
 
             // Cap total patterns at 500, keeping highest-confidence ones.
             // Without a cap patterns.json grows unboundedly and REM prompts bloat.

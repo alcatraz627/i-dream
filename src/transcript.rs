@@ -552,14 +552,37 @@ fn hash_string(s: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Session-infrastructure boilerplate that should never become a valence
+/// signal. These phrases appear in every catchup/core-dump handoff and would
+/// dominate the intuition store if left unfiltered.
+const STOP_WORDS: &[&str] = &[
+    // Session handoff boilerplate (catchup/core-dump preamble)
+    "this", "session", "being", "continued", "from", "previous", "conversation",
+    "that", "context", "with", "have", "been", "summary", "below", "covers",
+    "earlier", "portion", "context", "above", "contains", "compacted",
+    // Task system noise
+    "task", "notification", "output", "completed", "background",
+    // Skill names / commands
+    "command", "message", "catchup", "coredump", "dump", "core", "skill",
+    "running", "continue", "resume", "here", "start",
+    // Filler / meta
+    "sorry", "keep", "going", "will", "just", "need", "help", "okay", "done",
+    "note", "also", "make", "sure", "look", "like", "know", "want", "work",
+    "wait", "adding", "there", "following", "items", "allow", "history",
+    "final", "data", "check", "other", "alternate", "sources", "give",
+    "stop", "fuck", "minute", "filter", "please", "tests", "once", "works",
+    "tell", "option", "sounds", "good", "name",
+];
+
 fn extract_keywords(text: &str) -> Vec<String> {
     // Cheap keyword extraction: take first 5 lowercase alphanumeric tokens
-    // longer than 3 chars. Good enough for bucketing; real topic detection
-    // happens in the analysis pass.
+    // longer than 3 chars, after filtering out session-infrastructure stopwords.
+    // Good enough for bucketing; real topic detection happens in the analysis pass.
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|t| t.len() > 3)
-        .take(5)
         .map(|t| t.to_ascii_lowercase())
+        .filter(|t| !STOP_WORDS.contains(&t.as_str()))
+        .take(5)
         .collect()
 }
 
