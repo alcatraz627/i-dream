@@ -473,23 +473,37 @@ Output as JSON matching this shape:
         // Compact JSON (not pretty) to keep token cost down. Budget the
         // prompt to ~40k chars — anything more and Claude's analysis
         // would be both expensive and low-signal.
-        let serialized = serde_json::to_string(&batch.units)?;
-        let trimmed = if serialized.len() > 40_000 {
-            warn!(
-                "Metacog sample batch exceeds 40k chars ({}), truncating",
-                serialized.len()
-            );
-            // Keep prefix — newer samples come first due to rev() scan.
-            let mut cut = 40_000;
-            while !serialized.is_char_boundary(cut) {
-                cut -= 1;
+        //
+        // Fit as many complete units as possible within the budget instead of
+        // raw-truncating the serialized array (which would send malformed JSON
+        // to the model). Newer sessions come first due to rev() scan, so the
+        // budget naturally prioritizes recent activity.
+        const SAMPLE_BUDGET: usize = 40_000;
+        let total_units = batch.units.len();
+        let mut budget_units: Vec<&ExecutionUnit> = Vec::new();
+        let mut running_len = 2usize; // account for "[]" wrapper
+        for unit in &batch.units {
+            let unit_json = serde_json::to_string(unit)?;
+            let sep = if budget_units.is_empty() { 0 } else { 1 }; // comma separator
+            if running_len + sep + unit_json.len() > SAMPLE_BUDGET {
+                break;
             }
-            &serialized[..cut]
-        } else {
-            serialized.as_str()
-        };
+            running_len += sep + unit_json.len();
+            budget_units.push(unit);
+        }
+        let analyzed_count = budget_units.len();
+        let serialized = serde_json::to_string(&budget_units)?;
 
-        let prompt = format!("Analyze these execution units:\n\n{trimmed}");
+        if analyzed_count < total_units {
+            info!(
+                "Metacog: analyzing {}/{} units (budget-limited to {}k chars)",
+                analyzed_count,
+                total_units,
+                SAMPLE_BUDGET / 1000,
+            );
+        }
+
+        let prompt = format!("Analyze these execution units:\n\n{serialized}");
 
         let response = client
             .analyze(
@@ -509,7 +523,8 @@ Output as JSON matching this shape:
             &serde_json::json!({
                 "timestamp": Utc::now(),
                 "sessions": batch.sessions_seen,
-                "units_analyzed": batch.units.len(),
+                "units_analyzed": analyzed_count,
+                "units_total": total_units,
                 "tokens_used": response.tokens_used,
                 "response": response.content,
             }),
