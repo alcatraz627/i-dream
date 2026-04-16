@@ -3916,7 +3916,7 @@ code.inv-ext-txt    { color: var(--dim); }
   margin-bottom: -1px; font-weight: 700;
 }
 /* Tab content area (scrollable) */
-.iw-content { overflow-y: auto; flex: 1; }
+.iw-content { overflow-y: auto; flex: 1; min-height: 0; }
 
 /* ── Dream tab ── */
 .iw-dream-card {
@@ -3950,16 +3950,16 @@ code.inv-ext-txt    { color: var(--dim); }
 }
 .iw-empty { padding: 16px; font-size: 12px; color: var(--dim); font-style: italic; }
 .iw-help-text {
-  font-size: 11px; color: var(--dim); margin: 0 0 8px; padding: 0 2px;
+  font-size: 11px; color: var(--dim); margin: 10px 12px 8px; padding: 0;
   line-height: 1.5;
 }
-.iw-help-footer { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.iw-help-footer { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; margin-bottom: 12px; }
 .iw-help-footer a { color: var(--accent); text-decoration: none; font-size: 11px; }
 .iw-help-footer a:hover { text-decoration: underline; }
 .iw-run-row {
   display: flex; align-items: center; gap: 6px;
   background: var(--surface); border: 1px solid var(--border);
-  border-radius: 6px; padding: 6px 8px; margin-bottom: 10px;
+  border-radius: 6px; padding: 6px 8px; margin: 0 12px 10px;
 }
 .iw-run-cmd {
   flex: 1; font-family: var(--mono); font-size: 11px;
