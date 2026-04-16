@@ -762,7 +762,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Show recent pattern learnings (actual text) — click to copy full text
             if !cachedPatterns.isEmpty {
                 for p in cachedPatterns {
-                    let truncated = p.pattern.count > 82 ? String(p.pattern.prefix(79)) + "…" : p.pattern
+                    let truncated = p.pattern.count > 180 ? String(p.pattern.prefix(177)) + "…" : p.pattern
                     let sym  = valenceSymbol(p.valence)
                     let item = NSMenuItem()
                     let full = NSMutableAttributedString()
