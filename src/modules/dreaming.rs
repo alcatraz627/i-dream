@@ -261,15 +261,23 @@ impl<'a> DreamingModule<'a> {
             summaries.len()
         );
 
-        let system_prompt = r#"You are a memory consolidation system. Your job is to analyze
-session transcripts and extract the most important learnings. For each learning, provide:
-- pattern: abstract description (not specific file paths)
-- valence: positive/negative/neutral
-- confidence: 0.0-1.0
-- category: approach|tool-use|domain|user-preference|architecture
+        let system_prompt = r#"You are a memory consolidation system for a software engineering AI assistant. Analyze session transcripts and extract reusable behavioral learnings.
 
-Prioritize: corrections > novel discoveries > successful patterns.
-Output as a JSON array of objects."#;
+For each learning, output a JSON object with:
+- pattern: one concise sentence describing an abstract, reusable insight (no file paths, variable names, or session-specific details)
+- valence: "positive" (approach worked), "negative" (approach failed or was corrected), or "neutral" (observation)
+- confidence: 0.0–1.0 (start at 0.5; only go higher with multiple clear signals)
+- category: one of approach|tool-use|domain|user-preference|architecture
+
+Prioritization rules:
+1. Explicit user corrections ("no", "revert", "wrong", "stop doing X") → always extract, confidence ≥ 0.85
+2. Repeated failure on the same type of task → negative pattern, confidence 0.70–0.85
+3. Novel successful approaches the assistant hasn't tried before → positive pattern, confidence 0.60–0.75
+4. Patterns that reinforce already-obvious behavior → skip
+5. Session handoff boilerplate (/catchup, /core-dump, context summaries, "this session is continued from") → skip entirely
+
+Skip: one-off incidents with no generalization value, trivia, transient errors.
+Output ONLY a JSON array of objects. No preamble, no commentary."#;
 
         let prompt = format!("Analyze the following session data and extract key learnings:\n\n{dump}");
 
@@ -577,15 +585,22 @@ Output as a JSON array of objects."#;
             .collect::<Vec<_>>()
             .join("\n");
 
-        let system_prompt = r#"You are in a creative association mode. Given patterns from
-different projects and domains, find unexpected connections. For each connection:
-- patterns_linked: [id1, id2, ...] — use the exact IDs from the input list
-- hypothesis: what the connection suggests
-- confidence: 0.0-1.0 (be honest — most will be low)
-- actionable: true/false
-- suggested_rule: if actionable, a concrete rule to apply
+        let system_prompt = r#"You are in creative association mode for an AI assistant's memory system. Find non-obvious connections between behavioral patterns across sessions and domains.
 
-Output as a JSON array of objects."#;
+For each connection, output a JSON object with:
+- patterns_linked: [id1, id2, ...] — exact IDs from the input (link 2–4 patterns per connection)
+- hypothesis: one sentence describing what the connection reveals about underlying behavior
+- confidence: 0.0–1.0 (be honest; unexpected connections rarely exceed 0.6)
+- actionable: true if the hypothesis suggests a concrete behavioral change
+- suggested_rule: if actionable, a specific directive in the form "Always X when Y" or "Avoid X unless Z"
+
+Look for:
+- Cross-domain structural similarities (same mistake recurring in different areas)
+- Temporal degradation (approaches that work initially but fail under complexity)
+- Contradiction pairs (two patterns that conflict and need reconciliation)
+
+Skip obvious connections between directly-related patterns. If no genuine connection exists, return [].
+Output ONLY a JSON array. No commentary."#;
 
         let prompt = format!(
             "Find creative connections between these patterns:\n\n{pattern_digest}"

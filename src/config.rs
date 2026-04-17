@@ -11,6 +11,44 @@ pub struct Config {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub ingestion: IngestionConfig,
+    #[serde(default)]
+    pub limits: LimitsConfig,
+}
+
+/// Rolling-window Claude Code session-token limits.
+///
+/// When Claude Code usage (measured by output tokens in recent transcripts)
+/// exceeds `warn_pct` of either threshold, i-dream will skip automatic
+/// consolidation cycles and warn before manual triggers.
+///
+/// Set thresholds to 0 to disable limit checking entirely (the default).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// Max output tokens allowed in the rolling 5-hour window.
+    /// 0 = disabled. Suggested: 40000 for Claude Pro subscribers.
+    #[serde(default)]
+    pub output_tokens_5h: u64,
+    /// Max output tokens allowed in the rolling 7-day window.
+    /// 0 = disabled. Suggested: 500000 for Claude Pro subscribers.
+    #[serde(default)]
+    pub output_tokens_7d: u64,
+    /// Fraction of the threshold at which to start warning (0.0–1.0).
+    #[serde(default = "default_warn_pct")]
+    pub warn_pct: f64,
+}
+
+fn default_warn_pct() -> f64 {
+    0.80
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            output_tokens_5h: 0,
+            output_tokens_7d: 0,
+            warn_pct: default_warn_pct(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -242,6 +280,7 @@ impl Default for Config {
                 user_prompt_submit: true,
             },
             ingestion: IngestionConfig::default(),
+            limits:    LimitsConfig::default(),
         }
     }
 }

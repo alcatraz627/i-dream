@@ -49,6 +49,31 @@ pub struct DaemonState {
     pub total_cycles: u64,
     pub total_tokens_used: u64,
     pub last_activity: Option<DateTime<Utc>>,
+    /// Populated after each usage check — nil when limits are disabled.
+    #[serde(default)]
+    pub usage: Option<UsageLimitStatus>,
+}
+
+/// Rolling-window Claude Code token usage measured from session transcripts.
+/// Written to state.json so the menubar widget can display it without
+/// re-scanning transcripts on every refresh.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageLimitStatus {
+    /// Output tokens used by Claude Code sessions in the last 5 hours.
+    pub output_tokens_5h: u64,
+    /// Output tokens used in the last 7 days.
+    pub output_tokens_7d: u64,
+    /// Configured 5h threshold (0 = disabled).
+    pub limit_5h: u64,
+    /// Configured 7d threshold (0 = disabled).
+    pub limit_7d: u64,
+    /// Fraction of the 5h limit consumed (0.0–∞; 0.0 when disabled).
+    pub pct_5h: f64,
+    /// Fraction of the 7d limit consumed (0.0–∞; 0.0 when disabled).
+    pub pct_7d: f64,
+    /// True when either enabled window is at or above `warn_pct`.
+    pub over_warn_threshold: bool,
+    pub checked_at: DateTime<Utc>,
 }
 
 pub struct Daemon {
@@ -287,6 +312,12 @@ impl Daemon {
                     return;
                 }
                 info!("Idle threshold reached, starting consolidation cycle");
+                // Abort if Claude Code session usage is over the warn threshold.
+                if self.check_usage_limit() {
+                    warn!("Usage over warn threshold — skipping automatic consolidation cycle. Trigger manually to override.");
+                    self.cycle_in_progress.store(false, Ordering::SeqCst);
+                    return;
+                }
                 let result = self.run_consolidation().await;
                 self.cycle_in_progress.store(false, Ordering::SeqCst);
                 if let Err(e) = result {
@@ -331,6 +362,116 @@ impl Daemon {
         }
 
         Ok(idle_secs >= threshold_secs)
+    }
+
+    /// Scan recent Claude Code session transcripts and compute rolling-window
+    /// token usage. Writes the result into `state.json` so the menubar can
+    /// display it without re-scanning.
+    ///
+    /// Returns `true` when usage is over the configured warn threshold and
+    /// consolidation should be skipped or confirmed.
+    fn check_usage_limit(&self) -> bool {
+        let cfg = &self.config.limits;
+        // Both thresholds disabled — skip the scan entirely.
+        if cfg.output_tokens_5h == 0 && cfg.output_tokens_7d == 0 {
+            return false;
+        }
+
+        let projects_dir = crate::config::expand_tilde(&self.config.ingestion.projects_dir);
+        let now = Utc::now();
+        let cutoff_5h = now - chrono::Duration::hours(5);
+        let cutoff_7d = now - chrono::Duration::days(7);
+
+        let mut tokens_5h: u64 = 0;
+        let mut tokens_7d: u64 = 0;
+
+        let Ok(projects) = std::fs::read_dir(&projects_dir) else {
+            return false;
+        };
+
+        for project in projects.flatten() {
+            let Ok(sessions) = std::fs::read_dir(project.path()) else { continue };
+            for session in sessions.flatten() {
+                let path = session.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                // Quick mtime check to skip files untouched in 7 days.
+                if let Ok(meta) = session.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        let age = std::time::SystemTime::now()
+                            .duration_since(modified)
+                            .unwrap_or_default();
+                        if age.as_secs() > 7 * 86_400 + 3600 {
+                            continue;
+                        }
+                    }
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else { continue };
+                for line in content.lines() {
+                    // Parse only assistant entries (they carry usage).
+                    let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                    if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                        continue;
+                    }
+                    let out_tokens = val
+                        .pointer("/usage/outputTokens")
+                        .or_else(|| val.pointer("/usage/output_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    if out_tokens == 0 {
+                        continue;
+                    }
+                    let ts_str = val.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                    let ts = ts_str.parse::<DateTime<Utc>>().unwrap_or(now);
+                    if ts >= cutoff_7d {
+                        tokens_7d += out_tokens;
+                        if ts >= cutoff_5h {
+                            tokens_5h += out_tokens;
+                        }
+                    }
+                }
+            }
+        }
+
+        let pct_5h = if cfg.output_tokens_5h > 0 {
+            tokens_5h as f64 / cfg.output_tokens_5h as f64
+        } else {
+            0.0
+        };
+        let pct_7d = if cfg.output_tokens_7d > 0 {
+            tokens_7d as f64 / cfg.output_tokens_7d as f64
+        } else {
+            0.0
+        };
+        let over = pct_5h >= cfg.warn_pct || pct_7d >= cfg.warn_pct;
+
+        let status = UsageLimitStatus {
+            output_tokens_5h: tokens_5h,
+            output_tokens_7d: tokens_7d,
+            limit_5h: cfg.output_tokens_5h,
+            limit_7d: cfg.output_tokens_7d,
+            pct_5h,
+            pct_7d,
+            over_warn_threshold: over,
+            checked_at: now,
+        };
+
+        info!(
+            "Usage check: 5h={tokens_5h}/{} ({:.0}%), 7d={tokens_7d}/{} ({:.0}%), over={}",
+            cfg.output_tokens_5h,
+            pct_5h * 100.0,
+            cfg.output_tokens_7d,
+            pct_7d * 100.0,
+            over
+        );
+
+        // Persist into state.json for the menubar to read.
+        let _ = self.update_state(|s| {
+            s.usage = Some(status);
+        });
+
+        over
     }
 
     /// Run the full consolidation cycle, respecting budget and timeouts.
@@ -491,6 +632,28 @@ impl Daemon {
             .client
             .as_ref()
             .context("API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli")?;
+
+        // Check usage limits before spending API tokens. The CLI and menubar
+        // both surface this as a warning rather than a hard block, but the
+        // daemon records the status so callers can display it.
+        if self.check_usage_limit() {
+            warn!(
+                "Usage over warn threshold ({:.0}% of 5h limit, {:.0}% of 7d limit). \
+                 Proceeding with manual trigger.",
+                self.store
+                    .read_json::<DaemonState>("state.json")
+                    .ok()
+                    .and_then(|s| s.usage)
+                    .map(|u| u.pct_5h * 100.0)
+                    .unwrap_or(0.0),
+                self.store
+                    .read_json::<DaemonState>("state.json")
+                    .ok()
+                    .and_then(|s| s.usage)
+                    .map(|u| u.pct_7d * 100.0)
+                    .unwrap_or(0.0),
+            );
+        }
 
         let module = DreamingModule::new(&self.config, &self.store);
         let budget = self.config.budget.max_tokens_per_cycle;

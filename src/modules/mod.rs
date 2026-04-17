@@ -5,10 +5,12 @@
 //! and prospective memory.
 
 pub mod dreaming;
+pub mod insight_digest;
 pub mod introspection;
 pub mod intuition;
 pub mod metacog;
 pub mod prospective;
+pub mod user_settings;
 
 use crate::api::ClaudeClient;
 use crate::config::Config;

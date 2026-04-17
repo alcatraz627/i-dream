@@ -116,6 +116,8 @@ pub struct CalibrationEntry {
     pub underconfident_count: u64,
     pub well_calibrated_count: u64,
     pub biases_detected: Vec<String>,
+    #[serde(default)]
+    pub recommendations: Vec<String>,
 }
 
 pub struct MetacogModule<'a> {
@@ -383,6 +385,7 @@ mod tests {
             underconfident_count: 1,
             well_calibrated_count: 9,
             biases_detected: vec!["anchoring".into()],
+            recommendations: vec!["slow down".into()],
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: CalibrationEntry = serde_json::from_str(&json).unwrap();
@@ -533,6 +536,40 @@ Output as JSON matching this shape:
         }
 
         self.persist_processed(&batch.sessions_seen)?;
+
+        // Parse the LLM response and append to calibration.jsonl.
+        #[derive(Deserialize)]
+        struct LlmCalibration {
+            calibration_score: f64,
+            overconfident_count: u64,
+            underconfident_count: u64,
+            well_calibrated_count: u64,
+            #[serde(default)]
+            biases_detected: Vec<String>,
+            #[serde(default)]
+            recommendations: Vec<String>,
+        }
+        match serde_json::from_str::<LlmCalibration>(&response.content) {
+            Ok(llm) => {
+                let entry = CalibrationEntry {
+                    date: Utc::now().format("%Y-%m-%d").to_string(),
+                    session_id: batch.sessions_seen.first().map(|(s, _)| s.clone()).unwrap_or_default(),
+                    units_sampled: analyzed_count as u64,
+                    calibration_score: llm.calibration_score,
+                    overconfident_count: llm.overconfident_count,
+                    underconfident_count: llm.underconfident_count,
+                    well_calibrated_count: llm.well_calibrated_count,
+                    biases_detected: llm.biases_detected,
+                    recommendations: llm.recommendations,
+                };
+                if let Err(e) = self.store.append_jsonl("metacog/calibration.jsonl", &entry) {
+                    warn!("failed to persist calibration entry: {e:#}");
+                }
+            }
+            Err(e) => {
+                warn!("metacog: failed to parse LLM calibration response: {e:#}");
+            }
+        }
 
         // Prune samples.jsonl — keep only entries from the last 30 days.
         // Without this the file grows without bound; 8k+ entries → 21 MB

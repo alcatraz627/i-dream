@@ -221,14 +221,22 @@ private struct Association: Codable {
 }
 
 private struct MetacogAudit: Codable {
-    let calibrationScore: Double?
-    let biasesDetected:   [String]?
-    let recommendations:  [String]?
+    let calibrationScore:     Double?
+    let overconfidentCount:   Int?
+    let underconfidentCount:  Int?
+    let wellCalibratedCount:  Int?
+    let biasesDetected:       [String]?
+    let recommendations:      [String]?
     enum CodingKeys: String, CodingKey {
-        case calibrationScore = "calibration_score"
-        case biasesDetected   = "biases_detected"
+        case calibrationScore    = "calibration_score"
+        case overconfidentCount  = "overconfident_count"
+        case underconfidentCount = "underconfident_count"
+        case wellCalibratedCount = "well_calibrated_count"
+        case biasesDetected      = "biases_detected"
         case recommendations
     }
+    /// True only when at least the core calibration data is present.
+    var hasContent: Bool { calibrationScore != nil || biasesDetected != nil }
 }
 
 /// Outer wrapper: the module stores { "response": "```json\n{...}\n```", "sessions": [...] }
@@ -305,6 +313,13 @@ final class RichText {
     }
     @discardableResult func spacer() -> RichText {
         buf.append(NSAttributedString(string: "\n")); return self
+    }
+    /// Arbitrary color line — used for heat-map value rows in the dream journal.
+    @discardableResult func coloredLine(_ text: String, color: NSColor) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: color,
+        ])); return self
     }
     func build() -> NSAttributedString { buf }
 }
@@ -614,6 +629,165 @@ private func readBoard() -> BoardData {
     )
 }
 
+// ─── Payload color parser ─────────────────────────────────────────────────────
+//
+// Shared utility: colorizes a raw payload string (JSON, Markdown, plain text)
+// into an NSAttributedString with syntax-aware highlighting.
+//
+// Usage (from std::claude reference — see ~/.claude/skills/shared/README.md):
+//   colorizePayload(text, baseColor: phaseColor, bgColor: bgAlpha, indentStyle: style)
+//
+// Color param roles:
+//   baseColor  — primary text / string values / prose
+//   bgColor    — background tint for the whole block
+//   Keys/numbers/booleans always use fixed semantic colors (systemCyan, systemOrange, etc.)
+//   to stay readable regardless of baseColor. Only string values inherit baseColor.
+
+private func colorizePayload(
+    _ text:        String,
+    baseColor:     NSColor,
+    bgColor:       NSColor,
+    indentStyle:   NSParagraphStyle
+) -> NSAttributedString {
+    let baseFontSize: CGFloat = 9
+
+    // ── Detect format ──────────────────────────────────────────────────────
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    let isJSON     = trimmed.hasPrefix("{") || trimmed.hasPrefix("[")
+    let isMarkdown = !isJSON && (trimmed.hasPrefix("#") || trimmed.contains("\n##") || trimmed.contains("\n- "))
+
+    let buf = NSMutableAttributedString()
+    let baseAttrs: [NSAttributedString.Key: Any] = [
+        .font:            NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .regular),
+        .foregroundColor: baseColor,
+        .backgroundColor: bgColor,
+        .paragraphStyle:  indentStyle,
+    ]
+
+    if isJSON {
+        // ── JSON coloring ──────────────────────────────────────────────────
+        // Token-level coloring: keys=cyan, strings=baseColor, numbers=orange,
+        // booleans/null=yellow, punctuation=dim.
+        let lines = text.components(separatedBy: "\n")
+        for (li, rawLine) in lines.enumerated() {
+            let lineBuf = NSMutableAttributedString()
+            var i = rawLine.startIndex
+
+            while i < rawLine.endIndex {
+                let ch = rawLine[i]
+
+                // JSON string token
+                if ch == "\"" {
+                    var j = rawLine.index(after: i)
+                    while j < rawLine.endIndex {
+                        if rawLine[j] == "\\" && rawLine.index(after: j) < rawLine.endIndex {
+                            j = rawLine.index(j, offsetBy: 2)
+                        } else if rawLine[j] == "\"" {
+                            j = rawLine.index(after: j)
+                            break
+                        } else {
+                            j = rawLine.index(after: j)
+                        }
+                    }
+                    let token = String(rawLine[i..<j])
+                    // If followed (after whitespace) by ":" it's a key, else a value
+                    var peek = j
+                    while peek < rawLine.endIndex, rawLine[peek] == " " { peek = rawLine.index(after: peek) }
+                    let isKey = peek < rawLine.endIndex && rawLine[peek] == ":"
+                    let color: NSColor = isKey ? .systemCyan : baseColor
+                    lineBuf.append(NSAttributedString(string: token, attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: isKey ? .medium : .regular),
+                        .foregroundColor: color, .backgroundColor: bgColor, .paragraphStyle: indentStyle,
+                    ]))
+                    i = j
+                    continue
+                }
+
+                // Number
+                if ch.isNumber || (ch == "-" && rawLine.index(after: i) < rawLine.endIndex && rawLine[rawLine.index(after: i)].isNumber) {
+                    var j = rawLine.index(after: i)
+                    while j < rawLine.endIndex && (rawLine[j].isNumber || rawLine[j] == "." || rawLine[j] == "e" || rawLine[j] == "-") {
+                        j = rawLine.index(after: j)
+                    }
+                    lineBuf.append(NSAttributedString(string: String(rawLine[i..<j]), attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .regular),
+                        .foregroundColor: NSColor.systemOrange, .backgroundColor: bgColor, .paragraphStyle: indentStyle,
+                    ]))
+                    i = j
+                    continue
+                }
+
+                // Boolean / null keywords
+                let remaining = String(rawLine[i...])
+                if remaining.hasPrefix("true") || remaining.hasPrefix("false") || remaining.hasPrefix("null") {
+                    let kw = remaining.hasPrefix("true") ? "true" : remaining.hasPrefix("false") ? "false" : "null"
+                    lineBuf.append(NSAttributedString(string: kw, attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .bold),
+                        .foregroundColor: NSColor.systemYellow, .backgroundColor: bgColor, .paragraphStyle: indentStyle,
+                    ]))
+                    i = rawLine.index(i, offsetBy: kw.count)
+                    continue
+                }
+
+                // Punctuation / whitespace
+                let punctColor: NSColor = (ch == "{" || ch == "}" || ch == "[" || ch == "]" || ch == "," || ch == ":")
+                    ? NSColor.secondaryLabelColor : baseColor
+                lineBuf.append(NSAttributedString(string: String(ch), attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .regular),
+                    .foregroundColor: punctColor, .backgroundColor: bgColor, .paragraphStyle: indentStyle,
+                ]))
+                i = rawLine.index(after: i)
+            }
+
+            if li < lines.count - 1 {
+                lineBuf.append(NSAttributedString(string: "\n", attributes: baseAttrs))
+            }
+            buf.append(lineBuf)
+        }
+
+    } else if isMarkdown {
+        // ── Markdown coloring ──────────────────────────────────────────────
+        // Headers=bold+bright, bullet points=accent, code spans=monospace+dim,
+        // emphasis=italic, plain prose=baseColor.
+        for (li, line) in text.components(separatedBy: "\n").enumerated() {
+            let trim = line.trimmingCharacters(in: .whitespaces)
+            let lineAttrs: [NSAttributedString.Key: Any]
+
+            if trim.hasPrefix("### ") {
+                lineAttrs = [.font: NSFont.systemFont(ofSize: baseFontSize + 1, weight: .semibold),
+                             .foregroundColor: baseColor, .backgroundColor: bgColor, .paragraphStyle: indentStyle]
+            } else if trim.hasPrefix("## ") {
+                lineAttrs = [.font: NSFont.systemFont(ofSize: baseFontSize + 2, weight: .bold),
+                             .foregroundColor: NSColor.labelColor, .backgroundColor: bgColor, .paragraphStyle: indentStyle]
+            } else if trim.hasPrefix("# ") {
+                lineAttrs = [.font: NSFont.systemFont(ofSize: baseFontSize + 3, weight: .heavy),
+                             .foregroundColor: NSColor.labelColor, .backgroundColor: bgColor, .paragraphStyle: indentStyle]
+            } else if trim.hasPrefix("- ") || trim.hasPrefix("* ") || trim.hasPrefix("• ") {
+                lineAttrs = [.font: NSFont.systemFont(ofSize: baseFontSize, weight: .regular),
+                             .foregroundColor: baseColor.blended(withFraction: 0.3, of: .labelColor) ?? baseColor,
+                             .backgroundColor: bgColor, .paragraphStyle: indentStyle]
+            } else if trim.hasPrefix(">") {
+                lineAttrs = [.font: NSFont.systemFont(ofSize: baseFontSize, weight: .light),
+                             .foregroundColor: NSColor.secondaryLabelColor, .backgroundColor: bgColor, .paragraphStyle: indentStyle]
+            } else if trim.hasPrefix("```") || trim.hasSuffix("```") {
+                lineAttrs = [.font: NSFont.monospacedSystemFont(ofSize: baseFontSize - 1, weight: .regular),
+                             .foregroundColor: NSColor.tertiaryLabelColor, .backgroundColor: bgColor, .paragraphStyle: indentStyle]
+            } else {
+                lineAttrs = baseAttrs
+            }
+
+            buf.append(NSAttributedString(string: line + (li < text.components(separatedBy: "\n").count - 1 ? "\n" : ""),
+                                          attributes: lineAttrs))
+        }
+
+    } else {
+        // ── Plain text fallback ────────────────────────────────────────────
+        buf.append(NSAttributedString(string: text, attributes: baseAttrs))
+    }
+
+    return buf
+}
+
 // ─── Sparklines & metrics ─────────────────────────────────────────────────────
 
 /// Maps a sequence of integers to a Unicode sparkline string (▁▂▃▄▅▆▇█).
@@ -695,12 +869,22 @@ private func allAssociations() -> [Association] {
 private func readInsightDigest() -> String? {
     let path = subDir + "/dreams/insight-digest.md"
     guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
-    // Strip lines starting with # or _ (headers + italics metadata), keep prose
     let prose = raw.components(separatedBy: "\n")
         .filter { !$0.hasPrefix("#") && !$0.hasPrefix("_") && !$0.hasPrefix("##") }
         .joined(separator: "\n")
         .trimmingCharacters(in: .whitespacesAndNewlines)
     return prose.isEmpty ? nil : prose
+}
+
+/// Read the sentiment field from dreams/digest-meta.json.
+/// Returns "positive", "neutral", or "negative" (defaults to "neutral" if absent).
+private func readDigestSentiment() -> String {
+    let path = subDir + "/dreams/digest-meta.json"
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let s    = obj["sentiment"] as? String
+    else { return "neutral" }
+    return s
 }
 
 /// Read all dream insights from dreams/insights.md as a raw string.
@@ -795,25 +979,26 @@ private func readLatestAudit() -> (audit: MetacogAudit?, filename: String?) {
     let path = auditsDir + "/" + latest
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return (nil, nil) }
 
-    // Try direct decode first (future flat format).
-    if let audit = try? JSONDecoder().decode(MetacogAudit.self, from: data) {
-        return (audit, latest)
-    }
-
-    // Current format: { "response": "```json\n{...}\n```", "sessions": [...] }
-    // Unwrap the response string, strip markdown fences, decode the inner JSON.
+    // Try wrapper format first (current daemon output):
+    // { "response": "```json\n{...}\n```", "sessions": [...] }
     if let wrapper  = try? JSONDecoder().decode(MetacogAuditFile.self, from: data),
        let response = wrapper.response {
         let stripped = response
             .replacingOccurrences(of: "```json\n", with: "")
-            .replacingOccurrences(of: "```json", with: "")
-            .replacingOccurrences(of: "\n```", with: "")
-            .replacingOccurrences(of: "```",   with: "")
+            .replacingOccurrences(of: "```json",   with: "")
+            .replacingOccurrences(of: "\n```",     with: "")
+            .replacingOccurrences(of: "```",       with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let innerData = stripped.data(using: .utf8),
-           let audit = try? JSONDecoder().decode(MetacogAudit.self, from: innerData) {
+           let audit = try? JSONDecoder().decode(MetacogAudit.self, from: innerData),
+           audit.hasContent {
             return (audit, latest)
         }
+    }
+
+    // Fallback: flat format (future / manual writes)
+    if let audit = try? JSONDecoder().decode(MetacogAudit.self, from: data), audit.hasContent {
+        return (audit, latest)
     }
 
     return (nil, latest)
@@ -1315,24 +1500,47 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
             addSection(menu, "Recent Inferences")
 
-            // Insight digest — prose synthesis of last 5 dream insights
+            // Insight digest — "Recent Dreams Inference": prose synthesis of last 5 dream insights.
+            // Sentiment is read from dreams/digest-meta.json { "sentiment": "positive"|"neutral"|"negative" }
             if let digest = cachedDigest {
+                let sentiment = readDigestSentiment()
+                let sentimentColor: NSColor = sentiment == "positive" ? .systemGreen
+                                           : sentiment == "negative" ? .systemOrange
+                                           : .labelColor
                 let digestItem = NSMenuItem()
                 let digestAttr = NSMutableAttributedString()
                 let truncDigest = digest.count > 220 ? String(digest.prefix(217)) + "…" : digest
                 digestAttr.append(NSAttributedString(string: "  \(truncDigest)\n",
                     attributes: [.font: NSFont.systemFont(ofSize: 13),
-                                 .foregroundColor: NSColor.labelColor]))
-                digestAttr.append(NSAttributedString(string: "  Insight synthesis  ·  updated every 3h",
+                                 .foregroundColor: sentimentColor]))
+                digestAttr.append(NSAttributedString(string: "  Recent Dreams Inference  ·  updated every 3h",
                     attributes: [.font: NSFont.systemFont(ofSize: 11),
                                  .foregroundColor: NSColor.tertiaryLabelColor]))
                 digestItem.attributedTitle = digestAttr
                 digestItem.isEnabled = false
-                setIcon(digestItem, "sparkles")
+                // Golden-yellow sparkles icon tinted at render time
+                if let img = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "insights") {
+                    let tintedImg = img.copy() as! NSImage
+                    tintedImg.isTemplate = false
+                    let gold = NSColor(red: 1.0, green: 0.80, blue: 0.10, alpha: 1.0)
+                    let tinted = NSImage(size: tintedImg.size, flipped: false) { _ in
+                        gold.setFill()
+                        img.draw(in: NSRect(origin: .zero, size: tintedImg.size),
+                                 from: .zero, operation: .sourceOver, fraction: 1.0)
+                        return true
+                    }
+                    digestItem.image = tinted
+                }
                 menu.addItem(digestItem)
+
+                // Re-trigger "Recent Dreams Inference" button
+                let reInferItem = add(menu, "  ↺ Re-run Recent Dreams Inference",
+                                      #selector(triggerRecentDreamsInference))
+                setIcon(reInferItem, "arrow.clockwise.circle")
+                reInferItem.indentationLevel = 1
             }
 
-            // Show last cycle summary
+            // Show last cycle summary — with how long ago it happened
             if let latest = cachedJournal.last {
                 let parts = [
                     latest.sessionsAnalyzed > 0 ? "\(latest.sessionsAnalyzed) sessions" : nil,
@@ -1342,7 +1550,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 ].compactMap { $0 }.joined(separator: "  ·  ")
                 let summary = parts.isEmpty ? "skipped — no sessions" : parts
                 addTwoLine(menu,
-                           top:    "  Last cycle  \(fmtDate(latest.timestamp))",
+                           top:    "  Last cycle  \(fmtDate(latest.timestamp))  (\(timeAgo(latest.timestamp)))",
                            bottom: "  \(summary)  ·  \(fmtNum(latest.tokensUsed)) tokens")
             }
             // Show recent pattern learnings (actual text) — click to copy full text
@@ -1452,6 +1660,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let howTo = add(menu, "Show How-To…", #selector(showHowTo))
         setIcon(howTo, "questionmark.circle.fill")
+
+        let glossary = add(menu, "Terminology Glossary…", #selector(showTerminologyGlossary))
+        setIcon(glossary, "text.book.closed.fill")
 
         let gh = add(menu, "View on GitHub", #selector(openGitHub))
         setIcon(gh, "arrow.up.right.square")
@@ -2191,20 +2402,30 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // ── Payload box (LLM text output / prompt) ───────────────────────────
         if let payload = obj["payload"] as? String, !payload.isEmpty {
-            let payloadKind = obj["payload_kind"] as? String ?? ""
+            let payloadKind   = obj["payload_kind"] as? String ?? ""
             let isLLMResponse = kind == "api_response" || payloadKind == "text"
-            let capLen = isLLMResponse ? 1000 : 600
-            let truncPayload = payload.count > capLen
-                ? String(payload.prefix(capLen)) + "\n  …[\(payload.count - capLen) more chars]"
-                : payload
+            // Never truncate: api_response and journal_written are full raw outputs
+            // the user needs to see. Other payloads get a generous 4000-char window.
+            let displayPayload: String
+            if isLLMResponse || kind == "journal_written" {
+                displayPayload = payload
+            } else {
+                displayPayload = payload.count > 4000
+                    ? String(payload.prefix(4000)) + "\n  …[\(payload.count - 4000) more chars]"
+                    : payload
+            }
 
             let indentStyle = NSMutableParagraphStyle()
-            indentStyle.headIndent           = 24
-            indentStyle.firstLineHeadIndent  = 24
-            indentStyle.paragraphSpacing     = 2
+            indentStyle.headIndent          = 24
+            indentStyle.firstLineHeadIndent = 24
+            indentStyle.paragraphSpacing    = 2
 
             let (payColor, bgColor): (NSColor, NSColor)
-            if isLLMResponse {
+            if kind == "journal_written" {
+                // Journal writes get a warmer, amber-tinted display
+                payColor = NSColor.systemYellow.blended(withFraction: 0.4, of: .systemOrange) ?? .systemYellow
+                bgColor  = NSColor.systemYellow.withAlphaComponent(0.08)
+            } else if isLLMResponse {
                 payColor = phaseColor
                 bgColor  = phaseColor.withAlphaComponent(0.12)
             } else {
@@ -2215,12 +2436,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             line.append(NSAttributedString(string: "\n\n", attributes: [
                 .font: NSFont.systemFont(ofSize: 4),
             ]))
-            line.append(NSAttributedString(string: truncPayload, attributes: [
-                .font:                NSFont.monospacedSystemFont(ofSize: 9, weight: .regular),
-                .foregroundColor:     payColor,
-                .backgroundColor:     bgColor,
-                .paragraphStyle:      indentStyle,
-            ]))
+            // Apply syntax coloring for the payload using the shared color parser
+            let coloredPayload = colorizePayload(displayPayload,
+                                                 baseColor: payColor,
+                                                 bgColor: bgColor,
+                                                 indentStyle: indentStyle)
+            line.append(coloredPayload)
         }
 
         line.append(NSAttributedString(string: "\n\n"))
@@ -2632,7 +2853,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func showMetacogDetail() {
         let (audit, filename) = readLatestAudit()
         guard let audit = audit else {
-            alert("Metacog", "No metacognition audit data found."); return
+            alert("Metacog", "No metacognition audit data found.\n\nAudit files are created during background consolidation cycles. Ensure at least one cycle has completed with the metacog module enabled."); return
         }
         // Parse date from filename like "20260412-1032-audit.json"
         var dateStr = filename ?? ""
@@ -2642,28 +2863,79 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let df = DateFormatter()
                 df.dateFormat = "yyyyMMdd HHmm"
                 if let d = df.date(from: "\(parts[0]) \(parts[1])") {
-                    dateStr = fmtDateDirect(d)
+                    dateStr = fmtDateWithAge(ISO8601DateFormatter().string(from: d))
                 }
             }
         }
         let rt = RichText()
         rt.header("Metacognition Audit")
         if !dateStr.isEmpty { rt.dim("From: \(dateStr)") }
-        rt.spacer()
+
+        // ── Calibration score ──────────────────────────────────────────────
         if let score = audit.calibrationScore {
+            rt.spacer()
             rt.subheader("Calibration Score")
-            rt.body(String(format: "%.2f  (1.0 = perfectly calibrated)", score))
-            rt.spacer()
+            let scoreLabel = score >= 0.8 ? "well-calibrated"
+                           : score >= 0.5 ? "moderate"
+                           : score >= 0.2 ? "under-calibrated"
+                           : "poor"
+            rt.body(String(format: "%.2f / 1.00  (%@)", score, scoreLabel))
+            rt.dim("  1.0 = predictions match outcomes perfectly")
+            rt.dim("  <0.5 = systematically over- or under-confident")
         }
+
+        // ── Sample breakdown ───────────────────────────────────────────────
+        let over   = audit.overconfidentCount  ?? 0
+        let under  = audit.underconfidentCount ?? 0
+        let well   = audit.wellCalibratedCount ?? 0
+        let total  = over + under + well
+        if total > 0 {
+            rt.spacer()
+            rt.subheader("Sample Breakdown  (\(total) units)")
+            func pct(_ n: Int) -> String { total > 0 ? String(format: "%d%%", n * 100 / total) : "–" }
+            rt.body(String(format: "  ✓ Well-calibrated   %3d  (%@)", well,  pct(well)))
+            rt.body(String(format: "  ↑ Overconfident     %3d  (%@)", over,  pct(over)))
+            rt.body(String(format: "  ↓ Underconfident    %3d  (%@)", under, pct(under)))
+        }
+
+        // ── Biases detected ────────────────────────────────────────────────
         if let biases = audit.biasesDetected, !biases.isEmpty {
-            rt.subheader("Biases Detected")
-            biases.forEach { rt.body("  • \($0)") }
             rt.spacer()
+            rt.subheader("Biases Detected  (\(biases.count))")
+            biases.forEach { rt.body("  • \($0)") }
         }
+
+        // ── Recommendations ────────────────────────────────────────────────
         if let recs = audit.recommendations, !recs.isEmpty {
+            rt.spacer()
             rt.subheader("Recommendations")
-            recs.forEach { rt.body("  • \($0)") }
+            recs.enumerated().forEach { i, r in rt.body("  \(i+1). \(r)") }
         }
+
+        // ── Historical calibration trend ───────────────────────────────────
+        let calPath = subDir + "/metacog/calibration.jsonl"
+        if let calContent = try? String(contentsOfFile: calPath, encoding: .utf8) {
+            let scores: [Double] = calContent
+                .components(separatedBy: "\n").filter { !$0.isEmpty }
+                .compactMap { line -> Double? in
+                    guard let d = line.data(using: .utf8),
+                          let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                          let s = j["calibration_score"] as? Double else { return nil }
+                    return s
+                }
+            if scores.count >= 2 {
+                rt.spacer()
+                rt.subheader("Calibration Trend  (last \(min(scores.count, 10)) cycles)")
+                let window = Array(scores.suffix(10))
+                let sparkVals = window.map { Int($0 * 10) }
+                let avg = window.reduce(0, +) / Double(window.count)
+                rt.mono("  \(fmtSparkline(sparkVals, width: 10))  avg \(String(format: "%.2f", avg))")
+                let trend = (scores.last ?? 0) - (scores.first ?? 0)
+                let trendStr = trend > 0.05 ? "↑ improving" : trend < -0.05 ? "↓ declining" : "→ stable"
+                rt.dim("  Overall trend: \(trendStr)")
+            }
+        }
+
         let auditPath = filename.map { subDir + "/metacog/audits/" + $0 }
         showResizablePanel(title: "Metacog Audit", content: rt.build(), filePath: auditPath)
     }
@@ -2691,17 +2963,46 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             rt.divider()
         }
 
+        // Compute averages for color-coding (only non-skipped entries)
+        let active = journal.filter { $0.sessionsAnalyzed > 0 }
+        let avgSessions = active.isEmpty ? 0.0 : Double(active.map { $0.sessionsAnalyzed }.reduce(0,+)) / Double(active.count)
+        let avgPatterns = active.isEmpty ? 0.0 : Double(active.map { $0.patternsExtracted }.reduce(0,+)) / Double(active.count)
+        let avgAssocs   = active.isEmpty ? 0.0 : Double(active.map { $0.associationsFound }.reduce(0,+)) / Double(active.count)
+        let avgInsights = active.isEmpty ? 0.0 : Double(active.map { $0.insightsPromoted  }.reduce(0,+)) / Double(active.count)
+        let avgTokens   = active.isEmpty ? 0.0 : Double(active.map { $0.tokensUsed        }.reduce(0,+)) / Double(active.count)
+
+        // Returns green/labelColor/orange based on whether value is high/normal/low vs average
+        func heatColor(_ value: Int, avg: Double) -> NSColor {
+            guard avg > 0 else { return .labelColor }
+            let ratio = Double(value) / avg
+            if ratio >= 1.3 { return .systemGreen }
+            if ratio <= 0.5 { return .systemOrange }
+            return .labelColor
+        }
+
         for entry in journal.suffix(20).reversed() {
             rt.spacer()
-            rt.subheader(fmtDate(entry.timestamp))
+            // Header: date + time ago
+            rt.subheader("\(fmtDate(entry.timestamp))  (\(timeAgo(entry.timestamp)))")
             if entry.sessionsAnalyzed == 0 {
                 rt.dim("  Skipped — no new sessions to consolidate")
             } else {
-                rt.body("  Sessions analyzed:   \(entry.sessionsAnalyzed)")
-                if entry.patternsExtracted > 0 { rt.body("  Patterns extracted:  \(entry.patternsExtracted)") }
-                if entry.associationsFound  > 0 { rt.body("  Associations found:  \(entry.associationsFound)") }
-                if entry.insightsPromoted   > 0 { rt.body("  Insights promoted:   \(entry.insightsPromoted)") }
-                rt.dim("  Tokens used:         \(fmtNum(entry.tokensUsed))")
+                // Color each metric relative to the cycle average
+                let fields: [(String, Int, Double)] = [
+                    ("Sessions analyzed  ", entry.sessionsAnalyzed,  avgSessions),
+                    ("Patterns extracted ", entry.patternsExtracted, avgPatterns),
+                    ("Associations found ", entry.associationsFound, avgAssocs),
+                    ("Insights promoted  ", entry.insightsPromoted,  avgInsights),
+                    ("Tokens used        ", entry.tokensUsed,        avgTokens),
+                ]
+                for (label, val, avg) in fields {
+                    guard val > 0 else { continue }
+                    let color = heatColor(val, avg: avg)
+                    let valStr = label.contains("Tokens") ? fmtNum(val) : "\(val)"
+                    let avgStr = label.contains("Tokens") ? fmtNum(Int(avg)) : String(format: "%.1f", avg)
+                    let indicator = color == .systemGreen ? " ↑" : color == .systemOrange ? " ↓" : ""
+                    rt.coloredLine("  \(label)  \(valStr)\(indicator)  (avg \(avgStr))", color: color)
+                }
             }
         }
         if journal.count > 20 { rt.dim("… and \(journal.count - 20) earlier entries") }
@@ -2879,6 +3180,27 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         startDreamAnimation()
     }
 
+    /// Re-run the Recent Dreams Inference (digest generation + sentiment tagging).
+    /// Runs `i-dream dream wake` which re-triggers the Wake phase that synthesizes
+    /// the digest from the top dream insights. Terminology: "Recent Dreams Inference"
+    /// is the process of synthesizing recent high-confidence patterns into a prose summary
+    /// with a sentiment tag (positive / neutral / negative).
+    @objc private func triggerRecentDreamsInference() {
+        dlog("triggerRecentDreamsInference")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: iDream)
+        p.arguments     = ["dream", "wake"]
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        try? p.run()
+        isCycling      = true
+        cycleStartTime = Date()
+        startDreamAnimation()
+        // Refresh after a short delay to pick up the new digest
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            self?.refresh()
+        }
+    }
+
     @objc private func changeIcon(_ sender: NSMenuItem) {
         guard let sym = sender.representedObject as? String else { return }
         dlog("changeIcon: \(sym)")
@@ -2944,6 +3266,120 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let a = NSAlert()
         a.messageText = "i-dream Status"; a.informativeText = lines.joined(separator: "\n")
         a.alertStyle  = .informational; a.addButton(withTitle: "OK"); a.runModal()
+    }
+
+    @objc private func showTerminologyGlossary() {
+        let rt = RichText()
+        rt.header("i-dream — Terminology Glossary")
+        rt.dim("Reference for all terms, phases, and concepts used in i-dream")
+        rt.spacer()
+
+        // ── Modules ────────────────────────────────────────────────────────
+        rt.subheader("Modules")
+        rt.body("  Dreaming      Background sleep-cycle-inspired memory consolidation.")
+        rt.body("                Runs when idle 4h+. Three phases: SWS → REM → Wake.")
+        rt.body("  Metacognition  Samples execution units and scores calibration quality.")
+        rt.body("                Detects reasoning biases like anchoring and scope creep.")
+        rt.body("  Introspection Weekly analysis of reasoning chains for depth/breadth.")
+        rt.body("  Intuition      Surfaces \"gut feelings\" from valence memory at session start.")
+        rt.body("  Prospective    Fires condition-action reminders when context matches.")
+        rt.spacer()
+
+        // ── Dream phases ───────────────────────────────────────────────────
+        rt.subheader("Dream Phases")
+        rt.body("  SWS (Slow-Wave Sleep)")
+        rt.body("    Scans unprocessed session transcripts. Extracts behavioral")
+        rt.body("    patterns (temp=0.3, structured output). Deduplicates by")
+        rt.body("    normalized string and merges occurrence counts.")
+        rt.spacer()
+        rt.body("  REM (Rapid Eye Movement)")
+        rt.body("    Takes top-confidence patterns across sessions. Finds creative")
+        rt.body("    cross-domain associations (temp=0.9). Builds a hypothesis graph.")
+        rt.spacer()
+        rt.body("  Wake")
+        rt.body("    Verifies insights against current filesystem state. Promotes")
+        rt.body("    high-confidence patterns to dreams/insights.md. Also generates")
+        rt.body("    the Recent Dreams Inference summary.")
+        rt.spacer()
+
+        // ── Key terms ──────────────────────────────────────────────────────
+        rt.subheader("Key Terms")
+        rt.body("  Recent Dreams Inference")
+        rt.body("    A prose synthesis of the last 5 high-confidence dream insights,")
+        rt.body("    with a sentiment tag (positive / neutral / negative) describing")
+        rt.body("    the overall trajectory. Generated during the Wake phase and")
+        rt.body("    shown in the menu under \"Recent Inferences\". Can be re-triggered")
+        rt.body("    manually from the menu.")
+        rt.spacer()
+        rt.body("  Consolidation Cycle")
+        rt.body("    One complete run of all idle-time modules (Dreaming, Metacog,")
+        rt.body("    Introspection). Triggered after 4h+ of inactivity. Counted in")
+        rt.body("    state.json as total_cycles.")
+        rt.spacer()
+        rt.body("  Valence Memory")
+        rt.body("    Time-decayed pattern-outcome associations. Each entry stores a")
+        rt.body("    pattern string and how previous encounters turned out (positive /")
+        rt.body("    negative / neutral). Drives the Intuition module. Decays with a")
+        rt.body("    30-day half-life by default.")
+        rt.spacer()
+        rt.body("  Execution Unit")
+        rt.body("    A single bounded reasoning action sampled by Metacognition —")
+        rt.body("    typically one tool call or a small group of related actions.")
+        rt.body("    Scored for calibration, overconfidence, and bias markers.")
+        rt.spacer()
+        rt.body("  Calibration Score")
+        rt.body("    A [-1.0, 1.0] value where 1.0 = predictions perfectly match")
+        rt.body("    outcomes. Negative = systematically overconfident. Computed by")
+        rt.body("    the Metacog module over a batch of execution units per cycle.")
+        rt.spacer()
+        rt.body("  Priming / Priming Decay")
+        rt.body("    When an intuition fires at session start, it is \"primed\" — the")
+        rt.body("    association stays active for 4h before decaying. Used to avoid")
+        rt.body("    surfacing the same hint twice in quick succession.")
+        rt.spacer()
+        rt.body("  Intention")
+        rt.body("    A condition-action pair stored by the Prospective module.")
+        rt.body("    Example: if the current project touches auth code, remind to")
+        rt.body("    check the rate-limiting layer. Fires once per session match.")
+        rt.spacer()
+        rt.body("  Insight Digest")
+        rt.body("    Another name for Recent Dreams Inference — the stored file is")
+        rt.body("    dreams/insight-digest.md. The sentiment is in digest-meta.json.")
+        rt.spacer()
+        rt.body("  Dream Replay")
+        rt.body("    Step-through viewer for the JSONL event trace of a past cycle.")
+        rt.body("    Shows each API call's prompt and response, phase by phase.")
+        rt.spacer()
+        rt.body("  Rate Insights / Insight Feedback")
+        rt.body("    Thumbs-up / thumbs-down ratings on individual patterns, stored")
+        rt.body("    in dreams/insight-feedback.jsonl. Future cycles use these signals")
+        rt.body("    to weight pattern promotion and valence memory entries.")
+        rt.spacer()
+        rt.body("  Ambient HUD")
+        rt.body("    The floating always-visible overlay showing live daemon status,")
+        rt.body("    cognitive load gauge, sparkline, calibration score, and next")
+        rt.body("    cycle estimate. Toggled via the menu or ⌘H.")
+        rt.spacer()
+
+        // ── File locations ─────────────────────────────────────────────────
+        rt.subheader("Key Files")
+        rt.mono("  ~/.claude/subconscious/")
+        rt.mono("  ├── state.json          total_cycles, last_consolidation, tokens")
+        rt.mono("  ├── dreams/")
+        rt.mono("  │   ├── journal.jsonl   one entry per consolidation cycle")
+        rt.mono("  │   ├── patterns.json   extracted behavioral patterns")
+        rt.mono("  │   ├── insights.md     Wake-promoted high-confidence insights")
+        rt.mono("  │   ├── insight-digest.md   Recent Dreams Inference prose")
+        rt.mono("  │   ├── digest-meta.json    sentiment + last_run timestamp")
+        rt.mono("  │   ├── associations.json   cross-pattern hypotheses (REM)")
+        rt.mono("  │   └── traces/         per-cycle JSONL event logs")
+        rt.mono("  ├── metacog/")
+        rt.mono("  │   ├── calibration.jsonl   per-cycle calibration scores")
+        rt.mono("  │   └── audits/         individual audit JSON files")
+        rt.mono("  ├── valence/memory.jsonl     time-decayed pattern outcomes")
+        rt.mono("  └── intentions/registry.jsonl active prospective intentions")
+
+        showResizablePanel(title: "i-dream — Terminology Glossary", content: rt.build())
     }
 
     @objc private func showHowTo() {

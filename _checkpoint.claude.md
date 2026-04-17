@@ -1,0 +1,1 @@
+_precompact-checkpoint.claude.md
