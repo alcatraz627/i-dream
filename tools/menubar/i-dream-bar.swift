@@ -126,16 +126,47 @@ private func fmtElapsed(_ secs: TimeInterval) -> String {
 
 // ─── Data models ─────────────────────────────────────────────────────────────
 
+private struct UsageLimitStatus: Codable {
+    let outputTokens5h:    Int
+    let outputTokens7d:    Int
+    let limit5h:           Int
+    let limit7d:           Int
+    let pct5h:             Double
+    let pct7d:             Double
+    let overWarnThreshold: Bool
+    let checkedAt:         String
+    enum CodingKeys: String, CodingKey {
+        case outputTokens5h    = "output_tokens_5h"
+        case outputTokens7d    = "output_tokens_7d"
+        case limit5h           = "limit_5h"
+        case limit7d           = "limit_7d"
+        case pct5h             = "pct_5h"
+        case pct7d             = "pct_7d"
+        case overWarnThreshold = "over_warn_threshold"
+        case checkedAt         = "checked_at"
+    }
+
+    /// Human-readable warning line for menus and dialogs.
+    var warningLine: String {
+        var parts: [String] = []
+        if limit5h > 0 { parts.append("5h: \(Int(pct5h * 100))% of \(limit5h / 1000)k tokens") }
+        if limit7d > 0 { parts.append("7d: \(Int(pct7d * 100))% of \(limit7d / 1000)k tokens") }
+        return parts.joined(separator: "  ·  ")
+    }
+}
+
 private struct DaemonState: Codable {
     let lastActivity:      String?
     let lastConsolidation: String?
     let totalCycles:       Int
     let totalTokensUsed:   Int
+    let usage:             UsageLimitStatus?
     enum CodingKeys: String, CodingKey {
         case lastActivity      = "last_activity"
         case lastConsolidation = "last_consolidation"
         case totalCycles       = "total_cycles"
         case totalTokensUsed   = "total_tokens_used"
+        case usage             = "usage"
     }
 }
 
@@ -198,6 +229,11 @@ private struct MetacogAudit: Codable {
         case biasesDetected   = "biases_detected"
         case recommendations
     }
+}
+
+/// Outer wrapper: the module stores { "response": "```json\n{...}\n```", "sessions": [...] }
+private struct MetacogAuditFile: Codable {
+    let response: String?
 }
 
 // ─── Rich text builder ────────────────────────────────────────────────────────
@@ -273,6 +309,164 @@ final class RichText {
     func build() -> NSAttributedString { buf }
 }
 
+// ─── Pattern network view ─────────────────────────────────────────────────────
+// Ring-of-rings layout: categories on outer circle, their patterns on inner circles.
+// Confidence band determines node colour; click shows an NSPopover with full text.
+
+final class PatternGraphView: NSView {
+    private struct Node {
+        let pattern:  Pattern
+        var position: CGPoint
+        let radius:   CGFloat
+    }
+
+    private var nodes:       [Node]    = []
+    private var popover:     NSPopover?
+    private var selectedIdx: Int?      = nil
+
+    fileprivate init(frame: NSRect, patterns: [Pattern]) {
+        super.init(frame: frame)
+        wantsLayer = true
+        buildLayout(patterns)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func buildLayout(_ patterns: [Pattern]) {
+        let cx = bounds.midX
+        let cy = bounds.midY
+        let outerR: CGFloat = min(bounds.width, bounds.height) * 0.36
+        let categories = Array(Set(patterns.map { $0.category })).sorted()
+        let catCount   = max(categories.count, 1)
+        var byCategory: [String: [Pattern]] = [:]
+        for p in patterns { byCategory[p.category, default: []].append(p) }
+
+        nodes = []
+        for (i, cat) in categories.enumerated() {
+            let catAngle = CGFloat(i) / CGFloat(catCount) * 2 * .pi - .pi / 2
+            let catX = cx + outerR * cos(catAngle)
+            let catY = cy + outerR * sin(catAngle)
+            let pats     = byCategory[cat] ?? []
+            let innerR: CGFloat = outerR * 0.20
+            for (j, p) in pats.enumerated() {
+                let angle: CGFloat = pats.count == 1 ? 0 :
+                    CGFloat(j) / CGFloat(pats.count) * 2 * .pi
+                let x = catX + (pats.count == 1 ? 0 : innerR * cos(angle))
+                let y = catY + (pats.count == 1 ? 0 : innerR * sin(angle))
+                let r = 7.0 + CGFloat(p.confidence) * 8.0
+                nodes.append(Node(pattern: p, position: CGPoint(x: x, y: y), radius: r))
+            }
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+
+        // Background
+        NSColor.textBackgroundColor.setFill()
+        NSBezierPath.fill(bounds)
+
+        // Edges: thin lines between nodes in the same category
+        ctx.setLineWidth(0.6)
+        NSColor.separatorColor.setStroke()
+        for i in 0 ..< nodes.count {
+            for j in (i+1) ..< nodes.count {
+                guard nodes[i].pattern.category == nodes[j].pattern.category else { continue }
+                ctx.move(to: nodes[i].position)
+                ctx.addLine(to: nodes[j].position)
+                ctx.strokePath()
+            }
+        }
+
+        // Nodes
+        for (idx, node) in nodes.enumerated() {
+            let p = node.pattern
+            let baseColor: NSColor = p.confidence >= 0.85 ? .systemGreen
+                                   : p.confidence >= 0.65 ? .systemBlue
+                                   : .secondaryLabelColor
+            let fillAlpha: CGFloat = idx == selectedIdx ? 1.0 : 0.75
+            let r = node.radius
+            let rect = CGRect(x: node.position.x - r, y: node.position.y - r,
+                              width: r * 2, height: r * 2)
+            ctx.setFillColor(baseColor.withAlphaComponent(fillAlpha).cgColor)
+            ctx.setStrokeColor(baseColor.cgColor)
+            ctx.setLineWidth(idx == selectedIdx ? 2.5 : 1.0)
+            ctx.fillEllipse(in: rect)
+            ctx.strokeEllipse(in: rect)
+
+            // Short label above node
+            let words   = p.pattern.components(separatedBy: " ")
+            let label   = words.prefix(3).joined(separator: " ")
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font:            NSFont.systemFont(ofSize: 9),
+                .foregroundColor: NSColor.labelColor,
+            ]
+            let str     = NSAttributedString(string: label, attributes: attrs)
+            let sz      = str.size()
+            str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
+                                  y: node.position.y + r + 2))
+        }
+
+        // Category labels at cluster centres
+        let categories = Array(Set(nodes.map { $0.pattern.category })).sorted()
+        let catCount   = max(categories.count, 1)
+        let cx = bounds.midX; let cy = bounds.midY
+        let outerR: CGFloat = min(bounds.width, bounds.height) * 0.36
+        let catAttrs: [NSAttributedString.Key: Any] = [
+            .font:            NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        for (i, cat) in categories.enumerated() {
+            let angle = CGFloat(i) / CGFloat(catCount) * 2 * .pi - .pi / 2
+            let lx = cx + (outerR + 24) * cos(angle)
+            let ly = cy + (outerR + 24) * sin(angle)
+            let str = NSAttributedString(string: cat, attributes: catAttrs)
+            let sz  = str.size()
+            str.draw(at: CGPoint(x: lx - sz.width / 2, y: ly - sz.height / 2))
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        guard let hit = nodes.indices.min(by: { a, b in
+            hypot(pt.x - nodes[a].position.x, pt.y - nodes[a].position.y) <
+            hypot(pt.x - nodes[b].position.x, pt.y - nodes[b].position.y)
+        }), hypot(pt.x - nodes[hit].position.x, pt.y - nodes[hit].position.y) <= nodes[hit].radius + 6
+        else { popover?.close(); popover = nil; selectedIdx = nil; needsDisplay = true; return }
+
+        selectedIdx = hit
+        needsDisplay = true
+        showPopover(for: hit)
+    }
+
+    private func showPopover(for idx: Int) {
+        popover?.close()
+        let p  = nodes[idx].pattern
+        let vc = NSViewController()
+        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 130))
+        let tv = NSTextView(frame: NSRect(x: 12, y: 10, width: 316, height: 110))
+        tv.isEditable      = false
+        tv.backgroundColor = .clear
+        let rt = RichText()
+        rt.subheader(p.pattern)
+        rt.dim("\(p.category)  ·  \(Int(p.confidence * 100))% confident")
+        if let first = p.firstSeen { rt.dim("First seen: \(fmtDate(first))") }
+        tv.textStorage?.setAttributedString(rt.build())
+        vw.addSubview(tv)
+        vc.view = vw
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior              = .transient
+        pop.contentSize           = vw.frame.size
+        let n = nodes[idx]
+        let r = n.radius
+        pop.show(relativeTo: CGRect(x: n.position.x - r, y: n.position.y - r,
+                                    width: r*2, height: r*2),
+                 of: self, preferredEdge: .maxY)
+        popover = pop
+    }
+}
+
 // ─── Icon choices ─────────────────────────────────────────────────────────────
 
 private let iconChoices: [(label: String, symbol: String)] = [
@@ -321,6 +515,8 @@ private let iconChoices: [(label: String, symbol: String)] = [
 
 private let iconDefaultsKey   = "dev.i-dream.bar.icon"
 private let defaultIconSymbol = "moon.zzz.fill"
+private let hudVisibleKey     = "dev.i-dream.bar.hudVisible"
+private let hudAlwaysOnTopKey = "dev.i-dream.bar.hudOnTop"
 
 private func currentIconSymbol() -> String {
     UserDefaults.standard.string(forKey: iconDefaultsKey) ?? defaultIconSymbol
@@ -365,11 +561,39 @@ private func countProcessedSessions(at path: String) -> Int {
     return map.count
 }
 
+/// Returns the most recent daemon error message, but only if it occurred
+/// after the last successful consolidation (i.e., the error is still "live").
+/// Log lines are prefixed with an ISO8601 timestamp, e.g.:
+///   2026-04-16T23:41:47.123456Z  ERROR ...
 private func lastDaemonError() -> String? {
     guard let content = try? String(contentsOfFile: bestLogPath(), encoding: .utf8) else { return nil }
+
+    // Parse last consolidation date for comparison
+    let lastConsolidationDate: Date? = {
+        guard let data  = try? Data(contentsOf: URL(fileURLWithPath: statePath)),
+              let state = try? JSONDecoder().decode(DaemonState.self, from: data)
+        else { return nil }
+        return isoDate(state.lastConsolidation)
+    }()
+
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let iso2 = ISO8601DateFormatter()  // without fractional seconds fallback
+
     for line in content.components(separatedBy: "\n").reversed() {
-        guard line.contains(" ERROR "), let r = line.range(of: " ERROR ") else { continue }
-        let msg = String(line[r.upperBound...])
+        guard line.contains(" ERROR "), let errRange = line.range(of: " ERROR ") else { continue }
+
+        // Try to parse the line's leading timestamp (first token)
+        if let lastConsolidation = lastConsolidationDate {
+            let firstToken = String(line.prefix(32).components(separatedBy: " ").first ?? "")
+            let lineDate = iso.date(from: firstToken) ?? iso2.date(from: firstToken)
+            if let lineDate = lineDate, lineDate < lastConsolidation {
+                // Error is older than last successful cycle — no longer relevant
+                return nil
+            }
+        }
+
+        let msg = String(line[errRange.upperBound...])
             .replacingOccurrences(of: "API request failed: API request failed \\(\\d+ [^)]+\\): ",
                                    with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespaces)
@@ -388,6 +612,39 @@ private func readBoard() -> BoardData {
                                atPath: subDir + "/metacog/audits"))?.count ?? 0,
         lastError:        lastDaemonError()
     )
+}
+
+// ─── Sparklines & metrics ─────────────────────────────────────────────────────
+
+/// Maps a sequence of integers to a Unicode sparkline string (▁▂▃▄▅▆▇█).
+/// The tallest value is always █; an empty input returns "".
+private func fmtSparkline(_ values: [Int], width: Int = 10) -> String {
+    guard !values.isEmpty else { return "" }
+    let bars = "▁▂▃▄▅▆▇█"
+    let window = Array(values.suffix(width))
+    let maxVal = window.max() ?? 1
+    return window.map { v in
+        let idx = maxVal == 0 ? 0 : min(Int(Double(v) / Double(maxVal) * 7.0), 7)
+        return String(bars[bars.index(bars.startIndex, offsetBy: idx)])
+    }.joined()
+}
+
+/// Returns a 0–1 score estimating cognitive load from recent journal entries.
+/// Blends token velocity (60%) and pattern extraction rate (40%).
+private func cognitiveLoadScore(journal: [JournalEntry]) -> Double {
+    guard !journal.isEmpty else { return 0 }
+    let recent   = Array(journal.suffix(5))
+    let avgTok   = Double(recent.map { $0.tokensUsed }.reduce(0, +)) / Double(recent.count)
+    let avgPat   = Double(recent.map { $0.patternsExtracted }.reduce(0, +)) / Double(recent.count)
+    let tokLoad  = min(avgTok / 8000.0, 1.0)
+    let patLoad  = min(avgPat / 10.0,   1.0)
+    return tokLoad * 0.6 + patLoad * 0.4
+}
+
+/// Renders a 5-slot filled/empty gauge: score 0.0 → "○○○○○", 1.0 → "●●●●●".
+private func fmtLoadGauge(_ score: Double) -> String {
+    let filled = Int(score * 5 + 0.5)
+    return String(repeating: "●", count: filled) + String(repeating: "○", count: 5 - filled)
 }
 
 private func recentPatterns(limit: Int = 3) -> [Pattern] {
@@ -434,6 +691,68 @@ private func allAssociations() -> [Association] {
     return arr
 }
 
+/// Read the insight-digest prose paragraph (strips the markdown header/metadata lines).
+private func readInsightDigest() -> String? {
+    let path = subDir + "/dreams/insight-digest.md"
+    guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    // Strip lines starting with # or _ (headers + italics metadata), keep prose
+    let prose = raw.components(separatedBy: "\n")
+        .filter { !$0.hasPrefix("#") && !$0.hasPrefix("_") && !$0.hasPrefix("##") }
+        .joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return prose.isEmpty ? nil : prose
+}
+
+/// Read all dream insights from dreams/insights.md as a raw string.
+private func readAllInsights() -> String? {
+    let path = subDir + "/dreams/insights.md"
+    return try? String(contentsOfFile: path, encoding: .utf8)
+}
+
+/// Read the current dream frequency from settings.json (hours). Returns nil if unset.
+private func readDreamFrequency() -> Double? {
+    let path = subDir + "/settings.json"
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+          let obj  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let h    = obj["dream_frequency_hours"] as? Double,
+          h > 0
+    else { return nil }
+    return h
+}
+
+/// Persist the dream frequency to settings.json.
+private func writeDreamFrequency(_ hours: Double) {
+    let path = subDir + "/settings.json"
+    var obj: [String: Any] = [:]
+    if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+       let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        obj = existing
+    }
+    if hours > 0 { obj["dream_frequency_hours"] = hours }
+    else { obj.removeValue(forKey: "dream_frequency_hours") }
+    if let data = try? JSONSerialization.data(withJSONObject: obj, options: .prettyPrinted) {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
+/// Return the Date when the next dream cycle will fire (activity + threshold).
+/// Returns nil if no activity file exists.
+private func nextDreamDate(thresholdHours: Double) -> Date? {
+    let attrs = try? FileManager.default.attributesOfItem(atPath: activityFile)
+    guard let mod = attrs?[.modificationDate] as? Date else { return nil }
+    return mod.addingTimeInterval(thresholdHours * 3600)
+}
+
+/// Format a countdown to a future date: "in 2h 15m", "in 45m", "now".
+private func fmtCountdown(_ target: Date) -> String {
+    let secs = target.timeIntervalSinceNow
+    if secs <= 0 { return "now" }
+    let h = Int(secs) / 3600
+    let m = (Int(secs) % 3600) / 60
+    if h > 0 { return "in \(h)h \(m)m" }
+    return "in \(m)m"
+}
+
 // ─── Store health ─────────────────────────────────────────────────────────────
 
 private struct StoreFile {
@@ -473,10 +792,31 @@ private func readLatestAudit() -> (audit: MetacogAudit?, filename: String?) {
     guard let latest = files.filter({ $0.hasSuffix(".json") }).sorted().last else {
         return (nil, nil)
     }
-    let path  = auditsDir + "/" + latest
+    let path = auditsDir + "/" + latest
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return (nil, nil) }
-    let audit = try? JSONDecoder().decode(MetacogAudit.self, from: data)
-    return (audit, latest)
+
+    // Try direct decode first (future flat format).
+    if let audit = try? JSONDecoder().decode(MetacogAudit.self, from: data) {
+        return (audit, latest)
+    }
+
+    // Current format: { "response": "```json\n{...}\n```", "sessions": [...] }
+    // Unwrap the response string, strip markdown fences, decode the inner JSON.
+    if let wrapper  = try? JSONDecoder().decode(MetacogAuditFile.self, from: data),
+       let response = wrapper.response {
+        let stripped = response
+            .replacingOccurrences(of: "```json\n", with: "")
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "\n```", with: "")
+            .replacingOccurrences(of: "```",   with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let innerData = stripped.data(using: .utf8),
+           let audit = try? JSONDecoder().decode(MetacogAudit.self, from: innerData) {
+            return (audit, latest)
+        }
+    }
+
+    return (nil, latest)
 }
 
 /// Inspect the latest dream trace to identify current phase + completion.
@@ -537,16 +877,48 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
     var timer: Timer?
 
-    private var cachedRunning     = false
-    private var cachedState:      DaemonState?
-    private var cachedBoard:      BoardData?
-    private var cachedPatterns:   [Pattern]      = []
-    private var cachedJournal:    [JournalEntry] = []
-    private var cachedStoreFiles: [StoreFile]    = []
+    private var cachedRunning        = false
+    private var cachedState:         DaemonState?
+    private var cachedBoard:         BoardData?
+    private var cachedPatterns:      [Pattern]      = []
+    private var cachedJournal:       [JournalEntry] = []
+    private var cachedStoreFiles:    [StoreFile]    = []
+    private var cachedDigest:        String?
+    private var cachedFrequencyHours: Double?
+    private var cachedPatternCount:  Int = 0
+    private var cachedHighConfCount: Int = 0
 
     // Persistent resizable detail panel (replaces NSAlert popups)
     private var detailPanel:    NSPanel?
     private var detailFilePath: String?
+
+    // Dream completion card (auto-dismissing overlay)
+    private var completionCard: NSPanel?
+
+    // Pattern network graph panel
+    private var networkPanel:  NSPanel?
+
+    // Insight feedback panel
+    private var feedbackPanel: NSPanel?
+
+    // Ambient HUD — always-visible mini status window
+    private var hudPanel:        NSPanel?
+    private var hudUpdateTimer:  Timer?
+    private var hudBarChart:     MiniBarChartView?
+    private var hudPinBtn:       NSButton?
+    private var hudTimeRangeBtn: NSButton?
+    /// 0 = 7d, 1 = 30d, 2 = all
+    private var hudTimeRangeIndex: Int = 0
+
+    // Dream replay — event-by-event trace playback
+    private var replayPanel:      NSPanel?
+    private var replayTimer:      Timer?
+    private var replayEvents:     [[String: Any]] = []
+    private var replayIndex:      Int             = 0
+    private var replayTextView:   NSTextView?
+    private var replayPauseBtn:   NSButton?
+    private var replayTracePopup: NSPopUpButton?
+    private var replayTraceFiles: [String]        = []
 
     // Dreaming animation
     private var isCycling       = false
@@ -558,7 +930,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var theMenu: NSMenu!
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        dlog("launched PID=\(ProcessInfo.processInfo.processIdentifier)")
+        dlog("launched PID=\(ProcessInfo.processInfo.processIdentifier) build=\(BuildInfo.commitHash)/\(BuildInfo.sourceHash) at=\(BuildInfo.builtAt)")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         theMenu                  = NSMenu()
@@ -567,6 +939,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu          = theMenu
 
         refresh()
+        // Restore HUD if it was visible in the previous session
+        if UserDefaults.standard.bool(forKey: hudVisibleKey) { showHUD() }
+
         // Full refresh every 30s (state.json, board, patterns)
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -584,27 +959,41 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Called by AppKit right before the menu is shown — always up-to-date.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        cachedRunning     = isDaemonRunning()
-        cachedState       = readState()
-        cachedBoard       = readBoard()
-        cachedPatterns    = recentPatterns()
-        cachedJournal     = recentJournal()
-        cachedStoreFiles  = readStoreFiles()
+        cachedRunning          = isDaemonRunning()
+        cachedState            = readState()
+        cachedBoard            = readBoard()
+        cachedPatterns         = recentPatterns(limit: 5)
+        cachedJournal          = recentJournal(limit: 20)
+        cachedStoreFiles       = readStoreFiles()
+        cachedDigest           = readInsightDigest()
+        cachedFrequencyHours   = readDreamFrequency()
+        let allPats            = allPatterns()
+        cachedPatternCount     = allPats.count
+        cachedHighConfCount    = allPats.filter { $0.confidence >= 0.8 }.count
         updateButton()
         menu.removeAllItems()
         populateMenuItems(menu)
     }
 
     @objc func refresh() {
-        cachedRunning     = isDaemonRunning()
-        cachedState       = readState()
-        cachedBoard       = readBoard()
-        cachedPatterns    = recentPatterns()
-        cachedJournal     = recentJournal()
-        cachedStoreFiles  = readStoreFiles()
+        cachedRunning          = isDaemonRunning()
+        cachedState            = readState()
+        cachedBoard            = readBoard()
+        cachedPatterns         = recentPatterns(limit: 5)
+        cachedJournal          = recentJournal(limit: 20)
+        cachedStoreFiles       = readStoreFiles()
+        cachedDigest           = readInsightDigest()
+        cachedFrequencyHours   = readDreamFrequency()
+        let allPats            = allPatterns()
+        cachedPatternCount     = allPats.count
+        cachedHighConfCount    = allPats.filter { $0.confidence >= 0.8 }.count
         dlog("refresh: running=\(cachedRunning) cycles=\(cachedState?.totalCycles ?? -1)")
         checkCycleCompletion()
         updateButton()
+        // Keep HUD current if visible
+        if let panel = hudPanel, let tv = panel.contentView?.subviews.first as? NSTextView {
+            updateHUDContent(tv)
+        }
     }
 
     // ── Dreaming animation ─────────────────────────────────────────────────────
@@ -628,6 +1017,83 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateButton()
     }
 
+    // ── Dream completion card ─────────────────────────────────────────────────
+    // Slides in from the bottom-right corner, auto-dismisses after 6s with fade.
+
+    private func showCompletionCard() {
+        completionCard?.orderOut(nil)
+        completionCard = nil
+
+        let cardW: CGFloat = 400
+        let cardH: CGFloat = 210
+        guard let screen = NSScreen.main else { return }
+        let sv = screen.visibleFrame
+        let ox = sv.maxX - cardW - 16
+        let oy = sv.minY + 16
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: ox, y: oy, width: cardW, height: cardH),
+            styleMask:   [.nonactivatingPanel, .titled, .closable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        panel.level                     = .floating
+        panel.isMovableByWindowBackground = true
+        panel.titlebarAppearsTransparent = true
+        panel.backgroundColor           = NSColor.windowBackgroundColor.withAlphaComponent(0.96)
+        panel.hasShadow                 = true
+
+        // Animate in from slightly below
+        var startFrame = panel.frame
+        startFrame.origin.y -= 30
+        panel.setFrame(startFrame, display: false)
+        panel.orderFront(nil)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.3
+            panel.animator().setFrame(NSRect(x: ox, y: oy, width: cardW, height: cardH), display: true)
+        }
+
+        // Content
+        let entry   = cachedJournal.last
+        let n       = cachedState?.totalCycles ?? 0
+        let rt      = RichText()
+        rt.header("✓  Dream cycle \(n) complete")
+        rt.divider()
+        if let e = entry {
+            let parts = [
+                e.sessionsAnalyzed  > 0 ? "\(e.sessionsAnalyzed) sessions"  : nil,
+                e.patternsExtracted > 0 ? "\(e.patternsExtracted) patterns" : nil,
+                e.associationsFound > 0 ? "\(e.associationsFound) associations" : nil,
+                e.insightsPromoted  > 0 ? "\(e.insightsPromoted) insights promoted" : nil,
+            ].compactMap { $0 }.joined(separator: "  ·  ")
+            if !parts.isEmpty { rt.ok(parts) }
+            rt.dim("\(fmtNum(e.tokensUsed)) tokens used")
+        }
+        if let digest = cachedDigest {
+            rt.spacer()
+            let snippet = String(digest.prefix(160))
+            rt.body(snippet.count < digest.count ? snippet + "…" : snippet)
+        }
+
+        let tv = NSTextView(frame: NSRect(x: 16, y: 12, width: cardW - 32, height: cardH - 36))
+        tv.isEditable = false
+        tv.isSelectable = false
+        tv.backgroundColor = .clear
+        tv.textStorage?.setAttributedString(rt.build())
+        panel.contentView?.addSubview(tv)
+        completionCard = panel
+
+        // Fade out after 4s, remove after 6s
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 2
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                panel.orderOut(nil)
+                self?.completionCard = nil
+            })
+        }
+        dlog("completion card shown for cycle \(n)")
+    }
+
     private func checkCycleCompletion() {
         guard isCycling, let start = cycleStartTime else { return }
         // Safety timeout: 3 minutes
@@ -636,7 +1102,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let progress = detectDreamProgress(since: start)
         if progress.isDone {
-            dlog("cycle complete — trace detected"); stopDreamAnimation(); refresh()
+            dlog("cycle complete — trace detected")
+            stopDreamAnimation()
+            refresh()
+            showCompletionCard()
         }
     }
 
@@ -644,8 +1113,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateButton() {
         guard let btn = statusItem.button else { return }
-        let sym = currentIconSymbol()
-        if let img = NSImage(systemSymbolName: sym, accessibilityDescription: "i-dream") {
+        // Icon: user-chosen symbol unless there's an error, then always exclamation
+        let hasError = cachedBoard?.lastError != nil
+        let baseSym  = hasError && !isCycling ? "exclamationmark.circle.fill" : currentIconSymbol()
+        if let img = NSImage(systemSymbolName: baseSym, accessibilityDescription: "i-dream") {
             img.isTemplate = true
             btn.image = img
             btn.imagePosition = .imageLeft
@@ -661,11 +1132,23 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             btn.toolTip = "i-dream: dreaming… (\(elapsed))"
         } else if cachedRunning {
             let n = cachedState?.totalCycles ?? 0
-            btn.title   = " \(n)"
-            btn.toolTip = "i-dream: running · \(n) cycles"
+            // Star-glow: show recency of last dream as fading sparkle (2h window, 3 tiers)
+            var suffix = ""
+            if let lastConsolid = isoDate(cachedState?.lastConsolidation) {
+                let age = Date().timeIntervalSince(lastConsolid) / 7200.0  // 0–1 over 2h
+                if age < 0.33 {
+                    suffix = " ✦✦✦"
+                } else if age < 0.66 {
+                    suffix = " ✦✦"
+                } else if age < 1.0 {
+                    suffix = " ✦"
+                }
+            }
+            btn.title   = " \(n)\(suffix)"
+            btn.toolTip = "i-dream: running · \(n) cycles  [build: \(BuildInfo.commitHash)/\(BuildInfo.sourceHash)]"
         } else {
             btn.title   = ""
-            btn.toolTip = "i-dream: stopped — click to manage"
+            btn.toolTip = "i-dream: stopped — click to manage  [build: \(BuildInfo.commitHash)/\(BuildInfo.sourceHash)]"
         }
     }
 
@@ -691,13 +1174,52 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let statusText  = running ? "◉  i-dream  —  Running" : "○  i-dream  —  Stopped"
         addColored(menu, statusText, color: statusColor,
                    font: .systemFont(ofSize: 13, weight: .semibold))
+        // Cognitive load gauge — inline with status
+        if !cachedJournal.isEmpty {
+            let load      = cognitiveLoadScore(journal: cachedJournal)
+            let gauge     = fmtLoadGauge(load)
+            let loadColor: NSColor = load > 0.75 ? .systemOrange : load > 0.4 ? .systemBlue : .secondaryLabelColor
+            addRow(menu, "  Cognitive load", gauge, valueColor: loadColor)
+        }
+        // ─ Daemon controls ────────────────────────────────────────────────────
+        if running {
+            let s = add(menu, "Stop Daemon", #selector(stopDaemon))
+            setIcon(s, "stop.fill")
+        } else {
+            let s = add(menu, "Start Daemon", #selector(startDaemon))
+            setIcon(s, "play.fill")
+        }
+        let t = add(menu, "Trigger Dream Cycle", #selector(triggerCycleWithUsageCheck))
+        setIcon(t, "arrow.triangle.2.circlepath")
+        t.isEnabled = running && !isCycling
+
+        // Usage limit warning row (only when over threshold)
+        if let usage = s?.usage, usage.overWarnThreshold {
+            let warn = NSMenuItem(title: "⚠ High usage — \(usage.warningLine)", action: nil, keyEquivalent: "")
+            warn.isEnabled = false
+            warn.attributedTitle = NSAttributedString(string: "⚠ High usage — \(usage.warningLine)", attributes: [
+                .foregroundColor: NSColor.systemOrange,
+                .font: NSFont.systemFont(ofSize: 11),
+            ])
+            menu.addItem(warn)
+        }
+
         menu.addItem(.separator())
 
         // ─ Activity ───────────────────────────────────────────────────────────
         addSection(menu, "Activity")
         if let s = s {
             addRow(menu, "Cycles",      "\(s.totalCycles)",        valueColor: .systemBlue)
-            addRow(menu, "Tokens used", fmtNum(s.totalTokensUsed), valueColor: .systemBlue)
+            // Usage window stats if limits are configured
+            if let usage = s.usage, usage.limit5h > 0 || usage.limit7d > 0 {
+                let usageStr = usage.warningLine
+                let usageColor: NSColor = usage.overWarnThreshold ? .systemOrange : .systemGreen
+                addRow(menu, "Usage", usageStr, valueColor: usageColor)
+            }
+            // Sparkline of token usage over last 20 cycles
+            let spark = fmtSparkline(cachedJournal.map { $0.tokensUsed })
+            let tokLabel = spark.isEmpty ? fmtNum(s.totalTokensUsed) : "\(fmtNum(s.totalTokensUsed))  \(spark)"
+            addRow(menu, "Tokens used", tokLabel, valueColor: .systemBlue)
             addRow(menu, "Last run",    fmtDateWithAge(s.lastConsolidation))
             // last_activity in state.json is always null — read file mtime instead
             let lastAct = lastActivityDate()
@@ -721,6 +1243,52 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             addDim(menu, "  state.json not found")
         }
 
+        // ─ Dream Frequency ────────────────────────────────────────────────────
+        menu.addItem(.separator())
+        addSection(menu, "Dream Frequency")
+        let effectiveHz = cachedFrequencyHours ?? 4.0
+        let freqLabel: String
+        if effectiveHz < 1.0 {
+            freqLabel = "\(Int(effectiveHz * 60))m"
+        } else if effectiveHz == effectiveHz.rounded() {
+            freqLabel = "\(Int(effectiveHz))h"
+        } else {
+            freqLabel = String(format: "%.1fh", effectiveHz)
+        }
+        let nextDream = nextDreamDate(thresholdHours: effectiveHz)
+        let nextStr   = nextDream.map { fmtCountdown($0) } ?? "—"
+        addRow(menu, "  Frequency", freqLabel, valueColor: .systemBlue)
+        addRow(menu, "  Next dream", nextStr)
+
+        // Submenu with frequency choices
+        let freqMenu = NSMenu()
+        let freqOptions: [(label: String, hours: Double)] = [
+            ("30 minutes", 0.5),
+            ("1 hour",     1.0),
+            ("2 hours",    2.0),
+            ("3 hours",    3.0),
+            ("4 hours (default)", 4.0),
+            ("6 hours",    6.0),
+            ("9 hours",    9.0),
+            ("12 hours",  12.0),
+            ("18 hours",  18.0),
+            ("24 hours",  24.0),
+            ("36 hours",  36.0),
+            ("48 hours",  48.0),
+        ]
+        for opt in freqOptions {
+            let item = NSMenuItem(title: opt.label, action: #selector(setDreamFrequency(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = opt.hours
+            item.state = (opt.hours == (cachedFrequencyHours ?? 4.0)) ? .on : .off
+            freqMenu.addItem(item)
+        }
+        let freqParent = NSMenuItem(title: "  Change Frequency →", action: nil, keyEquivalent: "")
+        setIcon(freqParent, "clock")
+        menu.addItem(freqParent)
+        menu.setSubmenu(freqMenu, for: freqParent)
+
         // ─ Knowledge Base ─────────────────────────────────────────────────────
         menu.addItem(.separator())
         addSection(menu, "Knowledge Base  (tap to explore)")
@@ -743,9 +1311,27 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // ─ Recent inferences ──────────────────────────────────────────────────
-        if !cachedJournal.isEmpty || !cachedPatterns.isEmpty {
+        if !cachedJournal.isEmpty || !cachedPatterns.isEmpty || cachedDigest != nil {
             menu.addItem(.separator())
             addSection(menu, "Recent Inferences")
+
+            // Insight digest — prose synthesis of last 5 dream insights
+            if let digest = cachedDigest {
+                let digestItem = NSMenuItem()
+                let digestAttr = NSMutableAttributedString()
+                let truncDigest = digest.count > 220 ? String(digest.prefix(217)) + "…" : digest
+                digestAttr.append(NSAttributedString(string: "  \(truncDigest)\n",
+                    attributes: [.font: NSFont.systemFont(ofSize: 13),
+                                 .foregroundColor: NSColor.labelColor]))
+                digestAttr.append(NSAttributedString(string: "  Insight synthesis  ·  updated every 3h",
+                    attributes: [.font: NSFont.systemFont(ofSize: 11),
+                                 .foregroundColor: NSColor.tertiaryLabelColor]))
+                digestItem.attributedTitle = digestAttr
+                digestItem.isEnabled = false
+                setIcon(digestItem, "sparkles")
+                menu.addItem(digestItem)
+            }
+
             // Show last cycle summary
             if let latest = cachedJournal.last {
                 let parts = [
@@ -764,14 +1350,19 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 for p in cachedPatterns {
                     let truncated = p.pattern.count > 180 ? String(p.pattern.prefix(177)) + "…" : p.pattern
                     let sym  = valenceSymbol(p.valence)
+                    // Confidence colour: green ≥85%, blue ≥65%, muted <65%
+                    let confColor: NSColor = p.confidence >= 0.85 ? .systemGreen
+                                          : p.confidence >= 0.65 ? .systemBlue
+                                          : .secondaryLabelColor
+                    let confDot = p.confidence >= 0.85 ? "●" : p.confidence >= 0.65 ? "◕" : "○"
                     let item = NSMenuItem()
                     let full = NSMutableAttributedString()
                     full.append(NSAttributedString(string: "  \(sym) \"\(truncated)\"\n",
                                                    attributes: [.font: NSFont.systemFont(ofSize: 14)]))
-                    full.append(NSAttributedString(string: "  \(p.category)  ·  \(Int(p.confidence * 100))% confident  ·  ⌘C to copy",
+                    full.append(NSAttributedString(string: "  \(confDot) \(Int(p.confidence * 100))%  ·  \(p.category)  ·  ⌘C to copy",
                                                    attributes: [
                                                        .font: NSFont.systemFont(ofSize: 12),
-                                                       .foregroundColor: NSColor.secondaryLabelColor,
+                                                       .foregroundColor: confColor,
                                                    ]))
                     item.attributedTitle = full
                     item.action = #selector(copyItemText(_:))
@@ -782,6 +1373,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     setIcon(item, "doc.on.clipboard")
                     menu.addItem(item)
                 }
+                // View All Insights link
+                let viewAll = addClickable(menu, "  View All Insights →", "",
+                                           action: #selector(showInsightsDetail))
+                setIcon(viewAll, "list.bullet.rectangle")
             }
         }
 
@@ -831,22 +1426,27 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // ─ Daemon controls ────────────────────────────────────────────────────
-        addSection(menu, "Daemon")
-        if running {
-            let s = add(menu, "Stop Daemon", #selector(stopDaemon))
-            setIcon(s, "stop.fill")
-        } else {
-            let s = add(menu, "Start Daemon", #selector(startDaemon))
-            setIcon(s, "play.fill")
-        }
-        let t = add(menu, "Trigger Dream Cycle", #selector(triggerCycle))
-        setIcon(t, "arrow.triangle.2.circlepath")
-        t.isEnabled = running && !isCycling
-
-        menu.addItem(.separator())
-
         // ─ Tools ──────────────────────────────────────────────────────────────
+        // Ambient HUD toggle
+        let hudVisible = UserDefaults.standard.bool(forKey: hudVisibleKey)
+        let hudTitle = hudVisible ? "Hide Ambient HUD" : "Show Ambient HUD"
+        let hudItem = add(menu, hudTitle, #selector(toggleHUD))
+        setIcon(hudItem, hudVisible ? "eye.slash.fill" : "eye.fill")
+
+        if hudVisible {
+            let onTop   = UserDefaults.standard.bool(forKey: hudAlwaysOnTopKey)
+            let pinItem = add(menu, onTop ? "  ✓ Always on Top" : "  Always on Top",
+                              #selector(toggleHUDOnTop))
+            pinItem.indentationLevel = 1
+            _ = pinItem
+        }
+
+        let replay = add(menu, "Dream Replay…", #selector(showDreamReplay))
+        setIcon(replay, "play.circle.fill")
+        // Disable if no traces exist
+        let traceFiles = (try? FileManager.default.contentsOfDirectory(atPath: tracesDir))?.filter { $0.hasSuffix(".jsonl") } ?? []
+        replay.isEnabled = !traceFiles.isEmpty
+
         let dash = add(menu, "Open Dashboard", #selector(openDashboard))
         setIcon(dash, "chart.bar.doc.horizontal.fill")
 
@@ -1148,6 +1748,858 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showResizablePanel(title: "Patterns (\(patterns.count))",
                            content: rt.build(),
                            filePath: subDir + "/dreams/patterns.json")
+        // Add "Network View →" and "Rate Insights →" buttons to the toolbar
+        if let panel = detailPanel,
+           let bar = panel.contentView?.subviews.first(where: { $0.frame.height == 48 && $0.frame.origin.y == 0 }) {
+            let panW = panel.contentView?.bounds.width ?? 900
+            let netBtn = NSButton(title: "Network View →", target: self,
+                                  action: #selector(showPatternNetwork))
+            netBtn.frame      = NSRect(x: 12, y: 8, width: 130, height: 32)
+            netBtn.autoresizingMask = []
+            netBtn.bezelStyle = .rounded
+            bar.addSubview(netBtn)
+            let rateBtn = NSButton(title: "Rate Insights →", target: self,
+                                   action: #selector(showInsightsFeedback))
+            rateBtn.frame      = NSRect(x: 155, y: 8, width: 130, height: 32)
+            rateBtn.autoresizingMask = []
+            rateBtn.bezelStyle = .rounded
+            bar.addSubview(rateBtn)
+            _ = panW
+        }
+    }
+
+    // ── Insight Feedback ──────────────────────────────────────────────────────
+    // Opens a panel with top-15 patterns; user can rate each thumbs-up/down.
+
+    @objc private func showInsightsFeedback() {
+        let patterns = allPatterns()
+        guard !patterns.isEmpty else {
+            alert("Rate Insights", "No patterns to rate yet."); return
+        }
+        feedbackPanel?.close(); feedbackPanel = nil
+
+        let topPatterns = Array(patterns.sorted { $0.confidence > $1.confidence }.prefix(15))
+
+        let panW: CGFloat = 600
+        let panH: CGFloat = 600
+        let rowH: CGFloat = 44
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
+            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title                = "Rate Insights"
+        panel.isReleasedWhenClosed = false
+        panel.level                = .floating
+        panel.center()
+
+        // Build scroll view with one row per pattern
+        let totalContentH = CGFloat(topPatterns.count) * rowH
+        let containerView = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: totalContentH))
+
+        for (i, p) in topPatterns.enumerated() {
+            let y = totalContentH - CGFloat(i + 1) * rowH
+            let rowView = NSView(frame: NSRect(x: 0, y: y, width: panW, height: rowH))
+            rowView.autoresizingMask = [.width]
+
+            // Confidence bar
+            let barW = p.confidence * 80
+            let confBar = NSView(frame: NSRect(x: 8, y: 14, width: barW, height: 16))
+            let barColor: NSColor = p.valence == "positive" ? .systemGreen
+                                  : p.valence == "negative" ? .systemRed : .systemBlue
+            confBar.wantsLayer = true
+            confBar.layer?.backgroundColor = barColor.withAlphaComponent(0.7).cgColor
+            confBar.layer?.cornerRadius    = 3
+            rowView.addSubview(confBar)
+
+            // Pattern text label
+            let maxChars = 60
+            let labelText = p.pattern.count > maxChars ? String(p.pattern.prefix(maxChars)) + "…" : p.pattern
+            let label = NSTextField(labelWithString: labelText)
+            label.font      = .systemFont(ofSize: 12)
+            label.textColor = .labelColor
+            label.frame     = NSRect(x: 96, y: 12, width: panW - 96 - 120, height: 20)
+            label.autoresizingMask = [.width]
+            label.lineBreakMode    = .byTruncatingTail
+            rowView.addSubview(label)
+
+            // Thumbs-up button
+            let upBtn = NSButton(title: "👍", target: self, action: #selector(insightRateUp(_:)))
+            upBtn.frame = NSRect(x: panW - 116, y: 7, width: 50, height: 30)
+            upBtn.autoresizingMask = [.minXMargin]
+            upBtn.bezelStyle = .rounded
+            upBtn.tag = i
+            rowView.addSubview(upBtn)
+
+            // Thumbs-down button
+            let downBtn = NSButton(title: "👎", target: self, action: #selector(insightRateDown(_:)))
+            downBtn.frame = NSRect(x: panW - 62, y: 7, width: 50, height: 30)
+            downBtn.autoresizingMask = [.minXMargin]
+            downBtn.bezelStyle = .rounded
+            downBtn.tag = i
+            rowView.addSubview(downBtn)
+
+            // Separator line
+            let sep = NSBox(frame: NSRect(x: 0, y: 0, width: panW, height: 1))
+            sep.boxType = .separator; sep.autoresizingMask = [.width]
+            rowView.addSubview(sep)
+
+            containerView.addSubview(rowView)
+        }
+
+        // Store top patterns in a property so action handlers can reference them
+        _feedbackPatterns = topPatterns
+
+        let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: panW, height: panH))
+        sv.autoresizingMask    = [.width, .height]
+        sv.hasVerticalScroller = true
+        sv.autohidesScrollers  = true
+        sv.borderType          = .noBorder
+        sv.documentView        = containerView
+        panel.contentView?.addSubview(sv)
+
+        feedbackPanel = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private var _feedbackPatterns: [Pattern] = []
+
+    @objc private func insightRateUp(_ sender: NSButton) {
+        let idx = sender.tag
+        guard idx < _feedbackPatterns.count else { return }
+        let p = _feedbackPatterns[idx]
+        recordFeedback(patternId: p.pattern, rating: 1)
+        markFeedbackRow(button: sender, rating: 1)
+    }
+
+    @objc private func insightRateDown(_ sender: NSButton) {
+        let idx = sender.tag
+        guard idx < _feedbackPatterns.count else { return }
+        let p = _feedbackPatterns[idx]
+        recordFeedback(patternId: p.pattern, rating: -1)
+        markFeedbackRow(button: sender, rating: -1)
+    }
+
+    private func markFeedbackRow(button: NSButton, rating: Int) {
+        guard let rowView = button.superview else { return }
+        // Dim the row
+        rowView.alphaValue = 0.45
+        // Show "✓ rated" label
+        let doneLabel = NSTextField(labelWithString: rating > 0 ? "✓ 👍" : "✓ 👎")
+        doneLabel.font      = .systemFont(ofSize: 12, weight: .medium)
+        doneLabel.textColor = .secondaryLabelColor
+        doneLabel.frame     = NSRect(x: rowView.bounds.width - 116, y: 10, width: 104, height: 22)
+        doneLabel.autoresizingMask = [.minXMargin]
+        rowView.addSubview(doneLabel)
+        // Disable both rating buttons in this row
+        for sub in rowView.subviews {
+            if let btn = sub as? NSButton { btn.isEnabled = false }
+        }
+    }
+
+    private func recordFeedback(patternId: String, rating: Int) {
+        let feedbackPath = subDir + "/dreams/insight-feedback.jsonl"
+        let iso: String = {
+            let fmt = ISO8601DateFormatter()
+            fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return fmt.string(from: Date())
+        }()
+        let entry: [String: Any] = [
+            "ts": iso,
+            "pattern_id": patternId,
+            "rating": rating,
+            "source": "widget"
+        ]
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: entry),
+              let jsonStr  = String(data: jsonData, encoding: .utf8) else { return }
+        let line = jsonStr + "\n"
+        if FileManager.default.fileExists(atPath: feedbackPath) {
+            if let fh = FileHandle(forWritingAtPath: feedbackPath) {
+                fh.seekToEndOfFile()
+                fh.write(line.data(using: .utf8) ?? Data())
+                fh.closeFile()
+            }
+        } else {
+            try? line.write(toFile: feedbackPath, atomically: true, encoding: .utf8)
+        }
+    }
+
+    @objc private func showPatternNetwork() {
+        let patterns = allPatterns()
+        guard !patterns.isEmpty else {
+            alert("Pattern Network", "No patterns to visualize yet."); return
+        }
+        networkPanel?.close()
+        let panW: CGFloat = 860
+        let panH: CGFloat = 660
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
+            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title                = "Pattern Network  (\(patterns.count) patterns)"
+        panel.isReleasedWhenClosed = false
+        panel.level                = .floating
+        panel.center()
+
+        let graphH = panH - 48
+        let graphView = PatternGraphView(
+            frame: NSRect(x: 0, y: 48, width: panW, height: graphH),
+            patterns: patterns)
+        graphView.autoresizingMask = [.width, .height]
+        panel.contentView?.addSubview(graphView)
+
+        // Toolbar
+        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: 48))
+        bar.autoresizingMask = [.width]
+        let sep = NSBox(frame: NSRect(x: 0, y: 47, width: panW, height: 1))
+        sep.boxType = .separator; sep.autoresizingMask = [.width]
+        bar.addSubview(sep)
+        let hint = NSTextField(labelWithString: "Click a node to inspect · \(patterns.count) patterns across \(Set(patterns.map { $0.category }).count) categories")
+        hint.font        = .systemFont(ofSize: 11)
+        hint.textColor   = .secondaryLabelColor
+        hint.frame       = NSRect(x: 14, y: 14, width: panW - 200, height: 20)
+        hint.autoresizingMask = [.width]
+        bar.addSubview(hint)
+        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeNetworkPanel))
+        closeBtn.frame      = NSRect(x: panW - 92, y: 8, width: 80, height: 32)
+        closeBtn.autoresizingMask = [.minXMargin]
+        closeBtn.bezelStyle = .rounded
+        bar.addSubview(closeBtn)
+        panel.contentView?.addSubview(bar)
+
+        networkPanel = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func closeNetworkPanel() {
+        networkPanel?.close()
+        networkPanel = nil
+    }
+
+    // ── Dream replay ─────────────────────────────────────────────────────────
+    // Auto-plays through a trace JSONL file event by event at 500ms intervals.
+    // Shows phase colour, kind, timestamp, and detail for each event.
+
+    @objc private func showDreamReplay() {
+        replayTimer?.invalidate(); replayTimer = nil
+        replayPanel?.close();      replayPanel = nil
+
+        let fm  = FileManager.default
+        let all = ((try? fm.contentsOfDirectory(atPath: tracesDir))?.filter { $0.hasSuffix(".jsonl") }.sorted() ?? []).reversed() as [String]
+        // newest-first
+        let sorted = Array(all)
+        guard let latest = sorted.first else {
+            alert("Dream Replay", "No trace files found in \(tracesDir)"); return
+        }
+        replayTraceFiles = sorted
+
+        func loadTrace(_ filename: String) {
+            let tracePath = tracesDir + "/" + filename
+            guard let raw = try? String(contentsOfFile: tracePath, encoding: .utf8) else { return }
+            replayEvents = raw.components(separatedBy: "\n").filter { !$0.isEmpty }.compactMap { line in
+                guard let d = line.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+                else { return nil }
+                return obj
+            }
+            replayIndex = 0
+        }
+        loadTrace(latest)
+
+        let panW: CGFloat = 800
+        let panH: CGFloat = 620
+        let barH: CGFloat = 48
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
+            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title                = "Dream Replay"
+        panel.isReleasedWhenClosed = false
+        panel.level                = .floating
+        panel.center()
+
+        // Scrollable text view
+        let sv = NSScrollView(frame: NSRect(x: 0, y: barH, width: panW, height: panH - barH))
+        sv.autoresizingMask    = [.width, .height]
+        sv.hasVerticalScroller = true; sv.autohidesScrollers = true; sv.borderType = .noBorder
+        let cs = sv.contentSize
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: cs.width, height: cs.height))
+        tv.minSize = NSSize(width: 0, height: cs.height)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.autoresizingMask  = .width; tv.isEditable = false; tv.isSelectable = true
+        tv.backgroundColor   = .textBackgroundColor; tv.textContainerInset = NSSize(width: 14, height: 14)
+        tv.isVerticallyResizable = true; tv.isHorizontallyResizable = false
+        tv.textContainer?.containerSize    = NSSize(width: cs.width, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainer?.widthTracksTextView = true
+        sv.documentView = tv
+        replayTextView  = tv
+
+        // Toolbar
+        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: barH))
+        bar.autoresizingMask = [.width]
+        let sep = NSBox(frame: NSRect(x: 0, y: barH - 1, width: panW, height: 1))
+        sep.boxType = .separator; sep.autoresizingMask = [.width]; bar.addSubview(sep)
+
+        let pauseBtn = NSButton(title: "⏸ Pause", target: self, action: #selector(toggleReplayPlayback))
+        pauseBtn.frame = NSRect(x: 12, y: 8, width: 90, height: 32)
+        pauseBtn.bezelStyle = .rounded; bar.addSubview(pauseBtn)
+        replayPauseBtn = pauseBtn
+
+        // File selector popup — lists all trace files newest-first
+        let popup = NSPopUpButton(frame: NSRect(x: 110, y: 8, width: 500, height: 28), pullsDown: false)
+        popup.bezelStyle = .rounded
+        popup.autoresizingMask = [.width, .minXMargin]
+        for filename in sorted {
+            let title = Self.replayTraceLabel(filename: filename,
+                                              eventCount: filename == latest ? replayEvents.count : nil)
+            popup.addItem(withTitle: title)
+        }
+        popup.selectItem(at: 0)
+        popup.target = self
+        popup.action = #selector(replayFileSelected)
+        bar.addSubview(popup)
+        replayTracePopup = popup
+
+        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeReplayPanel))
+        closeBtn.frame = NSRect(x: panW - 92, y: 8, width: 80, height: 32)
+        closeBtn.autoresizingMask = [.minXMargin]; closeBtn.bezelStyle = .rounded; bar.addSubview(closeBtn)
+
+        panel.contentView?.addSubview(sv)
+        panel.contentView?.addSubview(bar)
+        replayPanel = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+
+        // Start auto-play
+        startReplay()
+    }
+
+    /// Formats a trace filename like "20260416-2139-abc.jsonl" → "Apr 16 21:39  (N events)"
+    private static func replayTraceLabel(filename: String, eventCount: Int?) -> String {
+        // Expected prefix: YYYYMMDD-HHMM
+        let base = (filename as NSString).deletingPathExtension
+        let parts = base.components(separatedBy: "-")
+        var dateStr = filename
+        if parts.count >= 2 {
+            let datePart = parts[0] // YYYYMMDD
+            let timePart = parts[1] // HHMM
+            if datePart.count == 8, timePart.count == 4 {
+                let year  = Int(datePart.prefix(4)) ?? 0
+                let month = Int(datePart.dropFirst(4).prefix(2)) ?? 0
+                let day   = Int(datePart.dropFirst(6).prefix(2)) ?? 0
+                let hour  = Int(timePart.prefix(2)) ?? 0
+                let min   = Int(timePart.suffix(2)) ?? 0
+                var cal   = Calendar(identifier: .gregorian)
+                cal.timeZone = TimeZone.current
+                if let date = cal.date(from: DateComponents(year: year, month: month, day: day,
+                                                            hour: hour, minute: min)) {
+                    let fmt = DateFormatter()
+                    fmt.dateFormat = "MMM d HH:mm"
+                    dateStr = fmt.string(from: date)
+                }
+            }
+        }
+        if let n = eventCount {
+            return "\(dateStr)  (\(n) events)"
+        }
+        return dateStr
+    }
+
+    @objc private func replayFileSelected() {
+        guard let popup = replayTracePopup else { return }
+        let idx = popup.indexOfSelectedItem
+        guard idx >= 0, idx < replayTraceFiles.count else { return }
+        let filename = replayTraceFiles[idx]
+        let tracePath = tracesDir + "/" + filename
+        guard let raw = try? String(contentsOfFile: tracePath, encoding: .utf8) else { return }
+        replayEvents = raw.components(separatedBy: "\n").filter { !$0.isEmpty }.compactMap { line in
+            guard let d = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        replayIndex = 0
+        replayTimer?.invalidate(); replayTimer = nil
+        replayTextView?.textStorage?.setAttributedString(NSAttributedString(string: ""))
+        // Update popup title to include event count now that we know it
+        popup.item(at: idx)?.title = Self.replayTraceLabel(filename: filename, eventCount: replayEvents.count)
+        startReplay()
+    }
+
+    private func startReplay() {
+        replayTimer?.invalidate()
+        replayTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.replayStep()
+        }
+        replayPauseBtn?.title = "⏸ Pause"
+    }
+
+    @objc private func toggleReplayPlayback() {
+        if replayTimer != nil {
+            replayTimer?.invalidate(); replayTimer = nil
+            replayPauseBtn?.title = "▶ Play"
+        } else {
+            startReplay()
+        }
+    }
+
+    @objc private func replayStep() {
+        guard replayIndex < replayEvents.count else {
+            replayTimer?.invalidate(); replayTimer = nil
+            replayPauseBtn?.title = "▶ Done"
+            return
+        }
+        let obj   = replayEvents[replayIndex]
+        let phase = obj["phase"] as? String ?? "–"
+        let kind  = obj["kind"]  as? String ?? "event"
+        let ts    = obj["ts"]    as? String ?? ""
+        let det   = obj["details"] as? String ?? ""
+        replayIndex += 1
+
+        let phaseColor: NSColor
+        switch phase {
+        case "sws":  phaseColor = .systemBlue
+        case "rem":  phaseColor = .systemPurple
+        case "wake": phaseColor = .systemGreen
+        default:     phaseColor = .secondaryLabelColor
+        }
+        let kindColor: NSColor = kind == "cycle_complete" ? .systemGreen
+                               : kind.contains("error")   ? .systemRed
+                               : .labelColor
+
+        let line = NSMutableAttributedString()
+        line.append(NSAttributedString(string: "[\(phase)]  ", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: phaseColor,
+        ]))
+        line.append(NSAttributedString(string: kind, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: kindColor,
+        ]))
+        if !det.isEmpty {
+            let truncDet = det.count > 120 ? String(det.prefix(117)) + "…" : det
+            line.append(NSAttributedString(string: "\n  \(truncDet)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
+        line.append(NSAttributedString(string: "\n  \(ts)", attributes: [
+            .font: NSFont.systemFont(ofSize: 10),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+        ]))
+
+        // ── Payload box (LLM text output / prompt) ───────────────────────────
+        if let payload = obj["payload"] as? String, !payload.isEmpty {
+            let payloadKind = obj["payload_kind"] as? String ?? ""
+            let isLLMResponse = kind == "api_response" || payloadKind == "text"
+            let capLen = isLLMResponse ? 1000 : 600
+            let truncPayload = payload.count > capLen
+                ? String(payload.prefix(capLen)) + "\n  …[\(payload.count - capLen) more chars]"
+                : payload
+
+            let indentStyle = NSMutableParagraphStyle()
+            indentStyle.headIndent           = 24
+            indentStyle.firstLineHeadIndent  = 24
+            indentStyle.paragraphSpacing     = 2
+
+            let (payColor, bgColor): (NSColor, NSColor)
+            if isLLMResponse {
+                payColor = phaseColor
+                bgColor  = phaseColor.withAlphaComponent(0.12)
+            } else {
+                payColor = NSColor.tertiaryLabelColor
+                bgColor  = NSColor.white.withAlphaComponent(0.04)
+            }
+
+            line.append(NSAttributedString(string: "\n\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 4),
+            ]))
+            line.append(NSAttributedString(string: truncPayload, attributes: [
+                .font:                NSFont.monospacedSystemFont(ofSize: 9, weight: .regular),
+                .foregroundColor:     payColor,
+                .backgroundColor:     bgColor,
+                .paragraphStyle:      indentStyle,
+            ]))
+        }
+
+        line.append(NSAttributedString(string: "\n\n"))
+
+        if let tv = replayTextView {
+            tv.textStorage?.append(line)
+            // Auto-scroll to bottom
+            tv.scrollToEndOfDocument(nil)
+        }
+    }
+
+    @objc private func closeReplayPanel() {
+        replayTimer?.invalidate(); replayTimer = nil
+        replayPanel?.close();      replayPanel = nil
+        replayTextView = nil;      replayPauseBtn = nil
+    }
+
+    // ── Ambient HUD ─────────────────────────────────────────────────────────
+    // A compact semi-transparent window pinned to the bottom-right corner.
+    // Shows: running status, cognitive load gauge, sparkline, last cycle.
+    // Refreshes every 30s (shares the main timer tick via updateHUD).
+
+    @objc private func toggleHUD() {
+        let nowVisible = UserDefaults.standard.bool(forKey: hudVisibleKey)
+        UserDefaults.standard.set(!nowVisible, forKey: hudVisibleKey)
+        if !nowVisible {
+            showHUD()
+        } else {
+            hudPanel?.orderOut(nil)
+            hudPanel = nil
+            hudUpdateTimer?.invalidate()
+            hudUpdateTimer = nil
+        }
+    }
+
+    @objc private func toggleHUDOnTop() {
+        let nowOn = UserDefaults.standard.bool(forKey: hudAlwaysOnTopKey)
+        let nextOn = !nowOn
+        UserDefaults.standard.set(nextOn, forKey: hudAlwaysOnTopKey)
+        if let panel = hudPanel {
+            panel.level = nextOn ? .statusBar : .floating
+        }
+        hudPinBtn?.title = nextOn ? "📌" : "📍"
+    }
+
+    @objc private func cycleHUDTimeRange() {
+        hudTimeRangeIndex = (hudTimeRangeIndex + 1) % 3
+        let labels = ["7d", "30d", "∞"]
+        hudTimeRangeBtn?.title = labels[hudTimeRangeIndex]
+        // Rebuild content immediately
+        if let tv = hudPanel?.contentView?.subviews.compactMap({ $0 as? NSTextView }).first {
+            updateHUDContent(tv)
+        }
+    }
+
+    private func showHUD() {
+        hudPanel?.orderOut(nil); hudPanel = nil
+        hudUpdateTimer?.invalidate(); hudUpdateTimer = nil
+        hudBarChart = nil
+        hudPinBtn = nil
+        hudTimeRangeBtn = nil
+
+        let w: CGFloat       = 360
+        let h: CGFloat       = 290
+        let cornerR: CGFloat = 12
+        guard let screen = NSScreen.main else { return }
+        let sv = screen.visibleFrame
+        let ox = sv.maxX - w - 12
+        let oy = sv.minY + 12
+        let onTop = UserDefaults.standard.bool(forKey: hudAlwaysOnTopKey)
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: ox, y: oy, width: w, height: h),
+            styleMask:   [.nonactivatingPanel, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        panel.level                       = onTop ? .statusBar : .floating
+        panel.isMovableByWindowBackground = true
+        panel.backgroundColor             = .clear
+        panel.alphaValue                  = 0.94
+        panel.hasShadow                   = true
+        panel.isOpaque                    = false
+        panel.collectionBehavior          = [.canJoinAllSpaces, .stationary]
+        panel.titlebarAppearsTransparent  = true
+
+        // ── Layer: gradient bg + rounded corners + pulsing blue border ───────
+        if let cv = panel.contentView {
+            cv.wantsLayer           = true
+            cv.layer?.cornerRadius  = cornerR
+            cv.layer?.masksToBounds = true
+
+            let grad = CAGradientLayer()
+            grad.frame = cv.bounds
+            grad.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+            grad.colors = [
+                NSColor(red: 0.06, green: 0.10, blue: 0.18, alpha: 0.94).cgColor,
+                NSColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 0.96).cgColor,
+            ]
+            grad.startPoint   = CGPoint(x: 0.5, y: 1.0)
+            grad.endPoint     = CGPoint(x: 0.5, y: 0.0)
+            grad.cornerRadius = cornerR
+            cv.layer?.insertSublayer(grad, at: 0)
+
+            let border = CALayer()
+            border.frame            = cv.bounds
+            border.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+            border.cornerRadius     = cornerR
+            border.borderWidth      = 1.0
+            border.borderColor      = NSColor.systemBlue.withAlphaComponent(0.45).cgColor
+            border.backgroundColor  = .none
+            cv.layer?.addSublayer(border)
+
+            let pulse = CABasicAnimation(keyPath: "borderColor")
+            pulse.fromValue      = NSColor.systemBlue.withAlphaComponent(0.30).cgColor
+            pulse.toValue        = NSColor.systemCyan.withAlphaComponent(0.80).cgColor
+            pulse.duration       = 2.8
+            pulse.autoreverses   = true
+            pulse.repeatCount    = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            border.add(pulse, forKey: "borderPulse")
+        }
+
+        let btnH:   CGFloat = 22
+        let chartH: CGFloat = 50
+        let chartY: CGFloat = 8
+        let tvY:    CGFloat = chartY + chartH + 4
+        let tvH:    CGFloat = h - tvY - btnH - 6
+
+        // Text view — stats
+        let tv = NSTextView(frame: NSRect(x: 12, y: tvY, width: w - 24, height: tvH))
+        tv.isEditable      = false
+        tv.isSelectable    = false
+        tv.backgroundColor = .clear
+        tv.drawsBackground = false
+        panel.contentView?.addSubview(tv)
+
+        // Bar chart view — token history
+        let chart = MiniBarChartView(frame: NSRect(x: 12, y: chartY, width: w - 24, height: chartH))
+        panel.contentView?.addSubview(chart)
+        hudBarChart = chart
+
+        // ── Top toolbar buttons ───────────────────────────────────────────────
+        // Close button (✕) — top-left
+        let closeBtn = NSButton(frame: NSRect(x: 6, y: h - btnH, width: 22, height: btnH))
+        closeBtn.bezelStyle       = .inline
+        closeBtn.isBordered       = false
+        closeBtn.title            = "✕"
+        closeBtn.font             = NSFont.systemFont(ofSize: 12)
+        closeBtn.contentTintColor = NSColor.tertiaryLabelColor
+        closeBtn.target           = self
+        closeBtn.action           = #selector(toggleHUD)
+        panel.contentView?.addSubview(closeBtn)
+
+        // Time range button — centre-ish top
+        let timeRangeLabels = ["7d", "30d", "∞"]
+        let trBtn = NSButton(frame: NSRect(x: w / 2 - 18, y: h - btnH, width: 36, height: btnH))
+        trBtn.bezelStyle       = .inline
+        trBtn.isBordered       = false
+        trBtn.title            = timeRangeLabels[hudTimeRangeIndex]
+        trBtn.font             = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        trBtn.contentTintColor = NSColor.secondaryLabelColor
+        trBtn.target           = self
+        trBtn.action           = #selector(cycleHUDTimeRange)
+        panel.contentView?.addSubview(trBtn)
+        hudTimeRangeBtn = trBtn
+
+        // Pin button — top-right (stored reference so toggleHUDOnTop can update it)
+        let pinBtn = NSButton(frame: NSRect(x: w - 30, y: h - btnH, width: 24, height: btnH))
+        pinBtn.bezelStyle       = .inline
+        pinBtn.isBordered       = false
+        pinBtn.title            = onTop ? "📌" : "📍"
+        pinBtn.font             = NSFont.systemFont(ofSize: 12)
+        pinBtn.target           = self
+        pinBtn.action           = #selector(toggleHUDOnTop)
+        panel.contentView?.addSubview(pinBtn)
+        hudPinBtn = pinBtn
+
+        hudPanel = panel
+        updateHUDContent(tv)
+        panel.orderFront(nil)
+
+        hudUpdateTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self, weak tv] _ in
+            guard let tv = tv else { return }
+            self?.updateHUDContent(tv)
+        }
+    }
+
+    /// Returns the journal entries filtered to the current hudTimeRangeIndex window.
+    private func hudFilteredJournal() -> [JournalEntry] {
+        guard !cachedJournal.isEmpty else { return [] }
+        switch hudTimeRangeIndex {
+        case 0: // 7 days
+            let cutoff = Date().addingTimeInterval(-7 * 86400)
+            return cachedJournal.filter { isoDate($0.timestamp).map { $0 >= cutoff } ?? true }
+        case 1: // 30 days
+            let cutoff = Date().addingTimeInterval(-30 * 86400)
+            return cachedJournal.filter { isoDate($0.timestamp).map { $0 >= cutoff } ?? true }
+        default: // all
+            return cachedJournal
+        }
+    }
+
+    /// Returns the latest calibration score from metacog/calibration.jsonl, or nil.
+    private func latestCalibrationScore() -> Double? {
+        let path = subDir + "/metacog/calibration.jsonl"
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+        guard let lastLine = lines.last,
+              let data  = lastLine.data(using: .utf8),
+              let json  = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let score = json["calibration_score"] as? Double
+        else { return nil }
+        return score
+    }
+
+    /// Returns the count of active (non-expired) intentions.
+    private func activeIntentionsCount() -> Int {
+        let path = subDir + "/intentions/registry.jsonl"
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return 0 }
+        let now = Date()
+        return content.components(separatedBy: "\n").filter { line in
+            guard !line.isEmpty,
+                  let data   = line.data(using: .utf8),
+                  let json   = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            // An intention is active if it has no expires_at, or its expires_at is in the future
+            if let exp = json["expires_at"] as? String, let expDate = isoDate(exp) {
+                return expDate > now
+            }
+            return true
+        }.count
+    }
+
+    private func updateHUDContent(_ tv: NSTextView) {
+        let dot: String     = isCycling ? "◉" : cachedRunning ? "◉" : "○"
+        let dotColor: NSColor = isCycling ? dreamAnimColors[animFrame % dreamAnimColors.count]
+                                          : cachedRunning ? .systemGreen : .systemOrange
+        let buf   = NSMutableAttributedString()
+        let fSz1: CGFloat = 14   // title / status line
+        let fSz2: CGFloat = 13   // primary stats
+        let fSz3: CGFloat = 12   // secondary / labels
+
+        func label(_ text: String) {
+            buf.append(NSAttributedString(string: text, attributes: [
+                .font:            NSFont.systemFont(ofSize: fSz3),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]))
+        }
+        func value(_ text: String, color: NSColor = .labelColor, mono: Bool = false) {
+            let f: NSFont = mono
+                ? NSFont.monospacedSystemFont(ofSize: fSz3, weight: .medium)
+                : NSFont.systemFont(ofSize: fSz3, weight: .medium)
+            buf.append(NSAttributedString(string: text, attributes: [
+                .font: f, .foregroundColor: color,
+            ]))
+        }
+
+        // ── Line 1: status dot + name + cycle count or elapsed ───────────────
+        buf.append(NSAttributedString(string: "\(dot) i-dream  ", attributes: [
+            .font:            NSFont.systemFont(ofSize: fSz1, weight: .semibold),
+            .foregroundColor: dotColor,
+        ]))
+        if isCycling, let start = cycleStartTime {
+            buf.append(NSAttributedString(string: "dreaming \(fmtElapsed(Date().timeIntervalSince(start)))", attributes: [
+                .font:            NSFont.systemFont(ofSize: fSz2),
+                .foregroundColor: NSColor.systemCyan,
+            ]))
+        } else if let n = cachedState?.totalCycles {
+            buf.append(NSAttributedString(string: "\(n) cycles", attributes: [
+                .font:            NSFont.systemFont(ofSize: fSz2),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
+        buf.append(NSAttributedString(string: "\n"))
+
+        // ── Line 2: load gauge + sparkline (time-range filtered) ─────────────
+        let filteredJournal = hudFilteredJournal()
+        if !filteredJournal.isEmpty {
+            let load  = cognitiveLoadScore(journal: filteredJournal)
+            let gauge = fmtLoadGauge(load)
+            let spark = fmtSparkline(filteredJournal.map { $0.tokensUsed }, width: 14)
+            let gaugeColor: NSColor = load >= 0.7 ? .systemOrange
+                                    : load >= 0.4 ? .systemYellow
+                                    : .systemGreen
+            buf.append(NSAttributedString(string: "\(gauge)  ", attributes: [
+                .font:            NSFont.monospacedSystemFont(ofSize: fSz2, weight: .regular),
+                .foregroundColor: gaugeColor,
+            ]))
+            buf.append(NSAttributedString(string: "\(spark)\n", attributes: [
+                .font:            NSFont.monospacedSystemFont(ofSize: fSz2, weight: .regular),
+                .foregroundColor: NSColor.systemCyan,
+            ]))
+        }
+
+        // ── Line 3: total tokens (filtered range) + last cycle ────────────────
+        if let s = cachedState {
+            let filteredTok = filteredJournal.reduce(0) { $0 + $1.tokensUsed }
+            let totalTok    = s.totalTokensUsed
+            let showFiltered = hudTimeRangeIndex < 2 && !filteredJournal.isEmpty
+            let tokStr = showFiltered
+                ? "\(fmtTokens(filteredTok)) / \(fmtTokens(totalTok)) total"
+                : fmtTokens(totalTok)
+            label("tokens  "); value("\(tokStr)\n", mono: true)
+        }
+
+        // ── Line 4: pattern count ─────────────────────────────────────────────
+        if cachedPatternCount > 0 {
+            label("patterns  ")
+            value("\(cachedPatternCount)")
+            if cachedHighConfCount > 0 {
+                value("  (\(cachedHighConfCount) high-conf)\n", color: .systemGreen)
+            } else {
+                buf.append(NSAttributedString(string: "\n"))
+            }
+        }
+
+        // ── Line 5: last cycle time + status ─────────────────────────────────
+        if let s = cachedState, let last = s.lastConsolidation {
+            label("last cycle  ")
+            value("\(timeAgo(last))\n")
+        } else {
+            label("no cycles yet\n")
+        }
+
+        // ── Line 6: metacog calibration score ────────────────────────────────
+        if let score = latestCalibrationScore() {
+            label("calibration  ")
+            let scoreColor: NSColor = score >= 0.7 ? .systemGreen
+                                    : score >= 0.3 ? .systemYellow
+                                    : score >= 0.0 ? .systemOrange
+                                    : .systemRed
+            value(String(format: "%.2f\n", score), color: scoreColor, mono: true)
+        }
+
+        // ── Line 7: active intentions ─────────────────────────────────────────
+        let intentCount = activeIntentionsCount()
+        if intentCount > 0 {
+            label("intentions  ")
+            value("\(intentCount) active\n")
+        }
+
+        // ── Line 8: next cycle estimate ──────────────────────────────────────
+        if !isCycling, let lastActivity = lastActivityDate() {
+            let idleHours: Double = 4   // default threshold
+            let nextCycleDate = lastActivity.addingTimeInterval(idleHours * 3600)
+            if nextCycleDate > Date() {
+                let remaining = nextCycleDate.timeIntervalSince(Date())
+                let rmStr: String
+                if remaining < 3600 {
+                    rmStr = "\(Int(remaining / 60))m"
+                } else {
+                    rmStr = "\(Int(remaining / 3600))h \(Int((remaining.truncatingRemainder(dividingBy: 3600)) / 60))m"
+                }
+                label("next cycle  ")
+                value("~\(rmStr)\n", color: .secondaryLabelColor)
+            } else {
+                label("next cycle  ")
+                value("idle — ready\n", color: .systemGreen)
+            }
+        }
+
+        // ── Line 9: error line (only if error is newer than last cycle) ──────
+        if let err = cachedBoard?.lastError {
+            buf.append(NSAttributedString(string: "⚠  \(err)", attributes: [
+                .font:            NSFont.systemFont(ofSize: fSz3 - 1),
+                .foregroundColor: NSColor.systemOrange,
+            ]))
+        }
+
+        tv.textStorage?.setAttributedString(buf)
+
+        // Push filtered token history to bar chart
+        hudBarChart?.values = filteredJournal.map { $0.tokensUsed }
+    }
+
+    /// Format token count as e.g. "348k" or "1.2M"
+    private func fmtTokens(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000     { return "\(n / 1_000)k" }
+        return "\(n)"
     }
 
     @objc private func showAssociationsDetail() {
@@ -1224,6 +2676,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let rt = RichText()
         rt.header("Dream Journal")
         rt.dim("\(journal.count) total cycles")
+
+        // ── Sparkline history chart ──────────────────────────────────────────
+        let window = Array(journal.suffix(20))
+        if window.count >= 2 {
+            let tokVals = window.map { $0.tokensUsed }
+            let patVals = window.map { $0.patternsExtracted }
+            let avgTok = tokVals.reduce(0, +) / tokVals.count
+            let avgPat = patVals.reduce(0, +) / patVals.count
+            rt.spacer()
+            rt.subheader("Token & Pattern Trends  (last \(window.count) cycles)")
+            rt.mono("Tokens/cycle   \(fmtSparkline(tokVals, width: 20))  avg \(fmtNum(avgTok))")
+            rt.mono("Patterns/cycle \(fmtSparkline(patVals, width: 20))  avg \(avgPat)")
+            rt.divider()
+        }
+
         for entry in journal.suffix(20).reversed() {
             rt.spacer()
             rt.subheader(fmtDate(entry.timestamp))
@@ -1241,6 +2708,89 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showResizablePanel(title: "Dream Journal (\(journal.count) cycles)",
                            content: rt.build(),
                            filePath: subDir + "/dreams/journal.jsonl")
+    }
+
+    @objc private func showInsightsDetail() {
+        guard let raw = readAllInsights(), !raw.isEmpty else {
+            alert("Insights", "No dream insights have been recorded yet."); return
+        }
+        let rt = RichText()
+        rt.header("Dream Insights")
+
+        // Split on Wake Cycle boundaries to preserve the date for each insight.
+        // Format: "## Wake Cycle — 2026-04-14 16:12 UTC\n\n### Insight..."
+        let cycleParts = raw.components(separatedBy: "\n## Wake Cycle")
+        var pairs: [(date: String, block: String)] = []
+        for part in cycleParts.dropFirst() {
+            // First line of each part = " — 2026-04-14 16:12 UTC"
+            let eol = part.firstIndex(of: "\n") ?? part.endIndex
+            let dateStr = String(part[part.startIndex..<eol])
+                .replacingOccurrences(of: " — ", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            let rest = String(part[eol...])
+            for block in rest.components(separatedBy: "\n### Insight").dropFirst() {
+                pairs.append((date: dateStr, block: block))
+            }
+        }
+
+        let total = pairs.count
+        rt.dim("\(total) insight\(total == 1 ? "" : "s") recorded")
+        rt.spacer()
+
+        // Render most-recent first
+        for (date, block) in pairs.reversed() {
+            renderInsight(rt, block: block, date: date)
+        }
+
+        showResizablePanel(title: "All Insights (\(total))",
+                           content: rt.build(),
+                           filePath: subDir + "/dreams/insights.md")
+    }
+
+    /// Render one `### Insight` block into `rt`.
+    private func renderInsight(_ rt: RichText, block: String, date: String) {
+        let lines = block.components(separatedBy: "\n")
+
+        // First line is the insight header suffix, e.g. " (conf=0.87)"
+        let headerLine = lines.first ?? ""
+        var confLabel = ""
+        if let range = headerLine.range(of: "conf=") {
+            let num = headerLine[range.upperBound...].prefix(while: { $0.isNumber || $0 == "." })
+            if let d = Double(num) { confLabel = "  \(Int(d * 100))% confidence" }
+        }
+        rt.subheader("Insight\(confLabel)")
+
+        for line in lines.dropFirst() {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty || t == "---" { continue }
+            if t.hasPrefix(">") {
+                // Hypothesis text → blue accent
+                rt.accent(String(t.dropFirst()).trimmingCharacters(in: .whitespaces))
+            } else if t.hasPrefix("**") {
+                // **Rule:** … — strip markers, show as medium-weight subheader
+                let stripped = t.replacingOccurrences(of: "**", with: "")
+                rt.subheader(stripped)
+            } else if t.hasPrefix("_") && t.hasSuffix("_") {
+                // _Patterns: uuid1, uuid2_ — strip markers, show as muted gray
+                let stripped = String(t.dropFirst().dropLast())
+                rt.dim(stripped)
+            } else {
+                rt.body(t)
+            }
+        }
+
+        // Date stamp at the bottom of each insight
+        if !date.isEmpty { rt.dim("  \(date)") }
+        rt.divider()
+    }
+
+    @objc private func setDreamFrequency(_ sender: NSMenuItem) {
+        guard let hours = sender.representedObject as? Double else { return }
+        writeDreamFrequency(hours)
+        cachedFrequencyHours = hours
+        dlog("dream frequency set to \(hours)h")
+        // Refresh button/menu to show updated "next dream" time
+        refresh()
     }
 
     // ── Actions ───────────────────────────────────────────────────────────────
@@ -1290,6 +2840,32 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dlog("runPrune")
         openInTerminal("\(iDream) prune")
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.refresh() }
+    }
+
+    /// Trigger a dream cycle, first checking usage limits.
+    /// If usage is over the warn threshold, shows a confirm dialog
+    /// with the current usage numbers before proceeding.
+    @objc private func triggerCycleWithUsageCheck() {
+        if let usage = cachedState?.usage, usage.overWarnThreshold {
+            let alert = NSAlert()
+            alert.messageText = "High Claude Usage — Proceed?"
+            alert.informativeText = """
+                Your Claude Code session usage is near its limit:
+
+                \(usage.warningLine)
+
+                Running a dream cycle will consume additional API tokens. \
+                Automatic cycles are paused until usage resets.
+
+                Proceed with manual trigger anyway?
+                """
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Run Dream Cycle")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        dlog("triggerCycle (usage-checked)")
+        triggerCycle()
     }
 
     @objc private func triggerCycle() {
@@ -1480,6 +3056,39 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let a = NSAlert()
         a.messageText = title; a.informativeText = msg
         a.alertStyle  = .warning; a.addButton(withTitle: "OK"); a.runModal()
+    }
+}
+
+// ─── Mini bar-chart view for HUD token history ────────────────────────────────
+/// Draws a compact histogram of recent token-usage values using NSBezierPath.
+/// Bars are colored cyan→yellow→orange based on relative load; newest bar is brightest.
+private class MiniBarChartView: NSView {
+    var values: [Int] = [] { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard !values.isEmpty else { return }
+        let n      = values.count
+        let maxVal = values.max() ?? 1
+        let gap:  CGFloat = 2.0
+        let barW: CGFloat = max(3, (bounds.width - gap * CGFloat(n - 1)) / CGFloat(n))
+
+        for (i, v) in values.enumerated() {
+            let fraction  = maxVal > 0 ? CGFloat(v) / CGFloat(maxVal) : 0
+            let barH      = max(2, fraction * (bounds.height - 4))
+            let x         = CGFloat(i) * (barW + gap)
+            let recency   = CGFloat(i) / max(1, CGFloat(n - 1))   // 0=oldest, 1=newest
+            let alpha     = 0.25 + recency * 0.70
+
+            let color: NSColor
+            if fraction > 0.75      { color = NSColor.systemOrange.withAlphaComponent(alpha) }
+            else if fraction > 0.45 { color = NSColor.systemYellow.withAlphaComponent(alpha) }
+            else                    { color = NSColor.systemCyan.withAlphaComponent(alpha) }
+
+            let barRect = NSRect(x: x, y: 2, width: max(1, barW - 1), height: barH)
+            let path    = NSBezierPath(roundedRect: barRect, xRadius: 1.5, yRadius: 1.5)
+            color.setFill()
+            path.fill()
+        }
     }
 }
 
