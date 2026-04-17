@@ -326,7 +326,8 @@ final class RichText {
 
 // ─── Pattern network view ─────────────────────────────────────────────────────
 // Ring-of-rings layout: categories on outer circle, their patterns on inner circles.
-// Confidence band determines node colour; click shows an NSPopover with full text.
+// Interactive: pan (drag), zoom (pinch / scroll-wheel), hover (faint connection lines),
+// click to inspect a node, double-click to reset view.
 
 final class PatternGraphView: NSView {
     private struct Node {
@@ -335,9 +336,22 @@ final class PatternGraphView: NSView {
         let radius:   CGFloat
     }
 
-    private var nodes:       [Node]    = []
-    private var popover:     NSPopover?
-    private var selectedIdx: Int?      = nil
+    private var nodes:          [Node]    = []
+    private var popover:        NSPopover?
+    private var selectedIdx:    Int?      = nil
+    private var hoveredIdx:     Int?      = nil
+    private var trackingArea:   NSTrackingArea?
+
+    // Pan / zoom state
+    private var panOffset:      CGPoint   = .zero
+    private var zoomScale:      CGFloat   = 1.0
+    private let zoomMin:        CGFloat   = 0.25
+    private let zoomMax:        CGFloat   = 4.0
+
+    // Click-vs-drag detection
+    private var mouseDownLoc:   CGPoint?  = nil
+    private var isDragging:     Bool      = false
+    private let dragThreshold:  CGFloat   = 5.0
 
     fileprivate init(frame: NSRect, patterns: [Pattern]) {
         super.init(frame: frame)
@@ -345,6 +359,8 @@ final class PatternGraphView: NSView {
         buildLayout(patterns)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { true }
 
     private func buildLayout(_ patterns: [Pattern]) {
         let cx = bounds.midX
@@ -373,59 +389,204 @@ final class PatternGraphView: NSView {
         }
     }
 
+    // MARK: – Hover tracking area
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(trackingArea!)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let gp   = viewToGraph(convert(event.locationInWindow, from: nil))
+        let prev = hoveredIdx
+        hoveredIdx = hitNode(at: gp)
+        if hoveredIdx != prev { needsDisplay = true }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if hoveredIdx != nil { hoveredIdx = nil; needsDisplay = true }
+    }
+
+    // MARK: – Zoom (pinch gesture + scroll wheel)
+
+    override func scrollWheel(with event: NSEvent) {
+        if event.hasPreciseScrollingDeltas {
+            // Trackpad two-finger swipe → pan
+            panOffset.x += event.scrollingDeltaX
+            panOffset.y += event.scrollingDeltaY
+        } else {
+            // Mouse wheel → zoom
+            let factor: CGFloat = event.deltaY > 0 ? 1.10 : 0.91
+            zoomScale = max(zoomMin, min(zoomMax, zoomScale * factor))
+        }
+        needsDisplay = true
+    }
+
+    override func magnify(with event: NSEvent) {
+        zoomScale = max(zoomMin, min(zoomMax, zoomScale * (1.0 + event.magnification)))
+        needsDisplay = true
+    }
+
+    // MARK: – Pan (drag) + click detection
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            // Double-click → reset to default view
+            panOffset = .zero; zoomScale = 1.0
+            popover?.close(); popover = nil
+            selectedIdx = nil
+            needsDisplay = true
+            return
+        }
+        window?.makeFirstResponder(self)
+        mouseDownLoc = convert(event.locationInWindow, from: nil)
+        isDragging   = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = mouseDownLoc else { return }
+        let cur = convert(event.locationInWindow, from: nil)
+        if !isDragging && hypot(cur.x - start.x, cur.y - start.y) > dragThreshold {
+            isDragging = true
+        }
+        if isDragging {
+            panOffset.x += event.deltaX
+            panOffset.y -= event.deltaY   // AppKit y-axis is bottom-up; deltaY is screen-down positive
+            needsDisplay = true
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { mouseDownLoc = nil; isDragging = false }
+        guard !isDragging else { return }
+        // It was a clean click — hit-test in graph space
+        let gp = viewToGraph(convert(event.locationInWindow, from: nil))
+        if let hit = hitNode(at: gp) {
+            selectedIdx = hit
+            needsDisplay = true
+            showPopover(for: hit)
+        } else {
+            popover?.close(); popover = nil
+            selectedIdx = nil
+            needsDisplay = true
+        }
+    }
+
+    // MARK: – Coordinate helpers
+
+    /// Convert a point in view (screen) space to the underlying graph coordinate space.
+    private func viewToGraph(_ pt: CGPoint) -> CGPoint {
+        let cx = bounds.midX, cy = bounds.midY
+        return CGPoint(
+            x: (pt.x - panOffset.x - cx) / zoomScale + cx,
+            y: (pt.y - panOffset.y - cy) / zoomScale + cy)
+    }
+
+    /// Hit-test: returns the index of the first node whose radius (+ 6pt padding) contains graphPt.
+    private func hitNode(at graphPt: CGPoint) -> Int? {
+        for (i, node) in nodes.enumerated() {
+            if hypot(graphPt.x - node.position.x, graphPt.y - node.position.y) <= node.radius + 6 {
+                return i
+            }
+        }
+        return nil
+    }
+
+    private func nodeColor(_ p: Pattern) -> NSColor {
+        return p.confidence >= 0.85 ? .systemGreen
+             : p.confidence >= 0.65 ? .systemBlue
+             : .secondaryLabelColor
+    }
+
+    // MARK: – Drawing
+
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
-        // Background
+        // Background (outside the transform so it always fills the view)
         NSColor.textBackgroundColor.setFill()
         NSBezierPath.fill(bounds)
 
-        // Edges: thin lines between nodes in the same category
-        ctx.setLineWidth(0.6)
-        NSColor.separatorColor.setStroke()
+        ctx.saveGState()
+
+        // Apply pan + zoom — zoom is centred on the view's midpoint
+        let cx = bounds.midX, cy = bounds.midY
+        ctx.translateBy(x: panOffset.x + cx, y: panOffset.y + cy)
+        ctx.scaleBy(x: zoomScale, y: zoomScale)
+        ctx.translateBy(x: -cx, y: -cy)
+
+        // ── Connection lines ──────────────────────────────────────────────────
+        // Same-category edges are always drawn faintly; hover boosts alpha for
+        // the hovered node's connections. Cross-category edges appear only on hover.
         for i in 0 ..< nodes.count {
             for j in (i+1) ..< nodes.count {
-                guard nodes[i].pattern.category == nodes[j].pattern.category else { continue }
+                let sameCategory = nodes[i].pattern.category == nodes[j].pattern.category
+                let hovRelated   = hoveredIdx == i || hoveredIdx == j
+                let alpha: CGFloat
+                if hovRelated {
+                    alpha = sameCategory ? 0.60 : 0.14
+                } else {
+                    alpha = sameCategory ? 0.15 : 0.0
+                }
+                guard alpha > 0 else { continue }
+                let c1 = nodeColor(nodes[i].pattern)
+                let c2 = nodeColor(nodes[j].pattern)
+                let blended = c1.blended(withFraction: 0.5, of: c2) ?? c1
+                ctx.setStrokeColor(blended.withAlphaComponent(alpha).cgColor)
+                ctx.setLineWidth(sameCategory ? 0.9 : 0.5)
                 ctx.move(to: nodes[i].position)
                 ctx.addLine(to: nodes[j].position)
                 ctx.strokePath()
             }
         }
 
-        // Nodes
+        // ── Nodes ─────────────────────────────────────────────────────────────
         for (idx, node) in nodes.enumerated() {
-            let p = node.pattern
-            let baseColor: NSColor = p.confidence >= 0.85 ? .systemGreen
-                                   : p.confidence >= 0.65 ? .systemBlue
-                                   : .secondaryLabelColor
-            let fillAlpha: CGFloat = idx == selectedIdx ? 1.0 : 0.75
-            let r = node.radius
+            let p          = node.pattern
+            let baseColor  = nodeColor(p)
+            let isHovered  = idx == hoveredIdx
+            let isSelected = idx == selectedIdx
+            let fillAlpha: CGFloat = isSelected ? 1.0 : isHovered ? 0.92 : 0.72
+            let r          = node.radius
+
+            // Glow ring for hovered / selected nodes
+            if isHovered || isSelected {
+                ctx.setStrokeColor(baseColor.withAlphaComponent(isSelected ? 0.45 : 0.28).cgColor)
+                ctx.setLineWidth(5.5)
+                let gr = r + 4
+                ctx.strokeEllipse(in: CGRect(x: node.position.x - gr, y: node.position.y - gr,
+                                             width: gr * 2, height: gr * 2))
+            }
+
             let rect = CGRect(x: node.position.x - r, y: node.position.y - r,
                               width: r * 2, height: r * 2)
             ctx.setFillColor(baseColor.withAlphaComponent(fillAlpha).cgColor)
             ctx.setStrokeColor(baseColor.cgColor)
-            ctx.setLineWidth(idx == selectedIdx ? 2.5 : 1.0)
+            ctx.setLineWidth(isSelected ? 2.5 : isHovered ? 2.0 : 1.0)
             ctx.fillEllipse(in: rect)
             ctx.strokeEllipse(in: rect)
 
-            // Short label above node
-            let words   = p.pattern.components(separatedBy: " ")
-            let label   = words.prefix(3).joined(separator: " ")
+            // Short label above node; brighter when hovered
+            let label = p.pattern.components(separatedBy: " ").prefix(3).joined(separator: " ")
             let attrs: [NSAttributedString.Key: Any] = [
                 .font:            NSFont.systemFont(ofSize: 9),
-                .foregroundColor: NSColor.labelColor,
+                .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
             ]
-            let str     = NSAttributedString(string: label, attributes: attrs)
-            let sz      = str.size()
+            let str = NSAttributedString(string: label, attributes: attrs)
+            let sz  = str.size()
             str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
                                   y: node.position.y + r + 2))
         }
 
-        // Category labels at cluster centres
+        // ── Category labels at cluster centres ────────────────────────────────
         let categories = Array(Set(nodes.map { $0.pattern.category })).sorted()
         let catCount   = max(categories.count, 1)
-        let cx = bounds.midX; let cy = bounds.midY
         let outerR: CGFloat = min(bounds.width, bounds.height) * 0.36
         let catAttrs: [NSAttributedString.Key: Any] = [
             .font:            NSFont.systemFont(ofSize: 10, weight: .semibold),
@@ -439,44 +600,73 @@ final class PatternGraphView: NSView {
             let sz  = str.size()
             str.draw(at: CGPoint(x: lx - sz.width / 2, y: ly - sz.height / 2))
         }
+
+        ctx.restoreGState()
+
+        // ── Zoom / pan indicator (outside transform — always screen-space) ────
+        if abs(zoomScale - 1.0) > 0.02 || panOffset.x != 0 || panOffset.y != 0 {
+            let hint = "\(Int(zoomScale * 100))%  ·  dbl-click to reset"
+            let hAttrs: [NSAttributedString.Key: Any] = [
+                .font:            NSFont.systemFont(ofSize: 9),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]
+            NSAttributedString(string: hint, attributes: hAttrs)
+                .draw(at: CGPoint(x: bounds.maxX - 140, y: 6))
+        }
     }
 
-    override func mouseDown(with event: NSEvent) {
-        let pt = convert(event.locationInWindow, from: nil)
-        guard let hit = nodes.indices.min(by: { a, b in
-            hypot(pt.x - nodes[a].position.x, pt.y - nodes[a].position.y) <
-            hypot(pt.x - nodes[b].position.x, pt.y - nodes[b].position.y)
-        }), hypot(pt.x - nodes[hit].position.x, pt.y - nodes[hit].position.y) <= nodes[hit].radius + 6
-        else { popover?.close(); popover = nil; selectedIdx = nil; needsDisplay = true; return }
-
-        selectedIdx = hit
-        needsDisplay = true
-        showPopover(for: hit)
-    }
+    // MARK: – Popover
 
     private func showPopover(for idx: Int) {
         popover?.close()
         let p  = nodes[idx].pattern
+
         let vc = NSViewController()
-        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 130))
-        let tv = NSTextView(frame: NSRect(x: 12, y: 10, width: 316, height: 110))
-        tv.isEditable      = false
-        tv.backgroundColor = .clear
+        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 162))
+        let tv = NSTextView(frame: NSRect(x: 12, y: 8, width: 376, height: 146))
+        tv.isEditable = false; tv.backgroundColor = .clear
+
         let rt = RichText()
         rt.subheader(p.pattern)
-        rt.dim("\(p.category)  ·  \(Int(p.confidence * 100))% confident")
-        if let first = p.firstSeen { rt.dim("First seen: \(fmtDate(first))") }
+
+        // Confidence bar (▮ filled, ░ empty)
+        let confPct = Int(p.confidence * 100)
+        let filled  = String(repeating: "▮", count: confPct / 10)
+        let empty   = String(repeating: "░", count: 10 - confPct / 10)
+        rt.dim("\(p.category)  ·  \(filled)\(empty) \(confPct)%")
+
+        if p.valence != "neutral" {
+            let valColor: NSColor = p.valence == "positive" ? .systemGreen
+                                  : p.valence == "negative" ? .systemOrange
+                                  : .secondaryLabelColor
+            rt.coloredLine("valence: \(p.valence)", color: valColor)
+        }
+        if let first = p.firstSeen { rt.dim("first seen: \(fmtDate(first))") }
+
+        // Same-category siblings
+        let siblings = nodes.filter { $0.pattern.category == p.category && $0.pattern.pattern != p.pattern }
+        if !siblings.isEmpty {
+            let names = siblings.prefix(3)
+                .map { $0.pattern.pattern.components(separatedBy: " ").prefix(4).joined(separator: " ") }
+                .joined(separator: " · ")
+            rt.dim("related: \(names)\(siblings.count > 3 ? " + \(siblings.count - 3) more" : "")")
+        }
+
         tv.textStorage?.setAttributedString(rt.build())
         vw.addSubview(tv)
         vc.view = vw
+
         let pop = NSPopover()
         pop.contentViewController = vc
         pop.behavior              = .transient
         pop.contentSize           = vw.frame.size
-        let n = nodes[idx]
-        let r = n.radius
-        pop.show(relativeTo: CGRect(x: n.position.x - r, y: n.position.y - r,
-                                    width: r*2, height: r*2),
+
+        // Convert node centre from graph space to view space for the anchor rect
+        let n    = nodes[idx]
+        let vx   = (n.position.x - bounds.midX) * zoomScale + bounds.midX + panOffset.x
+        let vy   = (n.position.y - bounds.midY) * zoomScale + bounds.midY + panOffset.y
+        let vr   = n.radius * zoomScale
+        pop.show(relativeTo: CGRect(x: vx - vr, y: vy - vr, width: vr * 2, height: vr * 2),
                  of: self, preferredEdge: .maxY)
         popover = pop
     }
@@ -2165,7 +2355,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let sep = NSBox(frame: NSRect(x: 0, y: 47, width: panW, height: 1))
         sep.boxType = .separator; sep.autoresizingMask = [.width]
         bar.addSubview(sep)
-        let hint = NSTextField(labelWithString: "Click a node to inspect · \(patterns.count) patterns across \(Set(patterns.map { $0.category }).count) categories")
+        let hint = NSTextField(labelWithString: "Click node to inspect  ·  Drag to pan  ·  Pinch / scroll to zoom  ·  Hover to see connections  ·  Dbl-click to reset  ·  \(patterns.count) patterns / \(Set(patterns.map { $0.category }).count) categories")
         hint.font        = .systemFont(ofSize: 11)
         hint.textColor   = .secondaryLabelColor
         hint.frame       = NSRect(x: 14, y: 14, width: panW - 200, height: 20)
