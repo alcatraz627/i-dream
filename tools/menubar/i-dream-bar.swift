@@ -180,18 +180,20 @@ private struct BoardData {
 }
 
 private struct Pattern: Codable {
+    let id:        String?
     let pattern:    String
     let valence:    String
     let confidence: Double
     let category:   String
     let firstSeen:  String?
     enum CodingKeys: String, CodingKey {
-        case pattern, valence, confidence, category
+        case id, pattern, valence, confidence, category
         case firstSeen = "first_seen"
     }
 }
 
 private struct JournalEntry: Codable {
+    let id:                String?
     let timestamp:         String
     let sessionsAnalyzed:  Int
     let patternsExtracted: Int
@@ -199,7 +201,7 @@ private struct JournalEntry: Codable {
     let insightsPromoted:  Int
     let tokensUsed:        Int
     enum CodingKeys: String, CodingKey {
-        case timestamp
+        case id, timestamp
         case sessionsAnalyzed  = "sessions_analyzed"
         case patternsExtracted = "patterns_extracted"
         case associationsFound = "associations_found"
@@ -209,14 +211,16 @@ private struct JournalEntry: Codable {
 }
 
 private struct Association: Codable {
-    let id:           String
-    let hypothesis:   String
-    let confidence:   Double
-    let actionable:   Bool
+    let id:            String
+    let hypothesis:    String
+    let confidence:    Double
+    let actionable:    Bool
     let suggestedRule: String?
+    let patternsLinked: [String]?
     enum CodingKeys: String, CodingKey {
         case id, hypothesis, confidence, actionable
-        case suggestedRule = "suggested_rule"
+        case suggestedRule  = "suggested_rule"
+        case patternsLinked = "patterns_linked"
     }
 }
 
@@ -314,6 +318,14 @@ final class RichText {
     @discardableResult func spacer() -> RichText {
         buf.append(NSAttributedString(string: "\n")); return self
     }
+    /// Clickable blue subheader — link value is passed to the text view delegate on click.
+    @discardableResult func linkSubheader(_ text: String, linkValue: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font:            NSFont.systemFont(ofSize: 14, weight: .medium),
+            .foregroundColor: NSColor.systemBlue,
+            .link:            linkValue as AnyObject,
+        ])); return self
+    }
     /// Arbitrary color line — used for heat-map value rows in the dream journal.
     @discardableResult func coloredLine(_ text: String, color: NSColor) -> RichText {
         buf.append(NSAttributedString(string: text + "\n", attributes: [
@@ -322,6 +334,20 @@ final class RichText {
         ])); return self
     }
     func build() -> NSAttributedString { buf }
+}
+
+// ─── Journal link delegate ───────────────────────────────────────────────────
+// Thin NSTextViewDelegate wrapper that intercepts clicks on link-attributed text
+// (NSLinkAttributeName with a String value = journal entry timestamp).
+// Avoids making BarDelegate globally conform to NSTextViewDelegate.
+
+private class JournalLinkDelegate: NSObject, NSTextViewDelegate {
+    let onLink: (String) -> Void
+    init(_ onLink: @escaping (String) -> Void) { self.onLink = onLink; super.init() }
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        if let ts = link as? String { onLink(ts); return true }
+        return false
+    }
 }
 
 // ─── Pattern network view ─────────────────────────────────────────────────────
@@ -666,6 +692,355 @@ final class PatternGraphView: NSView {
         let vx   = (n.position.x - bounds.midX) * zoomScale + bounds.midX + panOffset.x
         let vy   = (n.position.y - bounds.midY) * zoomScale + bounds.midY + panOffset.y
         let vr   = n.radius * zoomScale
+        pop.show(relativeTo: CGRect(x: vx - vr, y: vy - vr, width: vr * 2, height: vr * 2),
+                 of: self, preferredEdge: .maxY)
+        popover = pop
+    }
+}
+
+// ─── Association Network Graph ────────────────────────────────────────────────
+// Interactive graph of cross-pattern hypotheses (associations).
+// Nodes = associations, sized by confidence.
+// Edges = shared patternsLinked IDs, thickness ∝ overlap count.
+// Three concentric rings: inner ≥0.75 confidence, middle ≥0.50, outer <0.50.
+// Pan / zoom / hover / click identical to PatternGraphView.
+
+final class AssociationGraphView: NSView {
+    private struct Edge { let a: Int; let b: Int; let weight: Int }
+    private struct Node {
+        let assoc:    Association
+        var position: CGPoint
+        let radius:   CGFloat
+    }
+
+    private var nodes:        [Node]  = []
+    private var edges:        [Edge]  = []
+    private var popover:      NSPopover?
+    private var selectedIdx:  Int?    = nil
+    private var hoveredIdx:   Int?    = nil
+    private var trackingArea: NSTrackingArea?
+
+    private var panOffset:   CGPoint = .zero
+    private var zoomScale:   CGFloat = 1.0
+    private let zoomMin:     CGFloat = 0.25
+    private let zoomMax:     CGFloat = 4.0
+    private var mouseDownLoc: CGPoint? = nil
+    private var isDragging:  Bool    = false
+    private let dragThreshold: CGFloat = 5.0
+
+    fileprivate init(frame: NSRect, associations: [Association]) {
+        super.init(frame: frame)
+        wantsLayer = true
+        buildLayout(associations)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var acceptsFirstResponder: Bool { true }
+
+    private func buildLayout(_ associations: [Association]) {
+        let cx = bounds.midX, cy = bounds.midY
+        let outerR: CGFloat  = min(bounds.width, bounds.height) * 0.40
+        let middleR: CGFloat = outerR * 0.65
+        let innerR:  CGFloat = outerR * 0.30
+
+        // Sort descending confidence so high-confidence get inner ring
+        let sorted = associations.sorted { $0.confidence > $1.confidence }
+        let inner  = sorted.filter { $0.confidence >= 0.75 }
+        let mid    = sorted.filter { $0.confidence >= 0.50 && $0.confidence < 0.75 }
+        let outer  = sorted.filter { $0.confidence <  0.50 }
+
+        nodes = []
+        func place(_ group: [Association], ringR: CGFloat) {
+            guard !group.isEmpty else { return }
+            for (i, a) in group.enumerated() {
+                let angle = CGFloat(i) / CGFloat(group.count) * 2 * .pi - .pi / 2
+                let x = cx + ringR * cos(angle)
+                let y = cy + ringR * sin(angle)
+                let r: CGFloat = 8.0 + CGFloat(a.confidence) * 10.0
+                nodes.append(Node(assoc: a, position: CGPoint(x: x, y: y), radius: r))
+            }
+        }
+        place(inner, ringR: innerR)
+        place(mid,   ringR: middleR)
+        place(outer, ringR: outerR)
+
+        // Build edges: shared patternsLinked IDs
+        edges = []
+        for i in 0 ..< nodes.count {
+            let aIds = Set(nodes[i].assoc.patternsLinked ?? [])
+            for j in (i+1) ..< nodes.count {
+                let bIds = Set(nodes[j].assoc.patternsLinked ?? [])
+                let overlap = aIds.intersection(bIds).count
+                if overlap > 0 {
+                    edges.append(Edge(a: i, b: j, weight: overlap))
+                }
+            }
+        }
+    }
+
+    // MARK: – Hover
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(trackingArea!)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let gp = viewToGraph(convert(event.locationInWindow, from: nil))
+        let prev = hoveredIdx
+        hoveredIdx = hitNode(at: gp)
+        if hoveredIdx != prev { needsDisplay = true }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if hoveredIdx != nil { hoveredIdx = nil; needsDisplay = true }
+    }
+
+    // MARK: – Zoom
+
+    override func scrollWheel(with event: NSEvent) {
+        if event.hasPreciseScrollingDeltas {
+            panOffset.x += event.scrollingDeltaX
+            panOffset.y += event.scrollingDeltaY
+        } else {
+            let factor: CGFloat = event.deltaY > 0 ? 1.10 : 0.91
+            zoomScale = max(zoomMin, min(zoomMax, zoomScale * factor))
+        }
+        needsDisplay = true
+    }
+
+    override func magnify(with event: NSEvent) {
+        zoomScale = max(zoomMin, min(zoomMax, zoomScale * (1.0 + event.magnification)))
+        needsDisplay = true
+    }
+
+    // MARK: – Pan + click
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 {
+            panOffset = .zero; zoomScale = 1.0
+            popover?.close(); popover = nil
+            selectedIdx = nil; needsDisplay = true; return
+        }
+        window?.makeFirstResponder(self)
+        mouseDownLoc = convert(event.locationInWindow, from: nil)
+        isDragging   = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let start = mouseDownLoc else { return }
+        let cur = convert(event.locationInWindow, from: nil)
+        if !isDragging && hypot(cur.x - start.x, cur.y - start.y) > dragThreshold {
+            isDragging = true
+        }
+        if isDragging {
+            panOffset.x += event.deltaX
+            panOffset.y -= event.deltaY
+            needsDisplay = true
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { mouseDownLoc = nil; isDragging = false }
+        guard !isDragging else { return }
+        let gp = viewToGraph(convert(event.locationInWindow, from: nil))
+        if let hit = hitNode(at: gp) {
+            selectedIdx = hit; needsDisplay = true; showPopover(for: hit)
+        } else {
+            popover?.close(); popover = nil; selectedIdx = nil; needsDisplay = true
+        }
+    }
+
+    // MARK: – Coordinate helpers
+
+    private func viewToGraph(_ pt: CGPoint) -> CGPoint {
+        let cx = bounds.midX, cy = bounds.midY
+        return CGPoint(
+            x: (pt.x - panOffset.x - cx) / zoomScale + cx,
+            y: (pt.y - panOffset.y - cy) / zoomScale + cy)
+    }
+
+    private func hitNode(at gp: CGPoint) -> Int? {
+        nodes.enumerated().first { hypot(gp.x - $1.position.x, gp.y - $1.position.y) <= $1.radius + 6 }?.offset
+    }
+
+    private func nodeColor(_ a: Association) -> NSColor {
+        if a.actionable && a.confidence >= 0.75 { return .systemGreen }
+        if a.actionable                         { return .systemBlue  }
+        return a.confidence >= 0.65 ? .secondaryLabelColor : .tertiaryLabelColor
+    }
+
+    // MARK: – Drawing
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+
+        NSColor.textBackgroundColor.setFill()
+        NSBezierPath.fill(bounds)
+
+        ctx.saveGState()
+        let cx = bounds.midX, cy = bounds.midY
+        ctx.translateBy(x: panOffset.x + cx, y: panOffset.y + cy)
+        ctx.scaleBy(x: zoomScale, y: zoomScale)
+        ctx.translateBy(x: -cx, y: -cy)
+
+        // Ring guide circles (faint dashed)
+        let outerR: CGFloat  = min(bounds.width, bounds.height) * 0.40
+        for (r, label) in [(outerR, "low"), (outerR * 0.65, "mid"), (outerR * 0.30, "high")] {
+            ctx.setStrokeColor(NSColor.separatorColor.withAlphaComponent(0.3).cgColor)
+            ctx.setLineWidth(0.5)
+            ctx.setLineDash(phase: 0, lengths: [4, 4])
+            ctx.strokeEllipse(in: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+            ctx.setLineDash(phase: 0, lengths: [])
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 8.5),
+                .foregroundColor: NSColor.tertiaryLabelColor
+            ]
+            let s = NSAttributedString(string: label, attributes: attrs)
+            let sz = s.size()
+            s.draw(at: CGPoint(x: cx + r - sz.width - 4, y: cy - sz.height / 2))
+        }
+
+        // ── Edges ─────────────────────────────────────────────────────────────
+        let maxWeight = edges.map { $0.weight }.max() ?? 1
+        for edge in edges {
+            let hovRelated = hoveredIdx == edge.a || hoveredIdx == edge.b
+            let alpha: CGFloat = hovRelated ? 0.55 : 0.12
+            guard alpha > 0 else { continue }
+            let ca = nodeColor(nodes[edge.a].assoc)
+            let cb = nodeColor(nodes[edge.b].assoc)
+            let blended = ca.blended(withFraction: 0.5, of: cb) ?? ca
+            ctx.setStrokeColor(blended.withAlphaComponent(alpha).cgColor)
+            let w = 0.6 + 2.0 * CGFloat(edge.weight) / CGFloat(maxWeight)
+            ctx.setLineWidth(hovRelated ? w * 1.8 : w)
+            ctx.move(to: nodes[edge.a].position)
+            ctx.addLine(to: nodes[edge.b].position)
+            ctx.strokePath()
+        }
+
+        // ── Nodes ─────────────────────────────────────────────────────────────
+        for (idx, node) in nodes.enumerated() {
+            let a          = node.assoc
+            let baseColor  = nodeColor(a)
+            let isHovered  = idx == hoveredIdx
+            let isSelected = idx == selectedIdx
+            let r          = node.radius
+
+            if isHovered || isSelected {
+                ctx.setStrokeColor(baseColor.withAlphaComponent(isSelected ? 0.45 : 0.28).cgColor)
+                ctx.setLineWidth(5.5)
+                let gr = r + 4
+                ctx.strokeEllipse(in: CGRect(x: node.position.x - gr, y: node.position.y - gr,
+                                              width: gr * 2, height: gr * 2))
+            }
+
+            let fillAlpha: CGFloat = isSelected ? 1.0 : isHovered ? 0.92 : 0.70
+            ctx.setFillColor(baseColor.withAlphaComponent(fillAlpha).cgColor)
+            ctx.setStrokeColor(baseColor.cgColor)
+            ctx.setLineWidth(isSelected ? 2.5 : isHovered ? 2.0 : 1.0)
+            let rect = CGRect(x: node.position.x - r, y: node.position.y - r,
+                               width: r * 2, height: r * 2)
+            ctx.fillEllipse(in: rect)
+            ctx.strokeEllipse(in: rect)
+
+            // Diamond marker for actionable nodes
+            if a.actionable {
+                let dm: CGFloat = 4
+                let dp = node.position
+                ctx.setFillColor(NSColor.white.withAlphaComponent(isHovered ? 0.9 : 0.7).cgColor)
+                ctx.move(to: CGPoint(x: dp.x, y: dp.y + dm))
+                ctx.addLine(to: CGPoint(x: dp.x + dm, y: dp.y))
+                ctx.addLine(to: CGPoint(x: dp.x, y: dp.y - dm))
+                ctx.addLine(to: CGPoint(x: dp.x - dm, y: dp.y))
+                ctx.closePath()
+                ctx.fillPath()
+            }
+
+            // Short label (first 3 words)
+            let label = a.hypothesis.components(separatedBy: " ").prefix(3).joined(separator: " ")
+            let labelAttrs: [NSAttributedString.Key: Any] = [
+                .font:            NSFont.systemFont(ofSize: 9),
+                .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
+            ]
+            let str = NSAttributedString(string: label, attributes: labelAttrs)
+            let sz  = str.size()
+            str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
+                                  y: node.position.y + r + 2))
+        }
+
+        ctx.restoreGState()
+
+        // Zoom indicator
+        if abs(zoomScale - 1.0) > 0.02 || panOffset.x != 0 || panOffset.y != 0 {
+            let hAttrs: [NSAttributedString.Key: Any] = [
+                .font:            NSFont.systemFont(ofSize: 9),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]
+            NSAttributedString(string: "\(Int(zoomScale * 100))%  ·  dbl-click to reset",
+                               attributes: hAttrs)
+                .draw(at: CGPoint(x: bounds.maxX - 150, y: 6))
+        }
+    }
+
+    // MARK: – Popover
+
+    private func showPopover(for idx: Int) {
+        popover?.close()
+        let a  = nodes[idx].assoc
+
+        let vc = NSViewController()
+        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 168))
+        let tv = NSTextView(frame: NSRect(x: 12, y: 8, width: 416, height: 152))
+        tv.isEditable = false; tv.backgroundColor = .clear
+
+        let rt = RichText()
+        rt.subheader(a.hypothesis)
+
+        let confPct = Int(a.confidence * 100)
+        let filled  = String(repeating: "▮", count: confPct / 10)
+        let empty   = String(repeating: "░", count: 10 - confPct / 10)
+        let tag     = a.actionable ? "  · actionable ◆" : ""
+        rt.dim("\(filled)\(empty) \(confPct)%\(tag)")
+
+        if let rule = a.suggestedRule, !rule.isEmpty {
+            rt.accent("→ Rule: \(rule)")
+        }
+
+        let linkedCount = a.patternsLinked?.count ?? 0
+        if linkedCount > 0 { rt.dim("linked patterns: \(linkedCount)") }
+
+        // Neighbours sharing edges
+        let neighbours = edges
+            .filter { $0.a == idx || $0.b == idx }
+            .sorted { $0.weight > $1.weight }
+        if !neighbours.isEmpty {
+            let names = neighbours.prefix(3).map { e -> String in
+                let other = e.a == idx ? e.b : e.a
+                let h = nodes[other].assoc.hypothesis
+                return h.components(separatedBy: " ").prefix(4).joined(separator: " ")
+            }.joined(separator: " · ")
+            rt.dim("connected: \(names)\(neighbours.count > 3 ? " + \(neighbours.count - 3) more" : "")")
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+        vw.addSubview(tv)
+        vc.view = vw
+
+        let pop = NSPopover()
+        pop.contentViewController = vc
+        pop.behavior              = .transient
+        pop.contentSize           = vw.frame.size
+
+        let n  = nodes[idx]
+        let vx = (n.position.x - bounds.midX) * zoomScale + bounds.midX + panOffset.x
+        let vy = (n.position.y - bounds.midY) * zoomScale + bounds.midY + panOffset.y
+        let vr = n.radius * zoomScale
         pop.show(relativeTo: CGRect(x: vx - vr, y: vy - vr, width: vr * 2, height: vr * 2),
                  of: self, preferredEdge: .maxY)
         popover = pop
@@ -1264,14 +1639,19 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cachedHighConfCount: Int = 0
 
     // Persistent resizable detail panel (replaces NSAlert popups)
-    private var detailPanel:    NSPanel?
-    private var detailFilePath: String?
+    private var detailPanel:          NSPanel?
+    private var detailFilePath:       String?
+    private var journalLinkDelegate:  JournalLinkDelegate?
+    private var cycleDetailPanel:     NSPanel?
 
     // Dream completion card (auto-dismissing overlay)
     private var completionCard: NSPanel?
 
     // Pattern network graph panel
-    private var networkPanel:  NSPanel?
+    private var networkPanel:            NSPanel?
+
+    // Association network graph panel
+    private var associationNetworkPanel: NSPanel?
 
     // Insight feedback panel
     private var feedbackPanel: NSPanel?
@@ -2378,6 +2758,62 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         networkPanel = nil
     }
 
+    @objc private func showAssociationNetwork() {
+        let assocs = allAssociations()
+        guard !assocs.isEmpty else {
+            alert("Association Network", "No associations to visualize yet."); return
+        }
+        associationNetworkPanel?.close()
+        let panW: CGFloat = 860, panH: CGFloat = 660
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
+            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title                = "Association Network  (\(assocs.count) hypotheses)"
+        panel.isReleasedWhenClosed = false
+        panel.level                = .floating
+        panel.center()
+
+        let graphH = panH - 48
+        let graphView = AssociationGraphView(
+            frame: NSRect(x: 0, y: 48, width: panW, height: graphH),
+            associations: assocs)
+        graphView.autoresizingMask = [.width, .height]
+        panel.contentView?.addSubview(graphView)
+
+        let actionableCount = assocs.filter { $0.actionable }.count
+        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: 48))
+        bar.autoresizingMask = [.width]
+        let sep = NSBox(frame: NSRect(x: 0, y: 47, width: panW, height: 1))
+        sep.boxType = .separator; sep.autoresizingMask = [.width]
+        bar.addSubview(sep)
+        let legend = "Green=actionable ◆  Blue=non-actionable  ·  Rings: inner≥75% · mid≥50% · outer<50%  ·  Edges=shared patterns  ·  Dbl-click to reset"
+        let hint = NSTextField(labelWithString: legend)
+        hint.font        = .systemFont(ofSize: 10.5)
+        hint.textColor   = .secondaryLabelColor
+        hint.frame       = NSRect(x: 14, y: 14, width: panW - 200, height: 20)
+        hint.autoresizingMask = [.width]
+        bar.addSubview(hint)
+        let sub = NSTextField(labelWithString: "\(assocs.count) associations  ·  \(actionableCount) actionable")
+        sub.font = .systemFont(ofSize: 10); sub.textColor = .tertiaryLabelColor
+        sub.frame = NSRect(x: 14, y: 0, width: 260, height: 14)
+        bar.addSubview(sub)
+        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeAssociationNetworkPanel))
+        closeBtn.frame = NSRect(x: panW - 92, y: 8, width: 80, height: 32)
+        closeBtn.autoresizingMask = [.minXMargin]; closeBtn.bezelStyle = .rounded
+        bar.addSubview(closeBtn)
+        panel.contentView?.addSubview(bar)
+
+        associationNetworkPanel = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func closeAssociationNetworkPanel() {
+        associationNetworkPanel?.close()
+        associationNetworkPanel = nil
+    }
+
     // ── Dream replay ─────────────────────────────────────────────────────────
     // Auto-plays through a trace JSONL file event by event at 500ms intervals.
     // Shows phase colour, kind, timestamp, and detail for each event.
@@ -3038,6 +3474,17 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         showResizablePanel(title: "Associations (\(assocs.count))",
                            content: rt.build(),
                            filePath: subDir + "/dreams/associations.json")
+
+        // Add "Network View →" button to the panel toolbar
+        if let panel = detailPanel,
+           let bar = panel.contentView?.subviews.first(where: { $0.frame.height == 48 && $0.frame.origin.y == 0 }) {
+            let netBtn = NSButton(title: "Network View →", target: self,
+                                  action: #selector(showAssociationNetwork))
+            netBtn.frame = NSRect(x: 12, y: 8, width: 144, height: 32)
+            netBtn.autoresizingMask = []
+            netBtn.bezelStyle = .rounded
+            bar.addSubview(netBtn)
+        }
     }
 
     @objc private func showMetacogDetail() {
@@ -3172,8 +3619,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         for entry in journal.suffix(20).reversed() {
             rt.spacer()
-            // Header: date + time ago
-            rt.subheader("\(fmtDate(entry.timestamp))  (\(timeAgo(entry.timestamp)))")
+            // Header: clickable link → opens cycle detail panel
+            let headerText = "▸ \(fmtDate(entry.timestamp))  (\(timeAgo(entry.timestamp)))"
+            if entry.id != nil {
+                rt.linkSubheader(headerText, linkValue: entry.timestamp)
+            } else {
+                rt.subheader(headerText)
+            }
             if entry.sessionsAnalyzed == 0 {
                 rt.dim("  Skipped — no new sessions to consolidate")
             } else {
@@ -3196,9 +3648,219 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         if journal.count > 20 { rt.dim("… and \(journal.count - 20) earlier entries") }
-        showResizablePanel(title: "Dream Journal (\(journal.count) cycles)",
-                           content: rt.build(),
-                           filePath: subDir + "/dreams/journal.jsonl")
+        rt.dim("\n  ▸ Click a blue header to see patterns & associations for that cycle.")
+
+        // Build the panel with a delegate so link-clicks work
+        detailPanel?.close(); detailPanel = nil; detailFilePath = subDir + "/dreams/journal.jsonl"
+        let content = rt.build()
+        let panW: CGFloat = 900, panH: CGFloat = 680, barH: CGFloat = 48
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
+            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title = "Dream Journal (\(journal.count) cycles)"
+        panel.isReleasedWhenClosed = false; panel.level = .floating; panel.center()
+        let sv = NSScrollView(frame: NSRect(x: 0, y: barH, width: panW, height: panH - barH))
+        sv.autoresizingMask = [.width, .height]; sv.hasVerticalScroller = true
+        sv.autohidesScrollers = true; sv.borderType = .noBorder
+        let cs = sv.contentSize
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: cs.width, height: cs.height))
+        tv.minSize = NSSize(width: 0, height: cs.height)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.autoresizingMask = .width; tv.isEditable = false; tv.isSelectable = true
+        tv.backgroundColor = .textBackgroundColor; tv.textContainerInset = NSSize(width: 14, height: 14)
+        tv.isVerticallyResizable = true; tv.isHorizontallyResizable = false
+        tv.textContainer?.containerSize = NSSize(width: cs.width, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainer?.widthTracksTextView = true
+        sv.documentView = tv
+        tv.textStorage?.setAttributedString(content)
+
+        // Wire up the delegate so link-attributed headers are clickable
+        let myJournal = journal
+        journalLinkDelegate = JournalLinkDelegate { [weak self] ts in
+            guard let self, let entry = myJournal.first(where: { $0.timestamp == ts }) else { return }
+            self.showCycleDetail(for: entry)
+        }
+        tv.delegate = journalLinkDelegate
+
+        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: barH))
+        bar.autoresizingMask = [.width]
+        let sep = NSBox(frame: NSRect(x: 0, y: barH - 1, width: panW, height: 1))
+        sep.boxType = .separator; sep.autoresizingMask = [.width]; bar.addSubview(sep)
+        let openBtn = NSButton(title: "Open File", target: self, action: #selector(openDetailFile))
+        openBtn.frame = NSRect(x: panW - 184, y: 8, width: 84, height: 32)
+        openBtn.autoresizingMask = [.minXMargin]; openBtn.bezelStyle = .rounded; bar.addSubview(openBtn)
+        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeDetailPanel))
+        closeBtn.frame = NSRect(x: panW - 92, y: 8, width: 80, height: 32)
+        closeBtn.autoresizingMask = [.minXMargin]; closeBtn.bezelStyle = .rounded; bar.addSubview(closeBtn)
+        panel.contentView?.addSubview(sv); panel.contentView?.addSubview(bar)
+        detailPanel = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// Show a floating detail panel for one journal cycle entry.
+    /// Finds matching patterns (by first_seen ±30 min), associations linked to those
+    /// patterns, and a trace summary (if a matching trace file exists).
+    private func showCycleDetail(for entry: JournalEntry) {
+        cycleDetailPanel?.close(); cycleDetailPanel = nil
+
+        let entryDate = isoDate(entry.timestamp) ?? Date()
+        let windowSecs: TimeInterval = 30 * 60   // ±30 minutes
+
+        // ── 1. Patterns active in this cycle ────────────────────────────────
+        let cyclePats = allPatterns().filter { p in
+            guard let fs = p.firstSeen, let d = isoDate(fs) else { return false }
+            return abs(d.timeIntervalSince(entryDate)) <= windowSecs
+        }
+        let cyclePatIDs = Set(cyclePats.compactMap { $0.id })
+
+        // ── 2. Associations linked to those patterns ─────────────────────────
+        let cycleAssocs = allAssociations().filter { a in
+            guard let linked = a.patternsLinked, !linked.isEmpty else { return false }
+            return !linked.filter { cyclePatIDs.contains($0) }.isEmpty
+        }
+
+        // ── 3. Trace file summary ────────────────────────────────────────────
+        var traceLines: [String] = []
+        if let idPrefix = entry.id.map({ String($0.prefix(8)) }), !idPrefix.isEmpty {
+            let fm = FileManager.default
+            if let files = try? fm.contentsOfDirectory(atPath: tracesDir),
+               let traceFile = files.first(where: { $0.hasSuffix(".jsonl") && $0.contains(idPrefix) }) {
+                let path = tracesDir + "/" + traceFile
+                if let raw = try? String(contentsOfFile: path, encoding: .utf8) {
+                    traceLines = raw.components(separatedBy: "\n").filter { !$0.isEmpty }
+                }
+            }
+        }
+
+        // ── Build rich text ──────────────────────────────────────────────────
+        let rt = RichText()
+        rt.header("Cycle Detail")
+        rt.subheader("\(fmtDate(entry.timestamp))  ·  \(timeAgo(entry.timestamp))")
+        rt.spacer()
+
+        // Summary stats row
+        rt.subheader("Cycle Summary")
+        if entry.sessionsAnalyzed > 0 {
+            rt.body("  Sessions analyzed  \(entry.sessionsAnalyzed)")
+            rt.body("  Patterns extracted \(entry.patternsExtracted)")
+            rt.body("  Associations found \(entry.associationsFound)")
+            rt.body("  Insights promoted  \(entry.insightsPromoted)")
+            rt.body("  Tokens used        \(fmtNum(entry.tokensUsed))")
+        } else {
+            rt.dim("  Skipped — no new sessions to consolidate")
+        }
+        rt.divider()
+
+        // Patterns section
+        rt.subheader("Patterns (\(cyclePats.count))")
+        if cyclePats.isEmpty {
+            rt.dim("  No patterns matched to this cycle's timestamp window.")
+        } else {
+            for p in cyclePats.sorted(by: { $0.confidence > $1.confidence }) {
+                let pct = Int(p.confidence * 100)
+                let bar = String(repeating: "▮", count: pct / 10) + String(repeating: "░", count: 10 - pct / 10)
+                rt.body("  \(bar)  \(pct)%  \(p.pattern)")
+                let meta = [p.category, p.valence].filter { !$0.isEmpty }.joined(separator: "  ·  ")
+                if !meta.isEmpty { rt.dim("        \(meta)") }
+            }
+        }
+        rt.divider()
+
+        // Associations section
+        rt.subheader("Associations (\(cycleAssocs.count))")
+        if cycleAssocs.isEmpty {
+            rt.dim("  No associations linked to this cycle's patterns.")
+        } else {
+            for a in cycleAssocs.sorted(by: { $0.confidence > $1.confidence }) {
+                let pct = Int(a.confidence * 100)
+                rt.body("  \(pct)%  \(a.hypothesis)")
+                if let rule = a.suggestedRule, !rule.isEmpty {
+                    rt.dim("        Rule: \(rule)")
+                }
+            }
+        }
+        rt.divider()
+
+        // Trace phase breakdown (if available)
+        if !traceLines.isEmpty {
+            rt.subheader("Trace Events (\(traceLines.count))")
+            // Decode and show api_call + key events concisely
+            struct TraceEvent: Decodable {
+                let kind:    String?
+                let phase:   String?
+                let model:   String?
+                let tokens:  Int?
+                let message: String?
+                enum CodingKeys: String, CodingKey {
+                    case kind, phase, model, tokens, message
+                }
+            }
+            let events = traceLines.compactMap { line -> TraceEvent? in
+                guard let d = line.data(using: .utf8) else { return nil }
+                return try? JSONDecoder().decode(TraceEvent.self, from: d)
+            }
+            var phaseTokens: [String: Int] = [:]
+            for e in events {
+                if e.kind == "api_call" || e.kind == "api_response",
+                   let phase = e.phase, let tok = e.tokens {
+                    phaseTokens[phase, default: 0] += tok
+                }
+            }
+            if phaseTokens.isEmpty {
+                rt.dim("  \(traceLines.count) trace events recorded.")
+            } else {
+                for (phase, tok) in phaseTokens.sorted(by: { $0.key < $1.key }) {
+                    rt.body("  \(phase.capitalized.padding(toLength: 12, withPad: " ", startingAt: 0))  \(fmtNum(tok)) tokens")
+                }
+            }
+        }
+
+        // ── Panel setup ──────────────────────────────────────────────────────
+        let panW: CGFloat = 680, panH: CGFloat = 560, barH: CGFloat = 44
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
+            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        panel.title = "Cycle — \(fmtDate(entry.timestamp))"
+        panel.isReleasedWhenClosed = false; panel.level = .floating
+
+        // Offset from parent so both panels are visible at once
+        if let parent = detailPanel { panel.setFrameOrigin(NSPoint(x: parent.frame.origin.x + 40,
+                                                                    y: parent.frame.origin.y - 40)) }
+        else { panel.center() }
+
+        let sv = NSScrollView(frame: NSRect(x: 0, y: barH, width: panW, height: panH - barH))
+        sv.autoresizingMask = [.width, .height]; sv.hasVerticalScroller = true
+        sv.autohidesScrollers = true; sv.borderType = .noBorder
+        let cs = sv.contentSize
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: cs.width, height: cs.height))
+        tv.minSize = NSSize(width: 0, height: cs.height)
+        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.autoresizingMask = .width; tv.isEditable = false; tv.isSelectable = true
+        tv.backgroundColor = .textBackgroundColor; tv.textContainerInset = NSSize(width: 14, height: 14)
+        tv.isVerticallyResizable = true; tv.isHorizontallyResizable = false
+        tv.textContainer?.containerSize = NSSize(width: cs.width, height: CGFloat.greatestFiniteMagnitude)
+        tv.textContainer?.widthTracksTextView = true
+        sv.documentView = tv
+        tv.textStorage?.setAttributedString(rt.build())
+
+        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: barH))
+        bar.autoresizingMask = [.width]
+        let sep = NSBox(frame: NSRect(x: 0, y: barH - 1, width: panW, height: 1))
+        sep.boxType = .separator; sep.autoresizingMask = [.width]; bar.addSubview(sep)
+        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeCycleDetailPanel))
+        closeBtn.frame = NSRect(x: panW - 92, y: 6, width: 80, height: 30)
+        closeBtn.autoresizingMask = [.minXMargin]; closeBtn.bezelStyle = .rounded; bar.addSubview(closeBtn)
+        panel.contentView?.addSubview(sv); panel.contentView?.addSubview(bar)
+        cycleDetailPanel = panel
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func closeCycleDetailPanel() {
+        cycleDetailPanel?.close(); cycleDetailPanel = nil
     }
 
     @objc private func showInsightsDetail() {
