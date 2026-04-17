@@ -1067,6 +1067,7 @@ pub fn render_html(snap: &Snapshot) -> String {
     body.push_str(&render_inventory_section(snap));
     body.push_str(&render_config_section(snap));
     body.push_str(&render_insights_widget(snap));
+    body.push_str(&render_glossary_section());
 
     // Shell the body inside the full document with navbar, footer, theme toggle.
     // NOTE: We use r##"..."## (double-hash delimiter) because the navbar HTML
@@ -1109,6 +1110,7 @@ function registerFileContent(key, content) {{
     <a href="#arch">Architecture</a>
     <a href="#files">Files</a>
     <a href="#config">Config</a>
+    <a href="#glossary">Glossary</a>
   </div>
   <button class="theme-toggle" onclick="var l=document.documentElement.classList.toggle('light');localStorage.setItem('idream-theme',l?'light':'dark')" aria-label="Toggle theme">☀ / ☾</button>
 </nav>
@@ -2179,6 +2181,136 @@ fn render_insights_widget(snap: &Snapshot) -> String {
         store_rows = store_rows,
         tests   = tests_html,
     )
+}
+
+/// Terminology glossary section — a quick-reference card for every
+/// i-dream concept. Linked from the navbar so users can jump here
+/// without leaving the dashboard.
+fn render_glossary_section() -> String {
+    r##"<section class="dash-section" id="glossary">
+<h2 class="section-title">Terminology Glossary</h2>
+<p class="section-desc muted">Quick reference for every concept used across the dashboard, widget, and CLI.</p>
+<div class="glossary-grid">
+
+  <div class="glossary-card">
+    <div class="glossary-term">Dreaming</div>
+    <div class="glossary-def">Background memory consolidation module. Runs when idle 4+ hours. Mirrors human slow-wave sleep + REM sleep. Three sequential phases: SWS → REM → Wake.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">SWS <span class="badge badge-phase-sws">SWS</span></div>
+    <div class="glossary-def"><b>Slow-Wave Sleep.</b> Scans unprocessed Claude Code session transcripts, extracts behavioural patterns (tool usage, correction rates, retry sequences). Low temperature (0.3) for structured extraction.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">REM <span class="badge badge-phase-rem">REM</span></div>
+    <div class="glossary-def"><b>Rapid Eye Movement.</b> Takes high-confidence patterns and finds creative cross-domain connections. High temperature (0.9) for divergent association. Outputs association hypotheses.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Wake <span class="badge badge-phase-wake">Wake</span></div>
+    <div class="glossary-def"><b>Wake phase.</b> Verifies associations against the current filesystem state, deduplicates, and promotes high-confidence patterns to <code>dreams/insights.md</code>.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Pattern</div>
+    <div class="glossary-def">A recurring behavioural observation extracted from session transcripts. Has a <b>confidence</b> score (0–1), a <b>valence</b> (positive/neutral/negative), and a <b>category</b>. Stored in <code>dreams/patterns.json</code>.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Association</div>
+    <div class="glossary-def">A cross-pattern hypothesis generated in REM phase. Links two or more patterns with a causal/correlational theory. Has <b>confidence</b>, optional <b>suggested rule</b>, and an <b>actionable</b> flag. Stored in <code>dreams/associations.json</code>.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Insight</div>
+    <div class="glossary-def">A high-confidence association promoted from the Wake phase. Stored in <code>dreams/insights.md</code> and periodically synthesised into the <b>Insight Digest</b> prose summary.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Metacognition</div>
+    <div class="glossary-def">Samples execution units (tool calls + reasoning chains) and scores Claude's confidence calibration. Detects biases: anchoring, sunk-cost, overconfidence. Runs alongside Dreaming in idle cycles.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Calibration Score</div>
+    <div class="glossary-def">A number in [0, 1] measuring how well predicted confidence matches actual outcomes. 1.0 = perfect; &lt;0.5 = systematically miscalibrated. Tracked per-session in <code>metacog/calibration.jsonl</code>.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Intuition</div>
+    <div class="glossary-def">Surfaces "gut feelings" at session start based on pattern-outcome history. Uses exponential time-decay (somatic marker model). Valence entries stored in <code>valence/memory.jsonl</code>.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Valence</div>
+    <div class="glossary-def">The outcome quality associated with a pattern: <b>positive</b> (worked well), <b>neutral</b>, or <b>negative</b> (led to friction/failures). Used by Intuition to weight pattern priming.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Prospective Memory</div>
+    <div class="glossary-def">"Remember to…" intentions. Each has a <b>trigger condition</b> (keyword/regex) and an <b>action</b> (reminder text). Checked at session start; fired records logged in <code>intentions/fired.jsonl</code>.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Introspection</div>
+    <div class="glossary-def">Weekly analysis of captured reasoning chains. Measures depth (steps), breadth (alternatives considered), and fixation rate (repeated failed approaches). Produces reports in <code>introspection/reports/</code>.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Insight Digest</div>
+    <div class="glossary-def">A 2-3 sentence prose synthesis of the last 5 high-confidence insights. Generated at most once per 3 hours by the <code>InsightDigestModule</code>. Shown in the menubar widget dropdown. Has a <b>sentiment</b> tag (positive/neutral/negative) that colours the status icon.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Token Budget</div>
+    <div class="glossary-def">The maximum output tokens allowed per consolidation cycle (<code>max_tokens_per_cycle</code>, default 50 000). Each module phase consumes a fraction: Dreaming 50%, Metacog 25%, Introspection the remainder.</div>
+  </div>
+
+  <div class="glossary-card">
+    <div class="glossary-term">Consolidation Cycle</div>
+    <div class="glossary-def">A full background run triggered when idle 4+ hours. Runs Dreaming → Metacognition → Introspection in sequence. Stats recorded in <code>state.json</code>. Viewable in Dream Replay.</div>
+  </div>
+
+</div>
+</section>
+<style>
+.glossary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.glossary-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.glossary-term {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.glossary-def {
+  font-size: 0.84rem;
+  color: var(--dim);
+  line-height: 1.5;
+}
+.glossary-def code {
+  font-size: 0.82rem;
+  background: var(--code-bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.badge-phase-sws  { background: #2563eb; color: #fff; }
+.badge-phase-rem  { background: #7c3aed; color: #fff; }
+.badge-phase-wake { background: #059669; color: #fff; }
+</style>
+"##.to_string()
 }
 
 /// Format a byte count as a human-readable string (KB / MB).
