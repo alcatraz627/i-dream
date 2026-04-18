@@ -604,26 +604,28 @@ final class PatternGraphView: NSView {
         }
 
         // ── Connection lines ──────────────────────────────────────────────────
-        // Same-category edges are hidden by default — with 80+ nodes per category,
-        // drawing all pairs (N×(N-1)/2) at any alpha creates filled opaque blobs.
-        // Only reveal connections for the hovered node (up to 12 nearest neighbours).
+        // All edges hidden by default. On hover: show only the 15 nearest nodes
+        // sorted by Euclidean distance, regardless of category — this prevents the
+        // N×(N-1)/2 combinatorial blob when categories have 80+ members.
         if let hov = hoveredIdx {
-            let hovCat    = nodes[hov].pattern.category
-            var drawn     = 0
-            for j in 0 ..< nodes.count {
-                guard j != hov else { continue }
+            let hovPos = nodes[hov].position
+            let hovCat = nodes[hov].pattern.category
+            let nearest = (0 ..< nodes.count)
+                .filter { $0 != hov }
+                .sorted { hypot(nodes[$0].position.x - hovPos.x, nodes[$0].position.y - hovPos.y)
+                        < hypot(nodes[$1].position.x - hovPos.x, nodes[$1].position.y - hovPos.y) }
+                .prefix(15)
+            for j in nearest {
                 let sameCategory = nodes[j].pattern.category == hovCat
-                let alpha: CGFloat = sameCategory ? 0.50 : 0.18
-                if drawn > 12 && !sameCategory { continue }   // cap cross-cat lines
+                let alpha: CGFloat = sameCategory ? 0.55 : 0.22
                 let c1 = nodeColor(nodes[hov].pattern)
                 let c2 = nodeColor(nodes[j].pattern)
                 let blended = c1.blended(withFraction: 0.5, of: c2) ?? c1
                 ctx.setStrokeColor(blended.withAlphaComponent(alpha).cgColor)
-                ctx.setLineWidth(sameCategory ? 1.0 : 0.6)
-                ctx.move(to: nodes[hov].position)
+                ctx.setLineWidth(sameCategory ? 1.2 : 0.7)
+                ctx.move(to: hovPos)
                 ctx.addLine(to: nodes[j].position)
                 ctx.strokePath()
-                drawn += 1
             }
         }
 
@@ -971,20 +973,25 @@ final class AssociationGraphView: NSView {
         }
 
         // ── Edges ─────────────────────────────────────────────────────────────
-        let maxWeight = edges.map { $0.weight }.max() ?? 1
-        for edge in edges {
-            let hovRelated = hoveredIdx == edge.a || hoveredIdx == edge.b
-            let alpha: CGFloat = hovRelated ? 0.55 : 0.12
-            guard alpha > 0 else { continue }
-            let ca = nodeColor(nodes[edge.a].assoc)
-            let cb = nodeColor(nodes[edge.b].assoc)
-            let blended = ca.blended(withFraction: 0.5, of: cb) ?? ca
-            ctx.setStrokeColor(blended.withAlphaComponent(alpha).cgColor)
-            let w = 0.6 + 2.0 * CGFloat(edge.weight) / CGFloat(maxWeight)
-            ctx.setLineWidth(hovRelated ? w * 1.8 : w)
-            ctx.move(to: nodes[edge.a].position)
-            ctx.addLine(to: nodes[edge.b].position)
-            ctx.strokePath()
+        // Hidden by default; on hover show only edges connecting the hovered node,
+        // capped at 12 to prevent blob when nodes share many pattern links.
+        if let hov = hoveredIdx {
+            let maxWeight = edges.map { $0.weight }.max() ?? 1
+            let hovEdges  = edges
+                .filter { $0.a == hov || $0.b == hov }
+                .sorted { $0.weight > $1.weight }
+                .prefix(12)
+            for edge in hovEdges {
+                let ca = nodeColor(nodes[edge.a].assoc)
+                let cb = nodeColor(nodes[edge.b].assoc)
+                let blended = ca.blended(withFraction: 0.5, of: cb) ?? ca
+                ctx.setStrokeColor(blended.withAlphaComponent(0.60).cgColor)
+                let w = 1.0 + 2.0 * CGFloat(edge.weight) / CGFloat(maxWeight)
+                ctx.setLineWidth(w)
+                ctx.move(to: nodes[edge.a].position)
+                ctx.addLine(to: nodes[edge.b].position)
+                ctx.strokePath()
+            }
         }
 
         // ── Nodes ─────────────────────────────────────────────────────────────
@@ -1025,16 +1032,19 @@ final class AssociationGraphView: NSView {
                 ctx.fillPath()
             }
 
-            // Short label (first 3 words)
-            let label = a.hypothesis.components(separatedBy: " ").prefix(3).joined(separator: " ")
-            let labelAttrs: [NSAttributedString.Key: Any] = [
-                .font:            NSFont.systemFont(ofSize: 9),
-                .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
-            ]
-            let str = NSAttributedString(string: label, attributes: labelAttrs)
-            let sz  = str.size()
-            str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
-                                  y: node.position.y + r + 2))
+            // Short label — only when hovered, selected, or zoomed in enough.
+            // Suppressing at default zoom eliminates text fog with 170+ nodes.
+            if isHovered || isSelected || zoomScale > 1.8 {
+                let label = a.hypothesis.components(separatedBy: " ").prefix(4).joined(separator: " ")
+                let labelAttrs: [NSAttributedString.Key: Any] = [
+                    .font:            NSFont.systemFont(ofSize: isHovered ? 10 : 9),
+                    .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
+                ]
+                let str = NSAttributedString(string: label, attributes: labelAttrs)
+                let sz  = str.size()
+                str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
+                                      y: node.position.y + r + 2))
+            }
         }
 
         ctx.restoreGState()
