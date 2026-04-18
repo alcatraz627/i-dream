@@ -333,6 +333,10 @@ final class RichText {
             .foregroundColor: color,
         ])); return self
     }
+    /// Append a pre-built attributed string (no trailing newline added).
+    @discardableResult func raw(_ attributedString: NSAttributedString) -> RichText {
+        buf.append(attributedString); return self
+    }
     func build() -> NSAttributedString { buf }
 }
 
@@ -350,6 +354,24 @@ private class JournalLinkDelegate: NSObject, NSTextViewDelegate {
     }
 }
 
+// Intercepts insight feedback link clicks ("insight-up:<id>" / "insight-down:<id>").
+private class InsightFeedbackDelegate: NSObject, NSTextViewDelegate {
+    let onFeedback: (String, String) -> Void   // (insightId, "up"|"down")
+    init(_ onFeedback: @escaping (String, String) -> Void) { self.onFeedback = onFeedback; super.init() }
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        guard let linkStr = link as? String else { return false }
+        if linkStr.hasPrefix("insight-up:") {
+            onFeedback(String(linkStr.dropFirst("insight-up:".count)), "up")
+            return true
+        }
+        if linkStr.hasPrefix("insight-down:") {
+            onFeedback(String(linkStr.dropFirst("insight-down:".count)), "down")
+            return true
+        }
+        return false
+    }
+}
+
 // ─── Pattern network view ─────────────────────────────────────────────────────
 // Ring-of-rings layout: categories on outer circle, their patterns on inner circles.
 // Interactive: pan (drag), zoom (pinch / scroll-wheel), hover (faint connection lines),
@@ -362,7 +384,14 @@ final class PatternGraphView: NSView {
         let radius:   CGFloat
     }
 
-    private var nodes:          [Node]    = []
+    private struct CategoryArc {
+        let name:     String
+        let midAngle: CGFloat  // radians, graph coordinate space
+        let ringR:    CGFloat
+    }
+
+    private var nodes:          [Node]       = []
+    private var categoryArcs:   [CategoryArc] = []
     private var popover:        NSPopover?
     private var selectedIdx:    Int?      = nil
     private var hoveredIdx:     Int?      = nil
@@ -391,27 +420,44 @@ final class PatternGraphView: NSView {
     private func buildLayout(_ patterns: [Pattern]) {
         let cx = bounds.midX
         let cy = bounds.midY
-        let outerR: CGFloat = min(bounds.width, bounds.height) * 0.36
+        let ringR: CGFloat = min(bounds.width, bounds.height) * 0.44
+
         let categories = Array(Set(patterns.map { $0.category })).sorted()
         let catCount   = max(categories.count, 1)
         var byCategory: [String: [Pattern]] = [:]
         for p in patterns { byCategory[p.category, default: []].append(p) }
+        // Sort within category: highest confidence first
+        for cat in byCategory.keys { byCategory[cat]?.sort { $0.confidence > $1.confidence } }
 
-        nodes = []
-        for (i, cat) in categories.enumerated() {
-            let catAngle = CGFloat(i) / CGFloat(catCount) * 2 * .pi - .pi / 2
-            let catX = cx + outerR * cos(catAngle)
-            let catY = cy + outerR * sin(catAngle)
-            let pats     = byCategory[cat] ?? []
-            let innerR: CGFloat = outerR * 0.20
+        // Each category gets a proportional arc; 6° gap between adjacent categories
+        let gapRad:       CGFloat = 6.0 * .pi / 180.0
+        let totalGap:     CGFloat = gapRad * CGFloat(catCount)
+        let availableArc: CGFloat = 2 * .pi - totalGap
+        let total: CGFloat = CGFloat(max(patterns.count, 1))
+
+        nodes        = []
+        categoryArcs = []
+        var startAngle: CGFloat = -.pi / 2   // 12 o'clock
+
+        for cat in categories {
+            let pats = byCategory[cat] ?? []
+            guard !pats.isEmpty else { continue }
+            let catArc = availableArc * (CGFloat(pats.count) / total)
+            let midAngle = startAngle + catArc / 2
+
             for (j, p) in pats.enumerated() {
-                let angle: CGFloat = pats.count == 1 ? 0 :
-                    CGFloat(j) / CGFloat(pats.count) * 2 * .pi
-                let x = catX + (pats.count == 1 ? 0 : innerR * cos(angle))
-                let y = catY + (pats.count == 1 ? 0 : innerR * sin(angle))
-                let r = 7.0 + CGFloat(p.confidence) * 8.0
+                // Distribute nodes evenly across this category's arc slice
+                let t: CGFloat = pats.count == 1 ? 0.5 :
+                    CGFloat(j) / CGFloat(pats.count - 1)
+                let angle = startAngle + t * catArc
+                let x = cx + ringR * cos(angle)
+                let y = cy + ringR * sin(angle)
+                let r: CGFloat = 5.0 + CGFloat(p.confidence) * 7.0  // 5–12 pt
                 nodes.append(Node(pattern: p, position: CGPoint(x: x, y: y), radius: r))
             }
+
+            categoryArcs.append(CategoryArc(name: cat, midAngle: midAngle, ringR: ringR))
+            startAngle += catArc + gapRad
         }
     }
 
@@ -547,28 +593,37 @@ final class PatternGraphView: NSView {
         ctx.scaleBy(x: zoomScale, y: zoomScale)
         ctx.translateBy(x: -cx, y: -cy)
 
+        // ── Ring guide ────────────────────────────────────────────────────────
+        // Faint circle so the ring "track" is always visible even at gap sections.
+        if !nodes.isEmpty {
+            let ringR = categoryArcs.first?.ringR ?? min(bounds.width, bounds.height) * 0.44
+            ctx.setStrokeColor(NSColor.quaternaryLabelColor.cgColor)
+            ctx.setLineWidth(0.5)
+            ctx.strokeEllipse(in: CGRect(x: cx - ringR, y: cy - ringR,
+                                         width: ringR * 2, height: ringR * 2))
+        }
+
         // ── Connection lines ──────────────────────────────────────────────────
-        // Same-category edges are always drawn faintly; hover boosts alpha for
-        // the hovered node's connections. Cross-category edges appear only on hover.
-        for i in 0 ..< nodes.count {
-            for j in (i+1) ..< nodes.count {
-                let sameCategory = nodes[i].pattern.category == nodes[j].pattern.category
-                let hovRelated   = hoveredIdx == i || hoveredIdx == j
-                let alpha: CGFloat
-                if hovRelated {
-                    alpha = sameCategory ? 0.60 : 0.14
-                } else {
-                    alpha = sameCategory ? 0.15 : 0.0
-                }
-                guard alpha > 0 else { continue }
-                let c1 = nodeColor(nodes[i].pattern)
+        // Same-category edges are hidden by default — with 80+ nodes per category,
+        // drawing all pairs (N×(N-1)/2) at any alpha creates filled opaque blobs.
+        // Only reveal connections for the hovered node (up to 12 nearest neighbours).
+        if let hov = hoveredIdx {
+            let hovCat    = nodes[hov].pattern.category
+            var drawn     = 0
+            for j in 0 ..< nodes.count {
+                guard j != hov else { continue }
+                let sameCategory = nodes[j].pattern.category == hovCat
+                let alpha: CGFloat = sameCategory ? 0.50 : 0.18
+                if drawn > 12 && !sameCategory { continue }   // cap cross-cat lines
+                let c1 = nodeColor(nodes[hov].pattern)
                 let c2 = nodeColor(nodes[j].pattern)
                 let blended = c1.blended(withFraction: 0.5, of: c2) ?? c1
                 ctx.setStrokeColor(blended.withAlphaComponent(alpha).cgColor)
-                ctx.setLineWidth(sameCategory ? 0.9 : 0.5)
-                ctx.move(to: nodes[i].position)
+                ctx.setLineWidth(sameCategory ? 1.0 : 0.6)
+                ctx.move(to: nodes[hov].position)
                 ctx.addLine(to: nodes[j].position)
                 ctx.strokePath()
+                drawn += 1
             }
         }
 
@@ -592,37 +647,45 @@ final class PatternGraphView: NSView {
 
             let rect = CGRect(x: node.position.x - r, y: node.position.y - r,
                               width: r * 2, height: r * 2)
+            // Thin white halo so nodes stand out against dark ring arcs
+            if !isHovered && !isSelected {
+                ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.25).cgColor)
+                ctx.setLineWidth(1.5)
+                let hr = r + 1.0
+                ctx.strokeEllipse(in: CGRect(x: node.position.x - hr, y: node.position.y - hr,
+                                             width: hr * 2, height: hr * 2))
+            }
             ctx.setFillColor(baseColor.withAlphaComponent(fillAlpha).cgColor)
             ctx.setStrokeColor(baseColor.cgColor)
-            ctx.setLineWidth(isSelected ? 2.5 : isHovered ? 2.0 : 1.0)
+            ctx.setLineWidth(isSelected ? 2.5 : isHovered ? 2.0 : 1.2)
             ctx.fillEllipse(in: rect)
             ctx.strokeEllipse(in: rect)
 
-            // Short label above node; brighter when hovered
-            let label = p.pattern.components(separatedBy: " ").prefix(3).joined(separator: " ")
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font:            NSFont.systemFont(ofSize: 9),
-                .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
-            ]
-            let str = NSAttributedString(string: label, attributes: attrs)
-            let sz  = str.size()
-            str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
-                                  y: node.position.y + r + 2))
+            // Short label above node — only when hovered, selected, or zoomed in.
+            // Suppressing labels at low zoom eliminates the text fog with many nodes.
+            if isHovered || isSelected || zoomScale > 2.0 {
+                let label = p.pattern.components(separatedBy: " ").prefix(3).joined(separator: " ")
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font:            NSFont.systemFont(ofSize: 9),
+                    .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
+                ]
+                let str = NSAttributedString(string: label, attributes: attrs)
+                let sz  = str.size()
+                str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
+                                     y: node.position.y + r + 2))
+            }
         }
 
-        // ── Category labels at cluster centres ────────────────────────────────
-        let categories = Array(Set(nodes.map { $0.pattern.category })).sorted()
-        let catCount   = max(categories.count, 1)
-        let outerR: CGFloat = min(bounds.width, bounds.height) * 0.36
+        // ── Category labels at arc midpoints (outside the ring) ──────────────
         let catAttrs: [NSAttributedString.Key: Any] = [
-            .font:            NSFont.systemFont(ofSize: 10, weight: .semibold),
-            .foregroundColor: NSColor.secondaryLabelColor,
+            .font:            NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
         ]
-        for (i, cat) in categories.enumerated() {
-            let angle = CGFloat(i) / CGFloat(catCount) * 2 * .pi - .pi / 2
-            let lx = cx + (outerR + 24) * cos(angle)
-            let ly = cy + (outerR + 24) * sin(angle)
-            let str = NSAttributedString(string: cat, attributes: catAttrs)
+        for arc in categoryArcs {
+            let labelR = arc.ringR + 32
+            let lx = cx + labelR * cos(arc.midAngle)
+            let ly = cy + labelR * sin(arc.midAngle)
+            let str = NSAttributedString(string: arc.name, attributes: catAttrs)
             let sz  = str.size()
             str.draw(at: CGPoint(x: lx - sz.width / 2, y: ly - sz.height / 2))
         }
@@ -1674,6 +1737,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var replayPauseBtn:   NSButton?
     private var replayTracePopup: NSPopUpButton?
     private var replayTraceFiles: [String]        = []
+    private var insightFeedbackDelegate: InsightFeedbackDelegate?
 
     // Dreaming animation
     private var isCycling       = false
@@ -2123,7 +2187,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                            top:    "  Last cycle  \(fmtDate(latest.timestamp))  (\(timeAgo(latest.timestamp)))",
                            bottom: "  \(summary)  ·  \(fmtNum(latest.tokensUsed)) tokens")
             }
-            // Show recent pattern learnings (actual text) — click to copy full text
+            // Show recent pattern learnings — hover to expand submenu with full details
             if !cachedPatterns.isEmpty {
                 for p in cachedPatterns {
                     let truncated = p.pattern.count > 180 ? String(p.pattern.prefix(177)) + "…" : p.pattern
@@ -2133,22 +2197,20 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                           : p.confidence >= 0.65 ? .systemBlue
                                           : .secondaryLabelColor
                     let confDot = p.confidence >= 0.85 ? "●" : p.confidence >= 0.65 ? "◕" : "○"
+                    let dateStr = p.firstSeen != nil ? "  ·  \(fmtDateWithAge(p.firstSeen))" : ""
                     let item = NSMenuItem()
                     let full = NSMutableAttributedString()
                     full.append(NSAttributedString(string: "  \(sym) \"\(truncated)\"\n",
                                                    attributes: [.font: NSFont.systemFont(ofSize: 14)]))
-                    full.append(NSAttributedString(string: "  \(confDot) \(Int(p.confidence * 100))%  ·  \(p.category)  ·  ⌘C to copy",
+                    full.append(NSAttributedString(string: "  \(confDot) \(Int(p.confidence * 100))%  ·  \(p.category)\(dateStr)",
                                                    attributes: [
                                                        .font: NSFont.systemFont(ofSize: 12),
                                                        .foregroundColor: confColor,
                                                    ]))
                     item.attributedTitle = full
-                    item.action = #selector(copyItemText(_:))
-                    item.target = self
                     item.isEnabled = true
-                    // Store the full (untruncated) pattern for clipboard
-                    item.representedObject = "\(sym) \(p.pattern)\nCategory: \(p.category) | Confidence: \(Int(p.confidence * 100))%"
-                    setIcon(item, "doc.on.clipboard")
+                    item.submenu = makePatternSubmenu(p)
+                    setIcon(item, "sparkle")
                     menu.addItem(item)
                 }
                 // View All Insights link
@@ -2390,6 +2452,75 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // ── Pattern detail submenu ────────────────────────────────────────────────
+    // Built per-pattern item in "Recent Inferences". Shows full text, metadata
+    // rows, and action items (copy, view all). Hover → submenu appears at right.
+
+    private func makePatternSubmenu(_ p: Pattern) -> NSMenu {
+        let sub = NSMenu()
+
+        // ── Full text (non-truncated) ──────────────────────────────────────────
+        let textItem = NSMenuItem()
+        let textAttr = NSMutableAttributedString()
+        textAttr.append(NSAttributedString(string: "  " + p.pattern,
+            attributes: [
+                .font:            NSFont.systemFont(ofSize: 13),
+                .foregroundColor: NSColor.labelColor,
+            ]))
+        textItem.attributedTitle = textAttr
+        textItem.isEnabled = false
+        sub.addItem(textItem)
+
+        sub.addItem(.separator())
+
+        // ── Metadata rows ──────────────────────────────────────────────────────
+        addRow(sub, "Category",   p.category)
+
+        let confColor: NSColor = p.confidence >= 0.85 ? .systemGreen
+                               : p.confidence >= 0.65 ? .systemBlue
+                               : .secondaryLabelColor
+        let confDot = p.confidence >= 0.85 ? "●●●●●"
+                    : p.confidence >= 0.65 ? "●●●○○" : "●●○○○"
+        addRow(sub, "Confidence", "\(confDot)  \(Int(p.confidence * 100))%",
+               valueColor: confColor)
+
+        let sym = valenceSymbol(p.valence)
+        addRow(sub, "Valence", "\(sym)  \(p.valence)")
+
+        if let fs = p.firstSeen, !fs.isEmpty {
+            addRow(sub, "First seen", fmtDateWithAge(fs))
+        }
+
+        if let pid = p.id, !pid.isEmpty {
+            addRow(sub, "ID", pid)
+        }
+
+        sub.addItem(.separator())
+
+        // ── Actions ────────────────────────────────────────────────────────────
+        let copyItem = NSMenuItem()
+        copyItem.attributedTitle = NSAttributedString(string: "  Copy text",
+            attributes: [.font: NSFont.systemFont(ofSize: 13)])
+        copyItem.action = #selector(copyItemText(_:))
+        copyItem.target = self
+        copyItem.isEnabled = true
+        copyItem.representedObject =
+            "\(sym) \(p.pattern)\nCategory: \(p.category) | Confidence: \(Int(p.confidence * 100))%"
+        setIcon(copyItem, "doc.on.clipboard")
+        sub.addItem(copyItem)
+
+        let viewAllItem = NSMenuItem()
+        viewAllItem.attributedTitle = NSAttributedString(string: "  View All Insights →",
+            attributes: [.font: NSFont.systemFont(ofSize: 13)])
+        viewAllItem.action = #selector(showInsightsDetail)
+        viewAllItem.target = self
+        viewAllItem.isEnabled = true
+        setIcon(viewAllItem, "list.bullet.rectangle")
+        sub.addItem(viewAllItem)
+
+        return sub
+    }
+
     // ── SF Symbol icon helper ──────────────────────────────────────────────────
 
     private func setIcon(_ item: NSMenuItem, _ symbol: String) {
@@ -2561,9 +2692,8 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let topPatterns = Array(patterns.sorted { $0.confidence > $1.confidence }.prefix(15))
 
-        let panW: CGFloat = 600
+        let panW: CGFloat = 620
         let panH: CGFloat = 600
-        let rowH: CGFloat = 44
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
             styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
@@ -2573,18 +2703,35 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.level                = .floating
         panel.center()
 
-        // Build scroll view with one row per pattern
-        let totalContentH = CGFloat(topPatterns.count) * rowH
+        // Pre-measure each row's required text height so rows size to their content.
+        let labelFont   = NSFont.systemFont(ofSize: 12)
+        let textWidth   = panW - 96 - 124           // left margin + button column
+        let measureAttrs: [NSAttributedString.Key: Any] = [.font: labelFont]
+        let rowPadding: CGFloat = 20                // vertical padding per row
+
+        let rowHeights: [CGFloat] = topPatterns.map { p in
+            let measured = (p.pattern as NSString).boundingRect(
+                with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: measureAttrs)
+            return max(20, ceil(measured.height)) + rowPadding
+        }
+        let totalContentH = rowHeights.reduce(0, +)
         let containerView = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: totalContentH))
 
-        for (i, p) in topPatterns.enumerated() {
-            let y = totalContentH - CGFloat(i + 1) * rowH
-            let rowView = NSView(frame: NSRect(x: 0, y: y, width: panW, height: rowH))
+        // Build rows bottom-up (NSView origin is bottom-left).
+        // Item 0 (highest confidence) sits at the top of the scroll view.
+        var yOffset: CGFloat = 0
+        for i in stride(from: topPatterns.count - 1, through: 0, by: -1) {
+            let p    = topPatterns[i]
+            let rowH = rowHeights[i]
+            let rowView = NSView(frame: NSRect(x: 0, y: yOffset, width: panW, height: rowH))
             rowView.autoresizingMask = [.width]
 
-            // Confidence bar
-            let barW = p.confidence * 80
-            let confBar = NSView(frame: NSRect(x: 8, y: 14, width: barW, height: 16))
+            // Confidence bar (vertically centred)
+            let barW    = p.confidence * 80
+            let barY    = (rowH - 16) / 2
+            let confBar = NSView(frame: NSRect(x: 8, y: barY, width: barW, height: 16))
             let barColor: NSColor = p.valence == "positive" ? .systemGreen
                                   : p.valence == "negative" ? .systemRed : .systemBlue
             confBar.wantsLayer = true
@@ -2592,39 +2739,39 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             confBar.layer?.cornerRadius    = 3
             rowView.addSubview(confBar)
 
-            // Pattern text label
-            let maxChars = 60
-            let labelText = p.pattern.count > maxChars ? String(p.pattern.prefix(maxChars)) + "…" : p.pattern
-            let label = NSTextField(labelWithString: labelText)
-            label.font      = .systemFont(ofSize: 12)
-            label.textColor = .labelColor
-            label.frame     = NSRect(x: 96, y: 12, width: panW - 96 - 120, height: 20)
-            label.autoresizingMask = [.width]
-            label.lineBreakMode    = .byTruncatingTail
+            // Pattern text — full text, wrapping allowed
+            let textH   = rowH - rowPadding
+            let label   = NSTextField(wrappingLabelWithString: p.pattern)
+            label.font              = labelFont
+            label.textColor         = .labelColor
+            label.frame             = NSRect(x: 96, y: rowPadding / 2,
+                                             width: textWidth, height: textH)
+            label.autoresizingMask  = [.width]
             rowView.addSubview(label)
 
             // Thumbs-up button
             let upBtn = NSButton(title: "👍", target: self, action: #selector(insightRateUp(_:)))
-            upBtn.frame = NSRect(x: panW - 116, y: 7, width: 50, height: 30)
-            upBtn.autoresizingMask = [.minXMargin]
-            upBtn.bezelStyle = .rounded
-            upBtn.tag = i
+            upBtn.frame             = NSRect(x: panW - 118, y: (rowH - 30) / 2, width: 50, height: 30)
+            upBtn.autoresizingMask  = [.minXMargin]
+            upBtn.bezelStyle        = .rounded
+            upBtn.tag               = i
             rowView.addSubview(upBtn)
 
             // Thumbs-down button
             let downBtn = NSButton(title: "👎", target: self, action: #selector(insightRateDown(_:)))
-            downBtn.frame = NSRect(x: panW - 62, y: 7, width: 50, height: 30)
+            downBtn.frame           = NSRect(x: panW - 64, y: (rowH - 30) / 2, width: 50, height: 30)
             downBtn.autoresizingMask = [.minXMargin]
-            downBtn.bezelStyle = .rounded
-            downBtn.tag = i
+            downBtn.bezelStyle      = .rounded
+            downBtn.tag             = i
             rowView.addSubview(downBtn)
 
-            // Separator line
+            // Separator
             let sep = NSBox(frame: NSRect(x: 0, y: 0, width: panW, height: 1))
             sep.boxType = .separator; sep.autoresizingMask = [.width]
             rowView.addSubview(sep)
 
             containerView.addSubview(rowView)
+            yOffset += rowH
         }
 
         // Store top patterns in a property so action handlers can reference them
@@ -3887,21 +4034,36 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let total = pairs.count
-        rt.dim("\(total) insight\(total == 1 ? "" : "s") recorded")
+        let fb = readInsightFeedback()
+        let rated = fb.count
+        rt.dim("\(total) insight\(total == 1 ? "" : "s") recorded\(rated > 0 ? " · \(rated) rated" : "")")
         rt.spacer()
 
         // Render most-recent first
         for (date, block) in pairs.reversed() {
-            renderInsight(rt, block: block, date: date)
+            renderInsight(rt, block: block, date: date, feedback: fb)
         }
 
         showResizablePanel(title: "All Insights (\(total))",
                            content: rt.build(),
                            filePath: subDir + "/dreams/insights.md")
+
+        // Wire up feedback link clicks on the text view inside the panel
+        if let contentView = detailPanel?.contentView,
+           let scrollView = contentView.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView,
+           let textView = scrollView.documentView as? NSTextView {
+            insightFeedbackDelegate = InsightFeedbackDelegate { [weak self] insightId, rating in
+                self?.recordInsightFeedback(insightId: insightId, rating: rating)
+                // Refresh panel to update button colors
+                DispatchQueue.main.async { self?.showInsightsDetail() }
+            }
+            textView.delegate = insightFeedbackDelegate
+        }
     }
 
     /// Render one `### Insight` block into `rt`.
-    private func renderInsight(_ rt: RichText, block: String, date: String) {
+    private func renderInsight(_ rt: RichText, block: String, date: String,
+                               feedback: [String: String] = [:]) {
         let lines = block.components(separatedBy: "\n")
 
         // First line is the insight header suffix, e.g. " (conf=0.87)"
@@ -3934,7 +4096,78 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Date stamp at the bottom of each insight
         if !date.isEmpty { rt.dim("  \(date)") }
+
+        // Feedback links (👍/👎)
+        let insightId = Self.extractInsightId(from: block)
+        let existing = feedback[insightId]
+        let fb = NSMutableAttributedString()
+        fb.append(NSAttributedString(string: "  "))
+        fb.append(NSAttributedString(string: existing == "up" ? "✓ Helpful" : "👍 Helpful", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: existing == "up" ? NSColor.systemGreen : NSColor.tertiaryLabelColor,
+            .link: "insight-up:\(insightId)" as AnyObject,
+        ]))
+        fb.append(NSAttributedString(string: "    "))
+        fb.append(NSAttributedString(string: existing == "down" ? "✗ Not useful" : "👎 Not useful", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: existing == "down" ? NSColor.systemRed : NSColor.tertiaryLabelColor,
+            .link: "insight-down:\(insightId)" as AnyObject,
+        ]))
+        fb.append(NSAttributedString(string: "\n"))
+        rt.raw(fb)
+
         rt.divider()
+    }
+
+    /// Extract a stable identifier from an insight block (first pattern UUID, or hash fallback).
+    private static func extractInsightId(from block: String) -> String {
+        if let range = block.range(of: "_Patterns:") {
+            let after = String(block[range.upperBound...])
+            let cleaned = after.trimmingCharacters(in: .whitespacesAndNewlines)
+                               .replacingOccurrences(of: "_", with: "")
+            let firstUUID = cleaned.components(separatedBy: ",").first?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            if firstUUID.count >= 8 { return firstUUID }
+        }
+        // Fallback: djb2 hash of first 100 chars
+        var hash: UInt64 = 5381
+        for c in block.prefix(100).utf8 { hash = hash &* 33 &+ UInt64(c) }
+        return String(format: "%016llx", hash)
+    }
+
+    /// Read existing insight feedback from dreams/insight-feedback.jsonl → [insightId: "up"|"down"].
+    private func readInsightFeedback() -> [String: String] {
+        let path = subDir + "/dreams/insight-feedback.jsonl"
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
+        var result: [String: String] = [:]
+        for line in raw.components(separatedBy: "\n") where !line.isEmpty {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = obj["insight_id"] as? String,
+                  let rating = obj["rating"] as? String
+            else { continue }
+            result[id] = rating   // last entry wins (allows changing your mind)
+        }
+        return result
+    }
+
+    /// Record a feedback action to dreams/insight-feedback.jsonl.
+    private func recordInsightFeedback(insightId: String, rating: String) {
+        let path = subDir + "/dreams/insight-feedback.jsonl"
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let entry: [String: Any] = ["ts": ts, "insight_id": insightId, "rating": rating]
+        guard let data = try? JSONSerialization.data(withJSONObject: entry),
+              let line = String(data: data, encoding: .utf8)
+        else { return }
+        let content = line + "\n"
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            fh.write(content.data(using: .utf8) ?? Data())
+            fh.closeFile()
+        } else {
+            try? content.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        dlog("insight feedback: \(rating) for \(insightId.prefix(8))")
     }
 
     @objc private func setDreamFrequency(_ sender: NSMenuItem) {
