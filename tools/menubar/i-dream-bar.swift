@@ -631,7 +631,7 @@ final class PatternGraphView: NSView {
                 .prefix(15)
             for j in nearest {
                 let sameCategory = nodes[j].pattern.category == hovCat
-                let alpha: CGFloat = sameCategory ? 0.55 : 0.22
+                let alpha: CGFloat = sameCategory ? 0.38 : 0.16
                 let c1 = nodeColor(nodes[hov].pattern)
                 let c2 = nodeColor(nodes[j].pattern)
                 let blended = c1.blended(withFraction: 0.5, of: c2) ?? c1
@@ -698,7 +698,7 @@ final class PatternGraphView: NSView {
             let sz     = str.size()
             let origin = CGPoint(x: node.position.x - sz.width / 2,
                                  y: node.position.y + node.radius + 3)
-            let slot   = CGRect(origin: origin, size: sz).insetBy(dx: -4, dy: -2)
+            let slot   = CGRect(origin: origin, size: sz).insetBy(dx: -8, dy: -3)
             guard !usedLabelRects.contains(where: { $0.intersects(slot) }) else { return }
             str.draw(at: origin)
             usedLabelRects.append(slot)
@@ -1022,13 +1022,13 @@ final class AssociationGraphView: NSView {
             let hovEdges  = edges
                 .filter { $0.a == hov || $0.b == hov }
                 .sorted { $0.weight > $1.weight }
-                .prefix(12)
+                .prefix(5)  // 12 chords across a ring all pass through centre → filled polygon
             for edge in hovEdges {
                 let ca = nodeColor(nodes[edge.a].assoc)
                 let cb = nodeColor(nodes[edge.b].assoc)
                 let blended = ca.blended(withFraction: 0.5, of: cb) ?? ca
-                ctx.setStrokeColor(blended.withAlphaComponent(0.60).cgColor)
-                let w = 1.0 + 2.0 * CGFloat(edge.weight) / CGFloat(maxWeight)
+                ctx.setStrokeColor(blended.withAlphaComponent(0.30).cgColor)
+                let w = 0.8 + 1.2 * CGFloat(edge.weight) / CGFloat(maxWeight)
                 ctx.setLineWidth(w)
                 ctx.move(to: nodes[edge.a].position)
                 ctx.addLine(to: nodes[edge.b].position)
@@ -1091,7 +1091,7 @@ final class AssociationGraphView: NSView {
             let sz     = str.size()
             let origin = CGPoint(x: node.position.x - sz.width / 2,
                                  y: node.position.y + node.radius + 3)
-            let slot   = CGRect(origin: origin, size: sz).insetBy(dx: -4, dy: -2)
+            let slot   = CGRect(origin: origin, size: sz).insetBy(dx: -8, dy: -3)
             guard !usedAssocLabelRects.contains(where: { $0.intersects(slot) }) else { return }
             str.draw(at: origin)
             usedAssocLabelRects.append(slot)
