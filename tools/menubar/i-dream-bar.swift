@@ -262,27 +262,41 @@ final class RichText {
         ])); return self
     }
     @discardableResult func subheader(_ text: String) -> RichText {
+        let ps = NSMutableParagraphStyle(); ps.paragraphSpacing = 2; ps.paragraphSpacingBefore = 4
         buf.append(NSAttributedString(string: text + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 14, weight: .medium),
+            .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
             .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: ps,
         ])); return self
     }
     @discardableResult func body(_ text: String) -> RichText {
+        let ps = NSMutableParagraphStyle(); ps.paragraphSpacing = 2
         buf.append(NSAttributedString(string: text + "\n", attributes: [
             .font: NSFont.systemFont(ofSize: 13),
             .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: ps,
         ])); return self
     }
     @discardableResult func dim(_ text: String) -> RichText {
+        let ps = NSMutableParagraphStyle(); ps.paragraphSpacing = 2
         buf.append(NSAttributedString(string: text + "\n", attributes: [
             .font: NSFont.systemFont(ofSize: 12),
             .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: ps,
         ])); return self
     }
     @discardableResult func mono(_ text: String) -> RichText {
         buf.append(NSAttributedString(string: text + "\n", attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
             .foregroundColor: NSColor.labelColor,
+        ])); return self
+    }
+    /// Clickable monospaced path — link value is passed to the panel's link delegate on click.
+    @discardableResult func monoLink(_ text: String, linkValue: String) -> RichText {
+        buf.append(NSAttributedString(string: text + "\n", attributes: [
+            .font:            NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: NSColor.systemBlue,
+            .link:            linkValue as AnyObject,
         ])); return self
     }
     @discardableResult func ok(_ text: String) -> RichText {
@@ -663,18 +677,43 @@ final class PatternGraphView: NSView {
             ctx.fillEllipse(in: rect)
             ctx.strokeEllipse(in: rect)
 
-            // Short label above node — only when hovered, selected, or zoomed in.
-            // Suppressing labels at low zoom eliminates the text fog with many nodes.
-            if isHovered || isSelected || zoomScale > 2.0 {
-                let label = p.pattern.components(separatedBy: " ").prefix(3).joined(separator: " ")
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font:            NSFont.systemFont(ofSize: 9),
-                    .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
-                ]
-                let str = NSAttributedString(string: label, attributes: attrs)
-                let sz  = str.size()
-                str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
-                                     y: node.position.y + r + 2))
+        }
+
+        // ── Node labels — two-pass with overlap culling ───────────────────────
+        // Pass 1: hovered / selected nodes always render (highest priority).
+        // Pass 2: zoom-triggered labels skip any whose rect intersects a used slot.
+        // This prevents the "text blob" that appeared when all nodes rendered
+        // labels simultaneously above the zoom threshold.
+        var usedLabelRects: [CGRect] = []
+        func drawNodeLabel(_ node: Node, isHovered: Bool, isSelected: Bool) {
+            let p = node.pattern
+            let fontSize: CGFloat = isHovered ? 10 : 9
+            let color: NSColor    = isHovered || isSelected ? .labelColor : .secondaryLabelColor
+            let label = p.pattern.components(separatedBy: " ").prefix(3).joined(separator: " ")
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: fontSize),
+                .foregroundColor: color,
+            ]
+            let str    = NSAttributedString(string: label, attributes: attrs)
+            let sz     = str.size()
+            let origin = CGPoint(x: node.position.x - sz.width / 2,
+                                 y: node.position.y + node.radius + 3)
+            let slot   = CGRect(origin: origin, size: sz).insetBy(dx: -4, dy: -2)
+            guard !usedLabelRects.contains(where: { $0.intersects(slot) }) else { return }
+            str.draw(at: origin)
+            usedLabelRects.append(slot)
+        }
+        // Pass 1 — hovered / selected
+        for (idx, node) in nodes.enumerated() {
+            let isHov = idx == hoveredIdx; let isSel = idx == selectedIdx
+            guard isHov || isSel else { continue }
+            drawNodeLabel(node, isHovered: isHov, isSelected: isSel)
+        }
+        // Pass 2 — zoom-triggered (only if zoomed in enough; cull overlaps)
+        if zoomScale > 2.5 {
+            for (idx, node) in nodes.enumerated() {
+                if idx == hoveredIdx || idx == selectedIdx { continue }
+                drawNodeLabel(node, isHovered: false, isSelected: false)
             }
         }
 
@@ -713,12 +752,14 @@ final class PatternGraphView: NSView {
         let p  = nodes[idx].pattern
 
         let vc = NSViewController()
-        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 162))
-        let tv = NSTextView(frame: NSRect(x: 12, y: 8, width: 376, height: 146))
+        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 190))
+        let tv = NSTextView(frame: NSRect(x: 14, y: 10, width: 392, height: 170))
         tv.isEditable = false; tv.backgroundColor = .clear
+        tv.textContainerInset = NSSize(width: 0, height: 4)
 
         let rt = RichText()
         rt.subheader(p.pattern)
+        rt.spacer()
 
         // Confidence bar (▮ filled, ░ empty)
         let confPct = Int(p.confidence * 100)
@@ -737,6 +778,7 @@ final class PatternGraphView: NSView {
         // Same-category siblings
         let siblings = nodes.filter { $0.pattern.category == p.category && $0.pattern.pattern != p.pattern }
         if !siblings.isEmpty {
+            rt.spacer()
             let names = siblings.prefix(3)
                 .map { $0.pattern.pattern.components(separatedBy: " ").prefix(4).joined(separator: " ") }
                 .joined(separator: " · ")
@@ -1032,18 +1074,37 @@ final class AssociationGraphView: NSView {
                 ctx.fillPath()
             }
 
-            // Short label — only when hovered, selected, or zoomed in enough.
-            // Suppressing at default zoom eliminates text fog with 170+ nodes.
-            if isHovered || isSelected || zoomScale > 1.8 {
-                let label = a.hypothesis.components(separatedBy: " ").prefix(4).joined(separator: " ")
-                let labelAttrs: [NSAttributedString.Key: Any] = [
-                    .font:            NSFont.systemFont(ofSize: isHovered ? 10 : 9),
-                    .foregroundColor: isHovered ? NSColor.labelColor : NSColor.secondaryLabelColor,
-                ]
-                let str = NSAttributedString(string: label, attributes: labelAttrs)
-                let sz  = str.size()
-                str.draw(at: CGPoint(x: node.position.x - sz.width / 2,
-                                      y: node.position.y + r + 2))
+        }
+
+        // ── Association node labels — two-pass with overlap culling ───────────
+        var usedAssocLabelRects: [CGRect] = []
+        func drawAssocLabel(_ node: Node, isHovered: Bool, isSelected: Bool) {
+            let a = node.assoc
+            let fontSize: CGFloat = isHovered ? 10 : 9
+            let color: NSColor    = isHovered || isSelected ? .labelColor : .secondaryLabelColor
+            let label = a.hypothesis.components(separatedBy: " ").prefix(4).joined(separator: " ")
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: fontSize),
+                .foregroundColor: color,
+            ]
+            let str    = NSAttributedString(string: label, attributes: attrs)
+            let sz     = str.size()
+            let origin = CGPoint(x: node.position.x - sz.width / 2,
+                                 y: node.position.y + node.radius + 3)
+            let slot   = CGRect(origin: origin, size: sz).insetBy(dx: -4, dy: -2)
+            guard !usedAssocLabelRects.contains(where: { $0.intersects(slot) }) else { return }
+            str.draw(at: origin)
+            usedAssocLabelRects.append(slot)
+        }
+        for (idx, node) in nodes.enumerated() {
+            let isHov = idx == hoveredIdx; let isSel = idx == selectedIdx
+            guard isHov || isSel else { continue }
+            drawAssocLabel(node, isHovered: isHov, isSelected: isSel)
+        }
+        if zoomScale > 2.5 {
+            for (idx, node) in nodes.enumerated() {
+                if idx == hoveredIdx || idx == selectedIdx { continue }
+                drawAssocLabel(node, isHovered: false, isSelected: false)
             }
         }
 
@@ -1068,12 +1129,14 @@ final class AssociationGraphView: NSView {
         let a  = nodes[idx].assoc
 
         let vc = NSViewController()
-        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 168))
-        let tv = NSTextView(frame: NSRect(x: 12, y: 8, width: 416, height: 152))
+        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 200))
+        let tv = NSTextView(frame: NSRect(x: 14, y: 10, width: 432, height: 180))
         tv.isEditable = false; tv.backgroundColor = .clear
+        tv.textContainerInset = NSSize(width: 0, height: 4)
 
         let rt = RichText()
         rt.subheader(a.hypothesis)
+        rt.spacer()
 
         let confPct = Int(a.confidence * 100)
         let filled  = String(repeating: "▮", count: confPct / 10)
@@ -1093,6 +1156,7 @@ final class AssociationGraphView: NSView {
             .filter { $0.a == idx || $0.b == idx }
             .sorted { $0.weight > $1.weight }
         if !neighbours.isEmpty {
+            rt.spacer()
             let names = neighbours.prefix(3).map { e -> String in
                 let other = e.a == idx ? e.b : e.a
                 let h = nodes[other].assoc.hypothesis
@@ -1715,6 +1779,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var detailPanel:          NSPanel?
     private var detailFilePath:       String?
     private var journalLinkDelegate:  JournalLinkDelegate?
+    private var panelLinkDelegate:    JournalLinkDelegate?   // generic link handler for resizable panels
     private var cycleDetailPanel:     NSPanel?
 
     // Dream completion card (auto-dismissing overlay)
@@ -2546,13 +2611,16 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Present a floating, resizable NSPanel with rich attributed text content.
     /// Replaces the old fixed-size NSAlert popups. If `filePath` is given, an
-    /// "Open File" button is shown in the toolbar.
+    /// "Open File" button is shown in the toolbar. If `linkHandler` is given,
+    /// `.link`-attributed runs in the text view call the handler with the link value.
     private func showResizablePanel(title: String, content: NSAttributedString,
-                                     filePath: String? = nil) {
+                                     filePath: String? = nil,
+                                     linkHandler: ((String) -> Void)? = nil) {
         // Close and release any existing detail panel
         detailPanel?.close()
         detailPanel    = nil
         detailFilePath = filePath
+        panelLinkDelegate = nil
 
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 680),
@@ -2600,6 +2668,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tv.textContainer?.widthTracksTextView = true
         sv.documentView = tv
         tv.textStorage?.setAttributedString(content)
+
+        if let handler = linkHandler {
+            let delegate = JournalLinkDelegate(handler)
+            panelLinkDelegate = delegate   // strong ref — NSTextView.delegate is weak
+            tv.delegate = delegate
+        }
 
         // Toolbar bar at bottom
         let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: barH))
@@ -4456,25 +4530,52 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rt.body("    cycle estimate. Toggled via the menu or ⌘H.")
         rt.spacer()
 
-        // ── File locations ─────────────────────────────────────────────────
+        // ── File locations (click to open in VS Code) ──────────────────────
         rt.subheader("Key Files")
-        rt.mono("  ~/.claude/subconscious/")
-        rt.mono("  ├── state.json          total_cycles, last_consolidation, tokens")
-        rt.mono("  ├── dreams/")
-        rt.mono("  │   ├── journal.jsonl   one entry per consolidation cycle")
-        rt.mono("  │   ├── patterns.json   extracted behavioral patterns")
-        rt.mono("  │   ├── insights.md     Wake-promoted high-confidence insights")
-        rt.mono("  │   ├── insight-digest.md   Recent Dreams Inference prose")
-        rt.mono("  │   ├── digest-meta.json    sentiment + last_run timestamp")
-        rt.mono("  │   ├── associations.json   cross-pattern hypotheses (REM)")
-        rt.mono("  │   └── traces/         per-cycle JSONL event logs")
-        rt.mono("  ├── metacog/")
-        rt.mono("  │   ├── calibration.jsonl   per-cycle calibration scores")
-        rt.mono("  │   └── audits/         individual audit JSON files")
-        rt.mono("  ├── valence/memory.jsonl     time-decayed pattern outcomes")
-        rt.mono("  └── intentions/registry.jsonl active prospective intentions")
+        rt.dim("  Click any path to open in VS Code.")
+        rt.spacer()
+        let base = NSHomeDirectory() + "/.claude/subconscious"
+        rt.monoLink("  \(base)/",
+                    linkValue: base)
+        rt.monoLink("  ├── state.json              total_cycles, last_consolidation, tokens",
+                    linkValue: base + "/state.json")
+        rt.monoLink("  ├── dreams/",
+                    linkValue: base + "/dreams")
+        rt.monoLink("  │   ├── journal.jsonl        one entry per consolidation cycle",
+                    linkValue: base + "/dreams/journal.jsonl")
+        rt.monoLink("  │   ├── patterns.json        extracted behavioral patterns",
+                    linkValue: base + "/dreams/patterns.json")
+        rt.monoLink("  │   ├── insights.md          Wake-promoted high-confidence insights",
+                    linkValue: base + "/dreams/insights.md")
+        rt.monoLink("  │   ├── insight-digest.md    Recent Dreams Inference prose",
+                    linkValue: base + "/dreams/insight-digest.md")
+        rt.monoLink("  │   ├── digest-meta.json     sentiment + last_run timestamp",
+                    linkValue: base + "/dreams/digest-meta.json")
+        rt.monoLink("  │   ├── associations.json    cross-pattern hypotheses (REM)",
+                    linkValue: base + "/dreams/associations.json")
+        rt.monoLink("  │   └── traces/              per-cycle JSONL event logs",
+                    linkValue: base + "/dreams/traces")
+        rt.monoLink("  ├── metacog/",
+                    linkValue: base + "/metacog")
+        rt.monoLink("  │   ├── calibration.jsonl    per-cycle calibration scores",
+                    linkValue: base + "/metacog/calibration.jsonl")
+        rt.monoLink("  │   └── audits/              individual audit JSON files",
+                    linkValue: base + "/metacog/audits")
+        rt.monoLink("  ├── valence/memory.jsonl      time-decayed pattern outcomes",
+                    linkValue: base + "/valence/memory.jsonl")
+        rt.monoLink("  └── intentions/registry.jsonl active prospective intentions",
+                    linkValue: base + "/intentions/registry.jsonl")
 
-        showResizablePanel(title: "i-dream — Terminology Glossary", content: rt.build())
+        showResizablePanel(
+            title: "i-dream — Terminology Glossary",
+            content: rt.build(),
+            linkHandler: { path in
+                // Open the tapped path in VS Code. Works for both files and folders.
+                if let url = URL(string: "vscode://file\(path)") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        )
     }
 
     @objc private func showHowTo() {
