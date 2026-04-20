@@ -181,8 +181,9 @@ else
         echo "  ✓ Re-registered LaunchAgent: $LABEL"
         echo "  ✓ launchd will manage the widget (auto-restart on crash)"
     else
-        # No LaunchAgent — plain direct launch.
-        open "$OUTPUT"
+        # No LaunchAgent — launch directly in background (avoids Terminal window from 'open').
+        nohup "$OUTPUT" >> "$DEBUG_LOG" 2>&1 &
+        disown
     fi
     sleep 0.8
     if pgrep -x "i-dream-bar" &>/dev/null; then

@@ -186,6 +186,8 @@ private struct Pattern: Codable {
     let confidence: Double
     let category:   String
     let firstSeen:  String?
+    /// Stable key for selection — uses id when available, falls back to text prefix.
+    var stableKey: String { id ?? String(pattern.prefix(30)) }
     enum CodingKeys: String, CodingKey {
         case id, pattern, valence, confidence, category
         case firstSeen = "first_seen"
@@ -354,6 +356,40 @@ final class RichText {
     func build() -> NSAttributedString { buf }
 }
 
+// ─── Key-aware panel ─────────────────────────────────────────────────────────
+// NSPanel with .nonactivatingPanel doesn't become key window by default,
+// which breaks Cmd+A/Cmd+C in text fields. This subclass fixes that.
+
+private class KeyablePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+
+    /// Route Cmd+1…9 to tab selection, Cmd+R to refresh.
+    /// The `tabHandler` closure is set by DashboardWindowController after panel creation.
+    var tabHandler: ((Int) -> Void)?
+    var refreshHandler: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.command) else {
+            return super.performKeyEquivalent(with: event)
+        }
+        if let chars = event.charactersIgnoringModifiers, chars.count == 1 {
+            let ch = chars.first!
+            // Cmd+1 through Cmd+9
+            if ch >= "1" && ch <= "9" {
+                let idx = Int(ch.asciiValue! - Character("1").asciiValue!)
+                tabHandler?(idx)
+                return true
+            }
+            // Cmd+R → refresh
+            if ch == "r" || ch == "R" {
+                refreshHandler?()
+                return true
+            }
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 // ─── Journal link delegate ───────────────────────────────────────────────────
 // Thin NSTextViewDelegate wrapper that intercepts clicks on link-attributed text
 // (NSLinkAttributeName with a String value = journal entry timestamp).
@@ -371,6 +407,7 @@ private class JournalLinkDelegate: NSObject, NSTextViewDelegate {
 // Intercepts insight feedback link clicks ("insight-up:<id>" / "insight-down:<id>").
 private class InsightFeedbackDelegate: NSObject, NSTextViewDelegate {
     let onFeedback: (String, String) -> Void   // (insightId, "up"|"down")
+    var insightTexts: [String: String] = [:]   // insightId → full text for clipboard
     init(_ onFeedback: @escaping (String, String) -> Void) { self.onFeedback = onFeedback; super.init() }
     func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         guard let linkStr = link as? String else { return false }
@@ -380,6 +417,14 @@ private class InsightFeedbackDelegate: NSObject, NSTextViewDelegate {
         }
         if linkStr.hasPrefix("insight-down:") {
             onFeedback(String(linkStr.dropFirst("insight-down:".count)), "down")
+            return true
+        }
+        if linkStr.hasPrefix("insight-copy:") {
+            let id = String(linkStr.dropFirst("insight-copy:".count))
+            if let text = insightTexts[id] {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
             return true
         }
         return false
@@ -421,6 +466,28 @@ final class PatternGraphView: NSView {
     private var mouseDownLoc:   CGPoint?  = nil
     private var isDragging:     Bool      = false
     private let dragThreshold:  CGFloat   = 5.0
+
+    /// External selection from a list view — draws an accent glow ring on the matching node.
+    var highlightedId: String? = nil { didSet { needsDisplay = true } }
+    /// Called when the user clicks a node, passing the pattern's id (or nil on deselect).
+    var onNodeSelected: ((String?) -> Void)? = nil
+    /// Whether a search query is actively typed (even if zero results).
+    var isSearchActive: Bool = false { didSet { needsDisplay = true } }
+    /// Search filter: indices of nodes matching a search query.
+    var searchMatchedIndices: Set<Int> = [] { didSet { needsDisplay = true } }
+
+    /// Set search filter by matching node pattern text against query words.
+    func applySearch(_ query: String) {
+        guard !query.isEmpty else { isSearchActive = false; searchMatchedIndices = []; return }
+        isSearchActive = true
+        let words = query.lowercased().components(separatedBy: " ").filter { !$0.isEmpty }
+        var matched = Set<Int>()
+        for (i, node) in nodes.enumerated() {
+            let text = (node.pattern.pattern + " " + node.pattern.category + " " + node.pattern.valence).lowercased()
+            if words.allSatisfy({ text.contains($0) }) { matched.insert(i) }
+        }
+        searchMatchedIndices = matched
+    }
 
     fileprivate init(frame: NSRect, patterns: [Pattern]) {
         super.init(frame: frame)
@@ -550,22 +617,27 @@ final class PatternGraphView: NSView {
     override func mouseUp(with event: NSEvent) {
         defer { mouseDownLoc = nil; isDragging = false }
         guard !isDragging else { return }
-        // It was a clean click — hit-test in graph space
         let gp = viewToGraph(convert(event.locationInWindow, from: nil))
         if let hit = hitNode(at: gp) {
-            selectedIdx = hit
-            needsDisplay = true
-            showPopover(for: hit)
+            if selectedIdx == hit {
+                // Toggle off — click same node again deselects
+                popover?.close(); popover = nil
+                selectedIdx = nil; needsDisplay = true
+                onNodeSelected?(nil)
+            } else {
+                selectedIdx = hit; needsDisplay = true
+                showPopover(for: hit)
+                onNodeSelected?(nodes[hit].pattern.stableKey)
+            }
         } else {
             popover?.close(); popover = nil
-            selectedIdx = nil
-            needsDisplay = true
+            selectedIdx = nil; needsDisplay = true
+            onNodeSelected?(nil)
         }
     }
 
     // MARK: – Coordinate helpers
 
-    /// Convert a point in view (screen) space to the underlying graph coordinate space.
     private func viewToGraph(_ pt: CGPoint) -> CGPoint {
         let cx = bounds.midX, cy = bounds.midY
         return CGPoint(
@@ -573,7 +645,6 @@ final class PatternGraphView: NSView {
             y: (pt.y - panOffset.y - cy) / zoomScale + cy)
     }
 
-    /// Hit-test: returns the index of the first node whose radius (+ 6pt padding) contains graphPt.
     private func hitNode(at graphPt: CGPoint) -> Int? {
         for (i, node) in nodes.enumerated() {
             if hypot(graphPt.x - node.position.x, graphPt.y - node.position.y) <= node.radius + 6 {
@@ -581,6 +652,26 @@ final class PatternGraphView: NSView {
             }
         }
         return nil
+    }
+
+    /// Indices of nodes "linked" to the focused node (same category + nearest 15).
+    private func linkedIndices(for idx: Int) -> Set<Int> {
+        let pos = nodes[idx].position
+        let cat = nodes[idx].pattern.category
+        let nearest = (0..<nodes.count)
+            .filter { $0 != idx }
+            .sorted { hypot(nodes[$0].position.x - pos.x, nodes[$0].position.y - pos.y)
+                    < hypot(nodes[$1].position.x - pos.x, nodes[$1].position.y - pos.y) }
+            .prefix(15)
+            .filter { nodes[$0].pattern.category == cat }
+        return Set(nearest)
+    }
+
+    /// The "active focus" index — either selectedIdx or the index matching highlightedId.
+    private var focusIdx: Int? {
+        if let sel = selectedIdx { return sel }
+        guard let hid = highlightedId else { return nil }
+        return nodes.firstIndex { $0.pattern.stableKey == hid }
     }
 
     private func nodeColor(_ p: Pattern) -> NSColor {
@@ -617,11 +708,27 @@ final class PatternGraphView: NSView {
                                          width: ringR * 2, height: ringR * 2))
         }
 
+        // ── Focus-based linked set ──────────────────────────────────────────
+        let fIdx = focusIdx
+        let linked: Set<Int> = fIdx.map { linkedIndices(for: $0) } ?? []
+        let hasFocus = fIdx != nil
+
         // ── Connection lines ──────────────────────────────────────────────────
-        // All edges hidden by default. On hover: show only the 15 nearest nodes
-        // sorted by Euclidean distance, regardless of category — this prevents the
-        // N×(N-1)/2 combinatorial blob when categories have 80+ members.
-        if let hov = hoveredIdx {
+        // When a node is focused (selected or highlighted), draw lines to linked nodes.
+        // On hover (without focus), show nearest 15 as before.
+        if let fi = fIdx {
+            let fiPos = nodes[fi].position
+            let fiColor = nodeColor(nodes[fi].pattern)
+            for j in linked {
+                let c2 = nodeColor(nodes[j].pattern)
+                let blended = fiColor.blended(withFraction: 0.5, of: c2) ?? fiColor
+                ctx.setStrokeColor(blended.withAlphaComponent(0.45).cgColor)
+                ctx.setLineWidth(1.4)
+                ctx.move(to: fiPos)
+                ctx.addLine(to: nodes[j].position)
+                ctx.strokePath()
+            }
+        } else if let hov = hoveredIdx {
             let hovPos = nodes[hov].position
             let hovCat = nodes[hov].pattern.category
             let nearest = (0 ..< nodes.count)
@@ -649,22 +756,40 @@ final class PatternGraphView: NSView {
             let baseColor  = nodeColor(p)
             let isHovered  = idx == hoveredIdx
             let isSelected = idx == selectedIdx
-            let fillAlpha: CGFloat = isSelected ? 1.0 : isHovered ? 0.92 : 0.72
+            let isFocused  = idx == fIdx
+            let isLinked   = linked.contains(idx)
+            let isSearchMatch = isSearchActive && searchMatchedIndices.contains(idx)
+            // Dim nodes that aren't part of the focus group or search results
+            let dimmed     = (hasFocus && !isFocused && !isLinked) || (isSearchActive && !isSearchMatch)
+            let fillAlpha: CGFloat = dimmed ? 0.15 : isSelected ? 1.0 : isHovered ? 0.92 : 0.72
             let r          = node.radius
 
-            // Glow ring for hovered / selected nodes
-            if isHovered || isSelected {
-                ctx.setStrokeColor(baseColor.withAlphaComponent(isSelected ? 0.45 : 0.28).cgColor)
+            // Glow ring for hovered / selected / focused nodes
+            if isFocused || isHovered || isSelected {
+                ctx.setStrokeColor(baseColor.withAlphaComponent(isSelected || isFocused ? 0.55 : 0.28).cgColor)
                 ctx.setLineWidth(5.5)
                 let gr = r + 4
                 ctx.strokeEllipse(in: CGRect(x: node.position.x - gr, y: node.position.y - gr,
                                              width: gr * 2, height: gr * 2))
             }
+            // External highlight from list selection — accent-colour double ring
+            if let hid = highlightedId, p.stableKey == hid {
+                let accentColor = NSColor.controlAccentColor
+                ctx.setStrokeColor(accentColor.withAlphaComponent(0.55).cgColor)
+                ctx.setLineWidth(3.0)
+                let er = r + 7
+                ctx.strokeEllipse(in: CGRect(x: node.position.x - er, y: node.position.y - er,
+                                             width: er * 2, height: er * 2))
+                ctx.setStrokeColor(accentColor.withAlphaComponent(0.22).cgColor)
+                ctx.setLineWidth(8.0)
+                let er2 = r + 12
+                ctx.strokeEllipse(in: CGRect(x: node.position.x - er2, y: node.position.y - er2,
+                                             width: er2 * 2, height: er2 * 2))
+            }
 
             let rect = CGRect(x: node.position.x - r, y: node.position.y - r,
                               width: r * 2, height: r * 2)
-            // Thin white halo so nodes stand out against dark ring arcs
-            if !isHovered && !isSelected {
+            if !isHovered && !isSelected && !dimmed {
                 ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.25).cgColor)
                 ctx.setLineWidth(1.5)
                 let hr = r + 1.0
@@ -672,7 +797,7 @@ final class PatternGraphView: NSView {
                                              width: hr * 2, height: hr * 2))
             }
             ctx.setFillColor(baseColor.withAlphaComponent(fillAlpha).cgColor)
-            ctx.setStrokeColor(baseColor.cgColor)
+            ctx.setStrokeColor(baseColor.withAlphaComponent(dimmed ? 0.25 : 1.0).cgColor)
             ctx.setLineWidth(isSelected ? 2.5 : isHovered ? 2.0 : 1.2)
             ctx.fillEllipse(in: rect)
             ctx.strokeEllipse(in: rect)
@@ -751,11 +876,13 @@ final class PatternGraphView: NSView {
         popover?.close()
         let p  = nodes[idx].pattern
 
+        let popW: CGFloat = 420
         let vc = NSViewController()
-        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 190))
-        let tv = NSTextView(frame: NSRect(x: 14, y: 10, width: 392, height: 170))
+        let tv = NSTextView(frame: NSRect(x: 14, y: 10, width: popW - 28, height: 200))
         tv.isEditable = false; tv.backgroundColor = .clear
         tv.textContainerInset = NSSize(width: 0, height: 4)
+        tv.isVerticallyResizable = true
+        tv.textContainer?.widthTracksTextView = true
 
         let rt = RichText()
         rt.subheader(p.pattern)
@@ -786,6 +913,13 @@ final class PatternGraphView: NSView {
         }
 
         tv.textStorage?.setAttributedString(rt.build())
+
+        // Measure actual content height and size popover to fit
+        tv.layoutManager?.ensureLayout(for: tv.textContainer!)
+        let contentH = tv.layoutManager?.usedRect(for: tv.textContainer!).height ?? 170
+        let popH = min(max(contentH + 28, 100), 400)  // clamp 100–400
+        tv.frame = NSRect(x: 14, y: 10, width: popW - 28, height: popH - 20)
+        let vw = NSView(frame: NSRect(x: 0, y: 0, width: popW, height: popH))
         vw.addSubview(tv)
         vc.view = vw
 
@@ -834,6 +968,29 @@ final class AssociationGraphView: NSView {
     private var mouseDownLoc: CGPoint? = nil
     private var isDragging:  Bool    = false
     private let dragThreshold: CGFloat = 5.0
+
+    /// External selection from a list view — accent glow ring on the matching node.
+    var highlightedId: String? = nil { didSet { needsDisplay = true } }
+    var onNodeSelected: ((String?) -> Void)? = nil
+    /// Whether a search query is actively typed (even if zero results).
+    var isSearchActive: Bool = false { didSet { needsDisplay = true } }
+    /// Search filter: indices of nodes matching a search query.
+    var searchMatchedIndices: Set<Int> = [] { didSet { needsDisplay = true } }
+
+    /// Set search filter by matching node hypothesis text against query words.
+    func applySearch(_ query: String) {
+        guard !query.isEmpty else { isSearchActive = false; searchMatchedIndices = []; return }
+        isSearchActive = true
+        let words = query.lowercased().components(separatedBy: " ").filter { !$0.isEmpty }
+        var matched = Set<Int>()
+        for (i, node) in nodes.enumerated() {
+            let text = node.assoc.hypothesis.lowercased()
+            let rule = (node.assoc.suggestedRule ?? "").lowercased()
+            let combined = text + " " + rule
+            if words.allSatisfy({ combined.contains($0) }) { matched.insert(i) }
+        }
+        searchMatchedIndices = matched
+    }
 
     fileprivate init(frame: NSRect, associations: [Association]) {
         super.init(frame: frame)
@@ -957,9 +1114,18 @@ final class AssociationGraphView: NSView {
         guard !isDragging else { return }
         let gp = viewToGraph(convert(event.locationInWindow, from: nil))
         if let hit = hitNode(at: gp) {
-            selectedIdx = hit; needsDisplay = true; showPopover(for: hit)
+            if selectedIdx == hit {
+                // Toggle off — deselect
+                popover?.close(); popover = nil
+                selectedIdx = nil; needsDisplay = true
+                onNodeSelected?(nil)
+            } else {
+                selectedIdx = hit; needsDisplay = true; showPopover(for: hit)
+                onNodeSelected?(nodes[hit].assoc.id)
+            }
         } else {
             popover?.close(); popover = nil; selectedIdx = nil; needsDisplay = true
+            onNodeSelected?(nil)
         }
     }
 
@@ -974,6 +1140,40 @@ final class AssociationGraphView: NSView {
 
     private func hitNode(at gp: CGPoint) -> Int? {
         nodes.enumerated().first { hypot(gp.x - $1.position.x, gp.y - $1.position.y) <= $1.radius + 6 }?.offset
+    }
+
+    /// Indices of nodes connected to the given node via edges.
+    private func linkedIndices(for idx: Int) -> Set<Int> {
+        var result = Set<Int>()
+        for edge in edges {
+            if edge.a == idx { result.insert(edge.b) }
+            if edge.b == idx { result.insert(edge.a) }
+        }
+        // Also include same-ring neighbours (±3 positions) when no edges exist
+        if result.isEmpty {
+            let ring = confidenceRing(for: nodes[idx].assoc)
+            for (i, n) in nodes.enumerated() where i != idx {
+                if confidenceRing(for: n.assoc) == ring {
+                    let dist = hypot(n.position.x - nodes[idx].position.x,
+                                     n.position.y - nodes[idx].position.y)
+                    if dist < min(bounds.width, bounds.height) * 0.25 {
+                        result.insert(i)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    private func confidenceRing(for a: Association) -> Int {
+        a.confidence >= 0.75 ? 0 : a.confidence >= 0.50 ? 1 : 2
+    }
+
+    /// The "active focus" index — either selectedIdx or the index matching highlightedId.
+    private var focusIdx: Int? {
+        if let sel = selectedIdx { return sel }
+        guard let hid = highlightedId else { return nil }
+        return nodes.firstIndex { $0.assoc.id == hid }
     }
 
     private func nodeColor(_ a: Association) -> NSColor {
@@ -1014,21 +1214,55 @@ final class AssociationGraphView: NSView {
             s.draw(at: CGPoint(x: cx + r - sz.width - 4, y: cy - sz.height / 2))
         }
 
+        // ── Focus-based linked set ──────────────────────────────────────────
+        let fIdx = focusIdx
+        let linked: Set<Int> = fIdx.map { linkedIndices(for: $0) } ?? []
+        let hasFocus = fIdx != nil
+
         // ── Edges ─────────────────────────────────────────────────────────────
-        // Hidden by default; on hover show only edges connecting the hovered node,
-        // capped at 12 to prevent blob when nodes share many pattern links.
-        if let hov = hoveredIdx {
+        // When focused, show ALL edges involving the focused node + linked nodes.
+        // On hover without focus, show edges connecting the hovered node.
+        if let fi = fIdx {
+            let maxWeight = edges.map { $0.weight }.max() ?? 1
+            let focusEdges = edges.filter { $0.a == fi || $0.b == fi || linked.contains($0.a) || linked.contains($0.b) }
+            for edge in focusEdges {
+                let ca = nodeColor(nodes[edge.a].assoc)
+                let cb = nodeColor(nodes[edge.b].assoc)
+                let blended = ca.blended(withFraction: 0.5, of: cb) ?? ca
+                let w = 0.8 + 1.2 * CGFloat(edge.weight) / CGFloat(max(maxWeight, 1))
+                ctx.setStrokeColor(blended.withAlphaComponent(0.50).cgColor)
+                ctx.setLineWidth(w)
+                ctx.move(to: nodes[edge.a].position)
+                ctx.addLine(to: nodes[edge.b].position)
+                ctx.strokePath()
+            }
+            // Draw connector lines from focus to linked even without edges
+            let fiPos = nodes[fi].position
+            for j in linked {
+                let hasEdge = edges.contains { ($0.a == fi && $0.b == j) || ($0.a == j && $0.b == fi) }
+                if !hasEdge {
+                    let c2 = nodeColor(nodes[j].assoc)
+                    ctx.setStrokeColor(c2.withAlphaComponent(0.25).cgColor)
+                    ctx.setLineWidth(0.8)
+                    ctx.setLineDash(phase: 0, lengths: [4, 3])
+                    ctx.move(to: fiPos)
+                    ctx.addLine(to: nodes[j].position)
+                    ctx.strokePath()
+                    ctx.setLineDash(phase: 0, lengths: [])
+                }
+            }
+        } else if let hov = hoveredIdx {
             let maxWeight = edges.map { $0.weight }.max() ?? 1
             let hovEdges  = edges
                 .filter { $0.a == hov || $0.b == hov }
                 .sorted { $0.weight > $1.weight }
-                .prefix(5)  // 12 chords across a ring all pass through centre → filled polygon
+                .prefix(5)
             for edge in hovEdges {
                 let ca = nodeColor(nodes[edge.a].assoc)
                 let cb = nodeColor(nodes[edge.b].assoc)
                 let blended = ca.blended(withFraction: 0.5, of: cb) ?? ca
                 ctx.setStrokeColor(blended.withAlphaComponent(0.30).cgColor)
-                let w = 0.8 + 1.2 * CGFloat(edge.weight) / CGFloat(maxWeight)
+                let w = 0.8 + 1.2 * CGFloat(edge.weight) / CGFloat(max(maxWeight, 1))
                 ctx.setLineWidth(w)
                 ctx.move(to: nodes[edge.a].position)
                 ctx.addLine(to: nodes[edge.b].position)
@@ -1042,30 +1276,49 @@ final class AssociationGraphView: NSView {
             let baseColor  = nodeColor(a)
             let isHovered  = idx == hoveredIdx
             let isSelected = idx == selectedIdx
+            let isFocused  = idx == fIdx
+            let isLinked   = linked.contains(idx)
+            let isSearchMatch = isSearchActive && searchMatchedIndices.contains(idx)
+            let dimmed     = (hasFocus && !isFocused && !isLinked) || (isSearchActive && !isSearchMatch)
             let r          = node.radius
 
-            if isHovered || isSelected {
-                ctx.setStrokeColor(baseColor.withAlphaComponent(isSelected ? 0.45 : 0.28).cgColor)
+            if isFocused || isHovered || isSelected {
+                ctx.setStrokeColor(baseColor.withAlphaComponent(isSelected || isFocused ? 0.55 : 0.28).cgColor)
                 ctx.setLineWidth(5.5)
                 let gr = r + 4
                 ctx.strokeEllipse(in: CGRect(x: node.position.x - gr, y: node.position.y - gr,
                                               width: gr * 2, height: gr * 2))
             }
+            // External highlight from list selection
+            if let hid = highlightedId, a.id == hid {
+                let accentColor = NSColor.controlAccentColor
+                ctx.setStrokeColor(accentColor.withAlphaComponent(0.55).cgColor)
+                ctx.setLineWidth(3.0)
+                let er = r + 7
+                ctx.strokeEllipse(in: CGRect(x: node.position.x - er, y: node.position.y - er,
+                                             width: er * 2, height: er * 2))
+                ctx.setStrokeColor(accentColor.withAlphaComponent(0.22).cgColor)
+                ctx.setLineWidth(8.0)
+                let er2 = r + 12
+                ctx.strokeEllipse(in: CGRect(x: node.position.x - er2, y: node.position.y - er2,
+                                             width: er2 * 2, height: er2 * 2))
+            }
 
-            let fillAlpha: CGFloat = isSelected ? 1.0 : isHovered ? 0.92 : 0.70
+            let fillAlpha: CGFloat = dimmed ? 0.15 : isSelected ? 1.0 : isHovered ? 0.92 : 0.70
             ctx.setFillColor(baseColor.withAlphaComponent(fillAlpha).cgColor)
-            ctx.setStrokeColor(baseColor.cgColor)
+            ctx.setStrokeColor(baseColor.withAlphaComponent(dimmed ? 0.25 : 1.0).cgColor)
             ctx.setLineWidth(isSelected ? 2.5 : isHovered ? 2.0 : 1.0)
             let rect = CGRect(x: node.position.x - r, y: node.position.y - r,
                                width: r * 2, height: r * 2)
             ctx.fillEllipse(in: rect)
             ctx.strokeEllipse(in: rect)
 
-            // Diamond marker for actionable nodes
+            // Diamond marker for actionable nodes (dim if not in focus group)
             if a.actionable {
                 let dm: CGFloat = 4
                 let dp = node.position
-                ctx.setFillColor(NSColor.white.withAlphaComponent(isHovered ? 0.9 : 0.7).cgColor)
+                let diamondAlpha: CGFloat = dimmed ? 0.2 : isHovered ? 0.9 : 0.7
+                ctx.setFillColor(NSColor.white.withAlphaComponent(diamondAlpha).cgColor)
                 ctx.move(to: CGPoint(x: dp.x, y: dp.y + dm))
                 ctx.addLine(to: CGPoint(x: dp.x + dm, y: dp.y))
                 ctx.addLine(to: CGPoint(x: dp.x, y: dp.y - dm))
@@ -1128,11 +1381,13 @@ final class AssociationGraphView: NSView {
         popover?.close()
         let a  = nodes[idx].assoc
 
+        let popW: CGFloat = 460
         let vc = NSViewController()
-        let vw = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 200))
-        let tv = NSTextView(frame: NSRect(x: 14, y: 10, width: 432, height: 180))
+        let tv = NSTextView(frame: NSRect(x: 14, y: 10, width: popW - 28, height: 200))
         tv.isEditable = false; tv.backgroundColor = .clear
         tv.textContainerInset = NSSize(width: 0, height: 4)
+        tv.isVerticallyResizable = true
+        tv.textContainer?.widthTracksTextView = true
 
         let rt = RichText()
         rt.subheader(a.hypothesis)
@@ -1166,6 +1421,13 @@ final class AssociationGraphView: NSView {
         }
 
         tv.textStorage?.setAttributedString(rt.build())
+
+        // Measure actual content height and size popover to fit
+        tv.layoutManager?.ensureLayout(for: tv.textContainer!)
+        let contentH = tv.layoutManager?.usedRect(for: tv.textContainer!).height ?? 180
+        let popH = min(max(contentH + 28, 100), 400)
+        tv.frame = NSRect(x: 14, y: 10, width: popW - 28, height: popH - 20)
+        let vw = NSView(frame: NSRect(x: 0, y: 0, width: popW, height: popH))
         vw.addSubview(tv)
         vc.view = vw
 
@@ -1758,6 +2020,2913 @@ private func openInTerminal(_ command: String) {
     NSAppleScript(source: src)?.executeAndReturnError(&err)
 }
 
+// ─── Comprehensive Dashboard ──────────────────────────────────────────────────
+
+/// Sidebar nav button — flat label+icon button with a coloured background when selected.
+/// Does NOT override draw() to avoid the infinite-redraw trap of mutating self.font inside draw().
+final class NavSidebarButton: NSButton {
+    private var _title  = ""
+    private var _symbol = ""
+    private var _iconColor: NSColor = .labelColor
+
+    /// Per-tab icon colours (indexed by tab position).
+    private static let iconColors: [NSColor] = [
+        .systemPurple,   // Overview
+        .systemTeal,     // Patterns
+        .systemOrange,   // Associations
+        .systemIndigo,   // Journal
+        .systemYellow,   // Insights
+        .systemPink,     // Metacog
+        .systemGreen,    // Search
+        .secondaryLabelColor, // Help
+        .secondaryLabelColor, // About
+    ]
+
+    var isSelectedTab = false {
+        didSet {
+            guard oldValue != isSelectedTab else { return }
+            layer?.backgroundColor = isSelectedTab
+                ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+                : nil
+            self.contentTintColor = isSelectedTab ? _iconColor : _iconColor.withAlphaComponent(0.7)
+            updateAttributedTitle()
+        }
+    }
+
+    private static let tabTooltips: [String] = [
+        "System overview — stats, digest, valence (⌘1)",
+        "Behavioral patterns extracted from sessions (⌘2)",
+        "Cross-pattern associations and hypotheses (⌘3)",
+        "Consolidation cycle history and token usage (⌘4)",
+        "Promoted insights with confidence ratings (⌘5)",
+        "Metacognitive audits and calibration (⌘6)",
+        "Search across all knowledge base data (⌘7)",
+        "Keyboard shortcuts and feature reference (⌘8)",
+        "Build info, daemon status, data paths (⌘9)",
+    ]
+
+    func configure(title: String, symbol: String, index: Int) {
+        _title  = title
+        _symbol = symbol
+        _iconColor = index < NavSidebarButton.iconColors.count
+            ? NavSidebarButton.iconColors[index] : .labelColor
+        self.tag            = index
+        self.isBordered     = false
+        self.imagePosition  = .imageLeading
+        self.alignment      = .left
+        self.wantsLayer     = true
+        self.layer?.cornerRadius = 6
+        if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
+            self.image = img
+        }
+        self.contentTintColor = _iconColor.withAlphaComponent(0.7)
+        if index < NavSidebarButton.tabTooltips.count {
+            self.toolTip = NavSidebarButton.tabTooltips[index]
+        }
+        updateAttributedTitle()
+    }
+
+    /// Update the displayed title (e.g. to add a count badge).
+    func updateTitle(_ newTitle: String) {
+        _title = newTitle
+        updateAttributedTitle()
+    }
+
+    private func updateAttributedTitle() {
+        let weight: NSFont.Weight = isSelectedTab ? .semibold : .regular
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: weight),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        self.attributedTitle = NSAttributedString(string: " " + _title, attributes: attrs)
+    }
+}
+
+/// Manages the comprehensive dashboard panel — a full split-view window
+/// with sidebar navigation and embedded graph/text views for all i-dream data.
+final class DashboardWindowController: NSObject {
+    private var panel: NSPanel?
+    private var navButtons:       [NavSidebarButton] = []
+    private var contentContainer: NSView!
+    private var contentViews:     [NSView]           = []
+
+    // Cross-linking strong refs — prevent delegate/graph from deallocating
+    private var patternGraphView:    PatternGraphView?
+    private var patternListDelegate: JournalLinkDelegate?
+    private var assocGraphView:      AssociationGraphView?
+    private var assocListDelegate:   JournalLinkDelegate?
+    private var overviewLinkDelegate: JournalLinkDelegate?
+
+    // Detail panels for selection context (Patterns + Associations tabs)
+    private var patternDetailTextView:  NSTextView?
+    private var assocDetailTextView:    NSTextView?
+
+    // Insights tab state
+    private var insightFeedbackDelegate: InsightFeedbackDelegate?
+    private var insightsTextView: NSTextView?
+
+    // Search tab state
+    private var searchField:           NSSearchField?
+    private var searchResultsTextView: NSTextView?
+    private var searchLinkDelegate:    JournalLinkDelegate?
+    private var searchDebounceTimer:   Timer?
+
+    // Sidebar footer state
+    private var lastRefreshedLabel:    NSTextField?
+    private var lastRefreshedDate:     Date?
+
+    private let tabs: [(title: String, symbol: String)] = [
+        ("Overview",     "square.grid.2x2.fill"),
+        ("Patterns",     "brain.head.profile"),
+        ("Associations", "link"),
+        ("Journal",      "book.fill"),
+        ("Insights",     "sparkles"),
+        ("Metacog",      "checkmark.seal.fill"),
+        ("Search",       "magnifyingglass"),
+        ("Help",         "questionmark.circle.fill"),
+        ("About",        "info.circle.fill"),
+    ]
+
+    // Data snapshots — reloaded on each showOrFront() call
+    private var patterns:     [Pattern]      = []
+    private var associations: [Association]  = []
+    private var journal:      [JournalEntry] = []
+    private var state:        DaemonState?
+    private var board:        BoardData?
+    private var digest:       String?
+
+    // ── Public interface ───────────────────────────────────────────────────────
+
+    func showOrFront() {
+        patterns     = allPatterns()
+        associations = allAssociations()
+        journal      = allJournal()
+        state        = readState()
+        board        = readBoard()
+        digest       = readInsightDigest()
+
+        if let p = panel, p.isVisible {
+            rebuildContentViews()
+            p.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        buildAndShow()
+    }
+
+    // ── Panel construction ─────────────────────────────────────────────────────
+
+    private func buildAndShow() {
+        panel?.close()
+
+        let panW: CGFloat = 1240, panH: CGFloat = 840
+        let sideW: CGFloat = 200
+
+        let p = KeyablePanel(
+            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
+            backing: .buffered, defer: false)
+        p.title                = "i-dream — Dashboard"
+        p.isReleasedWhenClosed = false
+        p.level                = .floating
+        p.minSize              = NSSize(width: 960, height: 640)
+        p.center()
+        self.panel = p
+
+        // Wire keyboard shortcuts (Cmd+1-9, Cmd+R)
+        p.tabHandler     = { [weak self] idx in self?.selectTab(idx) }
+        p.refreshHandler = { [weak self] in self?.refreshDashboard() }
+
+        let cv = p.contentView!
+
+        // ── Sidebar ────────────────────────────────────────────────────────────
+        let sidebar = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: sideW, height: panH))
+        sidebar.autoresizingMask = [.height]
+        sidebar.material = .sidebar
+        sidebar.blendingMode = .behindWindow
+        sidebar.state = .active
+
+        let sideTitle = NSTextField(labelWithString: "i-dream")
+        sideTitle.font       = .systemFont(ofSize: 12, weight: .semibold)
+        sideTitle.textColor  = .tertiaryLabelColor
+        sideTitle.frame      = NSRect(x: 14, y: panH - 44, width: sideW - 28, height: 18)
+        sideTitle.autoresizingMask = [.minYMargin]
+        sidebar.addSubview(sideTitle)
+
+        navButtons = []
+        for (i, tab) in tabs.enumerated() {
+            let btn = NavSidebarButton(frame: NSRect(
+                x: 14, y: panH - 80 - CGFloat(i) * 44,
+                width: sideW - 22, height: 36))
+            btn.autoresizingMask = [.minYMargin]
+            btn.configure(title: tab.title, symbol: tab.symbol, index: i)
+            btn.target = self
+            btn.action = #selector(navTapped(_:))
+            sidebar.addSubview(btn)
+            navButtons.append(btn)
+        }
+
+        // Bottom: export + refresh + version + last-refreshed
+        let exportBtn = NSButton(title: "⬇  Export JSON", target: self, action: #selector(exportDashboardData))
+        exportBtn.frame            = NSRect(x: 8, y: 72, width: sideW - 16, height: 28)
+        exportBtn.isBordered       = false
+        exportBtn.font             = .systemFont(ofSize: 12)
+        exportBtn.contentTintColor = .secondaryLabelColor
+        sidebar.addSubview(exportBtn)
+
+        let refreshBtn = NSButton(title: "↺  Refresh  (⌘R)", target: self, action: #selector(refreshDashboard))
+        refreshBtn.frame            = NSRect(x: 8, y: 48, width: sideW - 16, height: 28)
+        refreshBtn.isBordered       = false
+        refreshBtn.font             = .systemFont(ofSize: 12)
+        refreshBtn.contentTintColor = .secondaryLabelColor
+        sidebar.addSubview(refreshBtn)
+
+        let verLabel = NSTextField(labelWithString: "build \(BuildInfo.commitHash.prefix(7))")
+        verLabel.font      = .monospacedSystemFont(ofSize: 9.5, weight: .regular)
+        verLabel.textColor = .tertiaryLabelColor
+        verLabel.frame     = NSRect(x: 14, y: 28, width: sideW - 28, height: 14)
+        sidebar.addSubview(verLabel)
+
+        let refreshedLbl = NSTextField(labelWithString: "Refreshed just now")
+        refreshedLbl.font      = .systemFont(ofSize: 9.5)
+        refreshedLbl.textColor = .tertiaryLabelColor
+        refreshedLbl.frame     = NSRect(x: 14, y: 10, width: sideW - 28, height: 14)
+        sidebar.addSubview(refreshedLbl)
+        lastRefreshedLabel = refreshedLbl
+        lastRefreshedDate  = Date()
+
+        // Vertical divider
+        let sideSep = NSBox(frame: NSRect(x: sideW - 1, y: 0, width: 1, height: panH))
+        sideSep.boxType          = .separator
+        sideSep.autoresizingMask = [.height]
+        sidebar.addSubview(sideSep)
+        cv.addSubview(sidebar)
+
+        // ── Content container ──────────────────────────────────────────────────
+        contentContainer = NSView(frame: NSRect(x: sideW, y: 0,
+                                                 width: panW - sideW, height: panH))
+        contentContainer.autoresizingMask = [.width, .height]
+        cv.addSubview(contentContainer)
+
+        rebuildContentViews()
+        let restored = UserDefaults.standard.integer(forKey: "idream-dashboard-selected-tab")
+        selectTab(restored < tabs.count ? restored : 0)
+
+        NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
+    }
+
+    private func rebuildContentViews() {
+        patternGraphView    = nil
+        patternListDelegate = nil
+        patternDetailTextView = nil
+        assocGraphView      = nil
+        assocListDelegate   = nil
+        assocDetailTextView = nil
+        searchField             = nil
+        searchResultsTextView   = nil
+        for v in contentViews { v.removeFromSuperview() }
+        contentViews = []
+        let f = contentContainer.bounds
+        contentViews = [
+            buildOverviewView(frame: f),
+            buildPatternView(frame: f),
+            buildAssociationView(frame: f),
+            buildJournalView(frame: f),
+            buildInsightsView(frame: f),
+            buildMetacogView(frame: f),
+            buildSearchView(frame: f),
+            buildHelpView(frame: f),
+            buildAboutView(frame: f),
+        ]
+        for v in contentViews { contentContainer.addSubview(v) }
+        let sel = navButtons.first(where: { $0.isSelectedTab })?.tag ?? 0
+        for (i, v) in contentViews.enumerated() { v.isHidden = (i != sel) }
+
+        // Update sidebar labels with data counts
+        updateSidebarBadges()
+    }
+
+    private func updateSidebarBadges() {
+        guard navButtons.count >= 9 else { return }
+        // 0: Overview — no count
+        // 1: Patterns
+        navButtons[1].updateTitle("Patterns (\(patterns.count))")
+        // 2: Associations
+        navButtons[2].updateTitle("Associations (\(associations.count))")
+        // 3: Journal
+        navButtons[3].updateTitle("Journal (\(journal.count))")
+        // 4: Insights — count insight blocks from raw markdown
+        let insightBlockCount: Int = {
+            guard let raw = readAllInsights() else { return 0 }
+            return raw.components(separatedBy: "\n").filter { $0.hasPrefix("### Insight") }.count
+        }()
+        navButtons[4].updateTitle("Insights (\(insightBlockCount))")
+        // 5: Metacog — show calibration score
+        let (audit, _) = readLatestAudit()
+        let calStr = audit?.calibrationScore.map { String(format: "%.2f", $0) } ?? "—"
+        navButtons[5].updateTitle("Metacog (\(calStr))")
+        // 6: Search, 7: Help, 8: About — no counts
+    }
+
+    // ── Navigation ─────────────────────────────────────────────────────────────
+
+    @objc private func navTapped(_ sender: NSButton) { selectTab(sender.tag) }
+
+    private func selectTab(_ index: Int) {
+        guard index >= 0 && index < tabs.count else { return }
+        for (i, btn) in navButtons.enumerated() { btn.isSelectedTab = (i == index) }
+        for (i, v) in contentViews.enumerated()  { v.isHidden        = (i != index) }
+        UserDefaults.standard.set(index, forKey: "idream-dashboard-selected-tab")
+    }
+
+    @objc private func refreshDashboard() {
+        showOrFront()
+        lastRefreshedDate = Date()
+        lastRefreshedLabel?.stringValue = "Refreshed just now"
+    }
+
+    @objc private func exportDashboardData() {
+        let sp = NSSavePanel()
+        sp.title          = "Export i-dream Data"
+        sp.nameFieldStringValue = "i-dream-export-\(ISO8601DateFormatter().string(from: Date()).prefix(10)).json"
+        sp.allowedContentTypes  = [.json]
+        sp.canCreateDirectories = true
+
+        guard sp.runModal() == .OK, let url = sp.url else { return }
+
+        let patternsArr = patterns.map { p -> [String: Any] in
+            ["pattern": p.pattern, "category": p.category, "confidence": p.confidence,
+             "valence": p.valence, "firstSeen": p.firstSeen ?? ""]
+        }
+        let assocsArr = associations.map { a -> [String: Any] in
+            ["hypothesis": a.hypothesis, "confidence": a.confidence,
+             "actionable": a.actionable, "suggestedRule": a.suggestedRule ?? ""]
+        }
+        let journalArr = journal.map { j -> [String: Any] in
+            ["timestamp": j.timestamp, "tokensUsed": j.tokensUsed,
+             "sessionsAnalyzed": j.sessionsAnalyzed, "patternsExtracted": j.patternsExtracted,
+             "associationsFound": j.associationsFound, "insightsPromoted": j.insightsPromoted]
+        }
+        let exportData: [String: Any] = [
+            "exportedAt": ISO8601DateFormatter().string(from: Date()),
+            "build": "\(BuildInfo.commitHash)/\(BuildInfo.sourceHash)",
+            "totalCycles": state?.totalCycles ?? 0,
+            "totalTokensUsed": state?.totalTokensUsed ?? 0,
+            "patterns": patternsArr,
+            "associations": assocsArr,
+            "journal": journalArr,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: exportData,
+                                                      options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        try? data.write(to: url)
+    }
+
+    // ── Shared helpers ─────────────────────────────────────────────────────────
+
+    private func makeScrollableTextView(frame: NSRect) -> (NSScrollView, NSTextView) {
+        let sv = NSScrollView(frame: frame)
+        sv.autoresizingMask    = [.width, .height]
+        sv.hasVerticalScroller = true
+        sv.autohidesScrollers  = true
+        sv.borderType          = .noBorder
+
+        let cs = sv.contentSize
+        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: cs.width, height: cs.height))
+        tv.minSize                            = NSSize(width: 0, height: cs.height)
+        tv.maxSize                            = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                       height: CGFloat.greatestFiniteMagnitude)
+        tv.autoresizingMask                   = .width
+        tv.isEditable                         = false
+        tv.isSelectable                       = true
+        tv.backgroundColor                    = .clear
+        tv.drawsBackground                    = false
+        tv.textContainerInset                 = NSSize(width: 24, height: 20)
+        tv.isVerticallyResizable              = true
+        tv.isHorizontallyResizable            = false
+        tv.textContainer?.widthTracksTextView = true
+        tv.textContainer?.containerSize       = NSSize(width: cs.width,
+                                                       height: CGFloat.greatestFiniteMagnitude)
+        sv.documentView = tv
+        return (sv, tv)
+    }
+
+    /// Horizontal stats banner — 40px strip with key metrics.
+    /// `stats` items are displayed as   Label: Value  │  Label: Value  │ …
+    private func makeStatsBanner(frame: NSRect,
+                                 stats: [(label: String, value: String, color: NSColor?)]) -> NSView {
+        let banner = NSView(frame: frame)
+        banner.wantsLayer = true
+        banner.layer?.backgroundColor = NSColor.windowBackgroundColor
+            .blended(withFraction: 0.04, of: .labelColor)?.cgColor
+
+        // Bottom separator
+        let sep = NSBox(frame: NSRect(x: 0, y: 0, width: frame.width, height: 1))
+        sep.boxType = .separator; sep.autoresizingMask = [.width]
+        banner.addSubview(sep)
+
+        var x: CGFloat = 18
+        let midY = frame.height / 2
+
+        for (i, stat) in stats.enumerated() {
+            if i > 0 {
+                let pipe = NSTextField(labelWithString: "│")
+                pipe.font = .systemFont(ofSize: 11); pipe.textColor = .separatorColor
+                pipe.sizeToFit()
+                pipe.setFrameOrigin(CGPoint(x: x, y: midY - pipe.frame.height / 2))
+                banner.addSubview(pipe)
+                x += pipe.frame.width + 10
+            }
+            let lbl = NSTextField(labelWithString: stat.label + ": ")
+            lbl.font = .systemFont(ofSize: 11); lbl.textColor = .secondaryLabelColor
+            lbl.sizeToFit()
+            lbl.setFrameOrigin(CGPoint(x: x, y: midY - lbl.frame.height / 2))
+            banner.addSubview(lbl); x += lbl.frame.width + 1
+
+            let val = NSTextField(labelWithString: stat.value)
+            val.font = .systemFont(ofSize: 11, weight: .semibold)
+            val.textColor = stat.color ?? .labelColor
+            val.sizeToFit()
+            val.setFrameOrigin(CGPoint(x: x, y: midY - val.frame.height / 2))
+            banner.addSubview(val); x += val.frame.width + 14
+        }
+        return banner
+    }
+
+    /// Parse recent ERROR lines from today's daemon log.
+    private func recentLogErrors(limit: Int = 3) -> [String] {
+        let logPath = bestLogPath()
+        guard let content = try? String(contentsOfFile: logPath, encoding: .utf8) else { return [] }
+        let lines = content.components(separatedBy: "\n")
+        let errors = lines.filter { $0.contains(" ERROR ") }
+        return Array(errors.suffix(limit).map { line -> String in
+            // Extract just the message part after the log level
+            if let range = line.range(of: " ERROR ") {
+                return String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            }
+            return line
+        })
+    }
+
+    // ── Tab 0: Overview ────────────────────────────────────────────────────────
+
+    private func buildOverviewView(frame: NSRect) -> NSView {
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+
+        let (sv, tv) = makeScrollableTextView(frame: frame)
+        sv.autoresizingMask = [.width, .height]
+        container.addSubview(sv)
+
+        let rt = RichText()
+        let hiConf   = patterns.filter { $0.confidence >= 0.8 }.count
+        let totalTok = journal.reduce(0) { $0 + $1.tokensUsed }
+        let avgConf  = patterns.isEmpty ? 0.0
+            : patterns.reduce(0.0) { $0 + $1.confidence } / Double(patterns.count)
+        let actionable = associations.filter { $0.actionable }.count
+        let posCnt = patterns.filter { $0.valence == "positive" }.count
+        let negCnt = patterns.filter { $0.valence == "negative" }.count
+        let neuCnt = patterns.count - posCnt - negCnt
+
+        // ── Header ──────────────────────────────────────────────────────────
+        rt.header("Dashboard Overview")
+        if let s = state {
+            let statusIcon = s.totalCycles > 0 ? "●" : "○"
+            let statusColor: NSColor = s.totalCycles > 0 ? .systemGreen : .systemOrange
+            rt.raw(NSAttributedString(string: "  \(statusIcon) ", attributes: [
+                .font: NSFont.systemFont(ofSize: 13), .foregroundColor: statusColor]))
+            rt.raw(NSAttributedString(string: "Daemon running  ·  Last dream \(timeAgo(s.lastConsolidation))  ·  \(s.totalCycles) cycles\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        rt.spacer()
+
+        // ── Error/Alert Banner ──────────────────────────────────────────────
+        let logErrors = recentLogErrors()
+        if !logErrors.isEmpty {
+            let bannerLine = NSMutableAttributedString()
+            bannerLine.append(NSAttributedString(string: "  ⚠ Recent Errors (\(logErrors.count))\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: NSColor.systemOrange,
+                .backgroundColor: NSColor.systemOrange.withAlphaComponent(0.08)]))
+            for err in logErrors {
+                let truncated = err.count > 120 ? String(err.prefix(120)) + "…" : err
+                bannerLine.append(NSAttributedString(string: "  · \(truncated)\n", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular),
+                    .foregroundColor: NSColor.systemOrange.withAlphaComponent(0.9)]))
+            }
+            bannerLine.append(NSAttributedString(string: "\n", attributes: [:]))
+            rt.raw(bannerLine)
+        }
+
+        // ── Stat Cards Row 1 ────────────────────────────────────────────────
+        rt.raw(statCardsRow([
+            ("Patterns",      "\(patterns.count)",      .systemTeal,    "\(hiConf) high conf"),
+            ("Associations",  "\(associations.count)",   .systemOrange,  "\(actionable) actionable"),
+            ("Dream Cycles",  "\(journal.count)",        .systemIndigo,  fmtNum(totalTok) + " tokens"),
+        ]))
+        rt.spacer()
+
+        // ── Stat Cards Row 2 ────────────────────────────────────────────────
+        let (audit, _) = readLatestAudit()
+        let calScore = audit?.calibrationScore.map { String(format: "%.0f%%", $0 * 100) } ?? "—"
+        let biasCount = audit?.biasesDetected?.count ?? 0
+        rt.raw(statCardsRow([
+            ("Avg Confidence", String(format: "%.0f%%", avgConf * 100),  avgConf >= 0.7 ? .systemGreen : .systemBlue, "\(hiConf) patterns ≥80%"),
+            ("Calibration",    calScore,                                 .systemPink,    "\(biasCount) biases detected"),
+            ("Valence",        "\(posCnt)↑  \(negCnt)↓  \(neuCnt)·",    .labelColor,    "sentiment distribution"),
+        ]))
+        rt.spacer()
+
+        // ── Insight Digest ──────────────────────────────────────────────────
+        if let d = digest, !d.isEmpty {
+            let sentiment = readDigestSentiment()
+            let sentColor: NSColor = sentiment == "positive" ? .systemGreen
+                                   : sentiment == "negative" ? .systemOrange : .labelColor
+            rt.raw(NSAttributedString(string: "  ┌─ Latest Insight Digest ", attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold), .foregroundColor: NSColor.labelColor]))
+            rt.raw(NSAttributedString(string: String(repeating: "─", count: 35) + "┐\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.separatorColor]))
+            let digestLines = d.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
+            for line in digestLines.prefix(8) {
+                rt.raw(NSAttributedString(string: "  │  " + line + "\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 13), .foregroundColor: sentColor]))
+            }
+            if digestLines.count > 8 {
+                rt.raw(NSAttributedString(string: "  │  … (\(digestLines.count - 8) more lines)\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.tertiaryLabelColor]))
+            }
+            rt.raw(NSAttributedString(string: "  └" + String(repeating: "─", count: 62) + "┘\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.separatorColor]))
+            rt.spacer()
+        }
+
+        // ── Pattern Categories Chart ────────────────────────────────────────
+        if !patterns.isEmpty {
+            rt.subheader("Pattern Categories")
+            let cats = Dictionary(grouping: patterns, by: { $0.category })
+                .sorted { $0.value.count > $1.value.count }
+            let maxCount = cats.first?.value.count ?? 1
+            let catColors: [NSColor] = [.systemTeal, .systemOrange, .systemIndigo, .systemPink,
+                                         .systemGreen, .systemBlue, .systemPurple, .systemYellow,
+                                         .systemRed, .systemBrown]
+            for (i, (cat, pats)) in cats.prefix(10).enumerated() {
+                let barLen = max(1, pats.count * 30 / maxCount)
+                let bar    = String(repeating: "█", count: barLen)
+                let empty  = String(repeating: " ", count: max(0, 30 - barLen))
+                let catPadded = cat.padding(toLength: 16, withPad: " ", startingAt: 0)
+                let avgC = pats.reduce(0.0) { $0 + $1.confidence } / Double(pats.count)
+                let color = catColors[i % catColors.count]
+                let line = NSMutableAttributedString()
+                line.append(NSAttributedString(string: "  \(catPadded) ", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: NSColor.labelColor]))
+                line.append(NSAttributedString(string: bar, attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                    .foregroundColor: color]))
+                line.append(NSAttributedString(string: empty, attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)]))
+                line.append(NSAttributedString(string: " \(String(format: "%3d", pats.count))", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .bold),
+                    .foregroundColor: NSColor.labelColor]))
+                line.append(NSAttributedString(string: "  avg \(String(format: "%.0f%%", avgC * 100))\n", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+                    .foregroundColor: NSColor.secondaryLabelColor]))
+                rt.raw(line)
+            }
+            if cats.count > 10 {
+                rt.dim("    … and \(cats.count - 10) more categories")
+            }
+            rt.spacer()
+        }
+
+        // ── Valence Distribution Bar ────────────────────────────────────────
+        if !patterns.isEmpty {
+            rt.subheader("Valence Distribution")
+            let total = max(1, patterns.count)
+            let posBar = max(0, posCnt * 40 / total)
+            let negBar = max(0, negCnt * 40 / total)
+            let neuBar = max(0, 40 - posBar - negBar)
+            let dist = NSMutableAttributedString()
+            dist.append(NSAttributedString(string: "  ", attributes: [:]))
+            if posBar > 0 {
+                dist.append(NSAttributedString(string: String(repeating: "▓", count: posBar), attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                    .foregroundColor: NSColor.systemGreen]))
+            }
+            if neuBar > 0 {
+                dist.append(NSAttributedString(string: String(repeating: "░", count: neuBar), attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                    .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+            if negBar > 0 {
+                dist.append(NSAttributedString(string: String(repeating: "▓", count: negBar), attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                    .foregroundColor: NSColor.systemRed]))
+            }
+            dist.append(NSAttributedString(string: "\n", attributes: [:]))
+            rt.raw(dist)
+            let legend = NSMutableAttributedString(string: "  ")
+            legend.append(NSAttributedString(string: "▲ \(posCnt) positive", attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemGreen]))
+            legend.append(NSAttributedString(string: "    ● \(neuCnt) neutral", attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+            legend.append(NSAttributedString(string: "    ▼ \(negCnt) negative\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.systemRed]))
+            rt.raw(legend)
+            rt.spacer()
+        }
+
+        // ── Token Usage Sparkline ───────────────────────────────────────────
+        if !journal.isEmpty {
+            rt.subheader("Token Usage  (per cycle)")
+            let allTok = journal.map { $0.tokensUsed }
+            let spark  = fmtSparkline(allTok, width: 40)
+            if !spark.isEmpty {
+                rt.raw(NSAttributedString(string: "  \(spark)\n", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+                    .foregroundColor: NSColor.systemIndigo]))
+                let minTok = allTok.min() ?? 0
+                let maxTok = allTok.max() ?? 0
+                let avgTok = allTok.isEmpty ? 0 : allTok.reduce(0, +) / allTok.count
+                rt.dim("  min \(fmtNum(minTok))  ·  avg \(fmtNum(avgTok))  ·  max \(fmtNum(maxTok))  ·  total \(fmtNum(totalTok))")
+            }
+            rt.spacer()
+        }
+
+        // ── Confidence Histogram ────────────────────────────────────────────
+        if !patterns.isEmpty {
+            rt.subheader("Confidence Distribution")
+            let buckets = stride(from: 0.0, to: 1.01, by: 0.1).map { threshold -> Int in
+                patterns.filter { $0.confidence >= threshold && $0.confidence < threshold + 0.1 }.count
+            }
+            let maxBucket = max(1, buckets.max() ?? 1)
+            for (i, count) in buckets.enumerated() {
+                let label = String(format: "%3.0f%%", Double(i) * 10)
+                let barLen = max(0, count * 28 / maxBucket)
+                let color: NSColor = i >= 8 ? .systemGreen : i >= 6 ? .systemBlue : i >= 4 ? .systemYellow : .systemRed
+                let line = NSMutableAttributedString()
+                line.append(NSAttributedString(string: "  \(label) ", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+                    .foregroundColor: NSColor.secondaryLabelColor]))
+                if barLen > 0 {
+                    line.append(NSAttributedString(string: String(repeating: "▮", count: barLen), attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+                        .foregroundColor: color]))
+                }
+                if count > 0 {
+                    line.append(NSAttributedString(string: " \(count)", attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
+                        .foregroundColor: NSColor.labelColor]))
+                }
+                line.append(NSAttributedString(string: "\n", attributes: [:]))
+                rt.raw(line)
+            }
+            rt.spacer()
+        }
+
+        // ── Recent Cycles ───────────────────────────────────────��───────────
+        if !journal.isEmpty {
+            rt.subheader("Recent Cycles")
+            for entry in journal.suffix(5).reversed() {
+                let parts = [
+                    entry.sessionsAnalyzed  > 0 ? "\(entry.sessionsAnalyzed) sessions"  : nil,
+                    entry.patternsExtracted > 0 ? "\(entry.patternsExtracted) patterns"  : nil,
+                    entry.associationsFound > 0 ? "\(entry.associationsFound) assoc"     : nil,
+                    entry.insightsPromoted  > 0 ? "\(entry.insightsPromoted) insights"   : nil,
+                ].compactMap { $0 }.joined(separator: "  ·  ")
+                rt.raw(NSAttributedString(string: "  ◆ ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+                    .foregroundColor: NSColor.systemIndigo]))
+                rt.raw(NSAttributedString(string: "\(fmtDate(entry.timestamp))  (\(timeAgo(entry.timestamp)))", attributes: [
+                    .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                    .foregroundColor: NSColor.systemIndigo,
+                    .link: "overview-cycle:\(entry.timestamp)" as NSString,
+                    .cursor: NSCursor.pointingHand]))
+                rt.raw(NSAttributedString(string: "\n", attributes: [:]))
+                rt.raw(NSAttributedString(string: "    \(parts.isEmpty ? "skipped — no sessions" : parts)  ·  \(fmtNum(entry.tokensUsed)) tokens\n\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 12),
+                    .foregroundColor: NSColor.secondaryLabelColor]))
+            }
+        }
+
+        // Wire link delegate for cycle navigation
+        overviewLinkDelegate = JournalLinkDelegate { [weak self] linkStr in
+            guard let self = self else { return }
+            if linkStr.hasPrefix("overview-cycle:") {
+                self.selectTab(3)  // Journal tab
+            }
+        }
+        tv.delegate = overviewLinkDelegate
+        tv.isAutomaticLinkDetectionEnabled = false
+
+        tv.textStorage?.setAttributedString(rt.build())
+        return container
+    }
+
+    /// Render a row of stat cards as styled attributed text.
+    /// Each card: value (bold colored), label (medium dim), detail (tertiary).
+    /// Cards are separated by thin vertical pipes with even spacing.
+    private func statCardsRow(_ cards: [(label: String, value: String, color: NSColor, detail: String)]) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        // Use tab stops to create even columns
+        let colW: CGFloat = 200
+        let style = NSMutableParagraphStyle()
+        style.tabStops = (0..<cards.count).map { NSTextTab(textAlignment: .left, location: CGFloat($0) * colW + 16) }
+        style.lineSpacing = 2
+
+        // Row 1: values
+        result.append(NSAttributedString(string: "\t"))
+        for (i, card) in cards.enumerated() {
+            if i > 0 {
+                result.append(NSAttributedString(string: "\t", attributes: [.paragraphStyle: style]))
+            }
+            result.append(NSAttributedString(string: card.value, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 17, weight: .bold),
+                .foregroundColor: card.color,
+                .paragraphStyle: style]))
+        }
+        result.append(NSAttributedString(string: "\n"))
+
+        // Row 2: labels
+        result.append(NSAttributedString(string: "\t"))
+        for (i, card) in cards.enumerated() {
+            if i > 0 {
+                result.append(NSAttributedString(string: "\t", attributes: [.paragraphStyle: style]))
+            }
+            result.append(NSAttributedString(string: card.label, attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: style]))
+        }
+        result.append(NSAttributedString(string: "\n"))
+
+        // Row 3: details
+        result.append(NSAttributedString(string: "\t"))
+        for (i, card) in cards.enumerated() {
+            if i > 0 {
+                result.append(NSAttributedString(string: "\t", attributes: [.paragraphStyle: style]))
+            }
+            result.append(NSAttributedString(string: card.detail, attributes: [
+                .font: NSFont.systemFont(ofSize: 10),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .paragraphStyle: style]))
+        }
+        result.append(NSAttributedString(string: "\n"))
+        return result
+    }
+
+    // ── Tab 1: Pattern Network ─────────────────────────────────────────────────
+
+    private func buildPatternView(frame: NSRect) -> NSView {
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+
+        let bannerH: CGFloat = 40
+        let hintH:   CGFloat = 36
+        let contentH = frame.height - bannerH - hintH
+
+        // Stats banner (top)
+        let hiConf  = patterns.filter { $0.confidence >= 0.8 }.count
+        let avgConf = patterns.isEmpty ? 0.0 : patterns.reduce(0.0) { $0 + $1.confidence } / Double(patterns.count)
+        let catCnt  = Set(patterns.map { $0.category }).count
+        let posCnt  = patterns.filter { $0.valence == "positive" }.count
+        let negCnt  = patterns.filter { $0.valence == "negative" }.count
+        let banner  = makeStatsBanner(
+            frame: NSRect(x: 0, y: frame.height - bannerH, width: frame.width, height: bannerH),
+            stats: [
+                ("Total",       "\(patterns.count)", nil),
+                ("High conf",   "\(hiConf)",          hiConf > 0 ? .systemGreen : nil),
+                ("Avg conf",    String(format: "%.0f%%", avgConf * 100), nil),
+                ("Categories",  "\(catCnt)",           nil),
+                ("Positive",    "\(posCnt)",            posCnt > 0 ? .systemGreen : nil),
+                ("Negative",    "\(negCnt)",            negCnt > 0 ? .systemOrange : nil),
+            ])
+        banner.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(banner)
+
+        // Hint bar (bottom)
+        let hintBar = NSView(frame: NSRect(x: 0, y: 0, width: frame.width, height: hintH))
+        hintBar.autoresizingMask = [.width, .maxYMargin]
+        let hintSep = NSBox(frame: NSRect(x: 0, y: hintH - 1, width: frame.width, height: 1))
+        hintSep.boxType = .separator; hintSep.autoresizingMask = [.width]
+        hintBar.addSubview(hintSep)
+        let hintLbl = NSTextField(labelWithString:
+            "Click list item or graph node to see details  ·  Drag to pan  ·  Scroll/pinch to zoom  ·  Dbl-click graph to reset")
+        hintLbl.font = .systemFont(ofSize: 10.5); hintLbl.textColor = .tertiaryLabelColor
+        hintLbl.frame = NSRect(x: 14, y: 10, width: frame.width - 28, height: 16)
+        hintLbl.autoresizingMask = [.width]
+        hintBar.addSubview(hintLbl)
+        container.addSubview(hintBar)
+
+        guard !patterns.isEmpty else {
+            let lbl = NSTextField(labelWithString: "No patterns yet — run a few dream cycles.")
+            lbl.font = .systemFont(ofSize: 14); lbl.textColor = .secondaryLabelColor
+            lbl.frame = NSRect(x: 20, y: frame.height / 2 - 12, width: frame.width - 40, height: 24)
+            lbl.autoresizingMask = [.width, .minYMargin]
+            container.addSubview(lbl)
+            return container
+        }
+
+        // Main horizontal split: left panel (list + detail) | right (graph)
+        let listW: CGFloat = 310
+        let splitFrame = NSRect(x: 0, y: hintH, width: frame.width, height: contentH)
+        let split = NSSplitView(frame: splitFrame)
+        split.isVertical       = true
+        split.dividerStyle     = .thin
+        split.autoresizingMask = [.width, .height]
+
+        // Left panel: vertical split — grouped list (top) + detail pane (bottom)
+        let leftPanel = NSSplitView(frame: NSRect(x: 0, y: 0, width: listW, height: contentH))
+        leftPanel.isVertical       = false
+        leftPanel.dividerStyle     = .thin
+        leftPanel.autoresizingMask = [.width, .height]
+
+        // --- Grouped pattern list (top of left panel) ---
+        let listH = contentH * 0.6
+        let (listSV, listTV) = makeScrollableTextView(
+            frame: NSRect(x: 0, y: 0, width: listW, height: listH))
+        listTV.textContainerInset = NSSize(width: 10, height: 10)
+        listTV.backgroundColor = .clear; listTV.drawsBackground = false
+
+        // Group patterns by category, sorted by count descending
+        let byCategory = Dictionary(grouping: patterns, by: { $0.category })
+        let sortedCats = byCategory.keys.sorted { byCategory[$0]!.count > byCategory[$1]!.count }
+        let catColors: [String: NSColor] = {
+            let palette: [NSColor] = [.systemTeal, .systemPurple, .systemOrange, .systemIndigo, .systemPink,
+                                      .systemGreen, .systemBlue, .systemYellow, .systemRed, .systemBrown]
+            var m: [String: NSColor] = [:]
+            for (i, cat) in sortedCats.enumerated() { m[cat] = palette[i % palette.count] }
+            return m
+        }()
+
+        let lrt = RichText()
+        let itemSpacing = NSMutableParagraphStyle()
+        itemSpacing.lineSpacing = 3
+        itemSpacing.paragraphSpacingBefore = 2
+
+        for cat in sortedCats {
+            let pats = byCategory[cat]!.sorted { $0.confidence > $1.confidence }
+            let catColor = catColors[cat] ?? .secondaryLabelColor
+
+            // Category header with colored dot and count
+            let catHeaderStyle = NSMutableParagraphStyle()
+            catHeaderStyle.paragraphSpacingBefore = 8
+            let catHeader = NSMutableAttributedString()
+            catHeader.append(NSAttributedString(string: "●  ", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: catColor,
+                .paragraphStyle: catHeaderStyle]))
+            catHeader.append(NSAttributedString(string: cat.uppercased(), attributes: [
+                .font: NSFont.systemFont(ofSize: 11.5, weight: .bold),
+                .foregroundColor: catColor]))
+            catHeader.append(NSAttributedString(string: "  (\(pats.count))\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
+                .foregroundColor: NSColor.tertiaryLabelColor]))
+            lrt.raw(catHeader)
+
+            for pat in pats {
+                let pid    = pat.stableKey
+                let conf   = Int(pat.confidence * 100)
+                let cCol: NSColor = pat.confidence >= 0.8 ? .systemGreen
+                                  : pat.confidence >= 0.6 ? .systemBlue : .secondaryLabelColor
+                let badge  = String(format: "%3d%%", conf)
+                let text   = pat.pattern.count > 52 ? String(pat.pattern.prefix(49)) + "…" : pat.pattern
+                let valDot: String = pat.valence == "positive" ? "▲" : pat.valence == "negative" ? "▼" : "·"
+                let valCol: NSColor = pat.valence == "positive" ? .systemGreen
+                                    : pat.valence == "negative" ? .systemOrange : .tertiaryLabelColor
+
+                let line = NSMutableAttributedString()
+                line.append(NSAttributedString(string: "  " + badge + " ", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: cCol,
+                    .paragraphStyle: itemSpacing]))
+                line.append(NSAttributedString(string: valDot + " ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: valCol]))
+                line.append(NSAttributedString(string: text + "\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 13),
+                    .foregroundColor: NSColor.labelColor,
+                    .link: "pattern:\(pid)" as NSString,
+                    .cursor: NSCursor.pointingHand]))
+                lrt.raw(line)
+            }
+            // Spacer between categories
+            lrt.raw(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 4)]))
+        }
+        listTV.textStorage?.setAttributedString(lrt.build())
+        listTV.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
+
+        // --- Detail pane (bottom of left panel) ---
+        let detailH = contentH * 0.4
+        let (detailSV, detailTV) = makeScrollableTextView(
+            frame: NSRect(x: 0, y: 0, width: listW, height: detailH))
+        detailTV.textContainerInset = NSSize(width: 10, height: 10)
+        detailTV.backgroundColor = .clear; detailTV.drawsBackground = false
+        patternDetailTextView = detailTV
+
+        // Initial placeholder for detail pane
+        let placeholderRT = RichText()
+        placeholderRT.dim("Select a pattern from the list or graph to see details.")
+        detailTV.textStorage?.setAttributedString(placeholderRT.build())
+
+        // Detail card wrapper — rounded border with subtle background
+        let detailWrap = NSView(frame: NSRect(x: 0, y: 0, width: listW, height: detailH))
+        detailWrap.autoresizingMask = [.width, .height]
+        detailWrap.wantsLayer = true
+
+        let cardInset: CGFloat = 6
+        let cardView = NSView(frame: detailWrap.bounds.insetBy(dx: cardInset, dy: cardInset))
+        cardView.autoresizingMask = [.width, .height]
+        cardView.wantsLayer = true
+        cardView.layer?.cornerRadius = 8
+        cardView.layer?.borderWidth  = 1
+        cardView.layer?.borderColor  = NSColor.separatorColor.cgColor
+        cardView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.3).cgColor
+
+        detailSV.frame = cardView.bounds.insetBy(dx: 2, dy: 2)
+        detailSV.autoresizingMask = [.width, .height]
+        cardView.addSubview(detailSV)
+        detailWrap.addSubview(cardView)
+
+        leftPanel.addArrangedSubview(listSV)
+        leftPanel.addArrangedSubview(detailWrap)
+        DispatchQueue.main.async { leftPanel.setPosition(listH, ofDividerAt: 0) }
+
+        // --- Graph (right panel) ---
+        let gv = PatternGraphView(
+            frame: NSRect(x: 0, y: 0, width: frame.width - listW - 1, height: contentH),
+            patterns: patterns)
+        gv.autoresizingMask = [.width, .height]
+
+        // Shared selection handler — updates detail pane, graph highlight, and list scroll
+        let selectPattern: (String?) -> Void = { [weak self, weak gv, weak listTV, weak detailTV] selectedId in
+            gv?.highlightedId = selectedId
+            // Clear previous highlight and apply new one
+            if let tv = listTV, let ts = tv.textStorage {
+                let full = NSRange(location: 0, length: ts.length)
+                ts.removeAttribute(.backgroundColor, range: full)
+                if let id = selectedId {
+                    var found: NSRange?
+                    ts.enumerateAttribute(.link, in: full) { val, range, stop in
+                        if (val as? NSString) == "pattern:\(id)" as NSString {
+                            found = range; stop.pointee = true
+                        }
+                    }
+                    if let r = found {
+                        // Extend highlight to cover the full line (including badge before the link)
+                        let lineRange = (ts.string as NSString).lineRange(for: r)
+                        let hlColor = NSColor.controlAccentColor.withAlphaComponent(0.15)
+                        ts.addAttribute(.backgroundColor, value: hlColor, range: lineRange)
+                        tv.scrollRangeToVisible(r)
+                    }
+                }
+            }
+            // Update detail pane
+            guard let self = self, let dtv = detailTV else { return }
+            guard let id = selectedId,
+                  let pat = self.patterns.first(where: { $0.stableKey == id }) else {
+                let rt = RichText()
+                rt.dim("Select a pattern from the list or graph to see details.")
+                dtv.textStorage?.setAttributedString(rt.build())
+                return
+            }
+            self.renderPatternDetail(pat, into: dtv)
+        }
+
+        // List + Detail → Graph + Detail (handles both pattern: and assoc: links)
+        let ld = JournalLinkDelegate { [weak self] link in
+            if link.hasPrefix("pattern:") {
+                selectPattern(String(link.dropFirst("pattern:".count)))
+            } else if link.hasPrefix("assoc:") {
+                // Navigate to Associations tab and select the association
+                self?.selectTab(2)
+            }
+        }
+        patternListDelegate = ld
+        listTV.delegate     = ld
+        detailTV.delegate   = ld
+        detailTV.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
+
+        // Graph → List + Detail
+        gv.onNodeSelected = { selectedId in
+            selectPattern(selectedId)
+        }
+        patternGraphView = gv
+
+        // Graph wrapper with search field overlay
+        let graphWrap = NSView(frame: NSRect(x: 0, y: 0, width: frame.width - listW - 1, height: contentH))
+        graphWrap.autoresizingMask = [.width, .height]
+
+        // Search field at top of graph
+        let searchH: CGFloat = 32
+        let searchBar = NSView(frame: NSRect(x: 0, y: contentH - searchH, width: graphWrap.frame.width, height: searchH))
+        searchBar.autoresizingMask = [.width, .minYMargin]
+        searchBar.wantsLayer = true
+        searchBar.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.85).cgColor
+
+        let graphSearch = NSSearchField(frame: NSRect(x: 8, y: 4, width: graphWrap.frame.width - 16, height: 24))
+        graphSearch.placeholderString = "Filter graph nodes…"
+        graphSearch.font = .systemFont(ofSize: 11)
+        graphSearch.autoresizingMask = [.width]
+        graphSearch.target = self
+        graphSearch.action = #selector(patternGraphSearchChanged(_:))
+        searchBar.addSubview(graphSearch)
+
+        gv.frame = NSRect(x: 0, y: 0, width: graphWrap.frame.width, height: contentH - searchH)
+        gv.autoresizingMask = [.width, .height]
+        graphWrap.addSubview(gv)
+        graphWrap.addSubview(searchBar)
+
+        split.addArrangedSubview(leftPanel)
+        split.addArrangedSubview(graphWrap)
+        container.addSubview(split)
+        DispatchQueue.main.async { split.setPosition(listW, ofDividerAt: 0) }
+        return container
+    }
+
+    @objc private func patternGraphSearchChanged(_ sender: NSSearchField) {
+        patternGraphView?.applySearch(sender.stringValue)
+    }
+
+    /// Render pattern detail into a text view — full text, metadata, and linked associations.
+    private func renderPatternDetail(_ pat: Pattern, into tv: NSTextView) {
+        let rt = RichText()
+
+        // Pattern header
+        rt.subheader(pat.pattern)
+        rt.spacer()
+
+        // Metadata row: category, valence, confidence bar
+        let confPct = Int(pat.confidence * 100)
+        let filled  = String(repeating: "▮", count: confPct / 10)
+        let empty   = String(repeating: "░", count: 10 - confPct / 10)
+        let valColor: NSColor = pat.valence == "positive" ? .systemGreen
+                              : pat.valence == "negative" ? .systemOrange
+                              : .secondaryLabelColor
+        let metaStr = NSMutableAttributedString()
+        metaStr.append(NSAttributedString(string: pat.category, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.secondaryLabelColor]))
+        metaStr.append(NSAttributedString(string: "  ·  ", attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.tertiaryLabelColor]))
+        metaStr.append(NSAttributedString(string: pat.valence, attributes: [
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: valColor]))
+        metaStr.append(NSAttributedString(string: "  ·  ", attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.tertiaryLabelColor]))
+        metaStr.append(NSAttributedString(string: "\(filled)\(empty) \(confPct)%\n", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor]))
+        rt.raw(metaStr)
+
+        if let first = pat.firstSeen {
+            rt.dim("first seen: \(fmtDate(first))")
+        }
+
+        // Linked associations — find associations whose patternsLinked contains this pattern's ID
+        if let pid = pat.id {
+            let linked = associations.filter { ($0.patternsLinked ?? []).contains(pid) }
+            if !linked.isEmpty {
+                rt.spacer()
+                let hdrStr = NSMutableAttributedString()
+                hdrStr.append(NSAttributedString(string: "⚡ Linked Associations", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: NSColor.systemOrange]))
+                hdrStr.append(NSAttributedString(string: "  (\(linked.count))\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: NSColor.tertiaryLabelColor]))
+                rt.raw(hdrStr)
+
+                for assoc in linked.sorted(by: { $0.confidence > $1.confidence }).prefix(8) {
+                    let conf = Int(assoc.confidence * 100)
+                    let aCol: NSColor = assoc.actionable ? .systemGreen : .systemBlue
+                    let marker = assoc.actionable ? "◆" : "○"
+                    let text = assoc.hypothesis.count > 60
+                        ? String(assoc.hypothesis.prefix(57)) + "…"
+                        : assoc.hypothesis
+
+                    let aLine = NSMutableAttributedString()
+                    aLine.append(NSAttributedString(string: "  \(marker) ", attributes: [
+                        .font: NSFont.systemFont(ofSize: 10),
+                        .foregroundColor: aCol]))
+                    aLine.append(NSAttributedString(string: "\(conf)%  ", attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .medium),
+                        .foregroundColor: aCol.withAlphaComponent(0.7)]))
+                    aLine.append(NSAttributedString(string: text + "\n", attributes: [
+                        .font: NSFont.systemFont(ofSize: 11),
+                        .foregroundColor: NSColor.labelColor,
+                        .link: "assoc:\(assoc.id)" as NSString,
+                        .cursor: NSCursor.pointingHand]))
+                    rt.raw(aLine)
+                }
+                if linked.count > 8 {
+                    rt.dim("  … and \(linked.count - 8) more")
+                }
+            } else {
+                rt.spacer()
+                rt.dim("No linked associations yet.")
+            }
+
+            // Same-category siblings
+            let siblings = patterns.filter { $0.category == pat.category && $0.id != pid }
+                .sorted { $0.confidence > $1.confidence }
+            if !siblings.isEmpty {
+                rt.spacer()
+                let sibHdr = NSMutableAttributedString()
+                sibHdr.append(NSAttributedString(string: "⟁ Same Category", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: NSColor.systemTeal]))
+                sibHdr.append(NSAttributedString(string: "  (\(siblings.count) in \(pat.category))\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: NSColor.tertiaryLabelColor]))
+                rt.raw(sibHdr)
+                for sib in siblings.prefix(5) {
+                    let sConf = Int(sib.confidence * 100)
+                    let sText = sib.pattern.count > 55 ? String(sib.pattern.prefix(52)) + "…" : sib.pattern
+                    rt.dim("  \(sConf)%  \(sText)")
+                }
+                if siblings.count > 5 {
+                    rt.dim("  … and \(siblings.count - 5) more")
+                }
+            }
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+        tv.scrollToBeginningOfDocument(nil)
+    }
+
+    // ── Tab 2: Association Network ─────────────────────────────────────────────
+
+    private func buildAssociationView(frame: NSRect) -> NSView {
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+
+        let bannerH: CGFloat = 40
+        let hintH:   CGFloat = 36
+        let contentH = frame.height - bannerH - hintH
+
+        let actionCnt  = associations.filter { $0.actionable }.count
+        let hiConfA    = associations.filter { $0.confidence >= 0.8 }.count
+        let avgConfA   = associations.isEmpty ? 0.0
+            : associations.reduce(0.0) { $0 + $1.confidence } / Double(associations.count)
+        let linkedPats = associations.flatMap { $0.patternsLinked ?? [] }
+        let uniquePats = Set(linkedPats).count
+
+        let banner = makeStatsBanner(
+            frame: NSRect(x: 0, y: frame.height - bannerH, width: frame.width, height: bannerH),
+            stats: [
+                ("Total",       "\(associations.count)", nil),
+                ("Actionable",  "\(actionCnt)",           actionCnt > 0 ? .systemGreen : nil),
+                ("High conf",   "\(hiConfA)",             hiConfA > 0 ? .systemGreen : nil),
+                ("Avg conf",    String(format: "%.0f%%", avgConfA * 100), nil),
+                ("Linked pats", "\(uniquePats)",          uniquePats > 0 ? .systemTeal : nil),
+            ])
+        banner.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(banner)
+
+        // Hint bar (bottom)
+        let hintBar = NSView(frame: NSRect(x: 0, y: 0, width: frame.width, height: hintH))
+        hintBar.autoresizingMask = [.width, .maxYMargin]
+        let hintSep = NSBox(frame: NSRect(x: 0, y: hintH - 1, width: frame.width, height: 1))
+        hintSep.boxType = .separator; hintSep.autoresizingMask = [.width]
+        hintBar.addSubview(hintSep)
+        let hintLbl = NSTextField(labelWithString:
+            "◆ = actionable  ·  Rings: inner ≥75% · mid ≥50% · outer <50%  ·  Click to see linked patterns")
+        hintLbl.font = .systemFont(ofSize: 10.5); hintLbl.textColor = .tertiaryLabelColor
+        hintLbl.frame = NSRect(x: 14, y: 10, width: frame.width - 28, height: 16)
+        hintLbl.autoresizingMask = [.width]
+        hintBar.addSubview(hintLbl)
+        container.addSubview(hintBar)
+
+        guard !associations.isEmpty else {
+            let lbl = NSTextField(labelWithString: "No associations yet — run a few dream cycles.")
+            lbl.font = .systemFont(ofSize: 14); lbl.textColor = .secondaryLabelColor
+            lbl.frame = NSRect(x: 20, y: frame.height / 2 - 12, width: frame.width - 40, height: 24)
+            lbl.autoresizingMask = [.width, .minYMargin]
+            container.addSubview(lbl)
+            return container
+        }
+
+        // Main horizontal split: left panel (list + detail) | right (graph)
+        let listW: CGFloat = 320
+        let splitFrame = NSRect(x: 0, y: hintH, width: frame.width, height: contentH)
+        let split = NSSplitView(frame: splitFrame)
+        split.isVertical       = true
+        split.dividerStyle     = .thin
+        split.autoresizingMask = [.width, .height]
+
+        // Left panel: vertical split — list (top) + detail (bottom)
+        let leftPanel = NSSplitView(frame: NSRect(x: 0, y: 0, width: listW, height: contentH))
+        leftPanel.isVertical       = false
+        leftPanel.dividerStyle     = .thin
+        leftPanel.autoresizingMask = [.width, .height]
+
+        // --- Association list (top) grouped by confidence tier ---
+        let listH = contentH * 0.55
+        let (listSV, listTV) = makeScrollableTextView(
+            frame: NSRect(x: 0, y: 0, width: listW, height: listH))
+        listTV.textContainerInset = NSSize(width: 10, height: 10)
+        listTV.backgroundColor = .clear; listTV.drawsBackground = false
+
+        // Group by confidence tier (using comparisons to avoid floating-point gaps)
+        let tiers: [(name: String, test: (Double) -> Bool, color: NSColor)] = [
+            ("High Confidence  (≥75%)", { $0 >= 0.75 }, .systemGreen),
+            ("Medium Confidence  (50–74%)", { $0 >= 0.50 && $0 < 0.75 }, .systemBlue),
+            ("Low Confidence  (<50%)", { $0 < 0.50 }, .secondaryLabelColor),
+        ]
+
+        let art = RichText()
+        let aItemSpacing = NSMutableParagraphStyle()
+        aItemSpacing.lineSpacing = 3
+        aItemSpacing.paragraphSpacingBefore = 2
+
+        for tier in tiers {
+            let group = associations
+                .filter { tier.test($0.confidence) }
+                .sorted { $0.confidence > $1.confidence }
+            guard !group.isEmpty else { continue }
+
+            // Tier header
+            let tierHdrStyle = NSMutableParagraphStyle()
+            tierHdrStyle.paragraphSpacingBefore = 8
+            let tierHdr = NSMutableAttributedString()
+            tierHdr.append(NSAttributedString(string: "●  ", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: tier.color,
+                .paragraphStyle: tierHdrStyle]))
+            tierHdr.append(NSAttributedString(string: tier.name, attributes: [
+                .font: NSFont.systemFont(ofSize: 11.5, weight: .bold),
+                .foregroundColor: tier.color]))
+            tierHdr.append(NSAttributedString(string: "  (\(group.count))\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 10.5),
+                .foregroundColor: NSColor.tertiaryLabelColor]))
+            art.raw(tierHdr)
+
+            for assoc in group {
+                let conf  = Int(assoc.confidence * 100)
+                let badge = String(format: "%3d%%", conf)
+                let text  = assoc.hypothesis.count > 50 ? String(assoc.hypothesis.prefix(47)) + "…" : assoc.hypothesis
+                let marker = assoc.actionable ? "◆" : "○"
+                let mCol: NSColor = assoc.actionable ? .systemGreen : .tertiaryLabelColor
+                let linkedCnt = assoc.patternsLinked?.count ?? 0
+
+                let line = NSMutableAttributedString()
+                line.append(NSAttributedString(string: "  " + badge + " ", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: tier.color,
+                    .paragraphStyle: aItemSpacing]))
+                line.append(NSAttributedString(string: marker + " ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: mCol]))
+                line.append(NSAttributedString(string: text + "\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 13),
+                    .foregroundColor: NSColor.labelColor,
+                    .link: "assoc:\(assoc.id)" as NSString,
+                    .cursor: NSCursor.pointingHand]))
+                if linkedCnt > 0 {
+                    line.append(NSAttributedString(string: "        \(linkedCnt) linked patterns\n", attributes: [
+                        .font: NSFont.systemFont(ofSize: 9.5),
+                        .foregroundColor: NSColor.tertiaryLabelColor]))
+                }
+                art.raw(line)
+            }
+            art.raw(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: 4)]))
+        }
+        listTV.textStorage?.setAttributedString(art.build())
+        listTV.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
+
+        // --- Detail pane (bottom of left panel) ---
+        let detailH = contentH * 0.45
+        let (detailSV, detailTV) = makeScrollableTextView(
+            frame: NSRect(x: 0, y: 0, width: listW, height: detailH))
+        detailTV.textContainerInset = NSSize(width: 10, height: 10)
+        detailTV.backgroundColor = .clear; detailTV.drawsBackground = false
+        assocDetailTextView = detailTV
+
+        let placeholderRT = RichText()
+        placeholderRT.dim("Select an association to see linked patterns and details.")
+        detailTV.textStorage?.setAttributedString(placeholderRT.build())
+
+        // Detail card wrapper — rounded border with subtle background
+        let detailWrap = NSView(frame: NSRect(x: 0, y: 0, width: listW, height: detailH))
+        detailWrap.autoresizingMask = [.width, .height]
+        detailWrap.wantsLayer = true
+
+        let aCardInset: CGFloat = 6
+        let aCardView = NSView(frame: detailWrap.bounds.insetBy(dx: aCardInset, dy: aCardInset))
+        aCardView.autoresizingMask = [.width, .height]
+        aCardView.wantsLayer = true
+        aCardView.layer?.cornerRadius = 8
+        aCardView.layer?.borderWidth  = 1
+        aCardView.layer?.borderColor  = NSColor.separatorColor.cgColor
+        aCardView.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.3).cgColor
+
+        detailSV.frame = aCardView.bounds.insetBy(dx: 2, dy: 2)
+        detailSV.autoresizingMask = [.width, .height]
+        aCardView.addSubview(detailSV)
+        detailWrap.addSubview(aCardView)
+
+        leftPanel.addArrangedSubview(listSV)
+        leftPanel.addArrangedSubview(detailWrap)
+        DispatchQueue.main.async { leftPanel.setPosition(listH, ofDividerAt: 0) }
+
+        // --- Graph (right panel) ---
+        let av = AssociationGraphView(
+            frame: NSRect(x: 0, y: 0, width: frame.width - listW - 1, height: contentH),
+            associations: associations)
+        av.autoresizingMask = [.width, .height]
+
+        // Shared selection handler
+        let selectAssociation: (String?) -> Void = { [weak self, weak av, weak listTV, weak detailTV] selectedId in
+            av?.highlightedId = selectedId
+            // Clear previous highlight and apply new one
+            if let tv = listTV, let ts = tv.textStorage {
+                let full = NSRange(location: 0, length: ts.length)
+                ts.removeAttribute(.backgroundColor, range: full)
+                if let id = selectedId {
+                    var found: NSRange?
+                    ts.enumerateAttribute(.link, in: full) { val, range, stop in
+                        if (val as? NSString) == "assoc:\(id)" as NSString {
+                            found = range; stop.pointee = true
+                        }
+                    }
+                    if let r = found {
+                        let lineRange = (ts.string as NSString).lineRange(for: r)
+                        let hlColor = NSColor.controlAccentColor.withAlphaComponent(0.15)
+                        ts.addAttribute(.backgroundColor, value: hlColor, range: lineRange)
+                        tv.scrollRangeToVisible(r)
+                    }
+                }
+            }
+            // Update detail pane
+            guard let self = self, let dtv = detailTV else { return }
+            guard let id = selectedId,
+                  let assoc = self.associations.first(where: { $0.id == id }) else {
+                let rt = RichText()
+                rt.dim("Select an association to see linked patterns and details.")
+                dtv.textStorage?.setAttributedString(rt.build())
+                return
+            }
+            self.renderAssociationDetail(assoc, into: dtv)
+        }
+
+        // List + Detail → Graph + Detail (handles both assoc: and pattern: links)
+        let ald = JournalLinkDelegate { [weak self] link in
+            if link.hasPrefix("assoc:") {
+                selectAssociation(String(link.dropFirst("assoc:".count)))
+            } else if link.hasPrefix("pattern:") {
+                // Navigate to Patterns tab
+                self?.selectTab(1)
+            }
+        }
+        assocListDelegate = ald
+        listTV.delegate   = ald
+        detailTV.delegate = ald
+        detailTV.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
+
+        // Graph → List + Detail
+        av.onNodeSelected = { selectedId in
+            selectAssociation(selectedId)
+        }
+        assocGraphView = av
+
+        // Graph wrapper with search field overlay
+        let graphWrap = NSView(frame: NSRect(x: 0, y: 0, width: frame.width - listW - 1, height: contentH))
+        graphWrap.autoresizingMask = [.width, .height]
+
+        // Search field at top of graph
+        let searchH: CGFloat = 32
+        let searchBar = NSView(frame: NSRect(x: 0, y: contentH - searchH, width: graphWrap.frame.width, height: searchH))
+        searchBar.autoresizingMask = [.width, .minYMargin]
+        searchBar.wantsLayer = true
+        searchBar.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.85).cgColor
+
+        let graphSearch = NSSearchField(frame: NSRect(x: 8, y: 4, width: graphWrap.frame.width - 16, height: 24))
+        graphSearch.placeholderString = "Filter graph nodes…"
+        graphSearch.font = .systemFont(ofSize: 11)
+        graphSearch.autoresizingMask = [.width]
+        graphSearch.target = self
+        graphSearch.action = #selector(assocGraphSearchChanged(_:))
+        searchBar.addSubview(graphSearch)
+
+        av.frame = NSRect(x: 0, y: 0, width: graphWrap.frame.width, height: contentH - searchH)
+        av.autoresizingMask = [.width, .height]
+        graphWrap.addSubview(av)
+        graphWrap.addSubview(searchBar)
+
+        split.addArrangedSubview(leftPanel)
+        split.addArrangedSubview(graphWrap)
+        container.addSubview(split)
+        DispatchQueue.main.async { split.setPosition(listW, ofDividerAt: 0) }
+        return container
+    }
+
+    @objc private func assocGraphSearchChanged(_ sender: NSSearchField) {
+        assocGraphView?.applySearch(sender.stringValue)
+    }
+
+    /// Render association detail into a text view — full hypothesis, metadata, linked patterns, and suggested rule.
+    private func renderAssociationDetail(_ assoc: Association, into tv: NSTextView) {
+        let rt = RichText()
+
+        // Hypothesis header
+        rt.subheader(assoc.hypothesis)
+        rt.spacer()
+
+        // Metadata
+        let confPct = Int(assoc.confidence * 100)
+        let filled  = String(repeating: "▮", count: confPct / 10)
+        let empty   = String(repeating: "░", count: 10 - confPct / 10)
+        let metaStr = NSMutableAttributedString()
+        metaStr.append(NSAttributedString(string: "\(filled)\(empty) \(confPct)%", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor]))
+        if assoc.actionable {
+            metaStr.append(NSAttributedString(string: "  ·  ◆ actionable", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                .foregroundColor: NSColor.systemGreen]))
+        }
+        metaStr.append(NSAttributedString(string: "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 11)]))
+        rt.raw(metaStr)
+
+        // Suggested rule
+        if let rule = assoc.suggestedRule, !rule.isEmpty {
+            rt.spacer()
+            let ruleStr = NSMutableAttributedString()
+            ruleStr.append(NSAttributedString(string: "→ Rule: ", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.systemYellow]))
+            ruleStr.append(NSAttributedString(string: rule + "\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.labelColor]))
+            rt.raw(ruleStr)
+        }
+
+        // Linked patterns — resolve IDs to actual pattern objects
+        let linkedIds = assoc.patternsLinked ?? []
+        if !linkedIds.isEmpty {
+            let resolvedPatterns = linkedIds.compactMap { id in
+                patterns.first { $0.id == id }
+            }
+            rt.spacer()
+            let hdrStr = NSMutableAttributedString()
+            hdrStr.append(NSAttributedString(string: "🔗 Linked Patterns", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.systemTeal]))
+            hdrStr.append(NSAttributedString(string: "  (\(resolvedPatterns.count) of \(linkedIds.count) resolved)\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 10),
+                .foregroundColor: NSColor.tertiaryLabelColor]))
+            rt.raw(hdrStr)
+
+            for pat in resolvedPatterns.sorted(by: { $0.confidence > $1.confidence }) {
+                let pConf = Int(pat.confidence * 100)
+                let valDot: String = pat.valence == "positive" ? "▲" : pat.valence == "negative" ? "▼" : "·"
+                let valCol: NSColor = pat.valence == "positive" ? .systemGreen
+                                    : pat.valence == "negative" ? .systemOrange : .tertiaryLabelColor
+                let catColor: NSColor = .secondaryLabelColor
+                let pText = pat.pattern.count > 55 ? String(pat.pattern.prefix(52)) + "…" : pat.pattern
+
+                let pLine = NSMutableAttributedString()
+                pLine.append(NSAttributedString(string: "  \(valDot) ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: valCol]))
+                pLine.append(NSAttributedString(string: "\(pConf)%  ", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .medium),
+                    .foregroundColor: catColor]))
+                pLine.append(NSAttributedString(string: pText + "\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: NSColor.labelColor,
+                    .link: "pattern:\(pat.stableKey)" as NSString,
+                    .cursor: NSCursor.pointingHand]))
+                pLine.append(NSAttributedString(string: "        \(pat.category)  ·  \(pat.valence)\n", attributes: [
+                    .font: NSFont.systemFont(ofSize: 9.5),
+                    .foregroundColor: NSColor.tertiaryLabelColor]))
+                rt.raw(pLine)
+            }
+
+            // Show unresolved IDs if any
+            let unresolvedCount = linkedIds.count - resolvedPatterns.count
+            if unresolvedCount > 0 {
+                rt.dim("  + \(unresolvedCount) pattern(s) not found in current data")
+            }
+        } else {
+            rt.spacer()
+            rt.dim("No linked patterns.")
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+        tv.scrollToBeginningOfDocument(nil)
+    }
+
+    // ── Tab 3: Journal ─────────────────────────────────────────────────────────
+
+    private func buildJournalView(frame: NSRect) -> NSView {
+        let bannerH: CGFloat = 40
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+
+        let allTok   = journal.map { $0.tokensUsed }
+        let totalTok = allTok.reduce(0, +)
+        let maxTok   = allTok.max() ?? 0
+        let avgTok   = journal.isEmpty ? 0 : totalTok / journal.count
+        let skipped  = journal.filter { $0.sessionsAnalyzed == 0 }.count
+
+        let banner = makeStatsBanner(
+            frame: NSRect(x: 0, y: frame.height - bannerH, width: frame.width, height: bannerH),
+            stats: [
+                ("Cycles",  "\(journal.count)",  nil),
+                ("Skipped", "\(skipped)",         skipped > 0 ? .systemOrange : nil),
+                ("Total tok", fmtNum(totalTok),  nil),
+                ("Avg tok",   fmtNum(avgTok),    nil),
+                ("Peak tok",  fmtNum(maxTok),    nil),
+            ])
+        banner.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(banner)
+
+        // Calendar heat map — sits between banner and scroll view
+        let heatMapH: CGFloat = journal.isEmpty ? 0 : 130
+        let heatMap = CalendarHeatMapView(frame: NSRect(
+            x: 24, y: frame.height - bannerH - heatMapH,
+            width: frame.width - 48, height: heatMapH))
+        heatMap.autoresizingMask = [.width, .minYMargin]
+        if !journal.isEmpty {
+            heatMap.entries = journal.compactMap { entry -> (date: Date, tokens: Int)? in
+                guard let d = isoDate(entry.timestamp) else { return nil }
+                return (date: d, tokens: entry.tokensUsed)
+            }
+            container.addSubview(heatMap)
+        }
+
+        let (sv, tv) = makeScrollableTextView(
+            frame: NSRect(x: 0, y: 0, width: frame.width, height: frame.height - bannerH - heatMapH))
+        sv.autoresizingMask = [.width, .height]
+        container.addSubview(sv)
+
+        let rt = RichText()
+        rt.header("Dream Journal  (\(journal.count) cycles)")
+        rt.spacer()
+
+        if journal.isEmpty {
+            rt.dim("No journal entries yet.")
+            tv.textStorage?.setAttributedString(rt.build())
+            return container
+        }
+
+        let spark = fmtSparkline(allTok)
+        if !spark.isEmpty {
+            rt.raw(NSAttributedString(string: "Token usage:  \(spark)  (oldest → newest)\n", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor]))
+            rt.spacer()
+        }
+
+        let maxTokD = Double(maxTok > 0 ? maxTok : 1)
+        for entry in journal.reversed() {
+            rt.divider()
+            rt.subheader("\(fmtDate(entry.timestamp))  ·  \(timeAgo(entry.timestamp))")
+            let parts = [
+                entry.sessionsAnalyzed  > 0 ? "\(entry.sessionsAnalyzed) sessions"  : nil,
+                entry.patternsExtracted > 0 ? "\(entry.patternsExtracted) patterns"  : nil,
+                entry.associationsFound > 0 ? "\(entry.associationsFound) assoc"     : nil,
+                entry.insightsPromoted  > 0 ? "\(entry.insightsPromoted) insights"   : nil,
+            ].compactMap { $0 }
+            rt.body("  " + (parts.isEmpty ? "skipped — no sessions to analyze" : parts.joined(separator: "  ·  ")))
+            let frac   = Double(entry.tokensUsed) / maxTokD
+            let barLen = max(1, Int(frac * 36))
+            let barStr = String(repeating: "█", count: barLen) + String(repeating: "░", count: 36 - barLen)
+            let tokCol: NSColor = frac > 0.8 ? .systemOrange : frac > 0.4 ? .systemBlue : .secondaryLabelColor
+            rt.raw(NSAttributedString(string: "  \(barStr)  \(fmtNum(entry.tokensUsed)) tokens\n", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular),
+                .foregroundColor: tokCol]))
+            rt.spacer()
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+        return container
+    }
+
+    // ── Tab 4: Insights ────────────────────────────────────────────────────────
+
+    private func buildInsightsView(frame: NSRect) -> NSView {
+        let bannerH: CGFloat = 40
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+
+        let raw = readAllInsights() ?? ""
+        let blocks = raw.components(separatedBy: "\n").reduce(into: [(header: String, lines: [String])]()) { acc, line in
+            if line.hasPrefix("### Insight") { acc.append((header: line, lines: [])) }
+            else if !acc.isEmpty { acc[acc.count - 1].lines.append(line) }
+        }
+        let hiBlock  = blocks.filter { b -> Bool in
+            guard let r = b.header.range(of: #"conf=([0-9.]+)"#, options: .regularExpression) else { return false }
+            return (Double(b.header[r].replacingOccurrences(of: "conf=", with: "")) ?? 0) >= 0.8
+        }.count
+        let avgConfI: Double = {
+            let vals = blocks.compactMap { b -> Double? in
+                guard let r = b.header.range(of: #"conf=([0-9.]+)"#, options: .regularExpression) else { return nil }
+                return Double(b.header[r].replacingOccurrences(of: "conf=", with: ""))
+            }
+            return vals.isEmpty ? 0.0 : vals.reduce(0, +) / Double(vals.count)
+        }()
+
+        // Read existing feedback ratings
+        let feedback = readDashboardInsightFeedback()
+        let ratedCount = feedback.count
+
+        let banner = makeStatsBanner(
+            frame: NSRect(x: 0, y: frame.height - bannerH, width: frame.width, height: bannerH),
+            stats: [
+                ("Insights",  "\(blocks.count)",  nil),
+                ("High conf", "\(hiBlock)",        hiBlock > 0 ? .systemGreen : nil),
+                ("Avg conf",  String(format: "%.0f%%", avgConfI * 100), nil),
+                ("Rated",     "\(ratedCount)",     ratedCount > 0 ? .systemBlue : nil),
+            ])
+        banner.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(banner)
+
+        let (sv, tv) = makeScrollableTextView(
+            frame: NSRect(x: 0, y: 0, width: frame.width, height: frame.height - bannerH))
+        sv.autoresizingMask = [.width, .height]
+        container.addSubview(sv)
+        insightsTextView = tv
+
+        let rt = RichText()
+        rt.header("Insights")
+        rt.spacer()
+
+        guard !raw.isEmpty else {
+            rt.dim("No insights yet — run a few dream cycles first.")
+            tv.textStorage?.setAttributedString(rt.build())
+            return container
+        }
+
+        rt.dim("\(blocks.count) insight\(blocks.count == 1 ? "" : "s") on record  ·  \(hiBlock) high-confidence (≥80%)\(ratedCount > 0 ? "  ·  \(ratedCount) rated" : "")")
+        rt.spacer()
+
+        var insightTextsMap: [String: String] = [:]
+        let reversed = blocks.reversed()
+        for (displayIdx, block) in reversed.enumerated() {
+            // Derive a stable insight ID from header content (hash of the header text)
+            let insightId = stableInsightId(block.header)
+            let existingRating = feedback[insightId]
+            insightTextsMap[insightId] = ([block.header] + block.lines).joined(separator: "\n")
+
+            var conf = 0.70
+            if let r = block.header.range(of: #"conf=([0-9.]+)"#, options: .regularExpression) {
+                conf = Double(block.header[r].replacingOccurrences(of: "conf=", with: "")) ?? 0.70
+            }
+            let color: NSColor = conf >= 0.85 ? .systemGreen : conf >= 0.65 ? .systemBlue : .secondaryLabelColor
+            let confPctI = Int(conf * 100)
+            let confFilled = String(repeating: "▮", count: confPctI / 10)
+            let confEmpty  = String(repeating: "░", count: 10 - confPctI / 10)
+
+            // Index number in light yellow + confidence bar
+            let indexNum = displayIdx + 1
+            let headerLine = NSMutableAttributedString()
+            headerLine.append(NSAttributedString(string: "#\(indexNum) ", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
+                .foregroundColor: NSColor.systemYellow.withAlphaComponent(0.85)]))
+            headerLine.append(NSAttributedString(string: "\(confFilled)\(confEmpty) \(confPctI)%", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: color]))
+
+            // Rate insight: thumbs up/down buttons
+            let upColor: NSColor = existingRating == "up" ? .systemGreen : .tertiaryLabelColor
+            let downColor: NSColor = existingRating == "down" ? .systemRed : .tertiaryLabelColor
+            headerLine.append(NSAttributedString(string: "    ", attributes: [
+                .font: NSFont.systemFont(ofSize: 11)]))
+            headerLine.append(NSAttributedString(string: "👍", attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: upColor,
+                .link: "insight-up:\(insightId)" as NSString,
+                .cursor: NSCursor.pointingHand]))
+            headerLine.append(NSAttributedString(string: " ", attributes: [
+                .font: NSFont.systemFont(ofSize: 11)]))
+            headerLine.append(NSAttributedString(string: "👎", attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: downColor,
+                .link: "insight-down:\(insightId)" as NSString,
+                .cursor: NSCursor.pointingHand]))
+            headerLine.append(NSAttributedString(string: "  ", attributes: [
+                .font: NSFont.systemFont(ofSize: 11)]))
+            headerLine.append(NSAttributedString(string: "📋", attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+                .link: "insight-copy:\(insightId)" as NSString,
+                .cursor: NSCursor.pointingHand]))
+            headerLine.append(NSAttributedString(string: "\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 11)]))
+            rt.raw(headerLine)
+
+            for line in block.lines {
+                if line == "---" || line.isEmpty { continue }
+                // Strip blockquote prefix for body text
+                let stripped = line.hasPrefix("> ") ? String(line.dropFirst(2)) : line
+                // Determine role-based styling
+                let isRule    = stripped.hasPrefix("**Rule:")
+                let isPattern = stripped.hasPrefix("_Patterns:") || stripped.hasPrefix("_Pattern:")
+                let baseFont: NSFont
+                let baseColor: NSColor
+                if isPattern {
+                    baseFont  = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+                    baseColor = NSColor.tertiaryLabelColor
+                } else if isRule {
+                    baseFont  = NSFont.systemFont(ofSize: 13, weight: .medium)
+                    baseColor = color
+                } else {
+                    baseFont  = NSFont.systemFont(ofSize: 13)
+                    baseColor = color
+                }
+                // Parse inline markdown: **bold** and _italic_
+                let result = NSMutableAttributedString()
+                var cursor = stripped.startIndex
+                while cursor < stripped.endIndex {
+                    // Check for **bold**
+                    if stripped[cursor...].hasPrefix("**") {
+                        let afterOpen = stripped.index(cursor, offsetBy: 2)
+                        if let closeRange = stripped.range(of: "**", range: afterOpen..<stripped.endIndex) {
+                            let boldText = String(stripped[afterOpen..<closeRange.lowerBound])
+                            let bFont = NSFont.systemFont(ofSize: baseFont.pointSize, weight: .bold)
+                            result.append(NSAttributedString(string: boldText, attributes: [
+                                .font: bFont, .foregroundColor: baseColor]))
+                            cursor = closeRange.upperBound
+                            continue
+                        }
+                    }
+                    // Check for _italic_ (but not inside identifiers/paths)
+                    if stripped[cursor] == "_" && (cursor == stripped.startIndex || stripped[stripped.index(before: cursor)] == " ") {
+                        let afterOpen = stripped.index(after: cursor)
+                        if afterOpen < stripped.endIndex,
+                           let closeIdx = stripped[afterOpen...].firstIndex(of: "_"),
+                           closeIdx > afterOpen {
+                            let italicText = String(stripped[afterOpen..<closeIdx])
+                            let desc = baseFont.fontDescriptor.withSymbolicTraits(.italic)
+                            let iFont = NSFont(descriptor: desc, size: baseFont.pointSize) ?? baseFont
+                            result.append(NSAttributedString(string: italicText, attributes: [
+                                .font: iFont, .foregroundColor: baseColor]))
+                            cursor = stripped.index(after: closeIdx)
+                            continue
+                        }
+                    }
+                    // Plain character
+                    result.append(NSAttributedString(string: String(stripped[cursor]), attributes: [
+                        .font: baseFont, .foregroundColor: baseColor]))
+                    cursor = stripped.index(after: cursor)
+                }
+                result.append(NSAttributedString(string: "\n", attributes: [
+                    .font: baseFont, .foregroundColor: baseColor]))
+                rt.raw(result)
+            }
+            rt.spacer()
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+
+        // Wire up feedback delegate for rating clicks + clipboard
+        insightFeedbackDelegate = InsightFeedbackDelegate { [weak self] insightId, rating in
+            self?.recordDashboardInsightFeedback(insightId: insightId, rating: rating)
+            // Rebuild the insights view to reflect updated rating state
+            DispatchQueue.main.async {
+                self?.refreshInsightsView()
+            }
+        }
+        insightFeedbackDelegate?.insightTexts = insightTextsMap
+        tv.delegate = insightFeedbackDelegate
+        tv.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
+
+        return container
+    }
+
+    /// Generate a stable ID for an insight from its header line.
+    private func stableInsightId(_ header: String) -> String {
+        // Use a simple hash of the header content for stability across rebuilds
+        let hash = header.utf8.reduce(0) { ($0 &* 31) &+ UInt64($1) }
+        return String(format: "%016llx", hash)
+    }
+
+    /// Read insight feedback from dreams/insight-feedback.jsonl.
+    private func readDashboardInsightFeedback() -> [String: String] {
+        let path = subDir + "/dreams/insight-feedback.jsonl"
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
+        var result: [String: String] = [:]
+        for line in raw.components(separatedBy: "\n") where !line.isEmpty {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = obj["insight_id"] as? String,
+                  let rating = obj["rating"] as? String
+            else { continue }
+            result[id] = rating
+        }
+        return result
+    }
+
+    /// Record a feedback action to dreams/insight-feedback.jsonl.
+    private func recordDashboardInsightFeedback(insightId: String, rating: String) {
+        let path = subDir + "/dreams/insight-feedback.jsonl"
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let entry: [String: Any] = ["ts": ts, "insight_id": insightId, "rating": rating]
+        guard let data = try? JSONSerialization.data(withJSONObject: entry),
+              let line = String(data: data, encoding: .utf8)
+        else { return }
+        let content = line + "\n"
+        if let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile()
+            fh.write(content.data(using: .utf8) ?? Data())
+            fh.closeFile()
+        } else {
+            try? content.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Refresh the insights tab content after a feedback action.
+    private func refreshInsightsView() {
+        guard insightsTextView != nil else { return }
+        // Find the insights tab index (tab 4)
+        if contentViews.count > 4 {
+            let parent = contentViews[4].superview ?? contentViews[4]
+            let newView = buildInsightsView(frame: parent.bounds)
+            newView.frame = contentViews[4].frame
+            newView.autoresizingMask = contentViews[4].autoresizingMask
+            contentViews[4].superview?.replaceSubview(contentViews[4], with: newView)
+            contentViews[4] = newView
+        }
+    }
+
+    // ── Tab 5: Metacog ─────────────────────────────────────────────────────────
+
+    private func buildMetacogView(frame: NSRect) -> NSView {
+        let bannerH: CGFloat = 40
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+
+        let (audit, filename) = readLatestAudit()
+        let latestRaw = readLatestAuditRaw()
+        let calScore  = audit?.calibrationScore ?? 0.0
+        let over      = audit?.overconfidentCount  ?? 0
+        let under     = audit?.underconfidentCount ?? 0
+        let well      = audit?.wellCalibratedCount ?? 0
+        let total     = over + under + well
+        let biasCount = audit?.biasesDetected?.count ?? 0
+
+        let calColor: NSColor = calScore >= 0.8 ? .systemGreen : calScore >= 0.5 ? .systemOrange : .systemRed
+        let banner = makeStatsBanner(
+            frame: NSRect(x: 0, y: frame.height - bannerH, width: frame.width, height: bannerH),
+            stats: [
+                ("Calibration", audit != nil ? String(format: "%.2f", calScore) : "—", audit != nil ? calColor : nil),
+                ("Samples",     "\(total)",    nil),
+                ("Well-cal",    "\(well)",     well > 0 ? .systemGreen : nil),
+                ("Overconf",    "\(over)",     over > 0 ? .systemOrange : nil),
+                ("Biases",      "\(biasCount)", biasCount > 0 ? .systemOrange : nil),
+            ])
+        banner.autoresizingMask = [.width, .minYMargin]
+        container.addSubview(banner)
+
+        let (sv, tv) = makeScrollableTextView(
+            frame: NSRect(x: 0, y: 0, width: frame.width, height: frame.height - bannerH))
+        sv.autoresizingMask = [.width, .height]
+        container.addSubview(sv)
+
+        let rt = RichText()
+        rt.header("Metacognition")
+        rt.spacer()
+
+        // ── How It Works explainer ──
+        rt.subheader("How Metacognition Works")
+        rt.spacer()
+        let diagramColor = NSColor.systemCyan.withAlphaComponent(0.7)
+        let diagram = """
+          ┌─────────────────┐     ┌──────────────┐     ┌──────────────────┐
+          │  Claude Session │────▶│  PostToolUse  │────▶│  Activity Store  │
+          │  (your work)    │     │  Hook (25%)   │     │  activity.jsonl  │
+          └─────────────────┘     └──────────────┘     └────────┬─────────┘
+                                                                │
+                  ┌─────────────────────────────────────────────┘
+                  ▼
+          ┌──────────────────┐     ┌──────────────┐     ┌──────────────────┐
+          │  Consolidation   │────▶│  Metacog LLM  │────▶│  Audit Report   │
+          │  Cycle (idle 4h) │     │  Analysis     │     │  calibration,   │
+          └──────────────────┘     └──────────────┘     │  biases, recs   │
+                                                         └──────────────────┘
+        """
+        rt.raw(NSAttributedString(string: diagram + "\n", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: diagramColor]))
+        rt.dim("  Every 4th tool call is sampled. During idle consolidation, an LLM")
+        rt.dim("  audits recent samples for calibration quality, biases, and patterns.")
+        rt.dim("  The calibration score measures how well Claude's confidence predictions")
+        rt.dim("  match actual outcomes (1.0 = perfect, <0.5 = significant miscalibration).")
+        rt.spacer()
+
+        if let audit = audit {
+            var dateStr = "—"
+            if let fn = filename {
+                let parts = fn.components(separatedBy: "-")
+                if parts.count >= 2 {
+                    let df = DateFormatter(); df.dateFormat = "yyyyMMdd HHmm"
+                    if let d = df.date(from: "\(parts[0]) \(parts[1])") {
+                        dateStr = fmtDateWithAge(ISO8601DateFormatter().string(from: d))
+                    }
+                }
+            }
+            rt.subheader("Latest Audit")
+            rt.dim("  From: \(dateStr)")
+
+            // Show extended audit metadata when available
+            if let raw = latestRaw {
+                var metaDetails: [String] = []
+                if let units = raw["units_analyzed"] as? Int, let unitTotal = raw["units_total"] as? Int {
+                    metaDetails.append("  Analyzed \(units) of \(unitTotal) sampled units")
+                }
+                if let tokens = raw["tokens_used"] as? Int {
+                    metaDetails.append("  Tokens used: \(tokens)")
+                }
+                if let sessions = raw["sessions"] as? [[Any]] {
+                    metaDetails.append("  Sessions covered: \(sessions.count)")
+                }
+                for detail in metaDetails { rt.dim(detail) }
+            }
+            rt.spacer()
+
+            if let score = audit.calibrationScore {
+                let label = score >= 0.8 ? "well-calibrated" : score >= 0.5 ? "moderate"
+                          : score >= 0.2 ? "under-calibrated" : "poor"
+                rt.raw(NSAttributedString(
+                    string: String(format: "  Calibration   %.2f / 1.00  (%@)\n", score, label),
+                    attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: calColor]))
+                rt.dim("  1.0 = predictions match outcomes perfectly")
+                rt.spacer()
+            }
+
+            if total > 0 {
+                rt.subheader("Sample Breakdown  (\(total) samples)")
+                func pct(_ n: Int) -> String { String(format: "%d%%", n * 100 / max(1, total)) }
+                // Visual bar for each category
+                let barWidth = 20
+                let wellBar  = String(repeating: "▮", count: well * barWidth / max(1, total))
+                let overBar  = String(repeating: "▮", count: over * barWidth / max(1, total))
+                let underBar = String(repeating: "▮", count: under * barWidth / max(1, total))
+                rt.raw(NSAttributedString(string: "  ✓ Well-calibrated   \(wellBar) \(well)  (\(pct(well)))\n", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: NSColor.systemGreen]))
+                rt.raw(NSAttributedString(string: "  ↑ Overconfident     \(overBar) \(over)  (\(pct(over)))\n", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: NSColor.systemOrange]))
+                rt.raw(NSAttributedString(string: "  ↓ Underconfident    \(underBar) \(under)  (\(pct(under)))\n", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: NSColor.systemBlue]))
+                rt.spacer()
+            }
+
+            if let biases = audit.biasesDetected, !biases.isEmpty {
+                rt.subheader("Biases Detected  (\(biases.count))")
+                for bias in biases {
+                    // Format bias names: replace underscores with spaces, title case
+                    let formatted = bias.replacingOccurrences(of: "_", with: " ")
+                    rt.raw(NSAttributedString(string: "  ⚠ \(formatted)\n", attributes: [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                        .foregroundColor: NSColor.systemOrange]))
+                }
+                rt.spacer()
+            }
+
+            if let recs = audit.recommendations, !recs.isEmpty {
+                rt.subheader("Recommendations")
+                recs.enumerated().forEach { i, r in rt.body("  \(i + 1). \(r)") }
+                rt.spacer()
+            }
+        } else {
+            rt.dim("No metacog audit data found yet.")
+            rt.body("Audits are created during background consolidation cycles.")
+            rt.spacer()
+        }
+
+        // ── Calibration trend ──
+        let calPath = subDir + "/metacog/calibration.jsonl"
+        if let calContent = try? String(contentsOfFile: calPath, encoding: .utf8) {
+            let scores: [Double] = calContent.components(separatedBy: "\n").filter { !$0.isEmpty }
+                .compactMap { line -> Double? in
+                    guard let d = line.data(using: .utf8),
+                          let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                          let s = j["calibration_score"] as? Double else { return nil }
+                    return s
+                }
+            if scores.count >= 2 {
+                rt.subheader("Calibration Trend  (last \(min(scores.count, 10)) cycles)")
+                let window    = Array(scores.suffix(10))
+                let sparkVals = window.map { Int($0 * 10) }
+                let avg       = window.reduce(0, +) / Double(window.count)
+                rt.mono("  \(fmtSparkline(sparkVals, width: 10))  avg \(String(format: "%.2f", avg))")
+                let trend    = (scores.last ?? 0) - (scores.first ?? 0)
+                let trendStr = trend > 0.05 ? "↑ improving" : trend < -0.05 ? "↓ declining" : "→ stable"
+                rt.dim("  Overall trend: \(trendStr)")
+                rt.spacer()
+            }
+        }
+
+        // ── Audit history ──
+        let auditHistory = readAuditHistory(limit: 6)
+        if auditHistory.count >= 2 {
+            rt.subheader("Audit History  (last \(auditHistory.count))")
+            for entry in auditHistory {
+                let scoreStr = String(format: "%.2f", entry.score)
+                let hColor: NSColor = entry.score >= 0.8 ? .systemGreen
+                                    : entry.score >= 0.5 ? .systemOrange : .systemRed
+                let line = NSMutableAttributedString()
+                line.append(NSAttributedString(string: "  \(entry.dateLabel)  ", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+                    .foregroundColor: NSColor.secondaryLabelColor]))
+                line.append(NSAttributedString(string: scoreStr, attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold),
+                    .foregroundColor: hColor]))
+                line.append(NSAttributedString(string: "  \(entry.biases)b  \(entry.samples)s\n", attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+                    .foregroundColor: NSColor.tertiaryLabelColor]))
+                rt.raw(line)
+            }
+            rt.spacer()
+        }
+
+        // ── Activity stats ──
+        let actPath = subDir + "/metacog/activity.jsonl"
+        if let actContent = try? String(contentsOfFile: actPath, encoding: .utf8) {
+            let lines = actContent.components(separatedBy: "\n").filter { !$0.isEmpty }
+            let cnt = lines.count
+            rt.subheader("Activity Samples")
+            rt.body("  \(cnt) tool-call samples recorded")
+            rt.dim("  Sampled at 25% of PostToolUse events")
+
+            // Show top tools if parseable
+            var toolCounts: [String: Int] = [:]
+            for line in lines.suffix(500) {
+                guard let d = line.data(using: .utf8),
+                      let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                      let tool = j["tool"] as? String else { continue }
+                toolCounts[tool, default: 0] += 1
+            }
+            if !toolCounts.isEmpty {
+                let top = toolCounts.sorted { $0.value > $1.value }.prefix(5)
+                rt.dim("  Top tools (recent 500 samples):")
+                for (tool, count) in top {
+                    rt.dim("    \(count)×  \(tool)")
+                }
+            }
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+        return container
+    }
+
+    /// Read raw JSON of the latest audit for extended metadata.
+    private func readLatestAuditRaw() -> [String: Any]? {
+        let auditsDir = subDir + "/metacog/audits"
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: auditsDir),
+              let latest = files.filter({ $0.hasSuffix(".json") }).sorted().last,
+              let data = try? Data(contentsOf: URL(fileURLWithPath: auditsDir + "/" + latest)),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return obj
+    }
+
+    private struct AuditHistoryEntry {
+        let dateLabel: String
+        let score: Double
+        let biases: Int
+        let samples: Int
+    }
+
+    /// Read recent audit files and extract summary info for the history view.
+    private func readAuditHistory(limit: Int) -> [AuditHistoryEntry] {
+        let auditsDir = subDir + "/metacog/audits"
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: auditsDir) else { return [] }
+        let sorted = files.filter { $0.hasSuffix(".json") }.sorted().suffix(limit)
+        return sorted.compactMap { fn -> AuditHistoryEntry? in
+            let path = auditsDir + "/" + fn
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return nil }
+
+            // Parse the response JSON to get the audit fields
+            var score = 0.0
+            var biases = 0
+            var samples = 0
+            if let response = obj["response"] as? String {
+                let stripped = response
+                    .replacingOccurrences(of: "```json\n", with: "")
+                    .replacingOccurrences(of: "```json",   with: "")
+                    .replacingOccurrences(of: "\n```",     with: "")
+                    .replacingOccurrences(of: "```",       with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let inner = stripped.data(using: .utf8),
+                   let audit = try? JSONSerialization.jsonObject(with: inner) as? [String: Any] {
+                    score = audit["calibration_score"] as? Double ?? 0
+                    biases = (audit["biases_detected"] as? [Any])?.count ?? 0
+                    let w = audit["well_calibrated_count"] as? Int ?? 0
+                    let o = audit["overconfident_count"] as? Int ?? 0
+                    let u = audit["underconfident_count"] as? Int ?? 0
+                    samples = w + o + u
+                }
+            }
+
+            // Extract date from filename: "20260419-0310-audit.json"
+            let parts = fn.components(separatedBy: "-")
+            var dateLabel = fn
+            if parts.count >= 2 {
+                let df = DateFormatter(); df.dateFormat = "yyyyMMdd HHmm"
+                let outFmt = DateFormatter(); outFmt.dateFormat = "MMM dd HH:mm"
+                if let d = df.date(from: "\(parts[0]) \(parts[1])") {
+                    dateLabel = outFmt.string(from: d)
+                }
+            }
+            return AuditHistoryEntry(dateLabel: dateLabel, score: score, biases: biases, samples: samples)
+        }
+    }
+
+    // ── Tab 6: Search ──────────────────────────────────────────────────────────
+
+    private func buildSearchView(frame: NSRect) -> NSView {
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+
+        // Search field at top
+        let fieldH: CGFloat = 32
+        let pad: CGFloat = 16
+        let tagBarH: CGFloat = 30
+        let sf = NSSearchField(frame: NSRect(x: pad, y: frame.height - fieldH - pad,
+                                              width: frame.width - pad * 2, height: fieldH))
+        sf.autoresizingMask = [.width, .minYMargin]
+        sf.placeholderString = "Search — supports multiple words (fuzzy), e.g. \"retry tool\""
+        sf.font = .systemFont(ofSize: 13)
+        sf.target = self
+        sf.action = #selector(searchChanged(_:))
+        sf.sendsSearchStringImmediately = true
+        container.addSubview(sf)
+        searchField = sf
+
+        // Quick-filter tag bar
+        let tagBar = NSView(frame: NSRect(x: 0, y: frame.height - fieldH - pad - tagBarH - 4,
+                                           width: frame.width, height: tagBarH))
+        tagBar.autoresizingMask = [.width, .minYMargin]
+        let categories = Set(patterns.map { $0.category }).sorted()
+        var tagX: CGFloat = pad
+        for cat in categories.prefix(12) {
+            let tag = NSButton(frame: NSRect(x: tagX, y: 4, width: 0, height: 22))
+            tag.title = cat
+            tag.bezelStyle = .inline
+            tag.font = .systemFont(ofSize: 10, weight: .medium)
+            tag.contentTintColor = .systemTeal
+            tag.target = self
+            tag.action = #selector(searchTagClicked(_:))
+            tag.sizeToFit()
+            tag.frame.size.width += 12
+            tagBar.addSubview(tag)
+            tagX += tag.frame.width + 6
+        }
+        container.addSubview(tagBar)
+
+        // Results area below
+        let topUsed = fieldH + pad + tagBarH + 8
+        let resultsFrame = NSRect(x: 0, y: 0,
+                                   width: frame.width,
+                                   height: frame.height - topUsed)
+        let (sv, tv) = makeScrollableTextView(frame: resultsFrame)
+        sv.autoresizingMask = [.width, .height]
+        container.addSubview(sv)
+        searchResultsTextView = tv
+
+        // Wire up link delegate for clickable search results
+        searchLinkDelegate = JournalLinkDelegate { [weak self] link in
+            if link.hasPrefix("pattern:") {
+                self?.selectTab(1) // Navigate to Patterns tab
+            } else if link.hasPrefix("assoc:") {
+                self?.selectTab(2) // Navigate to Associations tab
+            } else if link.hasPrefix("insight:") {
+                self?.selectTab(4) // Navigate to Insights tab
+            } else if link.hasPrefix("metacog:") {
+                self?.selectTab(5) // Navigate to Metacog tab
+            }
+        }
+        tv.delegate = searchLinkDelegate
+        tv.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
+
+        // Show initial placeholder with stats
+        renderSearchPlaceholder(tv)
+        return container
+    }
+
+    private func renderSearchPlaceholder(_ tv: NSTextView) {
+        let rt = RichText()
+        rt.spacer()
+        rt.subheader("  Search i-dream Knowledge Base")
+        rt.spacer()
+        rt.body("  Type to search across all data. Multiple words are matched independently")
+        rt.body("  (fuzzy): \"retry tool\" matches items containing both \"retry\" AND \"tool\".")
+        rt.spacer()
+        rt.dim("  ┌─ Data Sources ────────────────────────────────────────────┐")
+        rt.dim("  │  Patterns        \(patterns.count) items    pattern text, category, valence  │")
+        rt.dim("  │  Associations    \(associations.count) items    hypotheses, suggested rules     │")
+        rt.dim("  │  Insights        full text     insight blocks with context     │")
+        rt.dim("  │  Metacog         latest audit  biases and recommendations      │")
+        rt.dim("  └──────────────────────────────────────────────────────────────┘")
+        rt.spacer()
+        rt.dim("  Click a category tag above for quick filtering.")
+        rt.dim("  Use quotes for exact phrases (not yet supported — planned for V2).")
+        tv.textStorage?.setAttributedString(rt.build())
+    }
+
+    @objc private func searchTagClicked(_ sender: NSButton) {
+        searchField?.stringValue = sender.title
+        if let sf = searchField { searchChanged(sf) }
+    }
+
+    /// Fuzzy match: returns true if ALL words in `queryWords` appear in `text`.
+    private func fuzzyMatch(_ text: String, queryWords: [String]) -> Bool {
+        let lower = text.lowercased()
+        return queryWords.allSatisfy { lower.contains($0) }
+    }
+
+    /// Compute a relevance score: higher = better match. Rewards exact substring,
+    /// word-boundary matches, and early position.
+    private func relevanceScore(_ text: String, queryWords: [String], fullQuery: String) -> Int {
+        let lower = text.lowercased()
+        var score = 0
+        // Exact full query match bonus
+        if lower.contains(fullQuery) { score += 100 }
+        // Word-boundary bonus for each word
+        for w in queryWords {
+            if lower.hasPrefix(w) { score += 20 }
+            if lower.contains(" \(w)") { score += 10 }
+            if lower.contains(w) { score += 5 }
+        }
+        return score
+    }
+
+    @objc private func searchChanged(_ sender: NSSearchField) {
+        let rawQuery = sender.stringValue.trimmingCharacters(in: .whitespaces)
+        guard let tv = searchResultsTextView else { return }
+
+        if rawQuery.isEmpty {
+            searchDebounceTimer?.invalidate()
+            renderSearchPlaceholder(tv)
+            return
+        }
+
+        // Debounce: wait 150ms after last keystroke before executing search
+        searchDebounceTimer?.invalidate()
+        searchDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            self?.performSearch(rawQuery)
+        }
+    }
+
+    private func performSearch(_ rawQuery: String) {
+        guard let tv = searchResultsTextView else { return }
+        let query = rawQuery.lowercased()
+        let queryWords = query.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        let rt = RichText()
+        var totalHits = 0
+
+        // ── Patterns ────────────────────────────────────────────────────────
+        let matchedPatterns = patterns.enumerated().filter { (_, p) in
+            let searchable = "\(p.pattern) \(p.category) \(p.valence) \(p.id ?? "")"
+            return fuzzyMatch(searchable, queryWords: queryWords)
+        }.sorted { (a, b) in
+            let scoreA = relevanceScore(a.element.pattern, queryWords: queryWords, fullQuery: query)
+            let scoreB = relevanceScore(b.element.pattern, queryWords: queryWords, fullQuery: query)
+            return scoreA > scoreB
+        }
+        if !matchedPatterns.isEmpty {
+            rt.raw(sectionHeader("Patterns", count: matchedPatterns.count, icon: "◆", color: .systemTeal))
+            for (_, p) in matchedPatterns.prefix(30) {
+                let confPct = Int(p.confidence * 100)
+                let valColor: NSColor = p.valence == "positive" ? .systemGreen
+                    : p.valence == "negative" ? .systemRed : .secondaryLabelColor
+                let valIcon = p.valence == "positive" ? "▲" : p.valence == "negative" ? "▼" : "●"
+                // Tag pills: [category] [valence] [confidence]
+                let line = NSMutableAttributedString()
+                line.append(NSAttributedString(string: "  \(valIcon) ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: valColor]))
+                line.append(tagPill(p.category, color: .systemTeal))
+                line.append(NSAttributedString(string: " "))
+                line.append(tagPill(p.valence, color: valColor))
+                line.append(NSAttributedString(string: " "))
+                line.append(tagPill("\(confPct)%", color: confPct >= 80 ? .systemGreen : confPct >= 60 ? .systemBlue : .secondaryLabelColor))
+                line.append(NSAttributedString(string: "\n"))
+                rt.raw(line)
+                // Full pattern text with highlight — clickable link to Patterns tab
+                let patKey = p.stableKey
+                let highlighted = highlightQuery(in: p.pattern, queryWords: queryWords,
+                                                  baseFont: .systemFont(ofSize: 13),
+                                                  baseColor: .labelColor)
+                let indented = NSMutableAttributedString(string: "     ")
+                indented.append(highlighted)
+                // Add link attribute across the whole text range (excluding indent)
+                indented.addAttributes([
+                    .link: "pattern:\(patKey)" as NSString,
+                    .cursor: NSCursor.pointingHand,
+                ], range: NSRange(location: 5, length: indented.length - 5))
+                indented.append(NSAttributedString(string: "  → ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: NSColor.systemTeal.withAlphaComponent(0.6)]))
+                indented.append(NSAttributedString(string: "view", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: NSColor.systemTeal.withAlphaComponent(0.6),
+                    .link: "pattern:\(patKey)" as NSString,
+                    .cursor: NSCursor.pointingHand]))
+                indented.append(NSAttributedString(string: "\n"))
+                rt.raw(indented)
+                // Date if available
+                if let fs = p.firstSeen, !fs.isEmpty {
+                    rt.raw(NSAttributedString(string: "     First seen: \(fmtDate(fs))\n", attributes: [
+                        .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor]))
+                }
+                rt.raw(NSAttributedString(string: "\n"))
+            }
+            if matchedPatterns.count > 30 {
+                rt.dim("    … and \(matchedPatterns.count - 30) more patterns")
+            }
+            totalHits += matchedPatterns.count
+            rt.spacer()
+        }
+
+        // ── Associations ────────────────────────────────────────────────────
+        let matchedAssocs = associations.enumerated().filter { (_, a) in
+            let searchable = "\(a.hypothesis) \(a.suggestedRule ?? "") \(a.id)"
+            return fuzzyMatch(searchable, queryWords: queryWords)
+        }.sorted { (a, b) in
+            let scoreA = relevanceScore(a.element.hypothesis, queryWords: queryWords, fullQuery: query)
+            let scoreB = relevanceScore(b.element.hypothesis, queryWords: queryWords, fullQuery: query)
+            return scoreA > scoreB
+        }
+        if !matchedAssocs.isEmpty {
+            rt.raw(sectionHeader("Associations", count: matchedAssocs.count, icon: "◇", color: .systemOrange))
+            for (_, a) in matchedAssocs.prefix(30) {
+                let confPct = Int(a.confidence * 100)
+                let line = NSMutableAttributedString()
+                line.append(NSAttributedString(string: "  ", attributes: [:]))
+                if a.actionable {
+                    line.append(tagPill("actionable", color: .systemYellow))
+                    line.append(NSAttributedString(string: " "))
+                }
+                line.append(tagPill("\(confPct)%", color: confPct >= 80 ? .systemGreen : confPct >= 60 ? .systemBlue : .secondaryLabelColor))
+                line.append(NSAttributedString(string: "\n"))
+                rt.raw(line)
+                // Hypothesis with highlight — clickable link to Associations tab
+                let highlighted = highlightQuery(in: a.hypothesis, queryWords: queryWords,
+                                                  baseFont: .systemFont(ofSize: 13),
+                                                  baseColor: .labelColor)
+                let indented = NSMutableAttributedString(string: "     ")
+                indented.append(highlighted)
+                indented.addAttributes([
+                    .link: "assoc:\(a.id)" as NSString,
+                    .cursor: NSCursor.pointingHand,
+                ], range: NSRange(location: 5, length: indented.length - 5))
+                indented.append(NSAttributedString(string: "  ��� ", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: NSColor.systemOrange.withAlphaComponent(0.6)]))
+                indented.append(NSAttributedString(string: "view", attributes: [
+                    .font: NSFont.systemFont(ofSize: 10),
+                    .foregroundColor: NSColor.systemOrange.withAlphaComponent(0.6),
+                    .link: "assoc:\(a.id)" as NSString,
+                    .cursor: NSCursor.pointingHand]))
+                indented.append(NSAttributedString(string: "\n"))
+                rt.raw(indented)
+                // Suggested rule if present
+                if let rule = a.suggestedRule, !rule.isEmpty {
+                    let ruleHl = highlightQuery(in: rule, queryWords: queryWords,
+                                                 baseFont: .systemFont(ofSize: 12),
+                                                 baseColor: .secondaryLabelColor)
+                    let ruleLine = NSMutableAttributedString(string: "     Rule: ", attributes: [
+                        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+                        .foregroundColor: NSColor.secondaryLabelColor])
+                    ruleLine.append(ruleHl)
+                    ruleLine.append(NSAttributedString(string: "\n"))
+                    rt.raw(ruleLine)
+                }
+                rt.raw(NSAttributedString(string: "\n"))
+            }
+            if matchedAssocs.count > 30 {
+                rt.dim("    … and \(matchedAssocs.count - 30) more associations")
+            }
+            totalHits += matchedAssocs.count
+            rt.spacer()
+        }
+
+        // ── Insights ────────────────────────────────────────────────────────
+        if let raw = readAllInsights() {
+            let lines = raw.components(separatedBy: "\n")
+            var matchedLines: [(lineNum: Int, text: String)] = []
+            for (i, line) in lines.enumerated() {
+                if fuzzyMatch(line, queryWords: queryWords) {
+                    matchedLines.append((i + 1, line))
+                }
+            }
+            if !matchedLines.isEmpty {
+                rt.raw(sectionHeader("Insights", count: matchedLines.count, icon: "✦", color: .systemYellow))
+                for hit in matchedLines.prefix(25) {
+                    let trimmed = hit.text.trimmingCharacters(in: .whitespaces)
+                    if trimmed.isEmpty { continue }
+                    let insightLine = NSMutableAttributedString()
+                    insightLine.append(NSAttributedString(string: "  L\(hit.lineNum)  ", attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
+                        .foregroundColor: NSColor.tertiaryLabelColor,
+                    ]))
+                    let highlighted = highlightQuery(in: trimmed, queryWords: queryWords,
+                                                      baseFont: .systemFont(ofSize: 12),
+                                                      baseColor: .labelColor)
+                    insightLine.append(highlighted)
+                    // Make the entire line clickable to navigate to Insights tab
+                    insightLine.addAttributes([
+                        .link: "insight:L\(hit.lineNum)" as NSString,
+                        .cursor: NSCursor.pointingHand,
+                    ], range: NSRange(location: 0, length: insightLine.length))
+                    insightLine.append(NSAttributedString(string: "\n"))
+                    rt.raw(insightLine)
+                }
+                if matchedLines.count > 25 {
+                    rt.dim("    … and \(matchedLines.count - 25) more lines")
+                }
+                totalHits += matchedLines.count
+                rt.spacer()
+            }
+        }
+
+        // ── Metacog ─────────────────────────────────────────────────────────
+        let (audit, auditFile) = readLatestAudit()
+        if let audit = audit {
+            var metacogHits: [(kind: String, text: String)] = []
+            for b in (audit.biasesDetected ?? []) where fuzzyMatch(b, queryWords: queryWords) {
+                metacogHits.append(("bias", b))
+            }
+            for r in (audit.recommendations ?? []) where fuzzyMatch(r, queryWords: queryWords) {
+                metacogHits.append(("rec", r))
+            }
+            if !metacogHits.isEmpty {
+                let auditLabel: String = {
+                    guard let f = auditFile else { return "latest" }
+                    let name = (f as NSString).lastPathComponent
+                    return name.replacingOccurrences(of: "-audit.json", with: "")
+                }()
+                rt.raw(sectionHeader("Metacog (\(auditLabel))", count: metacogHits.count, icon: "⬡", color: .systemPink))
+                for hit in metacogHits.prefix(15) {
+                    let kindColor: NSColor = hit.kind == "bias" ? .systemOrange : .systemBlue
+                    let line = NSMutableAttributedString(string: "  ")
+                    line.append(tagPill(hit.kind, color: kindColor))
+                    line.append(NSAttributedString(string: " "))
+                    let highlighted = highlightQuery(in: hit.text, queryWords: queryWords,
+                                                      baseFont: .systemFont(ofSize: 12),
+                                                      baseColor: .labelColor)
+                    line.append(highlighted)
+                    // Make clickable to navigate to Metacog tab
+                    line.addAttributes([
+                        .link: "metacog:\(hit.kind)" as NSString,
+                        .cursor: NSCursor.pointingHand,
+                    ], range: NSRange(location: 0, length: line.length))
+                    line.append(NSAttributedString(string: "\n\n"))
+                    rt.raw(line)
+                }
+                totalHits += metacogHits.count
+                rt.spacer()
+            }
+        }
+
+        // ── Summary / no results ────────────────────────────────────────────
+        if totalHits == 0 {
+            rt.spacer()
+            rt.dim("  No results for \"\(rawQuery)\"")
+            rt.spacer()
+            rt.dim("  Tips:")
+            rt.dim("    • Try fewer or shorter words")
+            rt.dim("    • Click a category tag above to browse by topic")
+            rt.dim("    • All words must match (AND logic)")
+        } else {
+            rt.divider()
+            rt.dim("  \(totalHits) result(s) across all categories for \"\(rawQuery)\"")
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+        tv.scrollToBeginningOfDocument(nil)
+    }
+
+    /// Styled section header with icon and count.
+    private func sectionHeader(_ title: String, count: Int, icon: String, color: NSColor) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        result.append(NSAttributedString(string: "  \(icon) ", attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .bold), .foregroundColor: color]))
+        result.append(NSAttributedString(string: "\(title)  ", attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .bold), .foregroundColor: NSColor.labelColor]))
+        result.append(NSAttributedString(string: "\(count)\n", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium), .foregroundColor: color]))
+        result.append(NSAttributedString(string: "  " + String(repeating: "─", count: 50) + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.separatorColor]))
+        return result
+    }
+
+    /// Render a small inline tag pill: ┃category┃
+    private func tagPill(_ text: String, color: NSColor) -> NSAttributedString {
+        NSAttributedString(string: " \(text) ", attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: color,
+            .backgroundColor: color.withAlphaComponent(0.12),
+        ])
+    }
+
+    /// Highlight occurrences of all `queryWords` in `text` with a yellow background.
+    private func highlightQuery(in text: String, queryWords: [String],
+                                 baseFont: NSFont, baseColor: NSColor) -> NSAttributedString {
+        let result = NSMutableAttributedString(string: text, attributes: [
+            .font: baseFont, .foregroundColor: baseColor,
+        ])
+        let lower = text.lowercased() as NSString
+        for word in queryWords {
+            var searchStart = 0
+            while searchStart < lower.length {
+                let range = lower.range(of: word, range: NSRange(location: searchStart,
+                                                                   length: lower.length - searchStart))
+                if range.location == NSNotFound { break }
+                result.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.3),
+                                    range: range)
+                result.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
+                searchStart = range.location + range.length
+            }
+        }
+        return result
+    }
+
+    // ── Tab 7: Help ────────────────────────────────────────────────────────────
+
+    private func buildHelpView(frame: NSRect) -> NSView {
+        let container = NSView(frame: frame)
+        container.autoresizingMask = [.width, .height]
+        let (sv, tv) = makeScrollableTextView(frame: NSRect(origin: .zero, size: frame.size))
+        sv.autoresizingMask = [.width, .height]
+        let rt = RichText()
+
+        rt.header("Help & Reference Guide")
+        rt.spacer()
+
+        // --- Getting Started ---
+        rt.raw(helpSection("Getting Started", icon: "▸", color: .systemGreen))
+        rt.body("  i-dream monitors your Claude Code sessions, extracts behavioural")
+        rt.body("  patterns, finds cross-session associations, and surfaces insights.")
+        rt.body("  The daemon runs automatically in the background. This dashboard")
+        rt.body("  gives you a window into what it has learned.")
+        rt.spacer()
+
+        // --- Navigation ---
+        rt.raw(helpSection("Navigation", icon: "◧", color: .systemPurple))
+        rt.raw(helpRow("Sidebar",     "Click any tab to switch views"))
+        rt.raw(helpRow("↺ Refresh",   "Reload all data from disk"))
+        rt.raw(helpRow("Search tab",  "Full-text fuzzy search across all data"))
+        rt.raw(helpRow("Detail pane", "Click a pattern or association to see details below the list"))
+        rt.spacer()
+
+        // --- Graph Interactions ---
+        rt.raw(helpSection("Graph Interactions", icon: "⬡", color: .systemTeal))
+        rt.raw(helpShortcut("Click node",      "Select node, show details in sidebar + popover"))
+        rt.raw(helpShortcut("Click list item",  "Cross-highlight the matching graph node"))
+        rt.raw(helpShortcut("Drag",             "Pan the graph"))
+        rt.raw(helpShortcut("Scroll / Pinch",   "Zoom in and out"))
+        rt.raw(helpShortcut("Hover",            "Preview connected edges"))
+        rt.raw(helpShortcut("Double-click",     "Reset zoom and pan to default"))
+        rt.raw(helpShortcut("Filter field",     "Type to dim non-matching nodes"))
+        rt.spacer()
+
+        // --- Pattern Network Legend ---
+        rt.raw(helpSection("Pattern Network", icon: "●", color: .systemTeal))
+        rt.raw(helpLegend("●", .systemGreen,         "High confidence (≥85%)"))
+        rt.raw(helpLegend("●", .systemBlue,           "Medium confidence (≥65%)"))
+        rt.raw(helpLegend("●", .secondaryLabelColor,  "Lower confidence (<65%)"))
+        rt.raw(helpLegend("▲", .systemGreen,          "Positive valence"))
+        rt.raw(helpLegend("▼", .systemOrange,         "Negative valence"))
+        rt.body("  Node size scales with confidence. Category labels orbit the ring.")
+        rt.body("  Selecting a node dims unrelated nodes and draws connection lines.")
+        rt.spacer()
+
+        // --- Association Network Legend ---
+        rt.raw(helpSection("Association Network", icon: "◆", color: .systemOrange))
+        rt.raw(helpLegend("◆", .systemGreen,         "Actionable, high confidence"))
+        rt.raw(helpLegend("◆", .systemBlue,           "Actionable"))
+        rt.raw(helpLegend("○", .secondaryLabelColor,  "Non-actionable"))
+        rt.body("  Three concentric rings: inner ≥75%, middle ≥50%, outer <50% confidence.")
+        rt.body("  Edges connect associations sharing linked patterns; thicker = more overlap.")
+        rt.spacer()
+
+        // --- Tab Reference ---
+        rt.raw(helpSection("Tab Reference", icon: "▤", color: .systemIndigo))
+        rt.raw(helpRow("Overview",     "Dashboard with stats cards, charts, sparklines"))
+        rt.raw(helpRow("Patterns",     "Grouped by category, detail pane with linked associations"))
+        rt.raw(helpRow("Associations", "Grouped by confidence tier, shows linked pattern text"))
+        rt.raw(helpRow("Journal",      "Dream cycle history with token usage bars"))
+        rt.raw(helpRow("Insights",     "Full markdown-rendered insight blocks"))
+        rt.raw(helpRow("Metacog",      "Calibration scores, biases, recommendations"))
+        rt.raw(helpRow("Search",       "Fuzzy multi-word search across all data"))
+        rt.spacer()
+
+        // --- Data & CLI ---
+        rt.raw(helpSection("Data & Commands", icon: "⌘", color: .systemYellow))
+        rt.dim("  Data directory:")
+        rt.mono("    ~/.claude/subconscious/")
+        rt.spacer()
+        rt.dim("  Useful commands:")
+        rt.mono("    cargo run -- daemon start     # start the dream daemon")
+        rt.mono("    cargo run -- daemon stop      # stop the daemon")
+        rt.mono("    cargo run -- daemon status    # check daemon state")
+        rt.mono("    cargo run -- dream            # trigger a dream cycle now")
+        rt.spacer()
+        rt.dim("  Dashboard build:")
+        rt.mono("    bash tools/menubar/build.sh            # compile + launch")
+        rt.mono("    bash tools/menubar/build.sh --install  # auto-start on login")
+        rt.mono("    bash tools/menubar/build.sh --status   # check build staleness")
+        rt.spacer()
+
+        tv.textStorage?.setAttributedString(rt.build())
+        container.addSubview(sv)
+        return container
+    }
+
+    // --- Help page rendering helpers ---
+
+    /// Renders a colored section header with icon.
+    private func helpSection(_ title: String, icon: String, color: NSColor) -> NSAttributedString {
+        let str = NSMutableAttributedString()
+        str.append(NSAttributedString(string: "  \(icon) ", attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: color]))
+        str.append(NSAttributedString(string: title.uppercased(), attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: color]))
+        str.append(NSAttributedString(string: "\n  ", attributes: [
+            .font: NSFont.systemFont(ofSize: 4)]))
+        // Divider line
+        let divLen = max(title.count + 4, 20)
+        str.append(NSAttributedString(string: String(repeating: "─", count: divLen) + "\n", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .regular),
+            .foregroundColor: color.withAlphaComponent(0.3)]))
+        return str
+    }
+
+    /// Renders a key-value help row: label left-aligned, description right.
+    private func helpRow(_ label: String, _ desc: String) -> NSAttributedString {
+        let str = NSMutableAttributedString()
+        let padded = label.padding(toLength: 16, withPad: " ", startingAt: 0)
+        str.append(NSAttributedString(string: "  \(padded)", attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
+            .foregroundColor: NSColor.labelColor]))
+        str.append(NSAttributedString(string: desc + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5),
+            .foregroundColor: NSColor.secondaryLabelColor]))
+        return str
+    }
+
+    /// Renders a keyboard shortcut row.
+    private func helpShortcut(_ key: String, _ desc: String) -> NSAttributedString {
+        let str = NSMutableAttributedString()
+        let padded = key.padding(toLength: 18, withPad: " ", startingAt: 0)
+        str.append(NSAttributedString(string: "  \(padded)", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .medium),
+            .foregroundColor: NSColor.systemTeal]))
+        str.append(NSAttributedString(string: desc + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor]))
+        return str
+    }
+
+    /// Renders a colored legend item: symbol in color + description.
+    private func helpLegend(_ symbol: String, _ color: NSColor, _ desc: String) -> NSAttributedString {
+        let str = NSMutableAttributedString()
+        str.append(NSAttributedString(string: "  \(symbol) ", attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: color]))
+        str.append(NSAttributedString(string: desc + "\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5),
+            .foregroundColor: NSColor.secondaryLabelColor]))
+        return str
+    }
+
+    // ── Tab 8: About ───────────────────────────────────────────────────────────
+
+    private func buildAboutView(frame: NSRect) -> NSView {
+        let (sv, tv) = makeScrollableTextView(frame: frame)
+        let rt = RichText()
+
+        rt.header("About i-dream")
+        rt.spacer()
+        rt.body("  i-dream is a background cognitive reflection system that analyses your")
+        rt.body("  Claude Code sessions overnight, extracts patterns, associations, and insights,")
+        rt.body("  and surfaces them here so future sessions can benefit.")
+        rt.spacer()
+
+        rt.subheader("Version")
+        rt.body("  i-dream            v0.1.0")
+        rt.body("  Dashboard widget   v1.0.0")
+        // Compute "last updated" from the most recent data file modification
+        let dataFiles = [
+            subDir + "/dreams/patterns.json",
+            subDir + "/dreams/associations.json",
+            subDir + "/dreams/journal.json",
+            subDir + "/dreams/insights.md",
+            subDir + "/dreams/insight-digest.md",
+        ]
+        let fm = FileManager.default
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = "yyyy-MM-dd HH:mm"
+        var latestDate: Date?
+        for path in dataFiles {
+            if let attrs = try? fm.attributesOfItem(atPath: path),
+               let mod = attrs[.modificationDate] as? Date {
+                if latestDate == nil || mod > latestDate! { latestDate = mod }
+            }
+        }
+        if let d = latestDate {
+            let elapsed = Date().timeIntervalSince(d)
+            let ago: String = elapsed < 60 ? "just now"
+                : elapsed < 3600 ? "\(Int(elapsed / 60))m ago"
+                : elapsed < 86400 ? "\(Int(elapsed / 3600))h ago"
+                : "\(Int(elapsed / 86400))d ago"
+            rt.body("  Data last updated  \(dateFmt.string(from: d))  (\(ago))")
+        } else {
+            rt.dim("  Data last updated  —")
+        }
+        rt.spacer()
+
+        rt.subheader("Build Info")
+        rt.body(String(format: "  Commit hash      %@", BuildInfo.commitHash))
+        rt.body(String(format: "  Source hash      %@", BuildInfo.sourceHash))
+        rt.body(String(format: "  Built at         %@", BuildInfo.builtAt))
+        rt.spacer()
+
+        rt.subheader("Daemon Status")
+        if let s = state {
+            let statusStr = s.totalCycles > 0 ? "running  ·  \(s.totalCycles) cycles completed" : "started  ·  no cycles yet"
+            rt.body("  Status           \(statusStr)")
+            rt.body("  Last dream       \(fmtDate(s.lastConsolidation))  (\(timeAgo(s.lastConsolidation)))")
+            rt.body("  Total tokens     \(fmtNum(s.totalTokensUsed))")
+        } else {
+            rt.dim("  Daemon state not found — run i-dream daemon to start.")
+        }
+        rt.spacer()
+
+        rt.subheader("Data Paths")
+        let paths: [(String, String)] = [
+            ("Root",        subDir),
+            ("Patterns",    subDir + "/dreams/patterns.json"),
+            ("Associations",subDir + "/dreams/associations.json"),
+            ("Journal",     subDir + "/dreams/journal.json"),
+            ("Insights",    subDir + "/dreams/insights.md"),
+            ("Digest",      subDir + "/dreams/insight-digest.md"),
+            ("Metacog",     subDir + "/metacog/"),
+        ]
+        for (label, path) in paths {
+            let exists = FileManager.default.fileExists(atPath: path)
+            let size: String = {
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+                   let bytes = attrs[.size] as? Int, bytes > 0 {
+                    return bytes < 1024 ? "\(bytes) B"
+                         : bytes < 1_048_576 ? String(format: "%.1f KB", Double(bytes) / 1024)
+                         : String(format: "%.1f MB", Double(bytes) / 1_048_576)
+                }
+                return exists ? "dir" : "—"
+            }()
+            let indicator = exists ? "✓" : "✗"
+            let labelPadded = (label + ":").padding(toLength: 14, withPad: " ", startingAt: 0)
+            rt.raw(NSAttributedString(
+                string: "  \(indicator)  \(labelPadded)  \(size)  \(path)\n",
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                    .foregroundColor: exists ? NSColor.labelColor : NSColor.secondaryLabelColor,
+                ]))
+        }
+        rt.spacer()
+
+        rt.subheader("Knowledge Base Summary")
+        if let b = board {
+            rt.body("  Patterns         \(b.dreamsPatterns)")
+            rt.body("  Associations     \(b.associations)")
+            rt.body("  Sessions proc.   \(b.dreamsProcessed) dreams  ·  \(b.metacogProcessed) metacog")
+            if b.metacogAudits > 0 { rt.body("  Metacog audits   \(b.metacogAudits)") }
+        } else {
+            rt.dim("  Board data not available.")
+        }
+
+        tv.textStorage?.setAttributedString(rt.build())
+        return sv
+    }
+}
+
+// ─── Crash Reporter ───────────────────────────────────────────────────────────
+//
+// Two-layer strategy:
+//   1. NSSetUncaughtExceptionHandler — catches ObjC/Swift bridged exceptions in
+//      normal execution context; can safely show NSAlert + write log.
+//   2. SIGABRT / SIGSEGV / SIGILL / SIGBUS / SIGFPE signal handlers — write a
+//      crash-sentinel file via POSIX write() (async-signal-safe), then re-raise
+//      to let the OS generate the standard crash report.
+//   On next launch: if a sentinel exists, show a "previous crash" alert and
+//   offer to copy the details so the user can paste them for investigation.
+
+private let crashReportDir  = home + "/.claude/subconscious/crash-reports"
+private let crashSentinelPath = crashReportDir + "/i-dream-bar-latest.crashlog"
+
+enum CrashReporter {
+
+    static func install() {
+        try? FileManager.default.createDirectory(
+            atPath: crashReportDir, withIntermediateDirectories: true)
+
+        // ── Layer 1: uncaught ObjC/Swift-bridged exceptions ────────────────────
+        NSSetUncaughtExceptionHandler { exception in
+            let trace = exception.callStackSymbols.prefix(30).joined(separator: "\n")
+            let body  = """
+                === i-dream-bar Crash Report ===
+                Date:   \(ISO8601DateFormatter().string(from: Date()))
+                Build:  \(BuildInfo.commitHash)/\(BuildInfo.sourceHash) built \(BuildInfo.builtAt)
+                Type:   Uncaught Exception
+                Name:   \(exception.name.rawValue)
+                Reason: \(exception.reason ?? "(none)")
+
+                Stack Trace:
+                \(trace)
+                """
+            try? body.write(toFile: crashSentinelPath, atomically: true, encoding: .utf8)
+
+            // We're still in normal context — can safely show UI.
+            DispatchQueue.main.async {
+                CrashReporter.showCrashAlert(title: "i-dream crashed (exception)",
+                    reason: "\(exception.name.rawValue): \(exception.reason ?? "(no reason)")",
+                    traceLines: exception.callStackSymbols.prefix(20).map { $0 })
+            }
+        }
+
+        // ── Layer 2: fatal signals (SIGSEGV / SIGABRT etc.) ───────────────────
+        // Write a minimal sentinel file using only async-signal-safe syscalls,
+        // then re-raise so the OS generates its normal crash report.
+        func installSignalHandler(_ sig: Int32) {
+            signal(sig) { signum in
+                // Minimal async-signal-safe write — no Swift runtime, no malloc
+                let fd = Darwin.open(crashSentinelPath,
+                                     O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+                if fd >= 0 {
+                    let msg = "SIGNAL \(signum) — see ~/Library/Logs/DiagnosticReports/ for full trace\n"
+                    _ = msg.withCString { Darwin.write(fd, $0, strlen($0)) }
+                    Darwin.close(fd)
+                }
+                // Re-raise with default handler so the OS crash report is created.
+                signal(signum, SIG_DFL)
+                Darwin.raise(signum)
+            }
+        }
+        for sig in [SIGSEGV, SIGABRT, SIGILL, SIGBUS, SIGFPE] { installSignalHandler(sig) }
+    }
+
+    /// Called at startup — if a previous crash sentinel exists, show it once then delete it.
+    static func checkForPreviousCrash() {
+        guard let body = try? String(contentsOfFile: crashSentinelPath, encoding: .utf8),
+              !body.isEmpty else { return }
+        // Delete sentinel before showing alert (prevent loop if alert itself crashes)
+        try? FileManager.default.removeItem(atPath: crashSentinelPath)
+
+        let isSignal = body.hasPrefix("SIGNAL")
+        let title    = isSignal ? "i-dream crashed (signal)" : "i-dream crashed"
+        let lines    = body.components(separatedBy: "\n")
+        let reason   = lines.first(where: { $0.hasPrefix("Reason:") || $0.hasPrefix("SIGNAL") }) ?? lines.first ?? "(unknown)"
+        let trace    = isSignal ? [] : Array(lines.drop(while: { !$0.hasPrefix("Stack") }).dropFirst().prefix(20))
+
+        showCrashAlert(title: title, reason: reason, traceLines: trace, isPreviousCrash: true)
+    }
+
+    /// Display a crash alert with reason + truncated stack trace.
+    /// - `isPreviousCrash`: true when shown on next launch (not immediately after crash).
+    static func showCrashAlert(title: String, reason: String,
+                               traceLines: some Collection<String>,
+                               isPreviousCrash: Bool = false) {
+        let alert         = NSAlert()
+        alert.alertStyle  = .critical
+        alert.messageText = title
+        let intro = isPreviousCrash
+            ? "i-dream detected a crash from the previous session and restarted successfully."
+            : "i-dream encountered a fatal error and needs to quit."
+        let traceText = traceLines.isEmpty
+            ? "(see ~/Library/Logs/DiagnosticReports/ for full trace)"
+            : traceLines.joined(separator: "\n")
+        alert.informativeText = "\(intro)\n\nReason: \(reason)\n\nStack trace (top 20 frames):\n\(traceText)"
+        alert.addButton(withTitle: "Copy Details")
+        alert.addButton(withTitle: isPreviousCrash ? "Dismiss" : "Quit")
+
+        // Show the alert as a floating panel so it appears above everything
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let full = "[\(title)]\nReason: \(reason)\n\nStack:\n\(traceText)\n\nBuild: \(BuildInfo.commitHash)/\(BuildInfo.sourceHash) built \(BuildInfo.builtAt)"
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(full, forType: .string)
+        }
+        if !isPreviousCrash { exit(1) }
+    }
+}
+
 // ─── App delegate ─────────────────────────────────────────────────────────────
 
 final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -1814,6 +4983,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var replayTraceFiles: [String]        = []
     private var insightFeedbackDelegate: InsightFeedbackDelegate?
 
+    // Comprehensive dashboard
+    private var dashboardController: DashboardWindowController?
+
     // Dreaming animation
     private var isCycling       = false
     private var cycleStartTime: Date?
@@ -1824,6 +4996,8 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var theMenu: NSMenu!
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        CrashReporter.install()
+        CrashReporter.checkForPreviousCrash()
         dlog("launched PID=\(ProcessInfo.processInfo.processIdentifier) build=\(BuildInfo.commitHash)/\(BuildInfo.sourceHash) at=\(BuildInfo.builtAt)")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -4378,13 +7552,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openDashboard() {
-        // Regenerate the dashboard before opening so it always reflects current state.
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: iDream)
-        p.arguments = ["dashboard"]
-        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        try? p.run(); p.waitUntilExit()
-        NSWorkspace.shared.open(URL(fileURLWithPath: subDir + "/dashboard.html"))
+        if dashboardController == nil {
+            dashboardController = DashboardWindowController()
+        }
+        dashboardController!.showOrFront()
     }
 
     @objc private func openLogs() {
@@ -4720,6 +7891,108 @@ private class MiniBarChartView: NSView {
             let path    = NSBezierPath(roundedRect: barRect, xRadius: 1.5, yRadius: 1.5)
             color.setFill()
             path.fill()
+        }
+    }
+}
+
+// ─── Calendar heat map ───────────────────────────────────────────────────────
+/// GitHub-style contribution grid showing consolidation activity by day.
+/// Each cell represents one day; intensity is based on token usage relative to max.
+private class CalendarHeatMapView: NSView {
+    /// (date, tokenCount) pairs — one per consolidation cycle
+    var entries: [(date: Date, tokens: Int)] = [] { didSet { needsDisplay = true } }
+
+    private let cellSize: CGFloat = 12
+    private let gap: CGFloat      = 3
+    private let weeksToShow       = 16   // ~4 months
+
+    override var intrinsicContentSize: NSSize {
+        let w = CGFloat(weeksToShow) * (cellSize + gap) + 40  // +40 for day labels
+        let h = 7 * (cellSize + gap) + 20                     // +20 for month labels
+        return NSSize(width: w, height: h)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+
+        // Build a day → token total map
+        var dayMap: [Date: Int] = [:]
+        for e in entries {
+            let day = cal.startOfDay(for: e.date)
+            dayMap[day, default: 0] += e.tokens
+        }
+        let maxTokens = max(1, dayMap.values.max() ?? 1)
+
+        // Calculate start date: go back weeksToShow weeks from the end of this week
+        let todayWeekday = cal.component(.weekday, from: today) // 1=Sun
+        let daysToEndOfWeek = 7 - todayWeekday
+        let endDate = cal.date(byAdding: .day, value: daysToEndOfWeek, to: today)!
+        let startDate = cal.date(byAdding: .weekOfYear, value: -weeksToShow, to: endDate)!
+
+        let originX: CGFloat = 24  // leave room for day-of-week labels
+        let originY: CGFloat = 0
+
+        // Day-of-week labels
+        let dayLabels = ["", "M", "", "W", "", "F", ""]
+        let labelFont = NSFont.systemFont(ofSize: 9)
+        let labelAttrs: [NSAttributedString.Key: Any] = [
+            .font: labelFont, .foregroundColor: NSColor.tertiaryLabelColor]
+        for (i, lbl) in dayLabels.enumerated() {
+            guard !lbl.isEmpty else { continue }
+            let y = originY + CGFloat(6 - i) * (cellSize + gap)
+            NSAttributedString(string: lbl, attributes: labelAttrs)
+                .draw(at: CGPoint(x: 2, y: y + 1))
+        }
+
+        // Draw cells
+        var currentDate = startDate
+        var week = 0
+        var lastMonth = -1
+
+        while currentDate <= endDate {
+            let weekday = cal.component(.weekday, from: currentDate) - 1 // 0=Sun
+            let row = 6 - weekday  // Sun at bottom, Sat at top
+            let x = originX + CGFloat(week) * (cellSize + gap)
+            let y = originY + CGFloat(row) * (cellSize + gap)
+
+            let tokens = dayMap[currentDate] ?? 0
+            let intensity = Double(tokens) / Double(maxTokens)
+
+            let color: NSColor
+            if tokens == 0 {
+                color = NSColor.separatorColor.withAlphaComponent(0.15)
+            } else if intensity > 0.75 {
+                color = NSColor.systemGreen.withAlphaComponent(0.9)
+            } else if intensity > 0.45 {
+                color = NSColor.systemGreen.withAlphaComponent(0.6)
+            } else if intensity > 0.2 {
+                color = NSColor.systemGreen.withAlphaComponent(0.35)
+            } else {
+                color = NSColor.systemGreen.withAlphaComponent(0.18)
+            }
+
+            let rect = NSRect(x: x, y: y, width: cellSize, height: cellSize)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
+            color.setFill()
+            path.fill()
+
+            // Month label at start of each new month
+            let month = cal.component(.month, from: currentDate)
+            let dayOfMonth = cal.component(.day, from: currentDate)
+            if month != lastMonth && dayOfMonth <= 7 {
+                lastMonth = month
+                let fmt = DateFormatter()
+                fmt.dateFormat = "MMM"
+                let monthStr = fmt.string(from: currentDate)
+                let monthY = originY + 7 * (cellSize + gap) + 2
+                NSAttributedString(string: monthStr, attributes: labelAttrs)
+                    .draw(at: CGPoint(x: x, y: monthY))
+            }
+
+            // Advance
+            currentDate = cal.date(byAdding: .day, value: 1, to: currentDate)!
+            if cal.component(.weekday, from: currentDate) == 1 { week += 1 }
         }
     }
 }
