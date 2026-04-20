@@ -156,31 +156,97 @@ Options:
 
 ## macOS menu-bar widget
 
-`tools/menubar/i-dream-bar` is a lightweight macOS status-bar app that displays live daemon status and lets you trigger cycles without a terminal.
+`tools/menubar/i-dream-bar` is a native macOS status-bar app (~8,000 lines of Swift/AppKit) that provides both a quick-access menu and a comprehensive multi-tab dashboard.
 
 ```
 build.sh  →  compiles + signs + launches i-dream-bar
 
   ┌───────────────────────────────┐
-  │  ◉ i-dream  120 cycles        │  ← status dot (green=running, animated=cycling)
+  │  ◉ i-dream  129 cycles        │  ← status dot (green=running, animated=cycling)
   │  ●●●○○  ▁▂▃▄▅▆▇█▁▂▃▄         │  ← load gauge + token sparkline
-  │  tokens  348k                 │
+  │  tokens  467k                 │
   │  patterns  47  (12 high-conf) │
   │  last cycle  2h ago           │
   └───────────────────────────────┘
        bar chart (token history)
 ```
 
-**Ambient HUD** — a floating overlay (`⌘H` or menu toggle) shows live stats and auto-updates every 1s during active cycles. Supports pin-to-top and close buttons on the face.
+### Features
+
+**Ambient HUD** — a floating overlay (`⌘H` or menu toggle) shows live stats and auto-updates every 1s during active cycles. Supports pin-to-top and time-range toggling (7d/30d/all).
 
 **Dream Replay** — step through the event trace from the last cycle, including the full LLM prompt and response text for each API call, color-coded by sleep phase (SWS=blue, REM=purple, Wake=green).
 
+**Crash Reporter** — two-layer crash handling (NSSetUncaughtExceptionHandler + signal handlers). Writes a sentinel file on crash; shows a "previous crash" alert on next launch with copy-to-clipboard support.
+
 ```bash
 cd tools/menubar
-bash build.sh          # compile + launch
-bash build.sh --logs   # tail live logs
-bash build.sh --install  # add to Login Items
+bash build.sh              # compile + launch
+bash build.sh --logs       # tail live logs
+bash build.sh --install    # add to Login Items
+bash build.sh --status     # check running instances + build staleness
+bash build.sh --uninstall  # remove LaunchAgent + kill widget
 ```
+
+## Comprehensive dashboard
+
+The dashboard opens from the menu bar widget ("Open Dashboard") as a native AppKit panel (1240×840, resizable) with a sidebar and 9 content tabs.
+
+```
+┌──────────┬──────────────────────────────────────────────────────────┐
+│ i-dream  │                                                          │
+│          │  Dashboard Overview                                      │
+│ Overview │  ● Daemon running · Last dream 2h ago · 129 cycles       │
+│ Patterns │                                                          │
+│ Assoc    │  ⚠ Recent Errors (1)                                     │
+│ Journal  │  · Dreaming failed: stream idle timeout                  │
+│ Insights │                                                          │
+│ Metacog  │  ┌─ Patterns ─┐  ┌─ Associations ─┐  ┌─ Dream Cycles ─┐ │
+│ Search   │  │    47       │  │      23         │  │     129        │ │
+│ Help     │  │  12 hi-conf │  │  8 actionable   │  │  467K tokens   │ │
+│ About    │  └─────────────┘  └─────────────────┘  └────────────────┘ │
+│          │                                                          │
+│ ⬇ Export │  Insight Digest   Valence Distribution   Categories      │
+│ ↺ Refresh│                                                          │
+│ build a1 │                                                          │
+│ Refreshed│                                                          │
+└──────────┴──────────────────────────────────────────────────────────┘
+```
+
+### Tabs
+
+| Tab | Contents |
+|-----|----------|
+| **Overview** | Stat cards (patterns/associations/cycles/calibration/tokens/valence), error alert banner, insight digest, pattern category bar chart, valence distribution |
+| **Patterns** | Split view — category-grouped list with colored dots + interactive ring-layout graph (pan/zoom/hover/click). Search field overlay |
+| **Associations** | Split view — association list + network graph. Detail card on selection with hypothesis, confidence, linked patterns, suggested rule |
+| **Journal** | Stats banner, calendar heat map (16-week GitHub-style contribution grid), Unicode sparkline, per-cycle token usage bars |
+| **Insights** | Promoted insights with confidence bars (▮░), inline markdown rendering (bold/italic), thumbs up/down rating with persistent feedback, copy-to-clipboard (📋) |
+| **Metacog** | ASCII pipeline diagram, audit metadata, sample breakdown, bias list, recommendations, calibration trend sparkline, audit history |
+| **Search** | Full-text fuzzy search across all data with 150ms debounce, category tag quick-filters, ranked results with highlighted terms, cross-tab navigation links |
+| **Help** | Keyboard shortcuts reference, feature guide, legend for all visual elements |
+| **About** | Build info, daemon status, data paths with existence check + file sizes, knowledge base summary |
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `⌘1` – `⌘9` | Switch to tab 1–9 |
+| `⌘R` | Refresh all data |
+| `⌘A` | Select all text (in any text view) |
+| `⌘C` | Copy selection |
+
+### Dashboard features
+
+- **State restoration** — remembers the selected tab across window close/reopen
+- **Data export** — "Export JSON" button in sidebar exports patterns, associations, and journal to a timestamped JSON file via NSSavePanel
+- **Error alert banner** — parses daemon log for recent errors, displays warning banner on Overview tab
+- **Calendar heat map** — Journal tab shows 16-week activity grid with day-of-week labels; green intensity scales with token usage
+- **Copy-to-clipboard** — 📋 button on each insight copies full text to system pasteboard
+- **Sidebar tooltips** — hover any tab for a description + keyboard shortcut hint
+- **Last-refreshed indicator** — sidebar footer shows when data was last loaded
+- **Insight feedback** — thumbs up/down persists to `insight-feedback.jsonl`, reflected across rebuilds via stable FNV-like hashing
+- **Sidebar badges** — live counts on Patterns, Associations, Journal, Insights; calibration score on Metacog
 
 ## Configuration
 
@@ -211,19 +277,29 @@ Full schema: [docs/03-implementation-details.md](docs/03-implementation-details.
 ```
 ~/.claude/subconscious/
 ├── config.toml              User config (TOML)
-├── state.json               Daemon state (cycles, tokens, last run)
+├── state.json               Daemon state (cycles, tokens, last run, usage limits)
 ├── daemon.pid               PID file when daemonized
 ├── daemon.sock              Unix socket for hook → daemon signals
+├── .last-activity           Touch file for activity tracking (mtime = last activity)
 ├── dreams/
 │   ├── journal.jsonl        Dream cycle outputs (SWS + REM)
 │   ├── patterns.json        Extracted behavioral patterns (with confidence)
-│   └── processed.json       Set of already-consolidated session IDs
+│   ├── associations.json    Cross-pattern hypotheses and suggested rules
+│   ├── insights.md          Promoted long-form insights (markdown)
+│   ├── insight-digest.md    Latest digest summary for Overview tab
+│   ├── insight-feedback.jsonl  User ratings on insights (thumbs up/down)
+│   ├── dream-metrics.json   Session quality metrics (avg score, correction rate)
+│   ├── processed.json       Set of already-consolidated session IDs
+│   └── traces/              Per-cycle event traces (viewable in Dream Replay)
+│       └── YYYYMMDD-HHMMSS-*.json
 ├── metacog/
 │   ├── samples.jsonl        Sampled execution units (30-day retention)
-│   └── calibration.jsonl   Per-session calibration scores
+│   ├── calibration.jsonl    Per-session calibration scores
+│   └── audits/              Per-cycle audit reports (JSON)
+│       └── YYYYMMDD-HHMM-audit.json
 ├── valence/
 │   ├── memory.jsonl         Pattern-outcome associations (time-decayed)
-│   └── surface-log.jsonl   History of surfaced intuitions
+│   └── surface-log.jsonl    History of surfaced intuitions
 ├── introspection/
 │   ├── chains/              Captured reasoning chains
 │   ├── reports/             Historical analysis reports
@@ -231,8 +307,11 @@ Full schema: [docs/03-implementation-details.md](docs/03-implementation-details.
 ├── intentions/
 │   ├── registry.jsonl       Active intentions
 │   └── fired.jsonl          Fired record log
-└── traces/
-    └── dream-YYYYMMDD.jsonl Per-cycle event trace (viewable in Dream Replay)
+├── logs/
+│   ├── i-dream.log.YYYY-MM-DD  Daily daemon logs
+│   └── signals.jsonl        User signal events from hooks
+└── crash-reports/
+    └── i-dream-bar-latest.crashlog  Widget crash sentinel
 ```
 
 ## Testing
@@ -284,8 +363,10 @@ i-dream/
 │   ├── store.rs             File-based storage (atomic JSON, JSONL, markdown)
 │   ├── daemon.rs            Idle detection + consolidation orchestration
 │   ├── dream_trace.rs       JSONL event tracing per cycle
-│   ├── service.rs           Service layer helpers
-│   ├── logging.rs           Tracing subscriber setup
+│   ├── events.rs            Event types for hook → daemon communication
+│   ├── hooks.rs             Claude Code hook integration (install/uninstall/status)
+│   ├── service.rs           LaunchAgent service management (install/start/stop)
+│   ├── logging.rs           Tracing subscriber setup (daily rotation)
 │   ├── dashboard.rs         Terminal dashboard (live cycle view)
 │   ├── transcript.rs        Claude Code transcript parsing + keyword extraction
 │   └── modules/
@@ -294,16 +375,20 @@ i-dream/
 │       ├── metacog.rs       Execution unit sampling + calibration analysis
 │       ├── intuition.rs     Valence memory + priming cache + time-decay
 │       ├── introspection.rs Reasoning chain analysis (weekly)
-│       └── prospective.rs   Condition-action intentions + trigger matching
+│       ├── prospective.rs   Condition-action intentions + trigger matching
+│       ├── insight_digest.rs  Promoted insight summarization
+│       └── user_settings.rs   User preference persistence
 ├── tools/
 │   └── menubar/
-│       ├── i-dream-bar.swift   macOS status-bar widget
+│       ├── i-dream-bar.swift   macOS menu-bar widget + dashboard (~8,000 lines)
 │       └── build.sh            Compile + sign + launch script
 ├── docs/
 │   ├── 01-research-human-subconsciousness.md
 │   ├── 02-research-ai-metacognition.md
 │   ├── 03-implementation-details.md
-│   └── 04-architecture-diagram.md
+│   ├── 04-architecture-diagram.md
+│   ├── 05-how-to.md
+│   └── v2-dashboard-plan.md
 └── Cargo.toml               Dependencies, release profile (LTO)
 ```
 

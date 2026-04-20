@@ -50,7 +50,7 @@ The widget lives in your macOS menu bar. Click the icon to open the menu.
 - **Metacog Audits** — calibration scores and detected reasoning biases
 
 **Dashboard**
-- **Open Dashboard** — regenerates a fresh HTML report and opens it in your browser
+- **Open Dashboard** — opens the native AppKit dashboard panel (see Dashboard section below)
 
 **Logs**
 - **Logs → Open in Terminal** — live `tail -f` of the daemon log
@@ -103,17 +103,47 @@ All data lives under `~/.claude/subconscious/`:
 
 ## Dashboard
 
-The dashboard is a self-contained HTML file opened in your browser. It shows:
+The dashboard is a native AppKit panel (1240×840, resizable, min 960×640) that opens from the menu bar widget via **Open Dashboard**. It uses a sidebar with 9 tabs — no browser needed.
 
-- **Status card** — daemon running state, PID, last consolidation time
-- **Module grid** — Dreaming and Metacog status, stats, last activity
-- **Dream cycles** — per-cycle traces with phase events (click to expand)
-- **Hook events** — recent tool calls and session events captured by the hook server
-- **File inventory** — all store files with sizes and modification times (click any file to see its path)
-- **Architecture diagram** — system overview
-- **Config** — current daemon configuration (collapsed by default)
+### Navigating
 
-**Theme:** Dark mode by default. Toggle with the ☀ / ☾ button (top right). Preference persists across reloads via `localStorage`.
+- Click any tab in the sidebar, or use **⌘1** through **⌘9**
+- Press **⌘R** to refresh all data
+- The selected tab is remembered across window close/reopen (state restoration via UserDefaults)
+- Hover any sidebar tab for a tooltip describing its contents and keyboard shortcut
+
+### Tabs at a glance
+
+| Tab | What it shows |
+|-----|---------------|
+| **Overview** | Stat cards, error alert banner (from daemon log), insight digest, pattern category chart, valence distribution |
+| **Patterns** | Split view: category-grouped list + interactive ring-layout graph (pan/zoom/hover/click) |
+| **Associations** | Split view: hypothesis list + network graph with detail card on selection |
+| **Journal** | Stats banner, 16-week calendar heat map, Unicode sparkline, per-cycle token bars |
+| **Insights** | Confidence bars, inline markdown, thumbs up/down rating, copy-to-clipboard (📋) |
+| **Metacog** | ASCII pipeline diagram, audit metadata, bias list, calibration sparkline |
+| **Search** | Fuzzy multi-word search across all data with category tag quick-filters |
+| **Help** | Keyboard shortcuts, feature guide, visual element legend |
+| **About** | Build info, daemon status, data paths with sizes |
+
+### Exporting data
+
+Click **⬇ Export JSON** in the sidebar footer. This opens a save dialog and writes a structured JSON file containing all patterns, associations, and journal entries with build metadata.
+
+### Error alert banner
+
+When the daemon log contains recent `ERROR` lines, the Overview tab shows an orange warning banner at the top with up to 3 error summaries. This helps you spot SWS timeouts, API failures, or other issues without reading raw logs.
+
+### Calendar heat map
+
+The Journal tab includes a GitHub-style contribution grid showing the last 16 weeks of consolidation activity. Each cell = one day; green intensity scales with token usage relative to the peak day. Day-of-week labels (M/W/F) and month headers provide orientation.
+
+### Insight feedback
+
+Each insight block has 👍 👎 📋 buttons:
+- **👍 / 👎** — rates the insight; persists to `dreams/insight-feedback.jsonl` and reflects immediately
+- **📋** — copies the full insight text (header + body) to the system clipboard
+- Ratings use stable IDs (FNV-like hash of the header text) so they survive insight rebuilds
 
 ---
 
@@ -195,17 +225,24 @@ Claude Code sessions
   Daemon (i-dream)
   ├── SWS module  — summarises session transcripts via Claude API
   ├── REM module  — extracts patterns + associations from summaries
-  └── Wake module — promotes recurring patterns to insights.md
+  ├── Wake module — promotes recurring patterns to insights.md
+  ├── Metacog    — confidence calibration + bias detection
+  └── Intuition  — valence memory + outcome collection
        │
        ▼
   Store (~/.claude/subconscious/)
-  ├── patterns.json
-  ├── associations.json
-  ├── journal.jsonl
-  └── traces/
+  ├── dreams/    (patterns, associations, insights, journal, feedback)
+  ├── metacog/   (samples, audits, calibration)
+  ├── valence/   (memory, surface log)
+  ├── logs/      (daily logs, signals)
+  └── traces/    (per-cycle event traces)
        │
        ▼
-  Dashboard / Widget
+  Menu Bar Widget + Native Dashboard (9-tab AppKit panel)
+  ├── Overview, Patterns, Associations, Journal, Insights
+  ├── Metacog, Search, Help, About
+  ├── Ambient HUD (floating overlay)
+  └── Dream Replay (event-by-event trace playback)
 ```
 
 Dream cycles run on a configurable schedule (default: every 4 hours of idle time).
