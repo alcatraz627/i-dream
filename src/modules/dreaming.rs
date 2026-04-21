@@ -674,7 +674,54 @@ Output ONLY a JSON array. No commentary."#;
             } else {
                 Vec::new()
             };
-            all.extend(new_assocs);
+
+            // Deduplicate: merge associations whose normalized hypothesis matches
+            // an existing entry, same approach as SWS pattern dedup.
+            let mut existing_key_to_idx: HashMap<String, usize> = all
+                .iter()
+                .enumerate()
+                .map(|(i, a)| (normalize_pattern(&a.hypothesis), i))
+                .collect();
+
+            let mut truly_new: Vec<Association> = Vec::new();
+            for a in new_assocs {
+                let key = normalize_pattern(&a.hypothesis);
+                if let Some(&idx) = existing_key_to_idx.get(&key) {
+                    // Merge: absorb higher confidence, union patterns_linked.
+                    if a.confidence > all[idx].confidence {
+                        all[idx].confidence = a.confidence;
+                    }
+                    for pid in &a.patterns_linked {
+                        if !all[idx].patterns_linked.contains(pid) {
+                            all[idx].patterns_linked.push(pid.clone());
+                        }
+                    }
+                    // Absorb suggested_rule if the existing one is empty.
+                    if all[idx].suggested_rule.is_none() && a.suggested_rule.is_some() {
+                        all[idx].suggested_rule = a.suggested_rule;
+                    }
+                    // Re-enable promotion if a merged observation pushes confidence up.
+                    if all[idx].promoted && a.confidence > 0.8 {
+                        all[idx].promoted = false;
+                    }
+                } else {
+                    existing_key_to_idx.insert(key, all.len() + truly_new.len());
+                    truly_new.push(a);
+                }
+            }
+            all.extend(truly_new);
+
+            // Cap total associations at 300, keeping highest confidence.
+            const MAX_ASSOCIATIONS: usize = 300;
+            if all.len() > MAX_ASSOCIATIONS {
+                all.sort_by(|a, b| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                all.truncate(MAX_ASSOCIATIONS);
+            }
+
             self.store.write_json("dreams/associations.json", &all)?;
         }
 
@@ -723,6 +770,40 @@ Output ONLY a JSON array. No commentary."#;
             Vec::new()
         };
 
+        // Apply feedback: read insight-feedback.jsonl and adjust confidence.
+        // Upvotes boost confidence by 0.05, downvotes penalize by 0.10 and
+        // un-promote so the insight gets re-evaluated.
+        if self.store.exists("dreams/insight-feedback.jsonl") {
+            let feedback_path = self.store.path("dreams/insight-feedback.jsonl");
+            if let Ok(content) = std::fs::read_to_string(&feedback_path) {
+                for line in content.lines() {
+                    if let Ok(fb) = serde_json::from_str::<serde_json::Value>(line) {
+                        let id = fb.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let vote = fb.get("vote").and_then(|v| v.as_str()).unwrap_or("");
+                        if id.is_empty() || vote.is_empty() {
+                            continue;
+                        }
+                        for assoc in all_assocs.iter_mut() {
+                            if assoc.id == id {
+                                match vote {
+                                    "up" => {
+                                        assoc.confidence =
+                                            (assoc.confidence + 0.05).min(1.0);
+                                    }
+                                    "down" => {
+                                        assoc.confidence =
+                                            (assoc.confidence - 0.10).max(0.0);
+                                        assoc.promoted = false; // re-evaluate
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Collect candidates by cloning so we can mutate all_assocs afterward
         // without fighting the borrow checker.
         let candidates: Vec<Association> = all_assocs
@@ -756,13 +837,56 @@ Output ONLY a JSON array. No commentary."#;
 
             // Append to insights.md, creating the file with a header if new.
             let insights_path = self.store.path("dreams/insights.md");
+            let header =
+                "# Dream Insights\n\n_High-confidence associations promoted by the Wake phase._\n";
             let existing = if insights_path.exists() {
                 std::fs::read_to_string(&insights_path).unwrap_or_default()
             } else {
-                "# Dream Insights\n\n_High-confidence associations promoted by the Wake phase._\n"
-                    .to_string()
+                header.to_string()
             };
-            std::fs::write(&insights_path, format!("{existing}{block}"))?;
+            let full = format!("{existing}{block}");
+
+            // Rotate: if insights.md exceeds 100KB, keep only the last 15 Wake
+            // cycles to prevent unbounded growth. Archive the rest.
+            const MAX_INSIGHTS_BYTES: usize = 100_000;
+            const KEEP_CYCLES: usize = 15;
+            let content = if full.len() > MAX_INSIGHTS_BYTES {
+                let sections: Vec<&str> = full.split("\n## Wake Cycle").collect();
+                if sections.len() > KEEP_CYCLES + 1 {
+                    // Archive older content
+                    let archive_path = self.store.path("dreams/insights-archive.md");
+                    let archived: Vec<&str> =
+                        sections[1..=(sections.len() - KEEP_CYCLES - 1)].to_vec();
+                    let archive_content = archived
+                        .iter()
+                        .map(|s| format!("\n## Wake Cycle{s}"))
+                        .collect::<String>();
+                    let prev_archive = if archive_path.exists() {
+                        std::fs::read_to_string(&archive_path).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    std::fs::write(&archive_path, format!("{prev_archive}{archive_content}"))?;
+                    info!(
+                        "Wake: archived {} old cycles to insights-archive.md",
+                        archived.len()
+                    );
+
+                    // Keep header + last N cycles
+                    let kept: Vec<&str> =
+                        sections[(sections.len() - KEEP_CYCLES)..].to_vec();
+                    let kept_content = kept
+                        .iter()
+                        .map(|s| format!("\n## Wake Cycle{s}"))
+                        .collect::<String>();
+                    format!("{header}{kept_content}")
+                } else {
+                    full
+                }
+            } else {
+                full
+            };
+            std::fs::write(&insights_path, content)?;
 
             // Mark promoted in the persisted associations array.
             let promoted_ids: HashSet<&str> =
@@ -796,9 +920,40 @@ impl<'a> Module for DreamingModule<'a> {
             return Ok(false);
         }
 
-        // Check if enough sessions have passed since last dream
-        // TODO: Count sessions since last dream from state.json
-        Ok(true)
+        // Gate: only run if there are new/changed sessions to process.
+        // Scan session files and compare sizes against processed state.
+        let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
+        let files = match transcript::scan_projects(&projects_dir) {
+            Ok(f) => f,
+            Err(_) => return Ok(false),
+        };
+
+        let processed: ProcessedState = if self.store.exists("dreams/processed.json") {
+            self.store
+                .read_json("dreams/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+
+        let min_new = self.config.modules.dreaming.min_sessions_since_last as usize;
+        let mut new_count = 0usize;
+        for file in &files {
+            let current_size = std::fs::metadata(&file.path).map(|m| m.len()).unwrap_or(0);
+            let last_size = processed.sessions.get(&file.session_id).copied().unwrap_or(0);
+            if last_size == 0 || current_size > last_size {
+                new_count += 1;
+                if new_count >= min_new {
+                    return Ok(true);
+                }
+            }
+        }
+
+        info!(
+            "Dreaming: only {} new sessions (need {}), skipping cycle",
+            new_count, min_new
+        );
+        Ok(false)
     }
 
     async fn run(&self, client: &ClaudeClient, budget: u64) -> Result<u64> {
