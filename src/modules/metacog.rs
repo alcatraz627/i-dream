@@ -518,9 +518,16 @@ Output as JSON matching this shape:
             )
             .await?;
 
-        // Persist the raw audit response for later inspection / debugging.
+        // Strip markdown fences from LLM response (same issue as REM/introspection).
+        let cleaned = super::parse_json_codeblock(&response.content)
+            .unwrap_or_else(|| response.content.trim().to_string());
+
+        // Persist the audit response. Store the cleaned JSON as a parsed value
+        // (not double-encoded string) when possible.
         let audit_name = Store::timestamped_name("audit", "json");
         let audit_path = format!("metacog/audits/{audit_name}");
+        let response_value = serde_json::from_str::<serde_json::Value>(&cleaned)
+            .unwrap_or_else(|_| serde_json::Value::String(cleaned.clone()));
         if let Err(e) = self.store.write_json(
             &audit_path,
             &serde_json::json!({
@@ -529,7 +536,7 @@ Output as JSON matching this shape:
                 "units_analyzed": analyzed_count,
                 "units_total": total_units,
                 "tokens_used": response.tokens_used,
-                "response": response.content,
+                "response": response_value,
             }),
         ) {
             warn!("failed to persist metacog audit: {e:#}");
@@ -549,7 +556,7 @@ Output as JSON matching this shape:
             #[serde(default)]
             recommendations: Vec<String>,
         }
-        match serde_json::from_str::<LlmCalibration>(&response.content) {
+        match serde_json::from_str::<LlmCalibration>(&cleaned) {
             Ok(llm) => {
                 let entry = CalibrationEntry {
                     date: Utc::now().format("%Y-%m-%d").to_string(),

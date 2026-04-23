@@ -128,33 +128,8 @@ fn default_category() -> String {
 /// Falls back to bare ` ``` ... ``` ` and then to the whole content (if it
 /// looks like a JSON array or object) so we handle every response style the
 /// model has been observed to use.
-fn parse_json_codeblock(content: &str) -> Option<String> {
-    // Primary: ```json ... ``` (closing fence optional — LLMs sometimes omit it
-    // at high temperature or when the response is very long)
-    if let Some(start) = content.find("```json") {
-        let after = &content[start + 7..];
-        let end = after.find("```").unwrap_or(after.len());
-        let candidate = after[..end].trim();
-        if candidate.starts_with('[') || candidate.starts_with('{') {
-            return Some(candidate.to_string());
-        }
-    }
-    // Fallback: bare ``` ... ```
-    if let Some(start) = content.find("```") {
-        let after = &content[start + 3..];
-        let end = after.find("```").unwrap_or(after.len());
-        let candidate = after[..end].trim();
-        if candidate.starts_with('[') || candidate.starts_with('{') {
-            return Some(candidate.to_string());
-        }
-    }
-    // Last resort: the whole content if it already looks like JSON
-    let trimmed = content.trim();
-    if trimmed.starts_with('[') || trimmed.starts_with('{') {
-        return Some(trimmed.to_string());
-    }
-    None
-}
+// parse_json_codeblock is now shared — see super::parse_json_codeblock
+use super::parse_json_codeblock;
 
 /// Normalize a pattern string for deduplication. Lowercases, strips punctuation,
 /// and collapses whitespace so near-duplicate phrasings hash to the same key.

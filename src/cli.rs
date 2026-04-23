@@ -37,6 +37,18 @@ pub enum Command {
         /// Run specific phase only (sws, rem, wake, or all)
         #[arg(default_value = "all")]
         phase: DreamPhase,
+
+        /// Reprocess all sessions from scratch (resets processed state).
+        /// Without --modules, resets all modules. With --modules, resets only
+        /// the specified modules before running.
+        #[arg(long)]
+        backlog: bool,
+
+        /// Modules to reset when using --backlog (comma-separated).
+        /// Options: dreaming, introspection, metacog, valence, all.
+        /// Defaults to "all" if --backlog is used without --modules.
+        #[arg(long, value_delimiter = ',')]
+        modules: Option<Vec<String>>,
     },
 
     /// Inspect a module's state and data

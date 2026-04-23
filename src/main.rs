@@ -15,7 +15,7 @@ mod transcript;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Command};
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -64,9 +64,46 @@ async fn main() -> Result<()> {
             println!("{status}");
         }
 
-        Command::Dream { phase } => {
-            info!("Running manual dream cycle (phase: {phase:?})");
+        Command::Dream { phase, backlog, modules: module_list } => {
             let config = config::Config::load(&cli.config)?;
+
+            if backlog {
+                let store = store::Store::new(config.data_dir())?;
+                let targets = match &module_list {
+                    Some(mods) if !mods.iter().any(|m| m == "all") => mods.clone(),
+                    _ => vec![
+                        "dreaming".to_string(),
+                        "introspection".to_string(),
+                        "metacog".to_string(),
+                        "valence".to_string(),
+                    ],
+                };
+                info!("Backlog mode: resetting processed state for {:?}", targets);
+                for module in &targets {
+                    let path = match module.as_str() {
+                        "dreaming" | "dreams" => "dreams/processed.json",
+                        "introspection" => "introspection/processed.json",
+                        "metacog" => "metacog/processed.json",
+                        "valence" | "intuition" => "valence/processed.json",
+                        other => {
+                            warn!("Unknown module for backlog: {other}, skipping");
+                            continue;
+                        }
+                    };
+                    let full_path = store.path(path);
+                    if full_path.exists() {
+                        // Back up the processed state before resetting
+                        let backup = store.path(&format!("{path}.bak"));
+                        std::fs::copy(&full_path, &backup)?;
+                        // Write empty sessions map
+                        store.write_json(path, &serde_json::json!({"sessions": {}}))?;
+                        info!("Reset {path} (backup at {path}.bak)");
+                    }
+                }
+                println!("Backlog: reset processed state for {} module(s). Running cycle...", targets.len());
+            }
+
+            info!("Running manual dream cycle (phase: {phase:?})");
             let daemon = daemon::Daemon::new(config).await?;
             daemon.run_dream(phase).await?;
         }

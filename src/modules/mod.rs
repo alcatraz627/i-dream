@@ -16,6 +16,37 @@ use crate::api::ClaudeClient;
 use crate::config::Config;
 use anyhow::Result;
 
+/// Extract JSON from an LLM response that may be wrapped in markdown code fences.
+///
+/// Handles: ````json ... ````, bare ```` ... ````, and raw JSON.
+/// Returns `None` if no JSON-like content (starting with `[` or `{`) is found.
+pub fn parse_json_codeblock(content: &str) -> Option<String> {
+    // Primary: ```json ... ``` (closing fence optional — LLMs sometimes omit it)
+    if let Some(start) = content.find("```json") {
+        let after = &content[start + 7..];
+        let end = after.find("```").unwrap_or(after.len());
+        let candidate = after[..end].trim();
+        if candidate.starts_with('[') || candidate.starts_with('{') {
+            return Some(candidate.to_string());
+        }
+    }
+    // Fallback: bare ``` ... ```
+    if let Some(start) = content.find("```") {
+        let after = &content[start + 3..];
+        let end = after.find("```").unwrap_or(after.len());
+        let candidate = after[..end].trim();
+        if candidate.starts_with('[') || candidate.starts_with('{') {
+            return Some(candidate.to_string());
+        }
+    }
+    // Last resort: the whole content if it already looks like JSON
+    let trimmed = content.trim();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 /// Trait that all subconscious modules implement.
 ///
 /// The daemon calls `should_run()` to check if the module needs to execute,

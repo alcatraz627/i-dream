@@ -240,7 +240,7 @@ impl Default for Config {
                     sws_enabled: true,
                     rem_enabled: true,
                     wake_enabled: true,
-                    min_sessions_since_last: 3,
+                    min_sessions_since_last: 1,
                     journal_max_entries: 500,
                     wake_promotion_threshold: 0.5,
                 },

@@ -377,31 +377,7 @@ mod tests {
     }
 }
 
-/// Strip markdown code fences from LLM response to extract bare JSON.
-fn strip_json_fences(content: &str) -> String {
-    let trimmed = content.trim();
-    // Try ```json ... ``` first
-    if let Some(start) = trimmed.find("```json") {
-        let after = &trimmed[start + 7..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim().to_string();
-        }
-    }
-    // Try bare ``` ... ```
-    if let Some(start) = trimmed.find("```") {
-        let after = &trimmed[start + 3..];
-        // Skip the language tag line if present
-        let after = if let Some(nl) = after.find('\n') {
-            &after[nl + 1..]
-        } else {
-            after
-        };
-        if let Some(end) = after.find("```") {
-            return after[..end].trim().to_string();
-        }
-    }
-    trimmed.to_string()
-}
+// strip_json_fences replaced by shared super::parse_json_codeblock
 
 /// Compact chain representation for the analysis prompt. Drops verbose
 /// fields (full reasoning_summary) and keeps only structural metadata
@@ -679,7 +655,8 @@ Output ONLY the JSON object. No markdown fences, no commentary, no explanation."
         // Best-effort parse into ReasoningPatterns. The LLM sometimes
         // wraps JSON in prose or markdown fences — try stripping fences
         // first, then direct parse, then fall back to a timestamped report.
-        let content = strip_json_fences(&response.content);
+        let content = super::parse_json_codeblock(&response.content)
+            .unwrap_or_else(|| response.content.trim().to_string());
         match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(mut json) => {
                 // Inject our authoritative last_updated so the field
