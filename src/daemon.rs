@@ -11,7 +11,7 @@ use crate::modules::{
     introspection::{IntrospectionModule, ReasoningPatterns},
     intuition::IntuitionModule,
     metacog::{MetacogModule, ToolActivitySample},
-    prospective::{Intention, Priority, ProspectiveModule, Trigger},
+    prospective::{FiredRecord, Intention, Priority, ProspectiveModule, Trigger},
     user_settings::UserSettings,
     Module,
 };
@@ -1036,10 +1036,18 @@ fn build_session_start_response(store: &Store) -> String {
     out
 }
 
-/// Filter the intention registry to "broadcast-ready" entries — those
-/// that can fire without needing to match against a user prompt.
+/// Surface active intentions from the registry into the session briefing.
+///
+/// Includes both broadcast-ready (Time triggers with no keywords) and
+/// Context-trigger intentions. Context triggers are behavioral rules
+/// derived from dream insights — they don't need keyword matching against
+/// a specific message because they apply broadly to session behavior.
+/// Surfacing them here closes the dream→session feedback loop.
+///
+/// Each surfaced intention gets its fire_count incremented and a
+/// FiredRecord logged so we can track engagement.
 fn broadcast_intentions_section(store: &Store) -> Option<String> {
-    let registry: Vec<Intention> = store
+    let mut registry: Vec<Intention> = store
         .read_jsonl("intentions/registry.jsonl")
         .unwrap_or_default();
     if registry.is_empty() {
@@ -1047,29 +1055,71 @@ fn broadcast_intentions_section(store: &Store) -> Option<String> {
     }
 
     let now = Utc::now();
-    let mut broadcast: Vec<&Intention> = registry
+    let surfaced_ids: Vec<String> = registry
         .iter()
         .filter(|intent| intent.expires > now)
         .filter(|intent| intent.fire_count < intent.max_fires)
-        .filter(|intent| matches!(
-            &intent.trigger,
-            Trigger::Time { after, keywords } if *after <= now && keywords.is_empty()
-        ))
+        .filter(|intent| match &intent.trigger {
+            // Broadcast Time triggers (original behavior)
+            Trigger::Time { after, keywords } => *after <= now && keywords.is_empty(),
+            // Context triggers — behavioral rules from dream insights
+            Trigger::Context { .. } => true,
+            // Event triggers need keyword matching — skip at session start
+            Trigger::Event { .. } => false,
+        })
+        .map(|i| i.id.clone())
         .collect();
 
-    if broadcast.is_empty() {
+    if surfaced_ids.is_empty() {
         return None;
     }
 
-    // High priority first, then medium, then low.
-    broadcast.sort_by_key(|i| match i.action.priority {
+    // Increment fire_count for all surfaced intentions and rewrite registry.
+    for intent in &mut registry {
+        if surfaced_ids.contains(&intent.id) {
+            intent.fire_count += 1;
+            intent.last_fired = Some(now);
+        }
+    }
+    // Atomically rewrite the JSONL registry with updated fire counts.
+    let registry_path = store.path("intentions/registry.jsonl");
+    let tmp_path = registry_path.with_extension("tmp");
+    let lines: String = registry
+        .iter()
+        .filter_map(|i| serde_json::to_string(i).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    if let Err(e) = std::fs::write(&tmp_path, &lines)
+        .and_then(|_| std::fs::rename(&tmp_path, &registry_path))
+    {
+        warn!("Failed to update intention fire counts: {e:#}");
+    }
+
+    // Log fired records
+    for id in &surfaced_ids {
+        let record = FiredRecord {
+            intention_id: id.clone(),
+            fired_at: now,
+            session_id: String::new(), // SessionStart has no session ID
+            was_relevant: None,
+        };
+        let _ = store.append_jsonl("intentions/fired.jsonl", &record);
+    }
+
+    // Build the output section, sorted by priority.
+    let mut to_surface: Vec<&Intention> = registry
+        .iter()
+        .filter(|i| surfaced_ids.contains(&i.id))
+        .collect();
+    to_surface.sort_by_key(|i| match i.action.priority {
         Priority::High => 0,
         Priority::Medium => 1,
         Priority::Low => 2,
     });
 
-    let mut s = format!("## Reminders ({})", broadcast.len());
-    for intent in broadcast {
+    let mut s = format!("## Behavioral rules ({})", to_surface.len());
+    for intent in to_surface {
         let tag = match intent.action.priority {
             Priority::High => "high",
             Priority::Medium => "medium",
@@ -1415,7 +1465,7 @@ mod tests {
 
         let out = build_session_start_response(&store);
         assert!(out.contains("# i-dream briefing"), "missing header: {out}");
-        assert!(out.contains("## Reminders (1)"), "missing section: {out}");
+        assert!(out.contains("## Behavioral rules (1)"), "missing section: {out}");
         assert!(out.contains("[high]"), "missing priority tag: {out}");
         assert!(out.contains("Update CHANGELOG for v0.5.0"), "missing message: {out}");
     }
@@ -1587,7 +1637,7 @@ mod tests {
         store.write_json("introspection/patterns.json", &patterns).unwrap();
 
         let out = build_session_start_response(&store);
-        assert!(out.contains("## Reminders"), "missing reminders: {out}");
+        assert!(out.contains("## Behavioral rules"), "missing behavioral rules: {out}");
         assert!(out.contains("## Self-awareness"), "missing self-awareness: {out}");
         assert!(out.contains("Weekly review"));
         assert!(out.contains("incremental verification"));
