@@ -140,8 +140,17 @@ impl<'a> IntuitionModule<'a> {
         session_id: &str,
         date: &str,
     ) -> Option<(Vec<String>, Outcome)> {
-        // Need at least 2 tags for `match_patterns` to ever fire on this.
-        let tags: Vec<String> = unit.input.topic_keywords.iter().take(5).cloned().collect();
+        // Deduplicate tags (e.g. "code/review/code/review/code") and require
+        // at least 2 unique tags for `match_patterns` to ever fire on this.
+        let mut seen = std::collections::HashSet::new();
+        let tags: Vec<String> = unit
+            .input
+            .topic_keywords
+            .iter()
+            .filter(|t| seen.insert(t.to_lowercase()))
+            .take(5)
+            .cloned()
+            .collect();
         if tags.len() < 2 {
             return None;
         }
@@ -802,6 +811,32 @@ mod tests {
         let (tags, _) = IntuitionModule::outcome_for_unit(&unit, "s", "d").unwrap();
         assert_eq!(tags.len(), 5, "Should cap tags at 5");
         assert_eq!(tags, vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn outcome_deduplicates_repeated_keywords() {
+        // "code/review/code/review/code" had 5 raw tags but only 2 unique
+        let unit = make_exec_unit(
+            "u-dedup",
+            true,
+            vec!["code", "review", "code", "review", "code"],
+            vec![],
+        );
+        let (tags, _) = IntuitionModule::outcome_for_unit(&unit, "s", "d").unwrap();
+        assert_eq!(tags, vec!["code", "review"]);
+    }
+
+    #[test]
+    fn outcome_dedup_case_insensitive() {
+        let unit = make_exec_unit(
+            "u-dedup-case",
+            true,
+            vec!["Rust", "rust", "async", "ASYNC", "tokio"],
+            vec![],
+        );
+        let (tags, _) = IntuitionModule::outcome_for_unit(&unit, "s", "d").unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags, vec!["Rust", "async", "tokio"]);
     }
 
     // ── merge_outcomes: idempotent accumulation ───────────────

@@ -552,14 +552,14 @@ fn hash_string(s: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Session-infrastructure boilerplate that should never become a valence
-/// signal. These phrases appear in every catchup/core-dump handoff and would
-/// dominate the intuition store if left unfiltered.
+/// Session-infrastructure boilerplate and generic English words that should
+/// never become a valence signal. These would dominate the intuition store
+/// if left unfiltered — they appear in every prompt but carry no topic info.
 const STOP_WORDS: &[&str] = &[
     // Session handoff boilerplate (catchup/core-dump preamble)
     "this", "session", "being", "continued", "from", "previous", "conversation",
     "that", "context", "with", "have", "been", "summary", "below", "covers",
-    "earlier", "portion", "context", "above", "contains", "compacted",
+    "earlier", "portion", "above", "contains", "compacted",
     // Task system noise
     "task", "notification", "output", "completed", "background",
     // Skill names / commands
@@ -572,6 +572,20 @@ const STOP_WORDS: &[&str] = &[
     "final", "data", "check", "other", "alternate", "sources", "give",
     "stop", "fuck", "minute", "filter", "please", "tests", "once", "works",
     "tell", "option", "sounds", "good", "name",
+    // Common English function words that pass the >3 char filter but carry
+    // no topic signal. Identified from valence memory tag frequency analysis.
+    "what", "more", "still", "these", "then", "show", "another", "some",
+    "about", "would", "could", "should", "your", "their", "them", "they",
+    "when", "where", "which", "while", "each", "every", "into", "only",
+    "using", "used", "after", "before", "between", "through", "does",
+    "down", "first", "last", "next", "over", "under", "same", "such",
+    "very", "most", "even", "much", "many", "well", "back", "come",
+    "than", "those", "were", "because", "since", "until", "already",
+    "both", "point", "points", "line", "type", "list", "move",
+    // Tool/agent infrastructure tokens
+    "args", "toolu", "tool_use", "todos", "explicit", "default",
+    "provided", "supported", "possible", "current", "state",
+    "primary", "request", "intent", "requested",
 ];
 
 fn extract_keywords(text: &str) -> Vec<String> {
