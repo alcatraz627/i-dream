@@ -248,6 +248,9 @@ mod tests {
 
         let mut config = Config::default();
         config.modules.introspection.min_chains_for_report = 10;
+        // Point projects_dir at the empty temp dir so load_new_chains()
+        // doesn't scan real sessions during the should_run() bootstrap.
+        config.ingestion.projects_dir = dir.path().join("empty-projects").into();
         // Only create 3 chains
         let chains_dir = store.path("introspection/chains");
         for i in 0..3 {
@@ -266,6 +269,7 @@ mod tests {
 
         let mut config = Config::default();
         config.modules.introspection.min_chains_for_report = 3;
+        config.ingestion.projects_dir = dir.path().join("empty-projects").into();
         let chains_dir = store.path("introspection/chains");
         for i in 0..5 {
             std::fs::write(chains_dir.join(format!("chain-{i}.jsonl")), "{}").unwrap();
@@ -284,6 +288,7 @@ mod tests {
         let mut config = Config::default();
         config.modules.introspection.min_chains_for_report = 2;
         config.modules.introspection.report_interval_days = 7;
+        config.ingestion.projects_dir = dir.path().join("empty-projects").into();
 
         let chains_dir = store.path("introspection/chains");
         for i in 0..5 {
@@ -378,9 +383,36 @@ impl<'a> Module for IntrospectionModule<'a> {
             return Ok(false);
         }
 
-        // Check if we have enough chains for a meaningful report
+        // Always collect chains from new sessions first. This is a
+        // local-only operation (no API calls) that populates
+        // `introspection/chains/`. Without this, the module has a
+        // bootstrap deadlock: available_chains() returns 0 because
+        // load_new_chains() only ran inside run(), which never fired
+        // because should_run() saw 0 chains.
+        match self.load_new_chains() {
+            Ok((_, sessions_seen)) => {
+                if !sessions_seen.is_empty() {
+                    info!(
+                        "Introspection: collected chains from {} new sessions",
+                        sessions_seen.len()
+                    );
+                    self.persist_processed(&sessions_seen)?;
+                }
+            }
+            Err(e) => {
+                // Don't fail should_run on collection errors — fall through
+                // to check existing chains on disk.
+                warn!("Introspection: chain collection failed: {e:#}");
+            }
+        }
+
+        // Now check if we have enough chains for a meaningful report
         let chains = self.available_chains()?;
         if chains < self.config.modules.introspection.min_chains_for_report as usize {
+            info!(
+                "Introspection: {chains} chain files < {} threshold, skipping analysis",
+                self.config.modules.introspection.min_chains_for_report
+            );
             return Ok(false);
         }
 
@@ -404,21 +436,36 @@ impl<'a> Module for IntrospectionModule<'a> {
     async fn run(&self, client: &ClaudeClient, _budget: u64) -> Result<u64> {
         info!("Running weekly introspection analysis");
 
-        let (chains, sessions_seen) = self.load_new_chains()?;
+        // Chain collection already happened in should_run(). Load all
+        // persisted chains from disk for analysis rather than re-scanning
+        // sessions (which would skip already-processed ones).
+        let chains_dir = self.store.path("introspection/chains");
+        let mut chains: Vec<ReasoningChain> = Vec::new();
+        if chains_dir.exists() {
+            for entry in std::fs::read_dir(&chains_dir)? {
+                let entry = entry?;
+                if entry.path().extension().map(|e| e == "jsonl").unwrap_or(false) {
+                    let content = std::fs::read_to_string(entry.path())?;
+                    for line in content.lines() {
+                        if let Ok(chain) = serde_json::from_str::<ReasoningChain>(line) {
+                            chains.push(chain);
+                        }
+                    }
+                }
+            }
+        }
 
         if chains.is_empty() {
-            info!(
-                "Introspection: no new reasoning chains (scanned {} sessions), skipping API call",
-                sessions_seen.len()
-            );
-            self.persist_processed(&sessions_seen)?;
+            info!("Introspection: no reasoning chains on disk, skipping API call");
             return Ok(0);
         }
 
         info!(
-            "Introspection: analyzing {} new reasoning chains from {} sessions",
+            "Introspection: analyzing {} reasoning chains from {} session files",
             chains.len(),
-            sessions_seen.len()
+            std::fs::read_dir(&chains_dir)
+                .map(|d| d.count())
+                .unwrap_or(0)
         );
 
         let system_prompt = r#"You are analyzing reasoning chains from Claude Code sessions
@@ -518,7 +565,7 @@ Produce a JSON report with:
             }
         }
 
-        self.persist_processed(&sessions_seen)?;
+        // persist_processed already called in should_run()
 
         info!(
             "Introspection analysis complete ({} tokens)",

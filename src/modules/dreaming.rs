@@ -7,6 +7,7 @@
 use crate::api::ClaudeClient;
 use crate::config::{expand_tilde, Config};
 use crate::dream_trace::{DreamTracer, EventKind, Phase as TracePhase};
+use crate::modules::prospective::{Action, Intention, Priority, Trigger};
 use crate::modules::Module;
 use crate::store::Store;
 use crate::transcript;
@@ -663,8 +664,52 @@ Output ONLY a JSON array. No commentary."#;
                 Err(e) => warn!("REM: association JSON parse failed: {e:#}"),
             }
         } else {
-            let preview: String = response.content.chars().take(200).collect();
-            warn!("REM: no JSON block found in API response — associations not saved\n  response[:200]: {preview}");
+            // Retry once with a direct "return JSON only" prompt. This
+            // recovers the ~3.6% of REM calls where the model wraps
+            // valid associations in prose without a code fence.
+            warn!("REM: no JSON block in first response, retrying with extraction prompt");
+            let extract_prompt = format!(
+                "The following text contains association data. Extract ONLY the JSON array \
+                 from it. Output nothing but the raw JSON array, no markdown fences, no \
+                 commentary.\n\n{}",
+                &response.content
+            );
+            match client
+                .analyze(
+                    "Extract the JSON array from the text. Output ONLY valid JSON.",
+                    &extract_prompt,
+                    &self.config.budget.model,
+                    4096,
+                    0.0,
+                )
+                .await
+            {
+                Ok(retry_resp) => {
+                    if let Some(json_str) = parse_json_codeblock(&retry_resp.content) {
+                        match serde_json::from_str::<Vec<RawAssociation>>(&json_str) {
+                            Ok(raw) => {
+                                info!("REM: retry recovered {} associations", raw.len());
+                                for r in raw {
+                                    new_assocs.push(Association {
+                                        id: Uuid::new_v4().to_string(),
+                                        patterns_linked: r.patterns_linked,
+                                        hypothesis: r.hypothesis,
+                                        confidence: r.confidence,
+                                        actionable: r.actionable,
+                                        suggested_rule: r.suggested_rule,
+                                        promoted: false,
+                                    });
+                                }
+                            }
+                            Err(e) => warn!("REM: retry parse also failed: {e:#}"),
+                        }
+                    } else {
+                        let preview: String = response.content.chars().take(200).collect();
+                        warn!("REM: retry also produced no JSON\n  original[:200]: {preview}");
+                    }
+                }
+                Err(e) => warn!("REM: retry API call failed: {e:#}"),
+            }
         }
 
         let assoc_count = new_assocs.len() as u64;
@@ -773,19 +818,50 @@ Output ONLY a JSON array. No commentary."#;
         // Apply feedback: read insight-feedback.jsonl and adjust confidence.
         // Upvotes boost confidence by 0.05, downvotes penalize by 0.10 and
         // un-promote so the insight gets re-evaluated.
+        //
+        // Two feedback formats exist:
+        //   CLI:    {"insight_id": "...", "rating": "up"|"down"}
+        //   Widget: {"pattern_id": "...", "rating": 1|-1, "source": "widget"}
         if self.store.exists("dreams/insight-feedback.jsonl") {
             let feedback_path = self.store.path("dreams/insight-feedback.jsonl");
             if let Ok(content) = std::fs::read_to_string(&feedback_path) {
                 for line in content.lines() {
                     if let Ok(fb) = serde_json::from_str::<serde_json::Value>(line) {
-                        let id = fb.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        let vote = fb.get("vote").and_then(|v| v.as_str()).unwrap_or("");
+                        // Accept both "insight_id" (CLI) and "pattern_id" (widget)
+                        let id = fb
+                            .get("insight_id")
+                            .or_else(|| fb.get("pattern_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        // Accept string "up"/"down" or numeric 1/-1
+                        let vote = match fb.get("rating") {
+                            Some(v) if v.is_string() => {
+                                v.as_str().unwrap_or("").to_string()
+                            }
+                            Some(v) if v.is_number() => {
+                                match v.as_i64().unwrap_or(0) {
+                                    n if n > 0 => "up".to_string(),
+                                    n if n < 0 => "down".to_string(),
+                                    _ => String::new(),
+                                }
+                            }
+                            _ => String::new(),
+                        };
                         if id.is_empty() || vote.is_empty() {
                             continue;
                         }
                         for assoc in all_assocs.iter_mut() {
-                            if assoc.id == id {
-                                match vote {
+                            // Match by UUID (CLI feedback) or by hypothesis
+                            // text (widget feedback uses full pattern text
+                            // as pattern_id, not a UUID).
+                            let is_uuid = id.len() == 36 || id.len() == 16;
+                            let matched = if is_uuid {
+                                assoc.id == id
+                            } else {
+                                assoc.hypothesis.starts_with(id)
+                            };
+                            if matched {
+                                match vote.as_str() {
                                     "up" => {
                                         assoc.confidence =
                                             (assoc.confidence + 0.05).min(1.0);
@@ -899,6 +975,67 @@ Output ONLY a JSON array. No commentary."#;
             self.store.write_json("dreams/associations.json", &all_assocs)?;
 
             info!("Wake: promoted {promoted_count} insights to dreams/insights.md");
+
+            // Wire promoted actionable insights into the prospective module
+            // as Context-trigger intentions. This is the bridge that feeds
+            // the intention matching engine — without it, the prospective
+            // module's registry stays empty forever.
+            let expiry = Utc::now()
+                + chrono::Duration::days(
+                    self.config.modules.prospective.default_expiry_days as i64,
+                );
+            let mut intentions_created = 0u32;
+            for assoc in all_assocs.iter() {
+                if !promoted_ids.contains(assoc.id.as_str()) {
+                    continue;
+                }
+                let rule = match &assoc.suggested_rule {
+                    Some(r) if !r.is_empty() && assoc.actionable => r,
+                    _ => continue,
+                };
+                // Extract keywords from the rule text for matching
+                let keywords: Vec<String> = rule
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() > 3)
+                    .map(|w| w.to_ascii_lowercase())
+                    .take(5)
+                    .collect();
+                if keywords.is_empty() {
+                    continue;
+                }
+
+                let intention = Intention {
+                    id: Uuid::new_v4().to_string(),
+                    trigger: Trigger::Context {
+                        keywords,
+                        min_keyword_matches: 2,
+                    },
+                    action: Action {
+                        message: rule.clone(),
+                        priority: if assoc.confidence >= 0.8 {
+                            Priority::High
+                        } else {
+                            Priority::Medium
+                        },
+                        source: format!("dream-wake:{}", assoc.id),
+                    },
+                    created: Utc::now(),
+                    expires: expiry,
+                    fire_count: 0,
+                    max_fires: 5,
+                    last_fired: None,
+                };
+                if let Err(e) =
+                    self.store.append_jsonl("intentions/registry.jsonl", &intention)
+                {
+                    warn!("Wake: failed to create intention: {e:#}");
+                } else {
+                    intentions_created += 1;
+                }
+            }
+            if intentions_created > 0 {
+                info!("Wake: created {intentions_created} prospective intentions");
+            }
         } else {
             info!("Wake: no new promotable associations");
         }

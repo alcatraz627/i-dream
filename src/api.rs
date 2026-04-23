@@ -91,6 +91,17 @@ pub struct AnalysisResponse {
     pub tokens_used: u64,
 }
 
+/// Strip JSON-illegal control characters (U+0000–U+001F except \t \n \r)
+/// from API response text. Claude occasionally emits these in creative
+/// output, and downstream JSON serialization via serde_json preserves them
+/// as literal bytes, breaking Python's `json.loads()` (which rejects bare
+/// control chars by default).
+fn sanitize_control_chars(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c >= '\u{0020}' || c == '\t' || c == '\n' || c == '\r')
+        .collect()
+}
+
 #[derive(Serialize)]
 struct ApiRequest {
     model: String,
@@ -300,11 +311,13 @@ impl ClaudeClient {
             }
         };
 
-        let content = body
-            .content
-            .first()
-            .map(|b| b.text.clone())
-            .unwrap_or_default();
+        let content = sanitize_control_chars(
+            &body
+                .content
+                .first()
+                .map(|b| b.text.clone())
+                .unwrap_or_default(),
+        );
 
         Ok(AnalysisResponse {
             content,
@@ -389,10 +402,11 @@ impl ClaudeClient {
             anyhow::bail!("claude CLI exited with {}: {}", output.status, detail);
         }
 
-        let content = String::from_utf8(output.stdout)
-            .context("claude CLI output is not valid UTF-8")?
-            .trim()
-            .to_string();
+        let content = sanitize_control_chars(
+            String::from_utf8(output.stdout)
+                .context("claude CLI output is not valid UTF-8")?
+                .trim(),
+        );
 
         // Rough estimate — subprocess mode has no usage metadata
         let tokens_used = ((full_prompt.len() + content.len()) / 4) as u64;
