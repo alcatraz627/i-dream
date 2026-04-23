@@ -17,6 +17,12 @@
 # Agent artifacts
 .claude/
 **/.playwright-mcp/
+_*.claude.md
+
+# Screenshots / image artifacts in root
+/*.png
+/*.jpg
+/*.gif
 
 .env
 
