@@ -37,6 +37,24 @@ const EVENTS_LOG: &str = "logs/events.jsonl";
 /// trends without filtering the general event stream.
 const SIGNALS_LOG: &str = "logs/signals.jsonl";
 
+/// Log of what was surfaced at each SessionStart — intention IDs and
+/// whether introspection patterns were included. The valence module
+/// reads this during consolidation to correlate session outcomes with
+/// the insights that were active, closing the implicit feedback loop.
+const SURFACED_LOG: &str = "valence/surfaced.jsonl";
+
+/// A record of what the daemon surfaced into a session's context.
+/// Written once per SessionStart that produces a non-empty briefing.
+#[derive(Debug, Serialize, Deserialize)]
+struct SurfacedBriefing {
+    /// Daemon-side timestamp when the briefing was composed.
+    ts: DateTime<Utc>,
+    /// IDs of intentions that were included in the briefing.
+    intention_ids: Vec<String>,
+    /// Whether the introspection self-awareness section was included.
+    has_introspection: bool,
+}
+
 /// Relative path of the metacog real-time tool-activity log. Written on
 /// each `ToolUse` hook event as a lightweight heartbeat — counterpart to
 /// the deep-sampling batch file `metacog/samples.jsonl`.
@@ -559,7 +577,16 @@ impl Daemon {
             if module.should_run()? {
                 info!("Running intuition module (valence collection)");
                 match module.run(client, 0).await {
-                    Ok(_) => info!("Intuition complete"),
+                    Ok(_) => {
+                        info!("Intuition complete");
+                        // Backfill implicit feedback on surfaced insights
+                        // now that valence outcomes are fresh.
+                        match module.backfill_insight_feedback() {
+                            Ok(n) if n > 0 => info!("Backfilled {n} insight feedback records"),
+                            Ok(_) => {}
+                            Err(e) => warn!("Insight feedback backfill failed: {e:#}"),
+                        }
+                    }
                     Err(e) => error!("Intuition failed: {e:#}"),
                 }
             }
@@ -1043,7 +1070,23 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // the hook script echoes whatever we write back into Claude's context.
     // For all other events we just ack with an empty body.
     let response = match &event {
-        HookEvent::SessionStart { .. } => build_session_start_response(store),
+        HookEvent::SessionStart { .. } => {
+            let (text, intention_ids, has_introspection) =
+                build_session_start_response(store);
+            // Persist what was surfaced so the valence module can
+            // correlate session outcomes with active insights.
+            if !intention_ids.is_empty() || has_introspection {
+                let briefing = SurfacedBriefing {
+                    ts: Utc::now(),
+                    intention_ids,
+                    has_introspection,
+                };
+                if let Err(e) = store.append_jsonl(SURFACED_LOG, &briefing) {
+                    warn!("Failed to log surfaced briefing: {e:#}");
+                }
+            }
+            text
+        }
         _ => String::new(),
     };
     if !response.is_empty() {
@@ -1070,27 +1113,31 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
 /// Returns an empty string when nothing is worth surfacing. An empty
 /// body is the correct no-op signal for the shell hook — it writes
 /// nothing into Claude's context.
-fn build_session_start_response(store: &Store) -> String {
+fn build_session_start_response(store: &Store) -> (String, Vec<String>, bool) {
     let mut sections: Vec<String> = Vec::new();
+    let mut surfaced_ids: Vec<String> = Vec::new();
+    let mut has_introspection = false;
 
     // ── 1. Broadcast intentions ─────────────────────────────
-    if let Some(section) = broadcast_intentions_section(store) {
+    if let Some((section, ids)) = broadcast_intentions_section(store) {
         sections.push(section);
+        surfaced_ids = ids;
     }
 
     // ── 2. Introspection patterns ───────────────────────────
     if let Some(section) = introspection_patterns_section(store) {
         sections.push(section);
+        has_introspection = true;
     }
 
     if sections.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new(), false);
     }
 
     let mut out = String::from("# i-dream briefing\n\n");
     out.push_str(&sections.join("\n\n"));
     out.push('\n');
-    out
+    (out, surfaced_ids, has_introspection)
 }
 
 /// Surface active intentions from the registry into the session briefing.
@@ -1103,7 +1150,7 @@ fn build_session_start_response(store: &Store) -> String {
 ///
 /// Each surfaced intention gets its fire_count incremented and a
 /// FiredRecord logged so we can track engagement.
-fn broadcast_intentions_section(store: &Store) -> Option<String> {
+fn broadcast_intentions_section(store: &Store) -> Option<(String, Vec<String>)> {
     let mut registry: Vec<Intention> = store
         .read_jsonl("intentions/registry.jsonl")
         .unwrap_or_default();
@@ -1184,7 +1231,7 @@ fn broadcast_intentions_section(store: &Store) -> Option<String> {
         };
         s.push_str(&format!("\n- [{tag}] {}", intent.action.message));
     }
-    Some(s)
+    Some((s, surfaced_ids))
 }
 
 /// Surface strengths/weaknesses/assumptions from the latest
@@ -1501,7 +1548,7 @@ mod tests {
     #[test]
     fn session_start_response_empty_when_no_data() {
         let (_dir, store) = mk_store();
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(
             out.is_empty(),
             "Empty store should yield empty response, got: {out:?}"
@@ -1520,7 +1567,7 @@ mod tests {
         );
         store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(out.contains("# i-dream briefing"), "missing header: {out}");
         assert!(out.contains("## Behavioral rules (1)"), "missing section: {out}");
         assert!(out.contains("[high]"), "missing priority tag: {out}");
@@ -1539,7 +1586,7 @@ mod tests {
         );
         store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(
             out.is_empty(),
             "Future-gated time intentions should not fire at session start: {out:?}"
@@ -1570,7 +1617,7 @@ mod tests {
         };
         store.append_jsonl("intentions/registry.jsonl", &event_intention).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(
             out.is_empty(),
             "Keyword-gated intentions need a prompt to match — must not surface at session start: {out:?}"
@@ -1596,7 +1643,7 @@ mod tests {
             &broadcast_intention("med-1", "Medium thing", Priority::Medium, ago),
         ).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         let high_pos = out.find("High thing").expect("high missing");
         let med_pos = out.find("Medium thing").expect("medium missing");
         let low_pos = out.find("Low thing").expect("low missing");
@@ -1628,7 +1675,7 @@ mod tests {
         maxed.max_fires = 5;
         store.append_jsonl("intentions/registry.jsonl", &maxed).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(
             out.is_empty(),
             "Expired and maxed intentions must not surface: {out:?}"
@@ -1656,7 +1703,7 @@ mod tests {
         };
         store.write_json("introspection/patterns.json", &patterns).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(out.contains("## Self-awareness"), "missing section: {out}");
         assert!(out.contains("methodical search"), "missing strength: {out}");
         assert!(out.contains("premature optimization"), "missing weakness: {out}");
@@ -1693,11 +1740,58 @@ mod tests {
         };
         store.write_json("introspection/patterns.json", &patterns).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(out.contains("## Behavioral rules"), "missing behavioral rules: {out}");
         assert!(out.contains("## Self-awareness"), "missing self-awareness: {out}");
         assert!(out.contains("Weekly review"));
         assert!(out.contains("incremental verification"));
+    }
+
+    #[test]
+    fn session_start_response_returns_surfaced_intention_ids() {
+        let (_dir, store) = mk_store();
+        let ago = chrono::Duration::hours(-1);
+        store.append_jsonl(
+            "intentions/registry.jsonl",
+            &broadcast_intention("surf-a", "Rule A", Priority::High, ago),
+        ).unwrap();
+        store.append_jsonl(
+            "intentions/registry.jsonl",
+            &broadcast_intention("surf-b", "Rule B", Priority::Low, ago),
+        ).unwrap();
+
+        let (out, ids, has_intro) = build_session_start_response(&store);
+        assert!(!out.is_empty());
+        assert_eq!(ids.len(), 2, "expected 2 surfaced IDs, got: {ids:?}");
+        assert!(ids.contains(&"surf-a".to_string()));
+        assert!(ids.contains(&"surf-b".to_string()));
+        assert!(!has_intro, "no introspection patterns → false");
+    }
+
+    #[test]
+    fn session_start_response_flags_introspection() {
+        let (_dir, store) = mk_store();
+        let patterns = ReasoningPatterns {
+            last_updated: Utc::now(),
+            average_depth: 3.0,
+            average_breadth: 2.0,
+            fixation_rate: 0.0,
+            assumption_rate: 0.0,
+            overconfidence_rate: 0.0,
+            common_assumptions: vec!["X".into()],
+            strength_patterns: vec![],
+            weakness_patterns: vec![],
+            trend: Trend {
+                calibration_improving: true,
+                depth_trend: "stable".into(),
+                breadth_trend: "stable".into(),
+            },
+        };
+        store.write_json("introspection/patterns.json", &patterns).unwrap();
+
+        let (_out, ids, has_intro) = build_session_start_response(&store);
+        assert!(ids.is_empty(), "no intentions → empty ids");
+        assert!(has_intro, "introspection patterns present → true");
     }
 
     #[test]
@@ -1722,7 +1816,7 @@ mod tests {
         };
         store.write_json("introspection/patterns.json", &patterns).unwrap();
 
-        let out = build_session_start_response(&store);
+        let (out, _, _) = build_session_start_response(&store);
         assert!(
             out.is_empty(),
             "Patterns with no surfaceable content should not produce a section: {out:?}"

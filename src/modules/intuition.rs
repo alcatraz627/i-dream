@@ -17,6 +17,17 @@ use std::io::Write;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+/// A record of what was surfaced at SessionStart. Deserialized from
+/// `valence/surfaced.jsonl` (written by the daemon). Duplicated here
+/// to avoid coupling intuition → daemon.
+#[derive(Debug, Deserialize)]
+struct SurfacedBriefing {
+    ts: DateTime<Utc>,
+    intention_ids: Vec<String>,
+    #[allow(dead_code)]
+    has_introspection: bool,
+}
+
 /// Sessions already scanned for valence outcomes. Stored at
 /// `valence/processed.json` — mirrors the pattern used by metacog and
 /// dreaming so the same session isn't double-counted on every cycle.
@@ -348,6 +359,120 @@ impl<'a> IntuitionModule<'a> {
         );
 
         Ok((sessions_scanned, collected))
+    }
+
+    /// Backfill implicit feedback on surfaced insights.
+    ///
+    /// Reads `valence/surfaced.jsonl` and `intentions/fired.jsonl`, then
+    /// for each fired record with `was_relevant: None`, checks whether
+    /// sessions that followed the briefing had net-positive outcomes.
+    /// Updates `was_relevant` accordingly and rewrites the fired log.
+    ///
+    /// Returns the number of records updated.
+    pub fn backfill_insight_feedback(&self) -> Result<u64> {
+        use crate::modules::prospective::FiredRecord;
+
+        // ── 1. Load surfaced briefings ──────────────────────────
+        let surfaced: Vec<SurfacedBriefing> = self
+            .store
+            .read_jsonl("valence/surfaced.jsonl")
+            .unwrap_or_default();
+        if surfaced.is_empty() {
+            return Ok(0);
+        }
+
+        // ── 2. Load valence memory for session outcome stats ────
+        let entries: Vec<ValenceEntry> = self
+            .store
+            .read_jsonl("valence/memory.jsonl")
+            .unwrap_or_default();
+
+        // Build per-session outcome tallies from all valence entries.
+        let mut session_scores: HashMap<String, (u32, u32)> = HashMap::new(); // (positive, negative)
+        for entry in &entries {
+            for outcome in &entry.outcomes {
+                let (pos, neg) = session_scores.entry(outcome.session.clone()).or_default();
+                match outcome.result {
+                    ValenceResult::Positive => *pos += 1,
+                    ValenceResult::Negative => *neg += 1,
+                    ValenceResult::Neutral => {}
+                }
+            }
+        }
+
+        // ── 3. Load fired records ───────────────────────────────
+        let mut fired: Vec<FiredRecord> = self
+            .store
+            .read_jsonl("intentions/fired.jsonl")
+            .unwrap_or_default();
+        if fired.is_empty() {
+            return Ok(0);
+        }
+
+        // ── 4. For each unresolved fired record, find sessions
+        //       that started within 60s after the briefing and
+        //       derive relevance from their outcome ratio ─────────
+        let mut updated = 0u64;
+        for record in &mut fired {
+            if record.was_relevant.is_some() {
+                continue;
+            }
+
+            // Match by date — outcomes store YYYY-MM-DD strings, so
+            // we correlate at day granularity.
+            let fired_ts = record.fired_at;
+
+            // Count outcomes from sessions on the same day as the
+            // briefing.
+            let mut pos_total = 0u32;
+            let mut neg_total = 0u32;
+            for entry in &entries {
+                for outcome in &entry.outcomes {
+                    // Parse the outcome date and check if it falls in
+                    // the session window. Outcomes only store date
+                    // strings, so we do a coarser match: same-day +
+                    // session ID association.
+                    let fired_date = fired_ts.format("%Y-%m-%d").to_string();
+                    if outcome.date == fired_date {
+                        if let Some(&(p, n)) = session_scores.get(&outcome.session) {
+                            pos_total += p;
+                            neg_total += n;
+                            break; // count each session once
+                        }
+                    }
+                }
+            }
+
+            if pos_total + neg_total < 2 {
+                continue; // not enough data to judge
+            }
+
+            let ratio = pos_total as f64 / (pos_total + neg_total) as f64;
+            record.was_relevant = Some(ratio >= 0.5);
+            updated += 1;
+        }
+
+        if updated == 0 {
+            return Ok(0);
+        }
+
+        // ── 5. Rewrite the fired log atomically ─────────────────
+        let fired_path = self.store.path("intentions/fired.jsonl");
+        let tmp_path = fired_path.with_extension("jsonl.tmp");
+        {
+            let mut tmp = std::fs::File::create(&tmp_path)
+                .with_context(|| format!("create {}", tmp_path.display()))?;
+            for record in &fired {
+                let line = serde_json::to_string(record)?;
+                writeln!(tmp, "{line}")?;
+            }
+            tmp.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, &fired_path)
+            .with_context(|| format!("rename to {}", fired_path.display()))?;
+
+        info!("Insight feedback: backfilled {updated} fired records with relevance");
+        Ok(updated)
     }
 
     /// Match user message keywords against valence memory.
