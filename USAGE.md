@@ -10,7 +10,7 @@ Complete setup instructions for running i-dream on a new system.
 |-------------|---------|---------|
 | **Rust** | 1.78+ | Compiles the daemon |
 | **socat** | any | Unix socket communication (hook to daemon) |
-| **ANTHROPIC_API_KEY** | — | Claude API access for consolidation cycles |
+| **Claude Code CLI** or **ANTHROPIC_API_KEY** | latest / — | Claude access for consolidation (CLI mode recommended — see Step 3) |
 | **Claude Code** | latest | The CLI tool whose sessions i-dream processes |
 
 ### Optional
@@ -51,7 +51,40 @@ sudo apt install socat
 sudo pacman -S socat
 ```
 
-## Step 3 — Set your API key
+## Step 3 — Choose your billing mode
+
+i-dream supports two ways to call Claude for analysis:
+
+| Mode | Config | Billing | Prompt caching | Token tracking |
+|------|--------|---------|----------------|----------------|
+| **Direct API** (default) | `ANTHROPIC_API_KEY` env var | Per-token API credits | Yes (ephemeral) | Exact |
+| **Local CLI** (recommended) | `use_claude_code_cli = true` | Claude.ai subscription (flat rate) | No | Estimated |
+
+### Option A — Local CLI mode (recommended)
+
+Delegates analysis to your local `claude` CLI. Billing goes through your
+Claude.ai subscription — no per-token charges. This is significantly cheaper
+for most users: a Pro subscription ($20/month) covers far more tokens than
+the equivalent API spend (~$3–5/cycle × 30+ cycles/month = $90–150+/month).
+
+```toml
+# In ~/.claude/subconscious/config.toml
+[budget]
+use_claude_code_cli = true
+# If `claude` isn't on the daemon's PATH (common under launchd):
+# claude_code_cli_path = "/Users/you/.local/bin/claude"
+```
+
+No API key needed. The daemon shells out to `claude --print` and routes
+through your logged-in Claude.ai session.
+
+> **Note:** Prompt caching and exact token counts are not available in CLI
+> mode. Token usage shown in `state.json` is estimated at ~4 chars/token.
+
+### Option B — Direct API mode
+
+Uses the Anthropic API directly with per-token billing. Supports prompt
+caching (can reduce input costs by ~90% on repeated system prompts).
 
 Add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
@@ -64,6 +97,18 @@ Then reload:
 ```bash
 source ~/.zshrc
 ```
+
+For the daemon service (which doesn't inherit your shell env), create
+`~/.claude/subconscious/.env`:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+> **Cost comparison:** A typical cycle uses ~50K tokens (mostly Sonnet, some
+> Opus for REM). At API rates: ~$0.50–3.00/cycle depending on model mix.
+> Running 1–2 cycles/day = $15–180/month. A Claude Pro subscription at
+> $20/month covers the same workload at a fraction of the cost.
 
 ## Step 4 — Clone and build
 
@@ -103,13 +148,15 @@ max_tokens_per_cycle = 50000     # Token cap per cycle
 max_runtime_minutes = 10         # Hard timeout
 model = "claude-sonnet-4-6"      # Analytical model (SWS, Metacog)
 model_heavy = "claude-opus-4-6"  # Creative model (REM phase)
+use_claude_code_cli = true       # Use local CLI instead of API (recommended)
+# claude_code_cli_path = "/Users/you/.local/bin/claude"  # If not on PATH
 
 [ingestion]
 max_sessions_per_scan = 50       # Sessions to process per cycle
 
 [modules.dreaming]
 wake_promotion_threshold = 0.5   # Min confidence to promote to insights
-min_sessions_since_last = 3      # Skip cycle if fewer new sessions
+min_sessions_since_last = 1      # Skip cycle if fewer new sessions
 ```
 
 ## Step 6 — Install Claude Code hooks
@@ -327,7 +374,8 @@ i-dream start -d
 
 ### No patterns after a cycle
 
-- Check that `ANTHROPIC_API_KEY` is set: `echo $ANTHROPIC_API_KEY`
+- If using direct API mode, check that `ANTHROPIC_API_KEY` is set: `echo $ANTHROPIC_API_KEY`
+- If using CLI mode, verify `claude` is reachable: `which claude` (or check `budget.claude_code_cli_path` in config)
 - Check daemon logs: `cat ~/.claude/subconscious/logs/i-dream.log.*`
 - Ensure Claude Code sessions exist: `ls ~/.claude/projects/`
 - Run with debug logging: `i-dream dream all --log-level debug`
@@ -348,7 +396,7 @@ i-dream start -d
 
 ## Data safety
 
-- All data is local — nothing leaves your machine except API calls to Anthropic
+- All data is local — nothing leaves your machine except Claude analysis calls (direct API or local CLI)
 - Session transcripts are read-only (i-dream never modifies Claude Code data)
 - The daemon respects token budgets and hard timeouts
 - Hooks are non-blocking — they signal via touch files, never delay Claude Code

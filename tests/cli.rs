@@ -13,7 +13,7 @@
 //! ## What's NOT tested here
 //!
 //!   - `start` (long-running, would hang the test suite)
-//!   - `dream` (requires `ANTHROPIC_API_KEY` and hits the live API)
+//!   - `dream` (requires `ANTHROPIC_API_KEY` or local `claude` CLI — hits the live API)
 //!   - `hooks install` / `hooks uninstall` (mutates the real Claude Code
 //!     settings file — risky even in a sandbox)
 //!

@@ -39,7 +39,7 @@ i-dream models five aspects of human subconsciousness as background processes:
 | **Intuition** | Gut feelings / somatic markers | Surfaces "feelings" about approaches based on past outcomes | Session start |
 | **Prospective** | "Remember to…" intentions | Fires condition-action reminders when context matches | Session start |
 
-After 4+ hours of inactivity the daemon runs a consolidation cycle — calling the Anthropic API directly to analyze accumulated session data within a configurable token budget.
+After 4+ hours of inactivity the daemon runs a consolidation cycle — calling Claude (via your local CLI subscription or the Anthropic API directly) to analyze accumulated session data within a configurable token budget.
 
 ## Consolidation pipeline
 
@@ -88,7 +88,7 @@ Each phase has a hard timeout. Budget cascades — if dreaming uses less than 50
 
 - Rust 1.78+ (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
 - `socat` for Unix socket communication (`brew install socat`)
-- `ANTHROPIC_API_KEY` environment variable
+- **One of:** Claude Code CLI (recommended — uses your subscription) **or** `ANTHROPIC_API_KEY` env var (direct API billing)
 
 ### Build and install
 
@@ -247,6 +247,7 @@ max_tokens_per_cycle = 50000 # Token cap per consolidation cycle
 max_runtime_minutes = 10     # Hard timeout per cycle
 model = "claude-sonnet-4-6"  # Model for analytical work (SWS, Metacog)
 model_heavy = "claude-opus-4-6"  # Model for creative work (REM phase)
+use_claude_code_cli = true   # Use local CLI (subscription billing, no API key needed)
 
 [modules.metacog]
 sample_rate = 0.25           # Sample 25% of execution units
@@ -346,7 +347,7 @@ i-dream/
 │   ├── main.rs              Entry point, CLI dispatch, .env loading
 │   ├── cli.rs               Clap CLI (commands, subcommands, args)
 │   ├── config.rs            TOML config with defaults + expand_tilde
-│   ├── api.rs               Anthropic API client (direct HTTP, prompt caching, retry)
+│   ├── api.rs               Claude client (direct API with caching, or local CLI subprocess)
 │   ├── store.rs             File-based storage (atomic JSON, JSONL, markdown)
 │   ├── daemon.rs            Idle detection + consolidation orchestration
 │   ├── dream_trace.rs       JSONL event tracing per cycle
