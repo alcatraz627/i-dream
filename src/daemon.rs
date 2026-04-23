@@ -617,6 +617,9 @@ impl Daemon {
             self.config.budget.max_tokens_per_cycle
         );
 
+        // Run post-consolidation hooks (dream-metrics refresh, etc.)
+        Self::run_post_wake_hooks();
+
         Ok(())
     }
 
@@ -713,10 +716,64 @@ impl Daemon {
                     EventKind::CycleEnd,
                     format!("total_tokens={tokens}"),
                 )?;
+                Self::run_post_wake_hooks();
             }
         }
 
         Ok(())
+    }
+
+    /// Spawn post-wake hook scripts (dream-metrics refresh, insight injection, etc.)
+    ///
+    /// These scripts run fire-and-forget — failures are logged but do not
+    /// block the consolidation cycle. The hooks live under
+    /// `~/.claude/subconscious/hooks/` and `~/.claude/scripts/`.
+    fn run_post_wake_hooks() {
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+
+        let hooks = [
+            home.join(".claude/scripts/dream-metrics.sh"),
+            home.join(".claude/subconscious/hooks/post-wake.sh"),
+        ];
+
+        for hook in &hooks {
+            if hook.exists() {
+                info!("Running post-wake hook: {}", hook.display());
+                match std::process::Command::new("bash")
+                    .arg(hook)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        // Wait briefly for the script — these are lightweight.
+                        match child.wait() {
+                            Ok(status) if status.success() => {
+                                info!("Post-wake hook succeeded: {}", hook.display());
+                            }
+                            Ok(status) => {
+                                let stderr = child.stderr.take().map(|mut s| {
+                                    let mut buf = String::new();
+                                    std::io::Read::read_to_string(&mut s, &mut buf).ok();
+                                    buf
+                                });
+                                warn!(
+                                    "Post-wake hook exited {}: {} ({})",
+                                    status,
+                                    hook.display(),
+                                    stderr.unwrap_or_default().trim()
+                                );
+                            }
+                            Err(e) => warn!("Post-wake hook wait failed: {e:#}"),
+                        }
+                    }
+                    Err(e) => warn!("Failed to spawn post-wake hook {}: {e:#}", hook.display()),
+                }
+            }
+        }
     }
 
     /// Stop a running daemon, verifying liveness and waiting for exit.
