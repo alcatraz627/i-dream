@@ -22,7 +22,7 @@ struct ProcessedState {
 }
 
 /// A captured reasoning chain.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningChain {
     pub chain_id: String,
     pub session_id: String,
@@ -38,7 +38,7 @@ pub struct ReasoningChain {
     pub assumptions: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningStep {
     pub step: usize,
     pub step_type: String,
@@ -377,6 +377,145 @@ mod tests {
     }
 }
 
+/// Strip markdown code fences from LLM response to extract bare JSON.
+fn strip_json_fences(content: &str) -> String {
+    let trimmed = content.trim();
+    // Try ```json ... ``` first
+    if let Some(start) = trimmed.find("```json") {
+        let after = &trimmed[start + 7..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_string();
+        }
+    }
+    // Try bare ``` ... ```
+    if let Some(start) = trimmed.find("```") {
+        let after = &trimmed[start + 3..];
+        // Skip the language tag line if present
+        let after = if let Some(nl) = after.find('\n') {
+            &after[nl + 1..]
+        } else {
+            after
+        };
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Compact chain representation for the analysis prompt. Drops verbose
+/// fields (full reasoning_summary) and keeps only structural metadata
+/// so more chains fit within the token budget.
+#[derive(Clone, Serialize)]
+struct CompactChain {
+    chain_id: String,
+    session_id: String,
+    task: String,
+    total_steps: usize,
+    step_types: Vec<String>,
+    outcome: String,
+}
+
+impl CompactChain {
+    fn from_chain(chain: &ReasoningChain) -> Self {
+        Self {
+            chain_id: chain.chain_id.clone(),
+            session_id: chain.session_id.clone(),
+            task: if chain.task_description.len() > 120 {
+                let mut end = 120;
+                while !chain.task_description.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &chain.task_description[..end])
+            } else {
+                chain.task_description.clone()
+            },
+            total_steps: chain.total_steps,
+            step_types: chain
+                .steps
+                .iter()
+                .map(|s| {
+                    if let Some(ref target) = s.target {
+                        format!("{}:{}", s.step_type, target.rsplit('/').next().unwrap_or(target))
+                    } else {
+                        s.step_type.clone()
+                    }
+                })
+                .collect(),
+            outcome: chain.outcome.clone(),
+        }
+    }
+}
+
+/// Stratified sampling of reasoning chains for analysis.
+///
+/// Groups chains by session, then picks up to 3 per session (the longest,
+/// shortest, and a median-length chain) to maximize diversity. Iterates
+/// round-robin across sessions until the serialized size hits `max_chars`.
+/// Chains are compacted to ~200-400 bytes each (vs 10-30KB raw).
+fn sample_chains_stratified(chains: &[ReasoningChain], max_chars: usize) -> Vec<CompactChain> {
+    use std::collections::HashMap;
+
+    // Group by session
+    let mut by_session: HashMap<&str, Vec<&ReasoningChain>> = HashMap::new();
+    for chain in chains {
+        by_session
+            .entry(chain.session_id.as_str())
+            .or_default()
+            .push(chain);
+    }
+
+    // For each session, sort by step count and pick up to 3 representative chains:
+    // longest (deepest reasoning), shortest (simple task), median
+    let mut session_picks: Vec<Vec<CompactChain>> = Vec::new();
+    for (_sid, mut session_chains) in by_session {
+        session_chains.sort_by_key(|c| c.total_steps);
+        let mut picks = Vec::new();
+        if !session_chains.is_empty() {
+            picks.push(CompactChain::from_chain(session_chains[session_chains.len() - 1]));
+        }
+        if session_chains.len() > 1 {
+            picks.push(CompactChain::from_chain(session_chains[0]));
+        }
+        if session_chains.len() > 2 {
+            picks.push(CompactChain::from_chain(session_chains[session_chains.len() / 2]));
+        }
+        session_picks.push(picks);
+    }
+
+    // Sort sessions by timestamp (most recent chains first)
+    // Use chain_id as proxy since it contains the session_id
+    session_picks.sort_by(|a, b| {
+        let id_a = a.first().map(|c| c.chain_id.as_str()).unwrap_or("");
+        let id_b = b.first().map(|c| c.chain_id.as_str()).unwrap_or("");
+        id_b.cmp(id_a)
+    });
+
+    // Round-robin: round 0 = longest per session, round 1 = shortest, etc.
+    // Spread coverage across sessions before going deeper into any one.
+    let mut result: Vec<CompactChain> = Vec::new();
+    let mut total_chars = 2; // "[]" wrapper
+
+    for round in 0..3 {
+        for picks in &session_picks {
+            if round >= picks.len() {
+                continue;
+            }
+            let chain_json = match serde_json::to_string(&picks[round]) {
+                Ok(j) => j,
+                Err(_) => continue,
+            };
+            if total_chars + chain_json.len() + 1 > max_chars {
+                return result;
+            }
+            total_chars += chain_json.len() + 1;
+            result.push(picks[round].clone());
+        }
+    }
+
+    result
+}
+
 impl<'a> Module for IntrospectionModule<'a> {
     fn should_run(&self) -> Result<bool> {
         if !self.config.modules.introspection.enabled {
@@ -493,26 +632,39 @@ Produce a JSON report with:
     "depth_trend": "increasing" | "stable" | "decreasing",
     "breadth_trend": "increasing" | "stable" | "decreasing"
   }
-}"#;
+}
 
-        // Compact, not pretty. Budget: keep prompt under ~40k chars so
-        // the analysis stays inside a reasonable cost envelope.
-        let serialized = serde_json::to_string(&chains)?;
-        let trimmed = if serialized.len() > 40_000 {
-            warn!(
-                "Introspection chain batch exceeds 40k chars ({}), truncating",
-                serialized.len()
-            );
-            let mut cut = 40_000;
-            while !serialized.is_char_boundary(cut) {
-                cut -= 1;
+Output ONLY the JSON object. No markdown fences, no commentary, no explanation."#;
+
+        // Stratified sampling: pick a diverse representative subset of
+        // chains rather than serializing all and truncating (which would
+        // cut mid-JSON and waste the entire payload). Strategy:
+        //   1. Group chains by session
+        //   2. Sample up to 3 chains per session (long, medium, short)
+        //   3. Sample across as many sessions as fit in the budget
+        const MAX_CHARS: usize = 40_000;
+        let sampled = sample_chains_stratified(&chains, MAX_CHARS);
+        let serialized = serde_json::to_string(&sampled)?;
+
+        info!(
+            "Introspection: sampled {}/{} chains ({} chars) from {} total sessions",
+            sampled.len(),
+            chains.len(),
+            serialized.len(),
+            {
+                let mut sids: Vec<&str> = chains.iter().map(|c| c.session_id.as_str()).collect();
+                sids.sort_unstable();
+                sids.dedup();
+                sids.len()
             }
-            &serialized[..cut]
-        } else {
-            serialized.as_str()
-        };
+        );
 
-        let prompt = format!("Analyze these reasoning chains:\n\n{trimmed}");
+        let prompt = format!(
+            "Analyze these {} reasoning chains (sampled from {} total across multiple sessions):\n\n{}",
+            sampled.len(),
+            chains.len(),
+            serialized
+        );
 
         let response = client
             .analyze(
@@ -525,9 +677,10 @@ Produce a JSON report with:
             .await?;
 
         // Best-effort parse into ReasoningPatterns. The LLM sometimes
-        // wraps JSON in prose or markdown fences — try a direct parse
-        // first, then fall back to writing a timestamped report only.
-        match serde_json::from_str::<serde_json::Value>(&response.content) {
+        // wraps JSON in prose or markdown fences — try stripping fences
+        // first, then direct parse, then fall back to a timestamped report.
+        let content = strip_json_fences(&response.content);
+        match serde_json::from_str::<serde_json::Value>(&content) {
             Ok(mut json) => {
                 // Inject our authoritative last_updated so the field
                 // exists even if the LLM forgot to emit it.
