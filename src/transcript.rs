@@ -43,6 +43,11 @@ use tracing::debug;
 
 /// One line of a Claude Code transcript. Only `User`, `Assistant`, and
 /// `System` carry useful data; everything else is `Other` and skipped.
+// Note: Many fields in the transcript types below are populated by serde
+// deserialization from Claude Code JSONL transcripts but not yet read in
+// Rust code. They carry `#[allow(dead_code)]` rather than being removed,
+// because removing them would break deserialization of the JSON records.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum TranscriptEntry {
@@ -53,6 +58,7 @@ pub enum TranscriptEntry {
     Other,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserEntry {
@@ -86,6 +92,7 @@ pub enum UserContent {
     Blocks(Vec<UserBlock>),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserBlock {
@@ -101,6 +108,7 @@ pub enum UserBlock {
     Other,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantEntry {
@@ -113,6 +121,7 @@ pub struct AssistantEntry {
     pub message: AssistantMessage,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct AssistantMessage {
     #[serde(default)]
@@ -143,6 +152,7 @@ pub enum AssistantBlock {
     Other,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -156,6 +166,7 @@ pub struct Usage {
     pub cache_read_input_tokens: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemEntry {
@@ -168,6 +179,7 @@ pub struct SystemEntry {
 // ── File discovery & parsing ───────────────────────────────────
 
 /// A transcript file found on disk.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TranscriptFile {
     pub path: PathBuf,
@@ -268,6 +280,7 @@ struct Turn {
     tool_results: HashMap<String, bool>, // tool_use_id -> is_error
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct PendingToolCall {
     id: String,

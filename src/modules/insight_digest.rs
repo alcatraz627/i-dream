@@ -75,7 +75,7 @@ impl<'a> InsightDigestModule<'a> {
         Ok(true)
     }
 
-    pub async fn run(&self, client: &ClaudeClient, budget_tokens: u64) -> Result<u64> {
+    pub async fn run(&self, client: &ClaudeClient, _budget_tokens: u64) -> Result<u64> {
         let insights_path = self.store.path(INSIGHTS_PATH);
         let insights_raw = std::fs::read_to_string(&insights_path)?;
 

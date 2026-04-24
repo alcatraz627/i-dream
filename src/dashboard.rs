@@ -738,7 +738,7 @@ fn run_cargo_tests() -> TestRunResult {
             let combined = format!("{stdout}{stderr}");
             parse_cargo_test_output(&combined, duration_secs, ran_at)
         }
-        Err(e) => TestRunResult {
+        Err(_e) => TestRunResult {
             passed: 0, failed: 0, ignored: 0,
             duration_secs, ran_at, ok: false,
         },

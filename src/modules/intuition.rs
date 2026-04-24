@@ -20,11 +20,11 @@ use uuid::Uuid;
 /// A record of what was surfaced at SessionStart. Deserialized from
 /// `valence/surfaced.jsonl` (written by the daemon). Duplicated here
 /// to avoid coupling intuition → daemon.
+#[allow(dead_code)] // Fields populated by serde from valence/surfaced.jsonl
 #[derive(Debug, Deserialize)]
 struct SurfacedBriefing {
     ts: DateTime<Utc>,
     intention_ids: Vec<String>,
-    #[allow(dead_code)]
     has_introspection: bool,
 }
 
@@ -67,20 +67,26 @@ pub struct ValenceEntry {
     pub decayed_relevance: f64,
 }
 
-/// Priming cache — recently activated concepts.
+/// Priming cache — tracks recently activated concepts with time-decay.
+/// Part of the priming system: create a cache, call `decay_priming()` to
+/// age activations, then `match_patterns()` to find relevant valence entries.
+/// Wire into the SessionStart hook to surface intuitions proactively.
+#[allow(dead_code)] // Used in tests; will be wired to SessionStart hook
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PrimingCache {
     pub last_updated: DateTime<Utc>,
     pub concepts: std::collections::HashMap<String, ConceptActivation>,
 }
 
+#[allow(dead_code)] // Used in tests; part of the priming system
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConceptActivation {
     pub activation: f64,
     pub source: String,
 }
 
-/// An intuition surfaced to the user.
+/// An intuition surfaced to the user, with feedback tracking.
+#[allow(dead_code)] // Used in tests; will be wired to intuition surfacing
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SurfacedIntuition {
     pub timestamp: DateTime<Utc>,
@@ -476,6 +482,8 @@ impl<'a> IntuitionModule<'a> {
     }
 
     /// Match user message keywords against valence memory.
+    /// Requires ≥2 tag matches, min_occurrences from config, and |valence| > 0.5.
+    #[allow(dead_code)] // Used in tests; will be wired to SessionStart hook
     pub fn match_patterns<'b>(
         &self,
         keywords: &[String],
@@ -504,7 +512,10 @@ impl<'a> IntuitionModule<'a> {
             .collect()
     }
 
-    /// Decay the priming cache.
+    /// Decay the priming cache — applies exponential time-decay to all concept
+    /// activations. Removes entries below 0.05 threshold. Call periodically
+    /// (e.g. at each consolidation cycle) to age out stale priming state.
+    #[allow(dead_code)] // Used in tests; will be wired to consolidation cycle
     pub fn decay_priming(cache: &mut PrimingCache, hours_elapsed: f64, halflife_hours: f64) {
         let decay_factor = (-hours_elapsed * 2.0_f64.ln() / halflife_hours).exp();
         for activation in cache.concepts.values_mut() {

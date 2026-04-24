@@ -67,6 +67,7 @@ pub struct FiredRecord {
 }
 
 pub struct ProspectiveModule<'a> {
+    #[allow(dead_code)] // Needed when match_intentions is wired up
     config: &'a Config,
     store: &'a Store,
 }
@@ -77,6 +78,15 @@ impl<'a> ProspectiveModule<'a> {
     }
 
     /// Match incoming session context against active intentions.
+    /// Filters by expiry, max-fires, and trigger type (Event, Time, Context).
+    /// Returns matching Intention objects for the daemon to fire.
+    ///
+    /// Wire into the SessionStart handler to check if any intentions match
+    /// the session's initial context:
+    ///   `let matched = module.match_intentions(user_msg, Some(project_dir))?;`
+    ///   Then call `record_fired()` for each match and include the intention
+    ///   payload in the session response.
+    #[allow(dead_code)] // Used in tests; will be wired to SessionStart hook
     pub fn match_intentions(
         &self,
         message: &str,
@@ -87,46 +97,24 @@ impl<'a> ProspectiveModule<'a> {
             .store
             .read_jsonl("intentions/registry.jsonl")
             .unwrap_or_default();
-
         let matched: Vec<Intention> = registry
             .into_iter()
             .filter(|intent| {
-                // Skip expired
-                if intent.expires < now {
-                    return false;
-                }
-                // Skip max-fired
-                if intent.fire_count >= intent.max_fires {
-                    return false;
-                }
-
+                if intent.expires < now { return false; }
+                if intent.fire_count >= intent.max_fires { return false; }
                 match &intent.trigger {
-                    Trigger::Event {
-                        keywords,
-                        file_patterns: _,
-                        ..
-                    } => {
+                    Trigger::Event { keywords, file_patterns: _, .. } => {
                         let msg_lower = message.to_lowercase();
-                        keywords
-                            .iter()
-                            .any(|k| msg_lower.contains(&k.to_lowercase()))
+                        keywords.iter().any(|k| msg_lower.contains(&k.to_lowercase()))
                     }
                     Trigger::Time { after, keywords } => {
-                        if now < *after {
-                            return false;
-                        }
+                        if now < *after { return false; }
                         keywords.is_empty()
-                            || keywords
-                                .iter()
-                                .any(|k| message.to_lowercase().contains(&k.to_lowercase()))
+                            || keywords.iter().any(|k| message.to_lowercase().contains(&k.to_lowercase()))
                     }
-                    Trigger::Context {
-                        keywords,
-                        min_keyword_matches,
-                    } => {
+                    Trigger::Context { keywords, min_keyword_matches } => {
                         let msg_lower = message.to_lowercase();
-                        let matches = keywords
-                            .iter()
+                        let matches = keywords.iter()
                             .filter(|k| msg_lower.contains(&k.to_lowercase()))
                             .count();
                         matches >= *min_keyword_matches
@@ -134,7 +122,6 @@ impl<'a> ProspectiveModule<'a> {
                 }
             })
             .collect();
-
         Ok(matched)
     }
 

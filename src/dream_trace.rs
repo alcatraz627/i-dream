@@ -51,6 +51,7 @@ pub enum Phase {
     Done,
 }
 
+#[allow(dead_code)] // Used in tests; useful for log messages and dashboard labels
 impl Phase {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -101,6 +102,7 @@ pub enum EventKind {
     CycleEnd,
 }
 
+#[allow(dead_code)] // Used in tests; useful for log messages and trace filtering
 impl EventKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -164,6 +166,7 @@ pub struct DreamTracer<'a> {
     store: &'a Store,
     cycle_id: String,
     trace_rel_path: String,
+    #[allow(dead_code)] // Retained for future use: cycle duration calculation
     started_at: DateTime<Utc>,
 }
 
@@ -247,6 +250,7 @@ impl<'a> DreamTracer<'a> {
         self.emit(phase, kind, details, Vec::new(), Vec::new())
     }
 
+    #[allow(dead_code)] // Useful for correlating events across traces
     pub fn cycle_id(&self) -> &str {
         &self.cycle_id
     }
@@ -255,6 +259,7 @@ impl<'a> DreamTracer<'a> {
         &self.trace_rel_path
     }
 
+    #[allow(dead_code)] // Useful for computing wall-clock cycle duration
     pub fn started_at(&self) -> DateTime<Utc> {
         self.started_at
     }
@@ -263,6 +268,7 @@ impl<'a> DreamTracer<'a> {
 // ─── reader side: load traces for the dashboard ─────────────────────
 
 /// One trace file, fully parsed, with summary fields for display.
+#[allow(dead_code)] // Fields populated during trace loading for dashboard display
 #[derive(Debug, Clone)]
 pub struct DreamTraceFile {
     pub file_name: String,

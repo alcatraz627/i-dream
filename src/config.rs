@@ -198,6 +198,9 @@ impl Config {
         }
     }
 
+    /// Serialize the Config to TOML and write to disk. Creates parent
+    /// directories if needed. Used by CLI commands and tests.
+    #[allow(dead_code)] // Used in tests; will be wired to CLI config commands
     pub fn save(&self, path: &Path) -> Result<()> {
         let path = expand_tilde(path);
         if let Some(parent) = path.parent() {

@@ -33,6 +33,7 @@ impl UserSettings {
     }
 
     /// Persist to `<data_dir>/settings.json`.
+    #[allow(dead_code)] // Used in tests; will be wired to CLI settings commands
     pub fn save(&self, data_dir: &Path) -> Result<()> {
         let path = data_dir.join("settings.json");
         let content = serde_json::to_string_pretty(self)?;
