@@ -1762,7 +1762,7 @@ private func fmtSparkline(_ values: [Int], width: Int = 10) -> String {
     let window = Array(values.suffix(width))
     let maxVal = window.max() ?? 1
     return window.map { v in
-        let idx = maxVal == 0 ? 0 : min(Int(Double(v) / Double(maxVal) * 7.0), 7)
+        let idx = maxVal == 0 ? 0 : max(0, min(Int(Double(v) / Double(maxVal) * 7.0), 7))
         return String(bars[bars.index(bars.startIndex, offsetBy: idx)])
     }.joined()
 }
@@ -2288,17 +2288,26 @@ final class DashboardWindowController: NSObject {
         for v in contentViews { v.removeFromSuperview() }
         contentViews = []
         let f = contentContainer.bounds
-        contentViews = [
-            buildOverviewView(frame: f),
-            buildPatternView(frame: f),
-            buildAssociationView(frame: f),
-            buildJournalView(frame: f),
-            buildInsightsView(frame: f),
-            buildMetacogView(frame: f),
-            buildSearchView(frame: f),
-            buildHelpView(frame: f),
-            buildAboutView(frame: f),
-        ]
+        dlog("dashboard: building overview")
+        let v0 = buildOverviewView(frame: f)
+        dlog("dashboard: building pattern")
+        let v1 = buildPatternView(frame: f)
+        dlog("dashboard: building association")
+        let v2 = buildAssociationView(frame: f)
+        dlog("dashboard: building journal")
+        let v3 = buildJournalView(frame: f)
+        dlog("dashboard: building insights")
+        let v4 = buildInsightsView(frame: f)
+        dlog("dashboard: building metacog")
+        let v5 = buildMetacogView(frame: f)
+        dlog("dashboard: building search")
+        let v6 = buildSearchView(frame: f)
+        dlog("dashboard: building help")
+        let v7 = buildHelpView(frame: f)
+        dlog("dashboard: building about")
+        let v8 = buildAboutView(frame: f)
+        dlog("dashboard: all views built")
+        contentViews = [v0, v1, v2, v3, v4, v5, v6, v7, v8]
         for v in contentViews { contentContainer.addSubview(v) }
         let sel = navButtons.first(where: { $0.isSelectedTab })?.tag ?? 0
         for (i, v) in contentViews.enumerated() { v.isHidden = (i != sel) }
@@ -3670,6 +3679,7 @@ final class DashboardWindowController: NSObject {
         var insightTextsMap: [String: String] = [:]
         let reversed = blocks.reversed()
         for (displayIdx, block) in reversed.enumerated() {
+            dlog("dashboard insights: block \(displayIdx)/\(blocks.count) — \(block.header.prefix(50))")
             // Derive a stable insight ID from header content (hash of the header text)
             let insightId = stableInsightId(block.header)
             let existingRating = feedback[insightId]
@@ -3723,12 +3733,24 @@ final class DashboardWindowController: NSObject {
             rt.raw(headerLine)
 
             for line in block.lines {
-                if line == "---" || line.isEmpty { continue }
-                // Strip blockquote prefix for body text
-                let stripped = line.hasPrefix("> ") ? String(line.dropFirst(2)) : line
-                // Determine role-based styling
+                let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+                // Skip separators (--- or --------) and section headers and empty lines
+                if trimmedLine.isEmpty
+                    || trimmedLine.allSatisfy({ $0 == "-" })
+                    || trimmedLine.hasPrefix("##") { continue }
+                // Strip blockquote ("> ") or indented pipe ("| ") body prefixes
+                let stripped: String
+                if trimmedLine.hasPrefix("> ") {
+                    stripped = String(trimmedLine.dropFirst(2))
+                } else if trimmedLine.hasPrefix("| ") {
+                    stripped = String(trimmedLine.dropFirst(2))
+                } else {
+                    stripped = trimmedLine
+                }
+                // Determine role-based styling — handle both _ and * pattern prefix styles
                 let isRule    = stripped.hasPrefix("**Rule:")
                 let isPattern = stripped.hasPrefix("_Patterns:") || stripped.hasPrefix("_Pattern:")
+                    || stripped.hasPrefix("*Patterns:") || stripped.hasPrefix("*Pattern:")
                 let baseFont: NSFont
                 let baseColor: NSColor
                 if isPattern {
@@ -3745,10 +3767,11 @@ final class DashboardWindowController: NSObject {
                 let result = NSMutableAttributedString()
                 var cursor = stripped.startIndex
                 while cursor < stripped.endIndex {
-                    // Check for **bold**
+                    // Check for **bold** — use limitedBy so offsetBy:2 never crashes
                     if stripped[cursor...].hasPrefix("**") {
-                        let afterOpen = stripped.index(cursor, offsetBy: 2)
-                        if let closeRange = stripped.range(of: "**", range: afterOpen..<stripped.endIndex) {
+                        let afterOpen = stripped.index(cursor, offsetBy: 2, limitedBy: stripped.endIndex) ?? stripped.endIndex
+                        if afterOpen < stripped.endIndex,
+                           let closeRange = stripped.range(of: "**", range: afterOpen..<stripped.endIndex) {
                             let boldText = String(stripped[afterOpen..<closeRange.lowerBound])
                             let bFont = NSFont.systemFont(ofSize: baseFont.pointSize, weight: .bold)
                             result.append(NSAttributedString(string: boldText, attributes: [
@@ -5023,6 +5046,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.updateButton()
             }
         }
+
+        // SIGUSR1 → open dashboard (sent by `i-dream dashboard` CLI)
+        signal(SIGUSR1, SIG_IGN)
+        let usr1Src = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        usr1Src.setEventHandler { [weak self] in self?.openDashboard() }
+        usr1Src.resume()
     }
 
     // Called by AppKit right before the menu is shown — always up-to-date.

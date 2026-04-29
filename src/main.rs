@@ -132,6 +132,24 @@ async fn main() -> Result<()> {
         }
 
         Command::Dashboard { no_open, run_tests } => {
+            // If the menubar widget is running, signal it to open the native panel.
+            if !no_open {
+                let pgrep = std::process::Command::new("pgrep")
+                    .args(["-x", "i-dream-bar"])
+                    .output();
+                if let Ok(out) = pgrep {
+                    if let Ok(pid_str) = std::str::from_utf8(&out.stdout) {
+                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                            let _ = std::process::Command::new("kill")
+                                .args(["-USR1", &pid.to_string()])
+                                .status();
+                            println!("Opening native dashboard (sent SIGUSR1 to widget PID {pid})");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            // Fallback: generate and open HTML dashboard.
             let config = config::Config::load(&cli.config)?;
             let path = dashboard::generate(&config, run_tests)?;
             println!("Dashboard written to {}", path.display());
