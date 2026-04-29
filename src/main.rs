@@ -11,6 +11,7 @@ mod modules;
 mod service;
 mod store;
 mod transcript;
+mod widget;
 
 use anyhow::Result;
 use clap::Parser;
@@ -124,6 +125,10 @@ async fn main() -> Result<()> {
             // does not need the daemon config and should work even if
             // `config.toml` is missing (e.g. first-run `service install`).
             service::manage(action)?;
+        }
+
+        Command::Widget { action } => {
+            widget::manage(action)?;
         }
 
         Command::Dashboard { no_open, run_tests } => {

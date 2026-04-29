@@ -86,6 +86,12 @@ pub enum Command {
     /// Show current configuration
     Config,
 
+    /// Manage the menubar widget (i-dream-bar).
+    Widget {
+        #[command(subcommand)]
+        action: WidgetAction,
+    },
+
     /// Prune oldest entries from JSONL stores to reclaim disk space.
     ///
     /// Removes the oldest events/activity/signals/journal entries so each
@@ -150,4 +156,28 @@ pub enum ServiceAction {
         #[arg(short, long, default_value_t = 50)]
         lines: usize,
     },
+}
+
+#[derive(Subcommand)]
+pub enum WidgetAction {
+    /// Launch the widget (no recompile)
+    Start,
+    /// Kill all running widget instances
+    Stop,
+    /// Stop then start the widget
+    Restart,
+    /// Recompile from source and relaunch
+    Build,
+    /// Show PID, LaunchAgent state, and build freshness
+    Status,
+    /// Tail the widget debug log (/tmp/i-dream-bar.log)
+    Logs {
+        /// Number of lines to show (default: 50)
+        #[arg(short, long, default_value_t = 50)]
+        lines: usize,
+    },
+    /// Register as a LaunchAgent (auto-start on login)
+    Install,
+    /// Remove the LaunchAgent registration
+    Uninstall,
 }
