@@ -4994,6 +4994,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var hudTimeRangeBtn: NSButton?
     /// 0 = 7d, 1 = 30d, 2 = all
     private var hudTimeRangeIndex: Int = 0
+    /// Cached full journal for the HUD time-range view (read from disk, not the 20-entry menubar cache)
+    private var hudFullJournal:    [JournalEntry] = []
+    private var hudFullJournalAt:  Date           = .distantPast
+    /// Cached process-resource sample (sampled every ~5s)
+    private var hudProcSample:     String         = "—"
+    private var hudProcSampleAt:   Date           = .distantPast
 
     // Dream replay — event-by-event trace playback
     private var replayPanel:      NSPanel?
@@ -6551,6 +6557,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hudTimeRangeIndex = (hudTimeRangeIndex + 1) % 3
         let labels = ["7d", "30d", "∞"]
         hudTimeRangeBtn?.title = labels[hudTimeRangeIndex]
+        // Force a fresh journal read so the new range actually returns different data
+        // (the menubar's cachedJournal is capped at 20 entries — too small to differentiate ranges).
+        hudFullJournalAt = .distantPast
         // Rebuild content immediately
         if let tv = hudPanel?.contentView?.subviews.compactMap({ $0 as? NSTextView }).first {
             updateHUDContent(tv)
@@ -6565,7 +6574,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hudTimeRangeBtn = nil
 
         let w: CGFloat       = 360
-        let h: CGFloat       = 290
+        let h: CGFloat       = 340  // grew from 290 to fit action-button row + resource-load row
         let cornerR: CGFloat = 12
         guard let screen = NSScreen.main else { return }
         let sv = screen.visibleFrame
@@ -6585,6 +6594,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.isOpaque                    = false
         panel.collectionBehavior          = [.canJoinAllSpaces, .stationary]
         panel.titlebarAppearsTransparent  = true
+
+        // Replace the auto-created contentView with a custom one that catches right-click
+        // and forwards it to the menubar menu (theMenu).
+        let custom = HUDContentView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+        custom.delegate = self
+        panel.contentView = custom
 
         // ── Layer: gradient bg + rounded corners + pulsing blue border ───────
         if let cv = panel.contentView {
@@ -6623,11 +6638,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             border.add(pulse, forKey: "borderPulse")
         }
 
-        let btnH:   CGFloat = 22
-        let chartH: CGFloat = 50
-        let chartY: CGFloat = 8
-        let tvY:    CGFloat = chartY + chartH + 4
-        let tvH:    CGFloat = h - tvY - btnH - 6
+        let btnH:    CGFloat = 22
+        let actionH: CGFloat = 30   // action button row at very bottom
+        let actionY: CGFloat = 6
+        let chartH:  CGFloat = 50
+        let chartY:  CGFloat = actionY + actionH + 6
+        let tvY:     CGFloat = chartY + chartH + 4
+        let tvH:     CGFloat = h - tvY - btnH - 6
 
         // Text view — stats
         let tv = NSTextView(frame: NSRect(x: 12, y: tvY, width: w - 24, height: tvH))
@@ -6641,6 +6658,39 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let chart = MiniBarChartView(frame: NSRect(x: 12, y: chartY, width: w - 24, height: chartH))
         panel.contentView?.addSubview(chart)
         hudBarChart = chart
+
+        // ── Bottom action button row ─────────────────────────────────────────
+        // 4 evenly-spaced buttons with SF-symbol icons + tooltips.
+        // Reuses the existing menubar selectors so behaviour stays identical.
+        let actions: [(symbol: String, tooltip: String, sel: Selector)] = [
+            ("chart.bar.doc.horizontal.fill",   "Open Dashboard",            #selector(openDashboard)),
+            ("arrow.triangle.2.circlepath",     "Trigger Dream Cycle",       #selector(triggerCycleWithUsageCheck)),
+            (cachedRunning ? "stop.fill" : "play.fill",
+             cachedRunning ? "Stop Daemon" : "Start Daemon",
+             cachedRunning ? #selector(stopDaemon) : #selector(startDaemon)),
+            ("ellipsis.circle.fill",            "More… (right-click anywhere)", #selector(showHUDActionsMenu(_:))),
+        ]
+        let nBtns  = CGFloat(actions.count)
+        let gap:   CGFloat = 8
+        let totalGap = gap * (nBtns + 1)
+        let btnW   = (w - totalGap) / nBtns
+        for (i, a) in actions.enumerated() {
+            let bx = gap + CGFloat(i) * (btnW + gap)
+            let b = NSButton(frame: NSRect(x: bx, y: actionY, width: btnW, height: actionH))
+            b.bezelStyle  = .rounded
+            b.isBordered  = true
+            b.toolTip     = a.tooltip
+            if let img = NSImage(systemSymbolName: a.symbol, accessibilityDescription: a.tooltip) {
+                b.image = img
+                b.imagePosition = .imageOnly
+                b.contentTintColor = NSColor.systemCyan
+            } else {
+                b.title = a.tooltip
+            }
+            b.target = self
+            b.action = a.sel
+            panel.contentView?.addSubview(b)
+        }
 
         // ── Top toolbar buttons ───────────────────────────────────────────────
         // Close button (✕) — top-left
@@ -6689,18 +6739,74 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Returns the journal entries filtered to the current hudTimeRangeIndex window.
+    /// Reads the FULL journal (not the menubar's 20-entry cache) so 7d/30d/∞ are
+    /// actually distinguishable. Cached for 30s to avoid disk reads on every tick.
     private func hudFilteredJournal() -> [JournalEntry] {
-        guard !cachedJournal.isEmpty else { return [] }
+        if Date().timeIntervalSince(hudFullJournalAt) > 30 {
+            hudFullJournal   = allJournal()
+            hudFullJournalAt = Date()
+        }
+        let source = hudFullJournal.isEmpty ? cachedJournal : hudFullJournal
+        guard !source.isEmpty else { return [] }
         switch hudTimeRangeIndex {
         case 0: // 7 days
             let cutoff = Date().addingTimeInterval(-7 * 86400)
-            return cachedJournal.filter { isoDate($0.timestamp).map { $0 >= cutoff } ?? true }
+            return source.filter { isoDate($0.timestamp).map { $0 >= cutoff } ?? true }
         case 1: // 30 days
             let cutoff = Date().addingTimeInterval(-30 * 86400)
-            return cachedJournal.filter { isoDate($0.timestamp).map { $0 >= cutoff } ?? true }
+            return source.filter { isoDate($0.timestamp).map { $0 >= cutoff } ?? true }
         default: // all
-            return cachedJournal
+            return source
         }
+    }
+
+    /// Returns a compact one-line resource readout for i-dream processes.
+    /// Format: "daemon 0.4% 32M · bar 0.2% 28M". Cached for 5s.
+    private func hudProcessLoad() -> String {
+        if Date().timeIntervalSince(hudProcSampleAt) < 5 { return hudProcSample }
+        hudProcSampleAt = Date()
+        func sample(_ pgrepArgs: [String], label: String) -> String? {
+            let task = Process()
+            task.launchPath = "/usr/bin/pgrep"
+            task.arguments  = pgrepArgs
+            let pipe = Pipe(); task.standardOutput = pipe; task.standardError = Pipe()
+            do { try task.run(); task.waitUntilExit() } catch { return nil }
+            let pidOut = String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
+                                encoding: .utf8) ?? ""
+            let pids = pidOut.split(separator: "\n").compactMap { Int($0) }
+            guard !pids.isEmpty else { return nil }
+            // ps -o %cpu,rss -p PID,PID,...
+            let ps = Process()
+            ps.launchPath = "/bin/ps"
+            ps.arguments  = ["-o", "%cpu=,rss=", "-p", pids.map(String.init).joined(separator: ",")]
+            let p2 = Pipe(); ps.standardOutput = p2; ps.standardError = Pipe()
+            do { try ps.run(); ps.waitUntilExit() } catch { return nil }
+            let out = String(data: p2.fileHandleForReading.readDataToEndOfFile(),
+                             encoding: .utf8) ?? ""
+            var totalCPU = 0.0; var totalRSS = 0  // RSS in KB
+            for line in out.split(separator: "\n") {
+                let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+                if parts.count >= 2 {
+                    totalCPU += Double(parts[0]) ?? 0
+                    totalRSS += Int(parts[1]) ?? 0
+                }
+            }
+            let mb = Double(totalRSS) / 1024.0
+            let mbStr = mb >= 100 ? String(format: "%.0fM", mb) : String(format: "%.1fM", mb)
+            return String(format: "%@ %.1f%% %@", label, totalCPU, mbStr)
+        }
+        var parts: [String] = []
+        if let s = sample(["-f", "i-dream daemon"], label: "daemon") { parts.append(s) }
+        if let s = sample(["-x", "i-dream-bar"],    label: "bar")    { parts.append(s) }
+        hudProcSample = parts.isEmpty ? "—" : parts.joined(separator: " · ")
+        return hudProcSample
+    }
+
+    /// Exposes the menubar menu so the floating HUD can show it on right-click.
+    @objc func popUpHUDContextMenu(with event: NSEvent, from view: NSView) {
+        // theMenu has an NSMenuDelegate (menuNeedsUpdate) that rebuilds it on open,
+        // so the right-click menu always shows current state.
+        NSMenu.popUpContextMenu(theMenu, with: event, for: view)
     }
 
     /// Returns the latest calibration score from metacog/calibration.jsonl, or nil.
@@ -6862,7 +6968,22 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // ── Line 9: error line (only if error is newer than last cycle) ──────
+        // ── Line 9: process resource load (i-dream daemon + bar widget) ──────
+        let proc = hudProcessLoad()
+        if proc != "—" {
+            label("processes  ")
+            value("\(proc)\n", color: .secondaryLabelColor, mono: true)
+        }
+
+        // ── Line 10: range hint — clarifies which stats are window-filtered ──
+        let rangeLabels = ["7d", "30d", "all-time"]
+        buf.append(NSAttributedString(string: "  load·spark·tokens: \(rangeLabels[hudTimeRangeIndex])\n",
+            attributes: [
+                .font:            NSFont.systemFont(ofSize: fSz3 - 2),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]))
+
+        // ── Line 11: error line (only if error is newer than last cycle) ─────
         if let err = cachedBoard?.lastError {
             buf.append(NSAttributedString(string: "⚠  \(err)", attributes: [
                 .font:            NSFont.systemFont(ofSize: fSz3 - 1),
@@ -6874,6 +6995,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Push filtered token history to bar chart
         hudBarChart?.values = filteredJournal.map { $0.tokensUsed }
+    }
+
+    /// Wired to the HUD's "More…" button — pops up the same menubar menu next to the button.
+    @objc private func showHUDActionsMenu(_ sender: NSButton) {
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: sender.bounds.minX, y: sender.bounds.minY),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: sender.window?.windowNumber ?? 0,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1.0)
+            ?? NSApp.currentEvent
+        if let ev = event {
+            NSMenu.popUpContextMenu(theMenu, with: ev, for: sender)
+        }
     }
 
     /// Format token count as e.g. "348k" or "1.2M"
@@ -7888,6 +8024,17 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let a = NSAlert()
         a.messageText = title; a.informativeText = msg
         a.alertStyle  = .warning; a.addButton(withTitle: "OK"); a.runModal()
+    }
+}
+
+// ─── HUD content view ────────────────────────────────────────────────────────
+/// Custom contentView for the floating HUD panel. Forwards right-clicks
+/// to the BarDelegate so the menubar menu (theMenu) is shown on right-click,
+/// matching the user's expectation that right-click === left-click on menubar.
+private final class HUDContentView: NSView {
+    weak var delegate: BarDelegate?
+    override func rightMouseDown(with event: NSEvent) {
+        delegate?.popUpHUDContextMenu(with: event, from: self)
     }
 }
 
