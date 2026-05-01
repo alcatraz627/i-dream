@@ -4,6 +4,27 @@
 
 **Background memory consolidation, pattern extraction, intuition, metacognition, and introspective self-analysis — running silently while you work.**
 
+<details>
+<summary><strong>📑 Table of contents</strong></summary>
+
+- [Top highlight insights — and how they got there](#top-highlight-insights--and-how-they-got-there)
+- [How it works](#how-it-works)
+- [Consolidation pipeline](#consolidation-pipeline)
+- [Quickstart](#quickstart)
+- [CLI reference](#cli-reference)
+- [macOS menu-bar widget](#macos-menu-bar-widget)
+- [Comprehensive dashboard](#comprehensive-dashboard)
+- [Configuration](#configuration)
+- [Data directory](#data-directory)
+- [Testing](#testing)
+- [Project structure](#project-structure)
+- [Research foundations](#research-foundations)
+- [Documentation index](#documentation-index)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
+
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org/)
 [![Claude API](https://img.shields.io/badge/Claude-API%20%2B%20CLI-8c69d9.svg)](docs/09-cli-vs-api.md)
@@ -379,6 +400,10 @@ decay_halflife_days = 30.0   # Exponential decay for valence memory
 min_occurrences = 3          # Minimum data points before surfacing
 ```
 
+**Full reference:** [`docs/12-config-reference.md`](docs/12-config-reference.md) walks every section + every default + when to override. Copyable starting point with all sections at [`config.toml.example`](config.toml.example).
+
+**Env vars (only 2):** [`.env.example`](.env.example) — `ANTHROPIC_API_KEY` (only in API mode) + `RUST_LOG`.
+
 Full schema: [docs/03-implementation-details.md](docs/03-implementation-details.md)
 
 ## Data directory
@@ -527,9 +552,13 @@ Full research notes: [docs/01-research-human-subconsciousness.md](docs/01-resear
 | [07 — Floating HUD](docs/07-floating-hud.md) | Ambient widget reference |
 | [08 — Native dashboard](docs/08-native-dashboard.md) | Full dashboard tab map |
 | [09 — Local CLI vs API](docs/09-cli-vs-api.md) | Why CLI is the default + when to switch |
+| [10 — UI redesign prompts](docs/10-claude-redesign-prompt.md) | Two prompts (Claude Design + Claude.ai chat) for a polished UI redesign |
+| [11 — Shared widget utils](docs/11-shared-widget-utils.md) | Six reusable macOS-widget patterns + lookup-path convention |
+| [12 — Config reference](docs/12-config-reference.md) | Full walkthrough of every `config.toml` section |
 | [USAGE.md](USAGE.md) | Full CLI command reference |
 | [CHANGELOG.md](CHANGELOG.md) | Versioned change history |
-| [.env.example](.env.example) | Every env var the daemon reads |
+| [.env.example](.env.example) | The 2 env vars (everything else is in config.toml) |
+| [config.toml.example](config.toml.example) | Copyable starting point with every config section + defaults |
 
 ## Contributing
 

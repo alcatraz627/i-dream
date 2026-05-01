@@ -4,6 +4,19 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-05-01 docs + config
+
+### Added
+- **`config.toml.example`** — copyable starting point covering every section of `config.toml`, every default, and inline notes on when to override.
+- **`docs/12-config-reference.md`** — full schema walkthrough. Top-of-doc "four fields most likely to tune" table for new users; per-section tables with defaults + notes.
+- **README TOC** — collapsible `<details>` block at the top, links to every H2.
+- **Docs index entries** for `docs/10` (UI redesign prompts), `docs/11` (shared widget utils), `docs/12` (config reference) + `config.toml.example`.
+
+### Changed
+- **`.env.example`** trimmed to its actual scope — `ANTHROPIC_API_KEY` (API mode only) + `RUST_LOG`. Earlier version implied env vars covered budget/model/paths/etc., which was wrong; those all live in `config.toml`. Now points at `docs/12-config-reference.md` + `config.toml.example` for the real config surface.
+
+---
+
 ## [0.2.3] — 2026-05-01 third patch (final pending items)
 
 ### Added

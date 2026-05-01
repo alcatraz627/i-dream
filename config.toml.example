@@ -1,0 +1,158 @@
+# i-dream — example config.toml
+#
+# Copy to ~/.claude/subconscious/config.toml. Every value below is the
+# default the daemon assumes if the file is missing or the field is
+# omitted, so you only need to keep the fields you actually want to
+# override. The order of sections does not matter; TOML is structural.
+#
+# Run `i-dream config` at any time to dump the current effective config.
+
+# ─────────────────────────────────────────────────────────────────────
+#  [daemon] — process-level wiring
+# ─────────────────────────────────────────────────────────────────────
+[daemon]
+# Unix socket the menubar widget + hook scripts connect to.
+socket_path = "~/.claude/subconscious/daemon.sock"
+# Default tracing-subscriber filter. Override at runtime with RUST_LOG.
+log_level = "info"
+# How many modules can run concurrently in a single cycle.
+max_concurrent_modules = 2
+
+# ─────────────────────────────────────────────────────────────────────
+#  [idle] — when to fire a consolidation cycle
+# ─────────────────────────────────────────────────────────────────────
+[idle]
+# Hours of inactivity before the daemon considers running a cycle.
+threshold_hours = 4
+# How often the daemon checks idle state (and the wall-clock cron for
+# the Sunday briefing). Lower = more responsive, higher = lower CPU.
+check_interval_minutes = 15
+# File whose mtime tracks "last user activity." Touched by hooks +
+# CLI commands.
+activity_signal = "~/.claude/subconscious/.last-activity"
+
+# ─────────────────────────────────────────────────────────────────────
+#  [budget] — token + model controls
+# ─────────────────────────────────────────────────────────────────────
+[budget]
+# Hard cap on total output tokens across all modules in one cycle.
+# 50K is the default; raise for richer cycles, lower to constrain spend.
+max_tokens_per_cycle = 50000
+# Hard cap on cycle wall-clock duration. Aborts in-flight API calls
+# if exceeded.
+max_runtime_minutes = 10
+# Default model for SWS + most analysis (cheaper, faster).
+model = "claude-sonnet-4-6"
+# Heavy model for REM creative recombination (more expensive).
+model_heavy = "claude-opus-4-6"
+# RECOMMENDED: true if you have Claude Pro/Max — uses your subscription
+# instead of API tokens. Set to false (or omit) only if you're API-only.
+# See docs/09-cli-vs-api.md for the full tradeoff.
+use_claude_code_cli = false
+# Path to the local claude binary. Override if not on the daemon's PATH.
+claude_code_cli_path = "claude"
+
+# ─────────────────────────────────────────────────────────────────────
+#  [limits] — Claude Code session-token rate limits
+# ─────────────────────────────────────────────────────────────────────
+# When your Claude Code session usage exceeds warn_pct of either
+# threshold, i-dream skips automatic cycles and warns before manual
+# triggers. Set to 0 to disable (the default).
+[limits]
+output_tokens_5h = 0          # Suggested for Pro: 40000
+output_tokens_7d = 0          # Suggested for Pro: 500000
+warn_pct = 0.80
+
+# ─────────────────────────────────────────────────────────────────────
+#  [ingestion] — Claude Code transcript scanning
+# ─────────────────────────────────────────────────────────────────────
+[ingestion]
+# Where Claude Code stores per-project session transcripts. Each
+# subdirectory is one project; each .jsonl file is one session.
+projects_dir = "~/.claude/projects"
+# Cap on how many sessions a single SWS scan will process. Prevents
+# runaway work if you have thousands of historical transcripts.
+max_sessions_per_scan = 50
+
+# ─────────────────────────────────────────────────────────────────────
+#  [hooks] — which Claude Code hooks the installer enables
+# ─────────────────────────────────────────────────────────────────────
+[hooks]
+session_start      = true     # Inject project brief + intentions
+post_tool_use      = true     # Activity signal + metacog sampling
+stop               = true     # Session-end consolidation timing
+pre_compact        = true     # Pre-compaction snapshot
+# UserPromptSubmit captures correction/frustration sentiment per
+# message — drives D3 v2 auto-downvote of unhelpful insights.
+user_prompt_submit = true
+
+# ─────────────────────────────────────────────────────────────────────
+#  [modules.dreaming] — sleep cycle (SWS / REM / Wake)
+# ─────────────────────────────────────────────────────────────────────
+[modules.dreaming]
+enabled               = true
+sws_enabled           = true       # Slow-wave: pattern extraction
+rem_enabled           = true       # REM: cross-pattern associations
+wake_enabled          = true       # Wake: promote insights + intentions
+# Min new sessions since last cycle before a fresh cycle fires.
+min_sessions_since_last = 1
+# Max entries kept in dreams/journal.jsonl before pruning.
+journal_max_entries     = 500
+# Confidence threshold for Wake to promote an association to insights.md.
+# Lower = more permissive (more insights, more noise).
+wake_promotion_threshold = 0.5
+
+# ─────────────────────────────────────────────────────────────────────
+#  [modules.metacog] — confidence calibration + bias detection
+# ─────────────────────────────────────────────────────────────────────
+[modules.metacog]
+enabled                  = true
+# Probability a given execution unit is sampled for analysis.
+sample_rate              = 0.25
+# Probability when a trigger condition fires (correction, multi-failure).
+triggered_sample_rate    = 1.0
+trigger_on_correction    = true
+trigger_on_multi_failure = true
+max_samples_per_session  = 50
+
+# ─────────────────────────────────────────────────────────────────────
+#  [modules.intuition] — valence memory + gut feelings
+# ─────────────────────────────────────────────────────────────────────
+[modules.intuition]
+enabled               = true
+# Min occurrences before a pattern becomes a "gut feeling" surfacable.
+min_occurrences       = 3
+# Half-life for valence decay.
+decay_halflife_days   = 30.0
+# How long after surfacing a feeling counts as "primed" (no re-surface).
+priming_decay_hours   = 4.0
+max_valence_entries   = 1000
+
+# ─────────────────────────────────────────────────────────────────────
+#  [modules.introspection] — weekly self-analysis
+# ─────────────────────────────────────────────────────────────────────
+[modules.introspection]
+enabled               = true
+sample_rate           = 0.25
+report_interval_days  = 7
+min_chains_for_report = 10
+
+# ─────────────────────────────────────────────────────────────────────
+#  [modules.prospective] — condition-action intentions
+# ─────────────────────────────────────────────────────────────────────
+[modules.prospective]
+enabled               = true
+max_active_intentions = 50
+default_expiry_days   = 30
+# Min confidence for a context match to fire an intention.
+match_threshold       = 0.7
+
+# ─────────────────────────────────────────────────────────────────────
+#  [modules.briefing] — Sunday morning weekly briefing (D4)
+# ─────────────────────────────────────────────────────────────────────
+[modules.briefing]
+enabled = true
+# Day of week (0 = Monday, 6 = Sunday in num_days_from_monday encoding).
+weekday = 6
+# Local-time hour to fire (0–23).
+hour    = 9
