@@ -1102,6 +1102,18 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
         }
     }
 
+    // D3 v2 (2026-05-01): if this user prompt is a correction and any
+    // dream-spawned intention fired in the recent past, infer that the
+    // surfaced intention was unhelpful and write an auto-downvote into
+    // insight-feedback.jsonl. The next Wake cycle will apply it; per D3 v1,
+    // confidence dropping below 0.2 then marks the source association
+    // dismissed permanently.
+    if let HookEvent::UserSignal { correction: true, .. } = &event {
+        if let Err(e) = auto_downvote_recently_fired_intentions(store) {
+            warn!("D3 v2 auto-downvote failed: {e:#}");
+        }
+    }
+
     // SessionStart is the only event that gets a non-empty response —
     // the hook script echoes whatever we write back into Claude's context.
     // For all other events we just ack with an empty body.
@@ -1130,6 +1142,66 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
         writer.shutdown().await?;
     }
 
+    Ok(())
+}
+
+/// D3 v2 helper: scan intentions/fired.jsonl for FiredRecord rows from
+/// the last 10 minutes; for each, look up the originating intention in
+/// intentions/registry.jsonl, parse its `action.source` for the
+/// "dream-wake:<assoc_id>" tag the Wake phase writes, and append an
+/// auto-downvote entry to dreams/insight-feedback.jsonl tagged
+/// `source: "auto-correction"`. Idempotent within a window — the same
+/// fire can produce multiple auto-downvotes if multiple corrections land
+/// in quick succession; that's accepted (the Wake handler caps confidence
+/// at 0.0 anyway).
+fn auto_downvote_recently_fired_intentions(store: &Store) -> Result<()> {
+    use serde_json::json;
+    const WINDOW_MIN: i64 = 10;
+
+    let fired: Vec<FiredRecord> = store
+        .read_jsonl("intentions/fired.jsonl")
+        .unwrap_or_default();
+    if fired.is_empty() { return Ok(()); }
+    let cutoff = Utc::now() - chrono::Duration::minutes(WINDOW_MIN);
+    let recent: Vec<&FiredRecord> = fired
+        .iter()
+        .filter(|r| r.fired_at >= cutoff)
+        .collect();
+    if recent.is_empty() { return Ok(()); }
+
+    let registry: Vec<Intention> = store
+        .read_jsonl("intentions/registry.jsonl")
+        .unwrap_or_default();
+    if registry.is_empty() { return Ok(()); }
+
+    let intention_by_id: std::collections::HashMap<&str, &Intention> =
+        registry.iter().map(|i| (i.id.as_str(), i)).collect();
+
+    let now_ts = Utc::now().to_rfc3339();
+    let mut downvoted = 0usize;
+    for fired_record in &recent {
+        let Some(intent) = intention_by_id.get(fired_record.intention_id.as_str())
+            else { continue };
+        let Some(assoc_id) = intent.action.source.strip_prefix("dream-wake:")
+            else { continue };
+        let entry = json!({
+            "insight_id": assoc_id,
+            "rating": "down",
+            "source": "auto-correction",
+            "ts": now_ts.clone(),
+            "intention_id": fired_record.intention_id,
+        });
+        if let Err(e) = store.append_jsonl("dreams/insight-feedback.jsonl", &entry) {
+            warn!("D3 v2: failed to append auto-downvote: {e:#}");
+        } else {
+            downvoted += 1;
+        }
+    }
+    if downvoted > 0 {
+        info!(
+            "D3 v2: auto-downvoted {downvoted} dream-spawned intention(s) after correction signal"
+        );
+    }
     Ok(())
 }
 
