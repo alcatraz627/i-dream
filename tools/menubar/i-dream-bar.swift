@@ -449,9 +449,16 @@ final class PatternGraphView: NSView {
     }
 
     private struct CategoryArc {
-        let name:     String
-        let midAngle: CGFloat  // radians, graph coordinate space
-        let ringR:    CGFloat
+        let name:       String
+        let midAngle:   CGFloat  // radians, graph coordinate space
+        let ringR:      CGFloat  // outer radius (kept for layout/draw compat)
+        // T-S5 (2026-05-01): wedge layout — start/end angles bound the
+        // wedge so we can fill the pie slice instead of just placing the
+        // label, and so the wedge becomes a click target for "solo".
+        let startAngle: CGFloat
+        let endAngle:   CGFloat
+        let innerR:     CGFloat
+        let outerR:     CGFloat
     }
 
     private var nodes:          [Node]       = []
@@ -506,7 +513,14 @@ final class PatternGraphView: NSView {
     private func buildLayout(_ patterns: [Pattern]) {
         let cx = bounds.midX
         let cy = bounds.midY
-        let ringR: CGFloat = min(bounds.width, bounds.height) * 0.44
+        // T-S5 (2026-05-01): wedge layout. Each category gets a pie wedge,
+        // nodes inside the wedge are positioned (angular jitter, radius
+        // proportional to confidence). High-confidence patterns sit near
+        // the outer rim where the eye lands first; low-confidence sit
+        // closer to the center. The wedge boundary becomes a real area
+        // (ready to be a click target for "solo this category" later).
+        let outerR: CGFloat = min(bounds.width, bounds.height) * 0.44
+        let innerR: CGFloat = outerR * 0.20  // small dead zone in the center
 
         let categories = Array(Set(patterns.map { $0.category })).sorted()
         let catCount   = max(categories.count, 1)
@@ -515,7 +529,6 @@ final class PatternGraphView: NSView {
         // Sort within category: highest confidence first
         for cat in byCategory.keys { byCategory[cat]?.sort { $0.confidence > $1.confidence } }
 
-        // Each category gets a proportional arc; 6° gap between adjacent categories
         let gapRad:       CGFloat = 6.0 * .pi / 180.0
         let totalGap:     CGFloat = gapRad * CGFloat(catCount)
         let availableArc: CGFloat = 2 * .pi - totalGap
@@ -530,20 +543,48 @@ final class PatternGraphView: NSView {
             guard !pats.isEmpty else { continue }
             let catArc = availableArc * (CGFloat(pats.count) / total)
             let midAngle = startAngle + catArc / 2
+            let endAngle = startAngle + catArc
 
             for (j, p) in pats.enumerated() {
-                // Distribute nodes evenly across this category's arc slice
-                let t: CGFloat = pats.count == 1 ? 0.5 :
-                    CGFloat(j) / CGFloat(pats.count - 1)
+                // Angular position: distribute evenly across the wedge.
+                // 5% inset on each end so nodes don't land exactly on the
+                // wedge boundary (visually separates wedges).
+                let inset: CGFloat = 0.05
+                let t: CGFloat = pats.count == 1 ? 0.5
+                    : inset + (1 - 2 * inset) * CGFloat(j) / CGFloat(pats.count - 1)
                 let angle = startAngle + t * catArc
-                let x = cx + ringR * cos(angle)
-                let y = cy + ringR * sin(angle)
+                // Radial position: confidence → radius.
+                // High conf (1.0) sits at outerR * 0.95, low conf (0.0) at innerR.
+                let radial = innerR + (outerR * 0.95 - innerR) * CGFloat(p.confidence)
+                let x = cx + radial * cos(angle)
+                let y = cy + radial * sin(angle)
                 let r: CGFloat = 5.0 + CGFloat(p.confidence) * 7.0  // 5–12 pt
                 nodes.append(Node(pattern: p, position: CGPoint(x: x, y: y), radius: r))
             }
 
-            categoryArcs.append(CategoryArc(name: cat, midAngle: midAngle, ringR: ringR))
+            categoryArcs.append(CategoryArc(
+                name: cat, midAngle: midAngle, ringR: outerR,
+                startAngle: startAngle, endAngle: endAngle,
+                innerR: innerR, outerR: outerR
+            ))
             startAngle += catArc + gapRad
+        }
+    }
+
+    /// Category color for wedge fills + labels. Stable per category name.
+    private func categoryFillColor(_ name: String) -> NSColor {
+        // Deterministic ordered LCH-ish palette; keep in sync with nodeColor.
+        switch name {
+        case "approach":         return .systemTeal
+        case "tool-use":         return .systemOrange
+        case "user-preference":  return .systemPurple
+        case "domain":           return .systemBlue
+        case "architecture":     return .systemGreen
+        default:
+            // Fallback: hash the name for new categories so colors don't shuffle.
+            let h = abs(name.hashValue)
+            let palette: [NSColor] = [.systemPink, .systemYellow, .systemIndigo, .systemMint, .systemBrown]
+            return palette[h % palette.count]
         }
     }
 
@@ -703,14 +744,49 @@ final class PatternGraphView: NSView {
         ctx.scaleBy(x: zoomScale, y: zoomScale)
         ctx.translateBy(x: -cx, y: -cy)
 
-        // ── Ring guide ────────────────────────────────────────────────────────
-        // Faint circle so the ring "track" is always visible even at gap sections.
+        // ── Wedge fills (T-S5) ───────────────────────────────────────────────
+        // Replace the round-1 thin guide circle with five colored pie wedges,
+        // each tinted in its category color at low alpha + stroked at the
+        // outer arc with full color. The 5-category structure becomes
+        // visually unmissable even before any node is rendered.
         if !nodes.isEmpty {
-            let ringR = categoryArcs.first?.ringR ?? min(bounds.width, bounds.height) * 0.44
-            ctx.setStrokeColor(NSColor.quaternaryLabelColor.cgColor)
-            ctx.setLineWidth(0.5)
-            ctx.strokeEllipse(in: CGRect(x: cx - ringR, y: cy - ringR,
-                                         width: ringR * 2, height: ringR * 2))
+            for arc in categoryArcs {
+                let fill = categoryFillColor(arc.name)
+                let path = NSBezierPath()
+                // Sweep outer arc from start to end, then back via the inner arc.
+                let startPt = CGPoint(
+                    x: cx + arc.outerR * cos(arc.startAngle),
+                    y: cy + arc.outerR * sin(arc.startAngle))
+                path.move(to: startPt)
+                let nSeg = 24
+                for k in 1 ... nSeg {
+                    let t = CGFloat(k) / CGFloat(nSeg)
+                    let a = arc.startAngle + t * (arc.endAngle - arc.startAngle)
+                    path.line(to: CGPoint(
+                        x: cx + arc.outerR * cos(a),
+                        y: cy + arc.outerR * sin(a)))
+                }
+                for k in 0 ... nSeg {
+                    let t = CGFloat(k) / CGFloat(nSeg)
+                    let a = arc.endAngle - t * (arc.endAngle - arc.startAngle)
+                    path.line(to: CGPoint(
+                        x: cx + arc.innerR * cos(a),
+                        y: cy + arc.innerR * sin(a)))
+                }
+                path.close()
+                fill.withAlphaComponent(0.10).setFill()
+                path.fill()
+                // Outer-edge stroke at full color (1.5pt) + inner edge (subtle).
+                let outerStroke = NSBezierPath()
+                outerStroke.appendArc(
+                    withCenter: CGPoint(x: cx, y: cy),
+                    radius: arc.outerR,
+                    startAngle: arc.startAngle * 180 / .pi,
+                    endAngle:   arc.endAngle   * 180 / .pi)
+                fill.withAlphaComponent(0.85).setStroke()
+                outerStroke.lineWidth = 1.5
+                outerStroke.stroke()
+            }
         }
 
         // ── Focus-based linked set ──────────────────────────────────────────
