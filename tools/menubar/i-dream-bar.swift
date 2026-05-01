@@ -219,8 +219,13 @@ private struct Association: Codable {
     let actionable:    Bool
     let suggestedRule: String?
     let patternsLinked: [String]?
+    /// Both fields default-false so legacy associations.json (pre-D3 v1) decodes.
+    /// Decoded for the default-summary card and for future T-A12 multi-select
+    /// dismiss/promote write path.
+    let promoted:      Bool?
+    let dismissed:     Bool?
     enum CodingKeys: String, CodingKey {
-        case id, hypothesis, confidence, actionable
+        case id, hypothesis, confidence, actionable, promoted, dismissed
         case suggestedRule  = "suggested_rule"
         case patternsLinked = "patterns_linked"
     }
@@ -3033,10 +3038,10 @@ final class DashboardWindowController: NSObject {
         detailTV.backgroundColor = .clear; detailTV.drawsBackground = false
         patternDetailTextView = detailTV
 
-        // Initial placeholder for detail pane
-        let placeholderRT = RichText()
-        placeholderRT.dim("Select a pattern from the list or graph to see details.")
-        detailTV.textStorage?.setAttributedString(placeholderRT.build())
+        // T-S7 (2026-05-01): default summary card replaces the dim "Select…"
+        // wall. Surfaces the top-5-by-confidence patterns + keyboard hints
+        // so the dead pane becomes a useful default workspace.
+        detailTV.textStorage?.setAttributedString(buildPatternsDefaultSummary())
 
         // Detail card wrapper — rounded border with subtle background
         let detailWrap = NSView(frame: NSRect(x: 0, y: 0, width: listW, height: detailH))
@@ -3094,9 +3099,9 @@ final class DashboardWindowController: NSObject {
             guard let self = self, let dtv = detailTV else { return }
             guard let id = selectedId,
                   let pat = self.patterns.first(where: { $0.stableKey == id }) else {
-                let rt = RichText()
-                rt.dim("Select a pattern from the list or graph to see details.")
-                dtv.textStorage?.setAttributedString(rt.build())
+                // T-S7: deselection returns to the default summary, not the
+                // dim "Select…" placeholder.
+                dtv.textStorage?.setAttributedString(self.buildPatternsDefaultSummary())
                 return
             }
             self.renderPatternDetail(pat, into: dtv)
@@ -3155,6 +3160,74 @@ final class DashboardWindowController: NSObject {
 
     @objc private func patternGraphSearchChanged(_ sender: NSSearchField) {
         patternGraphView?.applySearch(sender.stringValue)
+    }
+
+    /// T-S7 (2026-05-01): default summary card for the Patterns detail pane
+    /// when nothing is selected. Replaces the dim "Select…" wall with a
+    /// useful at-a-glance overview: counts + top 5 by confidence + keyboard
+    /// hints. Reads `patterns` already in memory — no I/O.
+    private func buildPatternsDefaultSummary() -> NSAttributedString {
+        let rt = RichText()
+        rt.header("Patterns")
+        let total       = patterns.count
+        let highConf    = patterns.filter { $0.confidence >= 0.8 }.count
+        let categories  = Set(patterns.map { $0.category }).count
+        let positive    = patterns.filter { $0.valence == "positive" }.count
+        let negative    = patterns.filter { $0.valence == "negative" }.count
+        rt.dim("\(total) total · \(highConf) high-confidence · \(categories) categories · \(positive)↑ \(negative)↓")
+        rt.spacer()
+
+        rt.subheader("Top by confidence")
+        let topConf = patterns
+            .sorted { $0.confidence > $1.confidence }
+            .prefix(5)
+        for p in topConf {
+            let confPct = Int(p.confidence * 100)
+            let glyph = p.valence == "positive" ? "▲" : p.valence == "negative" ? "▼" : "·"
+            let preview = p.pattern.count > 80 ? String(p.pattern.prefix(78)) + "…" : p.pattern
+            rt.body("  \(confPct)%  \(glyph)  \(preview)")
+        }
+        rt.spacer()
+
+        rt.subheader("Tips")
+        rt.dim("  Click a row or graph node for full detail")
+        rt.dim("  Filter the list with the search field above the graph")
+        rt.dim("  Categories: \(Set(patterns.map { $0.category }).sorted().joined(separator: ", "))")
+        return rt.build()
+    }
+
+    /// T-S7: same default summary pattern for Associations.
+    private func buildAssociationsDefaultSummary() -> NSAttributedString {
+        let rt = RichText()
+        rt.header("Associations")
+        let total       = associations.count
+        let actionable  = associations.filter { $0.actionable }.count
+        let promoted    = associations.filter { $0.promoted ?? false }.count
+        let highConf    = associations.filter { $0.confidence >= 0.75 }.count
+        rt.dim("\(total) total · \(actionable) actionable · \(promoted) promoted · \(highConf) high-confidence")
+        rt.spacer()
+
+        rt.subheader("Top actionable by confidence")
+        let topActionable = associations
+            .filter { $0.actionable }
+            .sorted { $0.confidence > $1.confidence }
+            .prefix(5)
+        if topActionable.isEmpty {
+            rt.dim("  (no actionable associations yet)")
+        } else {
+            for a in topActionable {
+                let confPct = Int(a.confidence * 100)
+                let preview = a.hypothesis.count > 90 ? String(a.hypothesis.prefix(88)) + "…" : a.hypothesis
+                rt.body("  \(confPct)%  ◆  \(preview)")
+            }
+        }
+        rt.spacer()
+
+        rt.subheader("Tips")
+        rt.dim("  Click a row to focus its node + linked patterns in the graph")
+        rt.dim("  Default graph mode: edges show only when a node is selected")
+        rt.dim("  Network View opens the bipartite graph in a separate panel")
+        return rt.build()
     }
 
     /// Render pattern detail into a text view — full text, metadata, and linked associations.
@@ -3414,9 +3487,8 @@ final class DashboardWindowController: NSObject {
         detailTV.backgroundColor = .clear; detailTV.drawsBackground = false
         assocDetailTextView = detailTV
 
-        let placeholderRT = RichText()
-        placeholderRT.dim("Select an association to see linked patterns and details.")
-        detailTV.textStorage?.setAttributedString(placeholderRT.build())
+        // T-S7: default summary card — same pattern as the Patterns tab.
+        detailTV.textStorage?.setAttributedString(buildAssociationsDefaultSummary())
 
         // Detail card wrapper — rounded border with subtle background
         let detailWrap = NSView(frame: NSRect(x: 0, y: 0, width: listW, height: detailH))
@@ -3473,9 +3545,8 @@ final class DashboardWindowController: NSObject {
             guard let self = self, let dtv = detailTV else { return }
             guard let id = selectedId,
                   let assoc = self.associations.first(where: { $0.id == id }) else {
-                let rt = RichText()
-                rt.dim("Select an association to see linked patterns and details.")
-                dtv.textStorage?.setAttributedString(rt.build())
+                // T-S7: deselection returns to the default summary card.
+                dtv.textStorage?.setAttributedString(self.buildAssociationsDefaultSummary())
                 return
             }
             self.renderAssociationDetail(assoc, into: dtv)
