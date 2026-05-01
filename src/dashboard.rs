@@ -1774,7 +1774,81 @@ function localizeEventTimestamps() {{
     td.title = iso;
   }});
 }}
+
+// M15 — Keyboard shortcut overlay. Press '?' anywhere outside an input
+// field to open. Press Escape or click backdrop to close. The overlay
+// is built lazily on first open so the rest of the page paints faster.
+(function() {{
+  var overlay = null;
+  function build() {{
+    var div = document.createElement('div');
+    div.id = 'kbd-overlay';
+    div.innerHTML =
+      '<div class="kbd-card" role="dialog" aria-label="Keyboard shortcuts">' +
+        '<div class="kbd-card-head">' +
+          '<h2>Keyboard shortcuts</h2>' +
+          '<button class="kbd-close" aria-label="Close">×</button>' +
+        '</div>' +
+        '<div class="kbd-grid">' +
+          '<div class="kbd-section">' +
+            '<h3>Global</h3>' +
+            '<dl><dt><kbd>?</kbd></dt><dd>Toggle this overlay</dd>' +
+            '<dt><kbd>Esc</kbd></dt><dd>Close dialogs / clear selection</dd></dl>' +
+          '</div>' +
+          '<div class="kbd-section">' +
+            '<h3>Patterns Graph</h3>' +
+            '<dl><dt><kbd>Click</kbd></dt><dd>Focus 1-hop neighborhood</dd>' +
+            '<dt><kbd>Right-click</kbd></dt><dd>Export node as guideline / hook</dd>' +
+            '<dt><kbd>Double-click</kbd></dt><dd>Reset focus</dd></dl>' +
+          '</div>' +
+          '<div class="kbd-section">' +
+            '<h3>Tables</h3>' +
+            '<dl><dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Move selection</dd>' +
+            '<dt><kbd>Enter</kbd></dt><dd>Open detail view</dd></dl>' +
+          '</div>' +
+        '</div>' +
+        '<p class="kbd-hint muted">Tip: most actions also have hover tooltips and right-click menus.</p>' +
+      '</div>';
+    div.addEventListener('click', function(e) {{
+      if (e.target === div || e.target.classList.contains('kbd-close')) close();
+    }});
+    document.body.appendChild(div);
+    return div;
+  }}
+  function open() {{
+    if (!overlay) overlay = build();
+    overlay.classList.add('kbd-open');
+  }}
+  function close() {{
+    if (overlay) overlay.classList.remove('kbd-open');
+  }}
+  function toggle() {{
+    if (overlay && overlay.classList.contains('kbd-open')) close(); else open();
+  }}
+  document.addEventListener('keydown', function(e) {{
+    var t = e.target;
+    var inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (e.key === '?' && !inField) {{ e.preventDefault(); toggle(); }}
+    else if (e.key === 'Escape' && overlay && overlay.classList.contains('kbd-open')) {{ close(); }}
+  }});
+}})();
 </script>
+<style>
+#kbd-overlay {{ position:fixed; inset:0; background:rgba(0,0,0,0.65); display:none; align-items:center; justify-content:center; z-index:9999; }}
+#kbd-overlay.kbd-open {{ display:flex; }}
+.kbd-card {{ background:var(--surface,#161b22); border:1px solid var(--border,#30363d); border-radius:8px; padding:20px 24px; max-width:720px; width:90%; max-height:80vh; overflow:auto; box-shadow:0 20px 60px rgba(0,0,0,0.55); }}
+.kbd-card-head {{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }}
+.kbd-card h2 {{ margin:0; font-size:16px; color:var(--text,#c9d1d9); }}
+.kbd-close {{ background:transparent; border:none; color:var(--dim,#888); font-size:22px; cursor:pointer; padding:0 6px; line-height:1; }}
+.kbd-close:hover {{ color:var(--text,#c9d1d9); }}
+.kbd-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:18px; }}
+.kbd-section h3 {{ margin:0 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--accent,#5b8def); }}
+.kbd-section dl {{ margin:0; display:grid; grid-template-columns:auto 1fr; gap:6px 12px; align-items:baseline; }}
+.kbd-section dt {{ margin:0; }}
+.kbd-section dd {{ margin:0; font-size:12px; color:var(--text,#c9d1d9); }}
+.kbd-section kbd {{ display:inline-block; padding:2px 6px; background:var(--bg,#0d1117); border:1px solid var(--border,#30363d); border-bottom-width:2px; border-radius:3px; font:600 11px/1 ui-monospace,Menlo,monospace; color:var(--text,#c9d1d9); }}
+.kbd-hint {{ margin:14px 0 0; font-size:11px; }}
+</style>
 </body>
 </html>
 "##,
