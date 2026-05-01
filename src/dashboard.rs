@@ -2327,6 +2327,8 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   <span class="pg-sep">·</span>
   <label class="pg-check" title="Color pattern nodes by emergent community (M9 label propagation) instead of category"><input type="checkbox" id="pg-color-by-community"> Color by community</label>
   <span class="pg-sep">·</span>
+  <button id="pg-export" class="pg-btn" title="Download the patterns graph as a standalone HTML file (includes data + libs)">⤓ Export</button>
+  <span class="pg-sep">·</span>
   <span class="muted" id="pg-stats"></span>
   <span class="pg-sep">·</span>
   <span class="pg-spark-wrap" title="New patterns extracted per day, last 30 days. Hover any column for details.">
@@ -2668,6 +2670,58 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   document.getElementById('pg-color-by-community').onchange = function(e) {{
     colorByCommunity = e.target.checked;
     renderer.refresh();
+  }};
+
+  // M11 — export the patterns graph as a fully standalone HTML file.
+  // The trick: graphology+sigma are already inlined in the parent
+  // dashboard, and the section markup + IIFE are just DOM. Grab them
+  // all, wrap in a minimal document, and trigger a Blob download.
+  // Result is a single ~250KB HTML file the user can email, share, or
+  // open offline — no internet, no local data dir required.
+  document.getElementById('pg-export').onclick = function() {{
+    var section = document.getElementById('patterns-graph');
+    if (!section) return;
+    // Find the script tags that came AFTER the section in the dashboard
+    // — these are the graphology, sigma, and IIFE scripts that this
+    // section depends on. They live as siblings in the same body. We
+    // copy outerHTML for each script tag.
+    var scripts = '';
+    var walker = section.nextSibling;
+    while (walker) {{
+      if (walker.tagName === 'SCRIPT' || walker.tagName === 'STYLE') {{
+        scripts += walker.outerHTML + '\\n';
+      }}
+      walker = walker.nextSibling;
+    }}
+    // Also grab any <style> tags inside the section (the pg-* CSS).
+    var sectionStyles = '';
+    section.querySelectorAll('style').forEach(function(s) {{ sectionStyles += s.outerHTML + '\\n'; }});
+    var ts = new Date().toISOString().replace(/[:.]/g, '-');
+    var doc =
+      '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      '<title>i-dream Patterns Graph — ' + ts.slice(0, 19) + '</title>' +
+      '<style>' +
+      'body {{ margin:0; padding:18px; background:#0d1117; color:#c9d1d9; ' +
+      'font:14px/1.4 -apple-system,system-ui,sans-serif; }}' +
+      'h1 {{ font-size:18px; margin:0 0 12px; }}' +
+      'h2 {{ font-size:15px; margin-top:0; }}' +
+      ':root {{ --bg:#0d1117; --surface:#161b22; --text:#c9d1d9; ' +
+      '--dim:#8b949e; --border:#30363d; --accent:#5b8def; }}' +
+      '</style>' +
+      sectionStyles +
+      '</head><body>' +
+      '<h1>i-dream Patterns Graph snapshot</h1>' +
+      '<p style="color:#888;font-size:12px;margin-top:0">Exported ' + ts + ' · standalone — no network or data files required.</p>' +
+      section.outerHTML +
+      scripts +
+      '</body></html>';
+    var blob = new Blob([doc], {{ type: 'text/html' }});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'i-dream-patterns-graph-' + ts.slice(0, 10) + '.html';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function() {{ URL.revokeObjectURL(url); }}, 1000);
   }};
 }})();
 </script>
