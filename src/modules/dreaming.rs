@@ -60,6 +60,15 @@ pub struct Association {
     /// the Wake phase. Used to avoid re-promoting across cycles.
     #[serde(default)]
     pub promoted: bool,
+    /// D3 v1 (2026-05-01): set true when an explicit user down-vote drives
+    /// confidence below the dismissal threshold (default 0.2). Dismissed
+    /// associations are filtered from Wake promotion permanently and may
+    /// later be filtered from REM re-emission. Distinct from `promoted=false`
+    /// (which means "not yet promoted") — `dismissed=true` means "do not
+    /// surface this again". `#[serde(default)]` so legacy associations
+    /// missing the field deserialize as not-dismissed.
+    #[serde(default)]
+    pub dismissed: bool,
 }
 
 /// Dream journal entry (appended after each dream cycle).
@@ -771,6 +780,7 @@ Output ONLY a JSON array. No commentary."#;
                             actionable: r.actionable,
                             suggested_rule: r.suggested_rule,
                             promoted: false,
+                            dismissed: false,
                         });
                     }
                 }
@@ -811,6 +821,7 @@ Output ONLY a JSON array. No commentary."#;
                                         actionable: r.actionable,
                                         suggested_rule: r.suggested_rule,
                                         promoted: false,
+                                        dismissed: false,
                                     });
                                 }
                             }
@@ -983,6 +994,13 @@ Output ONLY a JSON array. No commentary."#;
                                         assoc.confidence =
                                             (assoc.confidence - 0.10).max(0.0);
                                         assoc.promoted = false; // re-evaluate
+                                        // D3 v1: when a down-vote drags
+                                        // confidence below the dismissal
+                                        // threshold, mark dismissed so the
+                                        // association stops re-surfacing.
+                                        if assoc.confidence < 0.2 {
+                                            assoc.dismissed = true;
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -994,16 +1012,27 @@ Output ONLY a JSON array. No commentary."#;
         }
 
         // Collect candidates by cloning so we can mutate all_assocs afterward
-        // without fighting the borrow checker.
+        // without fighting the borrow checker. D3 v1: filter dismissed too.
         let candidates: Vec<Association> = all_assocs
             .iter()
-            .filter(|a| !a.promoted && a.actionable && a.confidence >= threshold)
+            .filter(|a| !a.promoted && !a.dismissed && a.actionable && a.confidence >= threshold)
             .cloned()
             .collect();
 
         let promoted_count = candidates.len() as u64;
 
         if promoted_count > 0 {
+            // D7 (2026-05-01): load patterns once so promoted insights can
+            // cite their evidence (pattern texts, source projects, session
+            // count). Patterns are typically <500 entries — cheap to load.
+            let all_patterns: Vec<ExtractedPattern> = if self.store.exists("dreams/patterns.json") {
+                self.store.read_json("dreams/patterns.json").unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let pattern_by_id: HashMap<&str, &ExtractedPattern> =
+                all_patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+
             // Build the markdown block to append.
             let timestamp = Utc::now().format("%Y-%m-%d %H:%M UTC");
             let mut block = format!("\n\n## Wake Cycle — {timestamp}\n\n");
@@ -1015,11 +1044,77 @@ Output ONLY a JSON array. No commentary."#;
                 if let Some(rule) = &assoc.suggested_rule {
                     block.push_str(&format!("**Rule:** {rule}\n\n"));
                 }
+
+                // D7: enrich with evidence chips from the linked patterns.
+                // Falls back to the bare id list when a pattern can't be
+                // resolved (legacy data, deleted pattern, etc.).
                 if !assoc.patterns_linked.is_empty() {
-                    block.push_str(&format!(
-                        "_Patterns: {}_\n\n",
-                        assoc.patterns_linked.join(", ")
-                    ));
+                    let mut resolved_quotes: Vec<String> = Vec::new();
+                    let mut all_projects: Vec<String> = Vec::new();
+                    let mut all_sessions: Vec<String> = Vec::new();
+                    for pid in &assoc.patterns_linked {
+                        if let Some(p) = pattern_by_id.get(pid.as_str()) {
+                            let quote = if p.pattern.chars().count() > 140 {
+                                let mut q: String = p.pattern.chars().take(140).collect();
+                                q.push('…');
+                                q
+                            } else {
+                                p.pattern.clone()
+                            };
+                            resolved_quotes.push(format!("- _Pattern_: \"{}\"", quote));
+                            for proj in &p.source_projects {
+                                if !all_projects.contains(proj) {
+                                    all_projects.push(proj.clone());
+                                }
+                            }
+                            for sid in &p.source_sessions {
+                                if !all_sessions.contains(sid) {
+                                    all_sessions.push(sid.clone());
+                                }
+                            }
+                        }
+                    }
+                    if !resolved_quotes.is_empty() {
+                        block.push_str("**Evidence:**\n");
+                        for q in &resolved_quotes {
+                            block.push_str(q);
+                            block.push('\n');
+                        }
+                        if !all_projects.is_empty() {
+                            block.push_str(&format!(
+                                "- _Projects_ ({}): {}\n",
+                                all_projects.len(),
+                                all_projects.join(", ")
+                            ));
+                        }
+                        if !all_sessions.is_empty() {
+                            // Sessions can be many — just count + show first 3 prefixes.
+                            let preview: Vec<String> = all_sessions
+                                .iter()
+                                .take(3)
+                                .map(|s| s.chars().take(8).collect())
+                                .collect();
+                            let suffix = if all_sessions.len() > 3 {
+                                format!(", +{} more", all_sessions.len() - 3)
+                            } else {
+                                String::new()
+                            };
+                            block.push_str(&format!(
+                                "- _Sessions_ ({}): {}{}\n",
+                                all_sessions.len(),
+                                preview.join(", "),
+                                suffix
+                            ));
+                        }
+                        block.push('\n');
+                    } else {
+                        // Unresolved fallback — preserve the legacy line so old
+                        // consumers (Insights tab parser) still see something.
+                        block.push_str(&format!(
+                            "_Patterns: {}_\n\n",
+                            assoc.patterns_linked.join(", ")
+                        ));
+                    }
                 }
                 block.push_str("---\n");
             }
@@ -1392,6 +1487,7 @@ mod tests {
             actionable,
             suggested_rule: None,
             promoted,
+            dismissed: false,
         }
     }
 
