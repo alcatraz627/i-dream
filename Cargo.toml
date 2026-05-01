@@ -51,6 +51,10 @@ thiserror = "2"
 # Hashing (for message privacy)
 sha2 = "0.10"
 
+# Graph algorithms (Patterns Graph foundations — degree centrality, BFS for
+# bipartite projection; Louvain layered on top by hand-rolled module)
+petgraph = "0.6"
+
 # Directories
 dirs = "6"
 

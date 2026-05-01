@@ -83,6 +83,17 @@ pub enum Command {
         run_tests: bool,
     },
 
+    /// Compute Patterns Graph metrics (degree centrality, hubs, isolated
+    /// pattern count) and write to dreams/graph-metrics.json. The output
+    /// is consumed by both the Swift dashboard and the HTML graph view —
+    /// single source of truth, no per-renderer recomputation.
+    GraphMetrics {
+        /// Also write a snapshot of the current patterns + associations
+        /// to dreams/snapshots/<ts>.json (enables cycle-diff in the UI).
+        #[arg(long)]
+        snapshot: bool,
+    },
+
     /// Generate per-project briefs (D6) for every project_id seen in
     /// patterns.json with ≥3 patterns. Each brief is a 4-section markdown
     /// auto-injected at SessionStart when Claude Code starts a session

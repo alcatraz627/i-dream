@@ -5,6 +5,7 @@ mod daemon;
 mod dashboard;
 mod dream_trace;
 mod events;
+mod graph_metrics;
 mod hooks;
 mod logging;
 mod modules;
@@ -155,6 +156,24 @@ async fn main() -> Result<()> {
             println!("Dashboard written to {}", path.display());
             if !no_open {
                 dashboard::open_in_browser(&path)?;
+            }
+        }
+
+        Command::GraphMetrics { snapshot } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let metrics = graph_metrics::compute_and_persist(&store)?;
+            println!(
+                "✓ Wrote graph-metrics.json\n  patterns: {}\n  associations: {}\n  edges: {}\n  isolated patterns: {}\n  top hubs: {} (degree-sorted)",
+                metrics.n_patterns,
+                metrics.n_associations,
+                metrics.n_edges,
+                metrics.isolated_patterns,
+                metrics.hubs.len(),
+            );
+            if snapshot {
+                let path = graph_metrics::snapshot_for_diff(&store)?;
+                println!("✓ Wrote snapshot {}", path.display());
             }
         }
 
