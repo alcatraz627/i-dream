@@ -66,13 +66,23 @@ The widget lives in your macOS menu bar. Click the icon to open the menu.
 ## Daemon CLI
 
 ```bash
-i-dream status          # show daemon state, cycle count, module dirs
-i-dream start           # run in foreground (no pid file — for debugging)
-i-dream start --daemonize  # run with pid file (what the widget uses)
-i-dream stop            # stop the daemon gracefully
-i-dream dashboard       # regenerate dashboard HTML → ~/.claude/subconscious/dashboard.html
-i-dream inspect sws     # dump the SWS module's data
-i-dream inspect metacog # dump metacog data
+i-dream status                   # show daemon state, cycle count, module dirs
+i-dream start                    # run in foreground (no pid file — for debugging)
+i-dream start --daemonize        # run with pid file (what the widget uses)
+i-dream stop                     # stop the daemon gracefully
+i-dream dream                    # manually trigger a full dream cycle (sws+rem+wake)
+i-dream dream sws                # run only the SWS phase (cheap, frequent)
+i-dream dashboard                # SIGUSR1 the menubar widget to open the native panel
+i-dream dashboard --no-open      # regenerate ~/.claude/subconscious/dashboard.html only
+i-dream brief-projects           # generate per-project SessionStart briefs (D6)
+i-dream briefing --force         # synthesize the Sunday morning briefing now (D4)
+i-dream graph-metrics --snapshot # write dreams/graph-metrics.json + snapshot
+i-dream widget start             # build + launch the menubar widget
+i-dream widget logs              # tail -f /tmp/i-dream-bar.log
+i-dream inspect dreaming         # dump dreaming module data (patterns/associations/insights)
+i-dream inspect metacog          # dump metacog data
+i-dream config                   # print current effective config.toml
+i-dream prune --dry-run          # preview what would be pruned from large stores
 ```
 
 ---

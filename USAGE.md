@@ -227,6 +227,36 @@ i-dream inspect introspection  # Reasoning chain analysis
 i-dream inspect prospective    # Active intentions, fire log
 ```
 
+### Commands shipped in v0.2+
+
+```bash
+# Open the native dashboard panel (or generate HTML if widget isn't running)
+i-dream dashboard
+i-dream dashboard --no-open       # Generate HTML only, don't open browser
+
+# Manage the menubar widget
+i-dream widget start             # Build + launch the menubar widget
+i-dream widget stop              # Kill any running instance
+i-dream widget logs              # tail -f /tmp/i-dream-bar.log
+i-dream widget install           # Set up auto-start at login (LaunchAgents)
+
+# D6 — per-project SessionStart briefs (D2-tagged patterns required)
+i-dream brief-projects                    # Backfill + generate for all projects
+i-dream brief-projects --cwd "$PWD"       # Generate just for the current project
+
+# D4 — Sunday morning briefing (or any time with --force)
+i-dream briefing
+i-dream briefing --force                  # Regenerate even if same ISO week
+
+# Patterns Graph metrics (degree centrality + hubs + isolated count)
+i-dream graph-metrics                     # Compute + write dreams/graph-metrics.json
+i-dream graph-metrics --snapshot          # Also snapshot patterns.json + associations.json
+
+# Prune large stores
+i-dream prune                             # Trim oldest entries to keep limits
+i-dream prune --dry-run                   # Preview without changes
+```
+
 ## Step 8 — Session injection (optional but recommended)
 
 To inject dream insights into every new Claude session, add a `SessionStart` hook script:

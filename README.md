@@ -501,20 +501,24 @@ i-dream/
 │   ├── hooks.rs             Claude Code hook integration (install/uninstall/status)
 │   ├── service.rs           LaunchAgent service management (install/start/stop)
 │   ├── logging.rs           Tracing subscriber setup (daily rotation)
-│   ├── dashboard.rs         Terminal dashboard (live cycle view)
+│   ├── dashboard.rs         HTML dashboard renderer (Sigma+Graphology bipartite graph)
+│   ├── graph_metrics.rs     Shared Pattern↔Association metrics (degree, hubs, snapshots)
 │   ├── transcript.rs        Claude Code transcript parsing + keyword extraction
+│   ├── widget.rs            CLI subcommands for managing the menubar widget
 │   └── modules/
-│       ├── mod.rs           Module trait: should_run() + run()
-│       ├── dreaming.rs      SWS compression → REM association → Wake verify
+│       ├── mod.rs           Module trait + parse_json_codeblock + sanitization (D23)
+│       ├── dreaming.rs      SWS compression → REM association → Wake verify (D1+D2+D7+D3v1)
 │       ├── metacog.rs       Execution unit sampling + calibration analysis
 │       ├── intuition.rs     Valence memory + priming cache + time-decay
 │       ├── introspection.rs Reasoning chain analysis (weekly)
 │       ├── prospective.rs   Condition-action intentions + trigger matching
+│       ├── project_briefs.rs Per-project SessionStart briefs (D6)
+│       ├── weekly_briefing.rs Sunday morning briefing module (D4)
 │       ├── insight_digest.rs  Promoted insight summarization
 │       └── user_settings.rs   User preference persistence
 ├── tools/
 │   └── menubar/
-│       ├── i-dream-bar.swift   macOS menu-bar widget + dashboard (~8,000 lines)
+│       ├── i-dream-bar.swift   macOS menu-bar widget + HUD + dashboard (~8,500 lines)
 │       └── build.sh            Compile + sign + launch script
 ├── docs/
 │   ├── 01-research-human-subconsciousness.md
@@ -522,8 +526,24 @@ i-dream/
 │   ├── 03-implementation-details.md
 │   ├── 04-architecture-diagram.md
 │   ├── 05-how-to.md
+│   ├── 06-menubar-widget.md
+│   ├── 07-floating-hud.md
+│   ├── 08-native-dashboard.md
+│   ├── 09-cli-vs-api.md
+│   ├── 10-claude-redesign-prompt.md
+│   ├── 11-shared-widget-utils.md
+│   ├── 12-config-reference.md
+│   ├── banner.svg
 │   └── v2-dashboard-plan.md
-└── Cargo.toml               Dependencies, release profile (LTO)
+├── .github/
+│   ├── workflows/ci.yml          cargo fmt/clippy/test + swift compile check
+│   ├── ISSUE_TEMPLATE/           bug + feature templates
+│   └── PULL_REQUEST_TEMPLATE.md
+├── config.toml.example          Copyable starting point with every section
+├── .env.example                 The 2 env vars (everything else: config.toml)
+├── CHANGELOG.md                 Versioned change history (Keep-a-Changelog)
+├── CONTRIBUTING.md              Local dev loop + conventional commits
+└── Cargo.toml                   Dependencies, release profile (LTO), v0.2.4
 ```
 
 ## Research foundations

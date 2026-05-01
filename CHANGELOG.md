@@ -4,6 +4,19 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-05-01 doc audit pass
+
+### Added
+- **`USAGE.md`** — new "Commands shipped in v0.2+" section covering `dashboard`, `widget`, `brief-projects`, `briefing`, `graph-metrics`, `prune`. Closes the gap where the original install guide stopped at v0.1.0 commands.
+- **`docs/05-how-to.md`** — Daemon CLI block expanded from 7 commands to 18, mirrors the new CLI surface.
+- **`docs/04-architecture-diagram.md`** — primary diagram rewritten as **Mermaid** (renders natively on GitHub). Original ASCII version preserved inside a collapsible `<details>` block for terminal-only viewers.
+- **`README.md` Project structure** — updated tree to reflect new src files (`graph_metrics.rs`, `widget.rs`, `project_briefs.rs`, `weekly_briefing.rs`), all docs/06-12, banner.svg, .github/, config.toml.example, .env.example, CHANGELOG, CONTRIBUTING.
+
+### Changed
+- Bumped widget swift LOC reference from "~8,000" → "~8,500" (current size after the session's work).
+
+---
+
 ## [0.2.4] — 2026-05-01 docs + config
 
 ### Added

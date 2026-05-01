@@ -14,6 +14,42 @@ own copy is at `docs/04-architecture-diagram.md`.
 
 ## End-to-end system flow
 
+```mermaid
+flowchart TB
+  subgraph CC["Claude Code (IDE)"]
+    direction TB
+    user["user codes · tools run · hook events fire"]
+  end
+
+  subgraph daemon["i-dream daemon"]
+    direction TB
+    subgraph hot["Hook accept loop · hot, real-time"]
+      direction TB
+      h1["accept() · touch last_activity · write events.jsonl<br/>SessionStart → build + inject intuition + briefing"]
+    end
+    subgraph cold["Consolidation loop · cold, idle-gated"]
+      direction TB
+      c1["every N min: check idle threshold<br/>if idle → run phases:"]
+      c2["Dreaming SWS+REM+Wake (50%)"]
+      c3["Metacog (25%)"]
+      c4["Introspect (remaining)"]
+      c5["Prospective (cleanup)"]
+      c1 --> c2 --> c3 --> c4 --> c5
+    end
+    store[("Store · ~/.claude/subconscious/<br/>logs · dreams · metacog · valence · intentions · briefings · project-briefs · snapshots")]
+    api["ClaudeClient::analyze · retry loop · API or local CLI subprocess"]
+    hot --> store
+    cold --> store
+    cold --> api
+  end
+
+  CC <-->|"hooks.sock JSON · SessionStart response injects briefing"| hot
+  api -->|HTTPS| anthropic["api.anthropic.com /v1/messages<br/>OR local claude CLI subprocess (subscription billing)"]
+```
+
+<details>
+<summary>Plaintext ASCII version (for terminal viewers)</summary>
+
 ```
  ┌──────────────────────────────────────────────────────────────────────┐
  │                         Claude Code (IDE)                            │
@@ -71,6 +107,8 @@ own copy is at `docs/04-architecture-diagram.md`.
                      │  /v1/messages        │
                      └──────────────────────┘
 ```
+
+</details>
 
 ## How to read this diagram
 
