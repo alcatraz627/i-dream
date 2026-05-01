@@ -6553,7 +6553,17 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let panel = hudPanel {
             panel.level = nextOn ? .statusBar : .floating
         }
-        hudPinBtn?.title = nextOn ? "📌" : "📍"
+        if let btn = hudPinBtn {
+            let sym = nextOn ? "pin.fill" : "pin.slash.fill"
+            if let img = NSImage(systemSymbolName: sym, accessibilityDescription: nil) {
+                btn.image = img
+                btn.imagePosition = .imageOnly
+                btn.title = ""
+            } else {
+                btn.title = nextOn ? "📌" : "📍"
+            }
+            btn.contentTintColor = nextOn ? NSColor.systemYellow : NSColor.tertiaryLabelColor
+        }
     }
 
     @objc private func cycleHUDTimeRange() {
@@ -6720,16 +6730,29 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hoverLabel.backgroundColor = .clear
         hoverLabel.drawsBackground = false
         hoverLabel.isBordered = false
+        // Layer-backed so we can animate opacity (CALayer) and tint a
+        // semi-transparent background that matches the HUD gradient.
+        hoverLabel.wantsLayer = true
+        hoverLabel.layer?.backgroundColor = NSColor(
+            red: 0.04, green: 0.07, blue: 0.13, alpha: 0.85
+        ).cgColor
+        hoverLabel.layer?.cornerRadius = 5
+        hoverLabel.layer?.opacity      = 0.0   // hidden until first hover
         panel.contentView?.addSubview(hoverLabel)
         hudHoverLabel = hoverLabel
 
         // ── Top toolbar buttons ───────────────────────────────────────────────
-        // Close button (✕) — top-left
+        // Close button — top-left, SF Symbol xmark.circle.fill
         let closeBtn = NSButton(frame: NSRect(x: 6, y: h - btnH, width: 22, height: btnH))
         closeBtn.bezelStyle       = .inline
         closeBtn.isBordered       = false
-        closeBtn.title            = "✕"
-        closeBtn.font             = NSFont.systemFont(ofSize: 12)
+        if let img = NSImage(systemSymbolName: "xmark.circle.fill",
+                             accessibilityDescription: "Close") {
+            closeBtn.image = img
+            closeBtn.imagePosition = .imageOnly
+        } else {
+            closeBtn.title = "✕"
+        }
         closeBtn.contentTintColor = NSColor.tertiaryLabelColor
         closeBtn.target           = self
         closeBtn.action           = #selector(toggleHUD)
@@ -6748,12 +6771,19 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.contentView?.addSubview(trBtn)
         hudTimeRangeBtn = trBtn
 
-        // Pin button — top-right (stored reference so toggleHUDOnTop can update it)
+        // Pin button — top-right, SF Symbol pin.fill / pin.slash.fill
         let pinBtn = NSButton(frame: NSRect(x: w - 30, y: h - btnH, width: 24, height: btnH))
         pinBtn.bezelStyle       = .inline
         pinBtn.isBordered       = false
-        pinBtn.title            = onTop ? "📌" : "📍"
-        pinBtn.font             = NSFont.systemFont(ofSize: 12)
+        let pinSymbol = onTop ? "pin.fill" : "pin.slash.fill"
+        if let img = NSImage(systemSymbolName: pinSymbol,
+                             accessibilityDescription: onTop ? "Always on top" : "Floating") {
+            pinBtn.image = img
+            pinBtn.imagePosition = .imageOnly
+        } else {
+            pinBtn.title = onTop ? "📌" : "📍"
+        }
+        pinBtn.contentTintColor = onTop ? NSColor.systemYellow : NSColor.tertiaryLabelColor
         pinBtn.target           = self
         pinBtn.action           = #selector(toggleHUDOnTop)
         panel.contentView?.addSubview(pinBtn)
@@ -6835,10 +6865,27 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Set the HUD hover-label text + colour. Called by HoverButton on
     /// mouseEnter/mouseExit and by MiniBarChartView during bar hover.
+    /// The label has a CALayer-backed background tinted to match the HUD
+    /// gradient; opacity is animated 0↔1 over 120ms so labels appear and
+    /// vanish softly instead of snapping.
     func setHUDHoverLabel(_ text: String, color: NSColor) {
         guard let label = hudHoverLabel else { return }
         label.stringValue = text
         label.textColor   = color
+        guard let layer = label.layer else { return }
+        let target: Float = text.isEmpty ? 0.0 : 1.0
+        // Avoid restarting an animation that's already at the target value
+        // (mouseMoved fires many times per second on bar hover).
+        if abs(layer.opacity - target) < 0.01 { return }
+        let anim = CABasicAnimation(keyPath: "opacity")
+        anim.fromValue      = layer.opacity
+        anim.toValue        = target
+        anim.duration       = 0.12
+        anim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        anim.fillMode       = .forwards
+        anim.isRemovedOnCompletion = false
+        layer.add(anim, forKey: "fade")
+        layer.opacity = target
     }
 
     /// Bar-chart click → open the dashboard. The bar index is recorded in
@@ -8220,6 +8267,10 @@ private class MiniBarChartView: NSView {
         delegate?.setHUDHoverLabel("", color: .tertiaryLabelColor)
     }
     override func mouseDown(with event: NSEvent) {
+        // Single-click: select / show details on hover label (already wired via mouseMoved).
+        // Double-click only opens the dashboard — single click was too aggressive
+        // (the bar chart sits next to controls users may want to tap).
+        guard event.clickCount >= 2 else { return }
         let p = convert(event.locationInWindow, from: nil)
         guard let idx = barIndex(at: p) else { return }
         let entry = (idx < entries.count) ? entries[idx] : nil
