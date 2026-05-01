@@ -2386,10 +2386,34 @@ final class DashboardWindowController: NSObject {
         sidebar.blendingMode = .behindWindow
         sidebar.state = .active
 
+        // T-A2 (2026-05-01): brand mark + title — 10×10 dusk-violet glyph
+        // with a soft glow precedes a 15pt label-color title. Replaces the
+        // 12pt tertiary-color stock label that the round-2 review flagged
+        // as "the app has no face." Aligns with the project identity
+        // (sleep / dreams) without abandoning the cyan/teal/orange system
+        // accents.
+        let brandMarkSize: CGFloat = 10
+        let brandMark = NSView(frame: NSRect(x: 14, y: panH - 44 + 4,
+                                              width: brandMarkSize, height: brandMarkSize))
+        brandMark.wantsLayer = true
+        brandMark.autoresizingMask = [.minYMargin]
+        let brandColor = NSColor(red: 0.55, green: 0.41, blue: 0.85, alpha: 1.0)  // dusk violet
+        let brandLayer = CALayer()
+        brandLayer.frame = brandMark.bounds
+        brandLayer.cornerRadius = brandMarkSize / 2
+        brandLayer.backgroundColor = brandColor.cgColor
+        brandLayer.shadowColor = brandColor.cgColor
+        brandLayer.shadowOpacity = 0.45
+        brandLayer.shadowRadius = 4
+        brandLayer.shadowOffset = .zero
+        brandMark.layer?.addSublayer(brandLayer)
+        sidebar.addSubview(brandMark)
+
         let sideTitle = NSTextField(labelWithString: "i-dream")
-        sideTitle.font       = .systemFont(ofSize: 12, weight: .semibold)
-        sideTitle.textColor  = .tertiaryLabelColor
-        sideTitle.frame      = NSRect(x: 14, y: panH - 44, width: sideW - 28, height: 18)
+        sideTitle.font       = .systemFont(ofSize: 15, weight: .semibold)
+        sideTitle.textColor  = .labelColor
+        sideTitle.frame      = NSRect(x: 14 + brandMarkSize + 8,
+                                       y: panH - 44, width: sideW - 28 - brandMarkSize - 8, height: 22)
         sideTitle.autoresizingMask = [.minYMargin]
         sidebar.addSubview(sideTitle)
 
@@ -3165,7 +3189,13 @@ final class DashboardWindowController: NSObject {
                     if let r = found {
                         // Extend highlight to cover the full line (including badge before the link)
                         let lineRange = (ts.string as NSString).lineRange(for: r)
-                        let hlColor = NSColor.controlAccentColor.withAlphaComponent(0.15)
+                        // T-S1 minimal: bumped from 0.15 → 0.32 alpha for
+                        // visibility from peripheral vision. Combined with
+                        // the existing graph-side highlight halo, selection
+                        // is now reliably scannable. The full three-cue
+                        // rebuild (leading bar + bold + tint + caret) needs
+                        // the NSTableView refactor — deferred.
+                        let hlColor = NSColor.controlAccentColor.withAlphaComponent(0.32)
                         ts.addAttribute(.backgroundColor, value: hlColor, range: lineRange)
                         tv.scrollRangeToVisible(r)
                     }
@@ -3611,7 +3641,13 @@ final class DashboardWindowController: NSObject {
                     }
                     if let r = found {
                         let lineRange = (ts.string as NSString).lineRange(for: r)
-                        let hlColor = NSColor.controlAccentColor.withAlphaComponent(0.15)
+                        // T-S1 minimal: bumped from 0.15 → 0.32 alpha for
+                        // visibility from peripheral vision. Combined with
+                        // the existing graph-side highlight halo, selection
+                        // is now reliably scannable. The full three-cue
+                        // rebuild (leading bar + bold + tint + caret) needs
+                        // the NSTableView refactor — deferred.
+                        let hlColor = NSColor.controlAccentColor.withAlphaComponent(0.32)
                         ts.addAttribute(.backgroundColor, value: hlColor, range: lineRange)
                         tv.scrollRangeToVisible(r)
                     }
