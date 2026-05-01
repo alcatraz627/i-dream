@@ -977,6 +977,20 @@ final class AssociationGraphView: NSView {
     /// Search filter: indices of nodes matching a search query.
     var searchMatchedIndices: Set<Int> = [] { didSet { needsDisplay = true } }
 
+    /// T-S4 (2026-05-01): how many edges to draw at all. Default is
+    /// `.fromSelected` — the ball-of-yarn-on-load goes away instantly,
+    /// edges only appear once the user picks a node. Both opus round-2
+    /// reviewers flagged this as the single biggest "the graph stops
+    /// being useless" change.
+    enum EdgeMode { case off, fromSelected, all }
+    var edgeMode: EdgeMode = .fromSelected { didSet { needsDisplay = true } }
+    /// T-S4: dim non-actionable nodes when true. Round-1 + round-2 both
+    /// asked for this (B#? / B2-6 "Show: actionable only" toggle).
+    var actionableOnly: Bool = false { didSet { needsDisplay = true } }
+    /// A2-S3: cap focus-mode edges at top-N by weight to avoid
+    /// hairball-on-click. 12 is the round-2 recommendation.
+    private let focusEdgeCap: Int = 12
+
     /// Set search filter by matching node hypothesis text against query words.
     func applySearch(_ query: String) {
         guard !query.isEmpty else { isSearchActive = false; searchMatchedIndices = []; return }
@@ -1220,11 +1234,42 @@ final class AssociationGraphView: NSView {
         let hasFocus = fIdx != nil
 
         // ── Edges ─────────────────────────────────────────────────────────────
-        // When focused, show ALL edges involving the focused node + linked nodes.
-        // On hover without focus, show edges connecting the hovered node.
-        if let fi = fIdx {
+        // T-S4 (2026-05-01): edges respect `edgeMode`. Default `.fromSelected`
+        // dissolves the ball-of-yarn until a node is picked. `.off` hides them
+        // entirely; `.all` restores the full hairball for users who want it.
+        // A2-S3: focus-mode edges capped at top-12 by weight to avoid
+        // hairball-on-click for high-degree nodes (60+ neighbors).
+        if let fi = fIdx, edgeMode != .off {
             let maxWeight = edges.map { $0.weight }.max() ?? 1
-            let focusEdges = edges.filter { $0.a == fi || $0.b == fi || linked.contains($0.a) || linked.contains($0.b) }
+            let focusEdgesAll = edges.filter {
+                $0.a == fi || $0.b == fi || linked.contains($0.a) || linked.contains($0.b)
+            }
+            let focusEdges = Array(
+                focusEdgesAll
+                    .sorted { $0.weight > $1.weight }
+                    .prefix(focusEdgeCap)
+            )
+            let truncated = focusEdgesAll.count - focusEdges.count
+            if truncated > 0 {
+                // Render a small "+N more" pill near the focused node so the
+                // user knows there ARE more relationships, just not all drawn.
+                let pos = nodes[fi].position
+                let chip = "+\(truncated) more"
+                let attr = NSAttributedString(string: chip, attributes: [
+                    .font: NSFont.systemFont(ofSize: 9, weight: .medium),
+                    .foregroundColor: NSColor.tertiaryLabelColor,
+                ])
+                let sz = attr.size()
+                let pad: CGFloat = 4
+                let bg = NSRect(
+                    x: pos.x + nodes[fi].radius + 8,
+                    y: pos.y - sz.height/2 - pad/2,
+                    width: sz.width + pad*2, height: sz.height + pad
+                )
+                ctx.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
+                NSBezierPath(roundedRect: bg, xRadius: 3, yRadius: 3).fill()
+                attr.draw(at: NSPoint(x: bg.minX + pad, y: bg.minY + pad/2))
+            }
             for edge in focusEdges {
                 let ca = nodeColor(nodes[edge.a].assoc)
                 let cb = nodeColor(nodes[edge.b].assoc)
@@ -1251,7 +1296,7 @@ final class AssociationGraphView: NSView {
                     ctx.setLineDash(phase: 0, lengths: [])
                 }
             }
-        } else if let hov = hoveredIdx {
+        } else if let hov = hoveredIdx, edgeMode != .off {
             let maxWeight = edges.map { $0.weight }.max() ?? 1
             let hovEdges  = edges
                 .filter { $0.a == hov || $0.b == hov }
@@ -1268,6 +1313,21 @@ final class AssociationGraphView: NSView {
                 ctx.addLine(to: nodes[edge.b].position)
                 ctx.strokePath()
             }
+        } else if edgeMode == .all && fIdx == nil {
+            // T-S4: explicit "all" mode without focus — draw the full set
+            // (this is the legacy ball-of-yarn for users who want to see it).
+            let maxWeight = edges.map { $0.weight }.max() ?? 1
+            for edge in edges {
+                let ca = nodeColor(nodes[edge.a].assoc)
+                let cb = nodeColor(nodes[edge.b].assoc)
+                let blended = ca.blended(withFraction: 0.5, of: cb) ?? ca
+                ctx.setStrokeColor(blended.withAlphaComponent(0.18).cgColor)
+                let w = 0.6 + 0.8 * CGFloat(edge.weight) / CGFloat(max(maxWeight, 1))
+                ctx.setLineWidth(w)
+                ctx.move(to: nodes[edge.a].position)
+                ctx.addLine(to: nodes[edge.b].position)
+                ctx.strokePath()
+            }
         }
 
         // ── Nodes ─────────────────────────────────────────────────────────────
@@ -1279,7 +1339,12 @@ final class AssociationGraphView: NSView {
             let isFocused  = idx == fIdx
             let isLinked   = linked.contains(idx)
             let isSearchMatch = isSearchActive && searchMatchedIndices.contains(idx)
-            let dimmed     = (hasFocus && !isFocused && !isLinked) || (isSearchActive && !isSearchMatch)
+            // T-S4 actionable-only mode: dim every non-actionable node so the
+            // 12-30 truly actionable hypotheses pop visually.
+            let actionableDim = actionableOnly && !a.actionable
+            let dimmed     = (hasFocus && !isFocused && !isLinked)
+                || (isSearchActive && !isSearchMatch)
+                || actionableDim
             let r          = node.radius
 
             if isFocused || isHovered || isSelected {
@@ -2042,14 +2107,40 @@ final class NavSidebarButton: NSButton {
         .secondaryLabelColor, // About
     ]
 
+    /// 2px leading accent bar layer — visible only on selection.
+    /// T-S6 (2026-05-01): three redundant cues per the dashboard review —
+    /// accent bar (this), bg tint, semibold title. Selection becomes
+    /// scannable from peripheral vision.
+    private var accentBar: CALayer?
+
     var isSelectedTab = false {
         didSet {
             guard oldValue != isSelectedTab else { return }
             layer?.backgroundColor = isSelectedTab
-                ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+                ? NSColor.controlAccentColor.withAlphaComponent(0.22).cgColor
                 : nil
-            self.contentTintColor = isSelectedTab ? _iconColor : _iconColor.withAlphaComponent(0.7)
+            self.contentTintColor = isSelectedTab
+                ? _iconColor
+                : _iconColor.withAlphaComponent(0.55)
+            // Lazily create the accent bar; show only when selected.
+            if accentBar == nil {
+                let bar = CALayer()
+                bar.frame = CGRect(x: 0, y: 4, width: 2.5, height: max(0, bounds.height - 8))
+                bar.cornerRadius = 1
+                self.layer?.addSublayer(bar)
+                accentBar = bar
+            }
+            accentBar?.backgroundColor = isSelectedTab
+                ? _iconColor.cgColor
+                : NSColor.clear.cgColor
             updateAttributedTitle()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        if let bar = accentBar {
+            bar.frame = CGRect(x: 0, y: 4, width: 2.5, height: max(0, bounds.height - 8))
         }
     }
 
@@ -2094,11 +2185,14 @@ final class NavSidebarButton: NSButton {
 
     private func updateAttributedTitle() {
         let weight: NSFont.Weight = isSelectedTab ? .semibold : .regular
+        let color: NSColor = isSelectedTab
+            ? .labelColor
+            : .secondaryLabelColor   // T-S6: dim unselected for visible hierarchy
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: weight),
-            .foregroundColor: NSColor.labelColor,
+            .foregroundColor: color,
         ]
-        self.attributedTitle = NSAttributedString(string: " " + _title, attributes: attrs)
+        self.attributedTitle = NSAttributedString(string: "  " + _title, attributes: attrs)
     }
 }
 
