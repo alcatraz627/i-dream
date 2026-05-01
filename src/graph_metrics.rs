@@ -49,7 +49,7 @@ use crate::store::Store;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +89,12 @@ pub struct GraphMetrics {
     /// Distinct projects observed across all patterns. Counts the union
     /// of `source_projects` (D2 data).
     pub projects: Vec<String>,
+    /// M9 — community label per pattern id, computed via synchronous
+    /// label propagation over the bipartite graph (patterns ↔ associations).
+    /// Each label is a stable string id (the seed pattern id of the
+    /// community). `None` when the pattern is isolated. Patterns sharing
+    /// a label belong to the same emergent cluster.
+    pub communities: HashMap<String, Option<String>>,
 }
 
 /// Compute metrics from in-memory patterns + associations. Pure function —
@@ -158,6 +164,10 @@ pub fn compute_metrics(
     hub_pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
     let hubs: Vec<String> = hub_pairs.iter().take(10).map(|(k, _)| k.to_string()).collect();
 
+    // M9 — synchronous label propagation over the bipartite graph.
+    // Returns pattern_id → community_label (the seed pattern id).
+    let communities = label_propagation_communities(patterns, associations);
+
     GraphMetrics {
         computed_at: Utc::now(),
         n_patterns: patterns.len(),
@@ -168,7 +178,88 @@ pub fn compute_metrics(
         hubs,
         isolated_patterns: isolated,
         projects: all_projects,
+        communities,
     }
+}
+
+/// M9 — synchronous label propagation community detection.
+///
+/// Algorithm (Raghavan et al. 2007, simplified):
+/// 1. Each pattern gets its id as initial label.
+/// 2. Each iteration: for every pattern, look at all patterns it shares
+///    an association with (1-hop neighbors through associations);
+///    adopt the most-frequent label among them. Ties broken alphabetically.
+/// 3. Stop when no labels change in a full pass, or after MAX_ITERS=10.
+///
+/// Output: pattern_id → community_label. Isolated patterns (no
+/// associations) get `None`. Used by the dashboard to color-tint nodes
+/// by community + group hubs by cluster. Communities are emergent — no
+/// k-means-style "k clusters" tuning needed.
+fn label_propagation_communities(
+    patterns: &[ExtractedPattern],
+    associations: &[Association],
+) -> HashMap<String, Option<String>> {
+    const MAX_ITERS: usize = 10;
+    // Index patterns + build the adjacency map (pattern_id → set of co-linked pattern ids).
+    let pattern_ids: HashSet<&str> = patterns.iter().map(|p| p.id.as_str()).collect();
+    let mut neighbors: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for a in associations {
+        // Each association connects every pair of its linked patterns.
+        let valid: Vec<&str> = a.patterns_linked.iter()
+            .map(|s| s.as_str())
+            .filter(|id| pattern_ids.contains(id))
+            .collect();
+        for &i in &valid {
+            for &j in &valid {
+                if i != j {
+                    neighbors.entry(i).or_default().insert(j);
+                }
+            }
+        }
+    }
+
+    // Initial labels: each pattern is its own community.
+    let mut labels: HashMap<&str, &str> = patterns.iter()
+        .map(|p| (p.id.as_str(), p.id.as_str()))
+        .collect();
+
+    for _ in 0..MAX_ITERS {
+        let mut changed = false;
+        // Stable iteration order so the result is deterministic.
+        let mut ids: Vec<&str> = labels.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let Some(nbrs) = neighbors.get(id) else { continue };
+            if nbrs.is_empty() { continue; }
+            // Tally neighbor labels.
+            let mut tally: HashMap<&str, usize> = HashMap::new();
+            for n in nbrs {
+                if let Some(lbl) = labels.get(n) {
+                    *tally.entry(lbl).or_insert(0) += 1;
+                }
+            }
+            // Pick max count, ties broken alphabetically (stable).
+            let Some((&best, _)) = tally.iter()
+                .max_by(|(la, ca), (lb, cb)| ca.cmp(cb).then_with(|| lb.cmp(la)))
+            else { continue };
+            if labels.get(id) != Some(&best) {
+                labels.insert(id, best);
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+
+    // Output: borrowed → owned; isolated patterns → None.
+    patterns.iter().map(|p| {
+        let id = p.id.as_str();
+        if neighbors.get(id).map(|s| s.is_empty()).unwrap_or(true) {
+            (p.id.clone(), None)
+        } else {
+            let lbl = labels.get(id).copied().unwrap_or(id).to_string();
+            (p.id.clone(), Some(lbl))
+        }
+    }).collect()
 }
 
 /// Read patterns + associations from the store, compute metrics, persist.

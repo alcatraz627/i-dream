@@ -391,10 +391,24 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
     }
     categories.sort();
 
+    // M9 — community labels via label propagation. Recomputed inline so the
+    // dashboard doesn't need a stale dreams/graph-metrics.json on disk.
+    let metrics = crate::graph_metrics::compute_metrics(&patterns, &associations);
+    let communities = &metrics.communities;
+
+    // Stable community → palette-index map so colors don't shuffle on reload.
+    let mut comm_ids: Vec<&String> = communities.values().filter_map(|v| v.as_ref()).collect();
+    comm_ids.sort();
+    comm_ids.dedup();
+    let comm_index: std::collections::HashMap<&String, usize> =
+        comm_ids.iter().enumerate().map(|(i, c)| (*c, i)).collect();
+
     // Pattern nodes: kind = "pattern", color from category, size from sqrt(degree).
     let mut nodes_json: Vec<serde_json::Value> = Vec::new();
     for p in &patterns {
         let d = *deg.get(p.id.as_str()).unwrap_or(&0);
+        let community = communities.get(&p.id).and_then(|c| c.as_ref());
+        let community_idx = community.and_then(|c| comm_index.get(c)).copied();
         nodes_json.push(json!({
             "id": p.id,
             "kind": "pattern",
@@ -405,6 +419,8 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
             "occurrences": p.occurrences,
             "degree": d,
             "projects": p.source_projects,
+            "community": community,
+            "community_idx": community_idx,
         }));
     }
     for a in &associations {
@@ -460,11 +476,26 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
     // historically rate either kind under the same `insight_id` field.
     let (brier_score, brier_n) = compute_brier_score(store, &patterns, &associations);
 
+    // M9 — emit community summary so the legend can list them.
+    let mut comm_sizes: std::collections::HashMap<&String, usize> =
+        std::collections::HashMap::new();
+    for c in communities.values().flatten() {
+        *comm_sizes.entry(c).or_insert(0) += 1;
+    }
+    let mut comm_summary: Vec<serde_json::Value> = comm_sizes
+        .iter()
+        .map(|(id, n)| json!({ "id": id, "size": n, "idx": comm_index.get(id).copied().unwrap_or(0) }))
+        .collect();
+    comm_summary.sort_by(|a, b| {
+        b.get("size").and_then(|x| x.as_u64()).cmp(&a.get("size").and_then(|x| x.as_u64()))
+    });
+
     let payload = json!({
         "nodes": nodes_json,
         "edges": edges_json,
         "categories": categories,
         "hubs": hubs_json,
+        "communities": comm_summary,       // M9 — [{id, size, idx}]
         "brier_score": brier_score,        // null if no rated associations yet
         "brier_n": brier_n,                // sample size
         "n_patterns": patterns.len(),
@@ -2182,6 +2213,8 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   <span class="pg-sep">·</span>
   <label class="pg-check"><input type="checkbox" id="pg-actionable-only"> Actionable only</label>
   <span class="pg-sep">·</span>
+  <label class="pg-check" title="Color pattern nodes by emergent community (M9 label propagation) instead of category"><input type="checkbox" id="pg-color-by-community"> Color by community</label>
+  <span class="pg-sep">·</span>
   <span class="muted" id="pg-stats"></span>
 </div>
 <div class="pg-grid">
@@ -2366,7 +2399,22 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 
   let edgeMode = 'from-selected';
   let actionableOnly = false;
+  let colorByCommunity = false;
   let focusedId = null;
+
+  // M9 — community palette. Reused per community_idx so the same
+  // community keeps the same color across re-tints. Picked to be
+  // visually distinct from the category palette so toggling reads
+  // immediately. Falls back through the array on overflow.
+  const commPalette = [
+    '#e879f9','#34d399','#fbbf24','#60a5fa','#f87171',
+    '#a78bfa','#22d3ee','#fb923c','#84cc16','#ec4899',
+    '#14b8a6','#facc15','#818cf8','#f472b6','#4ade80',
+  ];
+  function communityColorFor(idx) {{
+    if (idx === null || idx === undefined) return '#555';
+    return commPalette[idx % commPalette.length];
+  }}
 
   function neighbors(id) {{
     const set = new Set([id]);
@@ -2375,6 +2423,14 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   }}
   function reducer(node, attrs) {{
     let res = Object.assign({{}}, attrs);
+    // M9 — recolor pattern nodes by community when toggle is on. Done
+    // inside the reducer so the toggle is instant (no graph rebuild).
+    if (colorByCommunity) {{
+      const d = attrs._data;
+      if (d.kind === 'pattern') {{
+        res.color = communityColorFor(d.community_idx);
+      }}
+    }}
     if (focusedId) {{
       const ns = neighbors(focusedId);
       if (!ns.has(node)) {{ res.color = '#222'; res.label = ''; }}
@@ -2448,6 +2504,10 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   document.getElementById('pg-mode-off').onclick           = (e) => setMode('off', e.currentTarget);
   document.getElementById('pg-actionable-only').onchange = function(e) {{
     actionableOnly = e.target.checked;
+    renderer.refresh();
+  }};
+  document.getElementById('pg-color-by-community').onchange = function(e) {{
+    colorByCommunity = e.target.checked;
     renderer.refresh();
   }};
 }})();
