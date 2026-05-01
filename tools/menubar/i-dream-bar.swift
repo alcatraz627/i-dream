@@ -491,6 +491,12 @@ final class PatternGraphView: NSView {
     var highlightedId: String? = nil { didSet { needsDisplay = true } }
     /// Called when the user clicks a node, passing the pattern's id (or nil on deselect).
     var onNodeSelected: ((String?) -> Void)? = nil
+    /// M14 — invoked on right-click over a pattern node. The owner (BarDelegate)
+    /// builds + pops the NSMenu so file-write actions ("Append to CLAUDE.md",
+    /// "Generate hook") live where they can reach the daemon's data dir.
+    /// First arg is the hit Pattern; second is the screen point to anchor the
+    /// menu at. nil pattern → right-click hit empty canvas, no menu.
+    fileprivate var onNodeContextMenu: ((Pattern?, NSPoint) -> Void)? = nil
     /// Whether a search query is actively typed (even if zero results).
     var isSearchActive: Bool = false { didSet { needsDisplay = true } }
     /// Search filter: indices of nodes matching a search query.
@@ -688,6 +694,21 @@ final class PatternGraphView: NSView {
             selectedIdx = nil; needsDisplay = true
             onNodeSelected?(nil)
         }
+    }
+
+    /// M14 — right-click hits a node, dispatches to onNodeContextMenu.
+    /// Hit-test uses the same coord transform + radius rule as left-click,
+    /// so right-click feels identical. screenPt is in screen coords ready
+    /// for NSMenu.popUp(positioning:at:in:).
+    override func rightMouseDown(with event: NSEvent) {
+        let viewPt = convert(event.locationInWindow, from: nil)
+        let gp = viewToGraph(viewPt)
+        let hit = hitNode(at: gp)
+        let hitPattern = hit.map { nodes[$0].pattern }
+        // viewPt is in this view's coordinate space; NSMenu.popUp needs
+        // a point in the view it's anchored *to*. Pass the view-local
+        // point and let the owner anchor it relative to `self`.
+        onNodeContextMenu?(hitPattern, viewPt)
     }
 
     // MARK: – Coordinate helpers
@@ -3441,6 +3462,15 @@ final class DashboardWindowController: NSObject {
         gv.onNodeSelected = { selectedId in
             selectPattern(selectedId)
         }
+        // M14 — right-click on a pattern node opens an actions menu:
+        // "Append as guideline to active CLAUDE.md", "Generate Hook scaffold".
+        // Both write into ~/.i-dream/exports/ and reveal in Finder so the
+        // user can move them deliberately rather than auto-mutating CLAUDE.md.
+        gv.onNodeContextMenu = { [weak self, weak gv] hitPattern, viewPt in
+            guard let self = self, let view = gv, let pat = hitPattern else { return }
+            let menu = self.buildPatternContextMenu(for: pat)
+            menu.popUp(positioning: nil, at: viewPt, in: view)
+        }
         patternGraphView = gv
 
         // Graph wrapper with search field overlay
@@ -5328,6 +5358,226 @@ final class DashboardWindowController: NSObject {
 
         tv.textStorage?.setAttributedString(rt.build())
         return sv
+    }
+
+    // MARK: - M14 — Pattern context menu (drag-to-CLAUDE.md / drag-to-hook)
+
+    /// Build the right-click menu for a pattern node. Two destructive-but-
+    /// reversible actions: append a guideline line to a CLAUDE.md draft, or
+    /// scaffold a hook. Both write to ~/.i-dream/exports/<ts>-<slug>/ and
+    /// reveal in Finder so the user reviews before promoting.
+    fileprivate func buildPatternContextMenu(for pat: Pattern) -> NSMenu {
+        let menu = NSMenu()
+        let header = NSMenuItem()
+        let preview = pat.pattern.count > 60 ? String(pat.pattern.prefix(57)) + "…" : pat.pattern
+        header.attributedTitle = NSAttributedString(
+            string: preview,
+            attributes: [.font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                         .foregroundColor: NSColor.secondaryLabelColor])
+        menu.addItem(header)
+        menu.addItem(NSMenuItem.separator())
+
+        let guideItem = NSMenuItem(title: "Export as CLAUDE.md guideline…",
+                                   action: #selector(exportPatternAsGuideline(_:)),
+                                   keyEquivalent: "")
+        guideItem.target = self
+        guideItem.representedObject = pat
+        menu.addItem(guideItem)
+
+        let hookItem = NSMenuItem(title: "Export as hook scaffold…",
+                                  action: #selector(exportPatternAsHook(_:)),
+                                  keyEquivalent: "")
+        hookItem.target = self
+        hookItem.representedObject = pat
+        menu.addItem(hookItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let copyItem = NSMenuItem(title: "Copy pattern text",
+                                  action: #selector(copyPatternText(_:)),
+                                  keyEquivalent: "")
+        copyItem.target = self
+        copyItem.representedObject = pat
+        menu.addItem(copyItem)
+
+        return menu
+    }
+
+    @objc fileprivate func exportPatternAsGuideline(_ sender: NSMenuItem) {
+        guard let pat = sender.representedObject as? Pattern else { return }
+        let body = m14_renderGuidelineSnippet(for: pat)
+        let url  = m14_writeExport(pat: pat, kind: "guideline", ext: "md", contents: body)
+        m14_revealAndToast(url: url, kind: "Guideline")
+    }
+
+    @objc fileprivate func exportPatternAsHook(_ sender: NSMenuItem) {
+        guard let pat = sender.representedObject as? Pattern else { return }
+        let (script, json) = m14_renderHookScaffold(for: pat)
+        let dir = m14_exportDir(pat: pat, kind: "hook")
+        let scriptURL = dir.appendingPathComponent("hook.sh")
+        let jsonURL   = dir.appendingPathComponent("settings-snippet.json")
+        let readmeURL = dir.appendingPathComponent("README.md")
+        try? script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                               ofItemAtPath: scriptURL.path)
+        try? json.write(to: jsonURL, atomically: true, encoding: .utf8)
+        try? m14_renderHookReadme(for: pat).write(to: readmeURL, atomically: true, encoding: .utf8)
+        m14_revealAndToast(url: dir, kind: "Hook scaffold")
+    }
+
+    @objc fileprivate func copyPatternText(_ sender: NSMenuItem) {
+        guard let pat = sender.representedObject as? Pattern else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(pat.pattern, forType: .string)
+    }
+
+    // M14 helpers — file IO
+
+    private func m14_exportRoot() -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let root = home.appendingPathComponent(".i-dream/exports", isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func m14_slug(_ s: String) -> String {
+        let lower = s.lowercased()
+        let cleaned = lower.unicodeScalars.map { c -> String in
+            if (c >= "a" && c <= "z") || (c >= "0" && c <= "9") { return String(c) }
+            return "-"
+        }.joined()
+        // Collapse runs of dashes, trim, cap length.
+        var out = ""
+        var lastDash = false
+        for ch in cleaned {
+            if ch == "-" {
+                if !lastDash { out.append(ch); lastDash = true }
+            } else { out.append(ch); lastDash = false }
+        }
+        out = out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return String(out.prefix(40))
+    }
+
+    private func m14_exportDir(pat: Pattern, kind: String) -> URL {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = fmt.string(from: Date())
+        let slug = m14_slug(pat.pattern)
+        let dir = m14_exportRoot()
+            .appendingPathComponent("\(stamp)-\(kind)-\(slug)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func m14_writeExport(pat: Pattern, kind: String, ext: String, contents: String) -> URL {
+        let dir = m14_exportDir(pat: pat, kind: kind)
+        let url = dir.appendingPathComponent("snippet.\(ext)")
+        try? contents.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    private func m14_revealAndToast(url: URL, kind: String) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        // Use osascript notification — UN/NSUserNotification both crash on
+        // unbundled binaries on this macOS version (see file-top comment).
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\")
+             .replacingOccurrences(of: "\"", with: "\\\"")
+             .replacingOccurrences(of: "\n", with: " ")
+        }
+        let cmd = "display notification \"\(esc(url.lastPathComponent))\" with title \"i-dream — \(esc(kind)) exported\" sound name \"Glass\""
+        DispatchQueue.global(qos: .background).async {
+            let task = Process()
+            task.launchPath = "/usr/bin/osascript"
+            task.arguments  = ["-e", cmd]
+            try? task.run()
+            task.waitUntilExit()
+        }
+    }
+
+    // M14 templates — pure-string, no dependencies
+
+    private func m14_renderGuidelineSnippet(for pat: Pattern) -> String {
+        let conf = Int(pat.confidence * 100)
+        return """
+        <!-- Generated from i-dream pattern · \(pat.category) · \(conf)% confidence · \(pat.valence) -->
+        <!-- Source pattern id: \(pat.stableKey) -->
+
+        ## \(pat.category.capitalized)
+
+        - \(pat.pattern)
+
+        <!-- Review and edit before pasting into CLAUDE.md. The pattern was
+             extracted automatically from session transcripts; the wording
+             may need to be tightened or made more directive before it
+             becomes a binding guideline. -->
+        """
+    }
+
+    private func m14_renderHookScaffold(for pat: Pattern) -> (script: String, settingsJson: String) {
+        // Conservative default: a UserPromptSubmit hook that injects a hint
+        // line. The user can swap to PreToolUse / PostToolUse with a one-
+        // line edit. We don't try to *enforce* the pattern automatically —
+        // that's a power tool that needs human review.
+        let escaped = pat.pattern.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        #!/usr/bin/env bash
+        # Generated from i-dream pattern · \(pat.category) · \(pat.stableKey)
+        # Hook event: UserPromptSubmit (default — adjust as needed)
+        #
+        # This is a SCAFFOLD. Review, edit, then move into ~/.claude/scripts/
+        # and reference it from settings.json. The pattern below was extracted
+        # from session transcripts and may need rephrasing.
+
+        cat <<'HINT'
+        💡 Reminder from i-dream: \(escaped)
+        HINT
+        """
+
+        let settings = """
+        {
+          "hooks": {
+            "UserPromptSubmit": [
+              {
+                "hooks": [
+                  {
+                    "type": "command",
+                    "command": "bash ~/.claude/scripts/i-dream-\(m14_slug(pat.pattern)).sh"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+        """
+        return (script, settings)
+    }
+
+    private func m14_renderHookReadme(for pat: Pattern) -> String {
+        return """
+        # Hook scaffold — \(pat.category)
+
+        Generated from i-dream pattern `\(pat.stableKey)`:
+
+        > \(pat.pattern)
+
+        ## Files
+
+        - `hook.sh` — the hook script (chmod +x already applied)
+        - `settings-snippet.json` — paste-ready snippet for `~/.claude/settings.json`
+
+        ## Install
+
+        1. Move `hook.sh` to `~/.claude/scripts/i-dream-<name>.sh`
+        2. Merge `settings-snippet.json` into your `~/.claude/settings.json`
+           (under the appropriate event — `UserPromptSubmit`, `PreToolUse`, etc.)
+        3. Test by triggering the event and watching the hook output
+
+        Adjust the event type and command as needed — the default is a
+        `UserPromptSubmit` hint injector, which is the safest starting
+        point.
+        """
     }
 }
 
