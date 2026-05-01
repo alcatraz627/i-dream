@@ -5000,6 +5000,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Cached process-resource sample (sampled every ~5s)
     private var hudProcSample:     String         = "—"
     private var hudProcSampleAt:   Date           = .distantPast
+    /// Hover-label that shows the action name when the mouse is over an
+    /// action button or a bar in the bar chart. Cleared on exit.
+    private var hudHoverLabel:    NSTextField?
 
     // Dream replay — event-by-event trace playback
     private var replayPanel:      NSPanel?
@@ -6574,7 +6577,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hudTimeRangeBtn = nil
 
         let w: CGFloat       = 360
-        let h: CGFloat       = 340  // grew from 290 to fit action-button row + resource-load row
+        let h: CGFloat       = 372  // grew to fit action row + hover-label slot + extra stats line
         let cornerR: CGFloat = 12
         guard let screen = NSScreen.main else { return }
         let sv = screen.visibleFrame
@@ -6641,8 +6644,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let btnH:    CGFloat = 22
         let actionH: CGFloat = 30   // action button row at very bottom
         let actionY: CGFloat = 6
+        let hoverH:  CGFloat = 14   // hover-label slot above the action row
+        let hoverY:  CGFloat = actionY + actionH + 2
         let chartH:  CGFloat = 50
-        let chartY:  CGFloat = actionY + actionH + 6
+        let chartY:  CGFloat = hoverY + hoverH + 4
         let tvY:     CGFloat = chartY + chartH + 4
         let tvH:     CGFloat = h - tvY - btnH - 6
 
@@ -6656,19 +6661,28 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Bar chart view — token history
         let chart = MiniBarChartView(frame: NSRect(x: 12, y: chartY, width: w - 24, height: chartH))
+        chart.delegate = self
         panel.contentView?.addSubview(chart)
         hudBarChart = chart
 
         // ── Bottom action button row ─────────────────────────────────────────
-        // 4 evenly-spaced buttons with SF-symbol icons + tooltips.
-        // Reuses the existing menubar selectors so behaviour stays identical.
-        let actions: [(symbol: String, tooltip: String, sel: Selector)] = [
-            ("chart.bar.doc.horizontal.fill",   "Open Dashboard",            #selector(openDashboard)),
-            ("arrow.triangle.2.circlepath",     "Trigger Dream Cycle",       #selector(triggerCycleWithUsageCheck)),
-            (cachedRunning ? "stop.fill" : "play.fill",
+        // 4 evenly-spaced HoverButtons with SF-symbol icons. Each carries a
+        // distinct semantic tint (cyan/blue/green-or-orange/grey) and shows
+        // its label in the hover-label slot above the row on mouseEnter.
+        let actions: [(symbol: String, label: String, tint: NSColor, sel: Selector)] = [
+            ("rectangle.stack.fill.badge.person.crop", "Open Dashboard",
+             NSColor.systemCyan,
+             #selector(openDashboard)),
+            ("moon.stars.fill",                        "Trigger Dream Cycle",
+             NSColor.systemPurple,
+             #selector(triggerCycleWithUsageCheck)),
+            (cachedRunning ? "stop.circle.fill" : "play.circle.fill",
              cachedRunning ? "Stop Daemon" : "Start Daemon",
+             cachedRunning ? NSColor.systemOrange : NSColor.systemGreen,
              cachedRunning ? #selector(stopDaemon) : #selector(startDaemon)),
-            ("ellipsis.circle.fill",            "More… (right-click anywhere)", #selector(showHUDActionsMenu(_:))),
+            ("ellipsis.circle.fill",                   "More… (or right-click anywhere)",
+             NSColor.secondaryLabelColor,
+             #selector(showHUDActionsMenu(_:))),
         ]
         let nBtns  = CGFloat(actions.count)
         let gap:   CGFloat = 8
@@ -6676,21 +6690,38 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let btnW   = (w - totalGap) / nBtns
         for (i, a) in actions.enumerated() {
             let bx = gap + CGFloat(i) * (btnW + gap)
-            let b = NSButton(frame: NSRect(x: bx, y: actionY, width: btnW, height: actionH))
-            b.bezelStyle  = .rounded
-            b.isBordered  = true
-            b.toolTip     = a.tooltip
-            if let img = NSImage(systemSymbolName: a.symbol, accessibilityDescription: a.tooltip) {
-                b.image = img
+            let b = HoverButton(frame: NSRect(x: bx, y: actionY, width: btnW, height: actionH))
+            b.hoverLabel = a.label
+            b.delegate   = self
+            b.tintColor  = a.tint
+            b.toolTip    = a.label
+            if let img = NSImage(systemSymbolName: a.symbol, accessibilityDescription: a.label) {
+                let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+                b.image = img.withSymbolConfiguration(cfg) ?? img
                 b.imagePosition = .imageOnly
-                b.contentTintColor = NSColor.systemCyan
+                b.contentTintColor = a.tint
             } else {
-                b.title = a.tooltip
+                b.title = a.label
             }
             b.target = self
             b.action = a.sel
             panel.contentView?.addSubview(b)
         }
+
+        // ── Hover label slot just above the action row ───────────────────────
+        // Single NSTextField positioned between the bar chart and the button
+        // row. HoverButton + MiniBarChartView write into it on mouseEnter and
+        // clear it on mouseExit. Stays empty when the cursor is idle.
+        let hoverLabel = NSTextField(labelWithString: "")
+        hoverLabel.frame = NSRect(x: 12, y: hoverY, width: w - 24, height: hoverH)
+        hoverLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        hoverLabel.textColor = NSColor.tertiaryLabelColor
+        hoverLabel.alignment = .center
+        hoverLabel.backgroundColor = .clear
+        hoverLabel.drawsBackground = false
+        hoverLabel.isBordered = false
+        panel.contentView?.addSubview(hoverLabel)
+        hudHoverLabel = hoverLabel
 
         // ── Top toolbar buttons ───────────────────────────────────────────────
         // Close button (✕) — top-left
@@ -6800,6 +6831,24 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let s = sample(["-x", "i-dream-bar"],    label: "bar")    { parts.append(s) }
         hudProcSample = parts.isEmpty ? "—" : parts.joined(separator: " · ")
         return hudProcSample
+    }
+
+    /// Set the HUD hover-label text + colour. Called by HoverButton on
+    /// mouseEnter/mouseExit and by MiniBarChartView during bar hover.
+    func setHUDHoverLabel(_ text: String, color: NSColor) {
+        guard let label = hudHoverLabel else { return }
+        label.stringValue = text
+        label.textColor   = color
+    }
+
+    /// Bar-chart click → open the dashboard. The bar index is recorded in
+    /// case a future iteration wants to pass `--cycle <index>` to the
+    /// dashboard for deep-linking; for now we just bring the panel up.
+    fileprivate func barChartClicked(at index: Int, entry: JournalEntry?) {
+        if let e = entry {
+            dlog("HUD bar-chart click: index=\(index) timestamp=\(e.timestamp) tokens=\(e.tokensUsed)")
+        }
+        openDashboard()
     }
 
     /// Exposes the menubar menu so the floating HUD can show it on right-click.
@@ -6948,6 +6997,24 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             value("\(intentCount) active\n")
         }
 
+        // ── Line 7b: dreams today + avg tokens / cycle (filtered range) ───────
+        // Two cheap stats derived from filteredJournal: count of cycles whose
+        // timestamp is today (calendar day) and the mean token count across
+        // the filtered window. Skipped silently when the journal is empty.
+        if !filteredJournal.isEmpty {
+            let cal = Calendar.current
+            let todayStart = cal.startOfDay(for: Date())
+            let dreamsToday = filteredJournal.filter { e in
+                guard let d = isoDate(e.timestamp) else { return false }
+                return d >= todayStart
+            }.count
+            let totalTokRange = filteredJournal.reduce(0) { $0 + $1.tokensUsed }
+            let avgTok = totalTokRange / max(1, filteredJournal.count)
+            let avgStr = avgTok >= 1000 ? "\(avgTok / 1000)k" : "\(avgTok)"
+            label("today  "); value("\(dreamsToday) cycle\(dreamsToday == 1 ? "" : "s")    ")
+            label("avg/cycle  "); value("\(avgStr)\n", mono: true)
+        }
+
         // ── Line 8: next cycle estimate ──────────────────────────────────────
         if !isCycling, let lastActivity = lastActivityDate() {
             let idleHours: Double = 4   // default threshold
@@ -6993,8 +7060,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         tv.textStorage?.setAttributedString(buf)
 
-        // Push filtered token history to bar chart
-        hudBarChart?.values = filteredJournal.map { $0.tokensUsed }
+        // Push filtered token history to bar chart, including the entries
+        // themselves so hover labels can read timestamp + tokens per bar.
+        hudBarChart?.values  = filteredJournal.map { $0.tokensUsed }
+        hudBarChart?.entries = filteredJournal
     }
 
     /// Wired to the HUD's "More…" button — pops up the same menubar menu next to the button.
@@ -8038,11 +8107,124 @@ private final class HUDContentView: NSView {
     }
 }
 
+// ─── HUD hover-aware button ──────────────────────────────────────────────────
+/// NSButton subclass with no chrome by default — paints a subtle rounded
+/// background only while the cursor is over it, and pushes its `hoverLabel`
+/// into the BarDelegate's `hudHoverLabel` text field on enter / clears on
+/// exit. Used for the action button row at the bottom of the floating HUD.
+private final class HoverButton: NSButton {
+    var hoverLabel: String  = ""
+    var tintColor:  NSColor = .systemCyan
+    weak var delegate: BarDelegate?
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false { didSet { needsDisplay = true } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        isBordered = false
+        bezelStyle = .regularSquare
+        layer?.cornerRadius = 6
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        let ta = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(ta)
+        trackingArea = ta
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        delegate?.setHUDHoverLabel(hoverLabel, color: tintColor)
+    }
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        delegate?.setHUDHoverLabel("", color: .tertiaryLabelColor)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHovered {
+            tintColor.withAlphaComponent(0.18).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
 // ─── Mini bar-chart view for HUD token history ────────────────────────────────
 /// Draws a compact histogram of recent token-usage values using NSBezierPath.
 /// Bars are colored cyan→yellow→orange based on relative load; newest bar is brightest.
+///
+/// Interaction: hovering a bar pushes a "tokens · timeAgo" string into the
+/// HUD hover label; clicking a bar fires `delegate?.barChartClicked(at:entry:)`
+/// which currently opens the dashboard. Cursor switches to a pointing hand
+/// over hovered bars.
 private class MiniBarChartView: NSView {
     var values: [Int] = [] { didSet { needsDisplay = true } }
+    /// Parallel array — entries[i] is the JournalEntry the bar at index i was
+    /// drawn from. Optional so callers (legacy or test) can still drive the
+    /// chart with just values.
+    var entries: [JournalEntry] = []
+    weak var delegate: BarDelegate?
+    private var trackingArea: NSTrackingArea?
+    private var hoveredIndex: Int? = nil { didSet { if oldValue != hoveredIndex { needsDisplay = true } } }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        let ta = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(ta)
+        trackingArea = ta
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    /// Translate a point in view coordinates → bar index.
+    private func barIndex(at point: NSPoint) -> Int? {
+        guard !values.isEmpty, point.x >= 0, point.x < bounds.width else { return nil }
+        let n   = values.count
+        let gap: CGFloat = 2.0
+        let barW = max(3, (bounds.width - gap * CGFloat(n - 1)) / CGFloat(n))
+        let idx = Int(point.x / (barW + gap))
+        return (0..<n).contains(idx) ? idx : nil
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let idx = barIndex(at: p)
+        hoveredIndex = idx
+        if let i = idx, i < entries.count {
+            let e = entries[i]
+            let tokStr = e.tokensUsed >= 1000
+                ? String(format: "%.1fk", Double(e.tokensUsed) / 1000)
+                : "\(e.tokensUsed)"
+            let when = timeAgo(e.timestamp)
+            delegate?.setHUDHoverLabel("\(tokStr) tokens · \(when) — click for details", color: .systemCyan)
+        } else {
+            delegate?.setHUDHoverLabel("", color: .tertiaryLabelColor)
+        }
+    }
+    override func mouseExited(with event: NSEvent) {
+        hoveredIndex = nil
+        delegate?.setHUDHoverLabel("", color: .tertiaryLabelColor)
+    }
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard let idx = barIndex(at: p) else { return }
+        let entry = (idx < entries.count) ? entries[idx] : nil
+        delegate?.barChartClicked(at: idx, entry: entry)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard !values.isEmpty else { return }
@@ -8056,7 +8238,8 @@ private class MiniBarChartView: NSView {
             let barH      = max(2, fraction * (bounds.height - 4))
             let x         = CGFloat(i) * (barW + gap)
             let recency   = CGFloat(i) / max(1, CGFloat(n - 1))   // 0=oldest, 1=newest
-            let alpha     = 0.25 + recency * 0.70
+            var alpha     = 0.25 + recency * 0.70
+            if hoveredIndex == i { alpha = 1.0 }
 
             let color: NSColor
             if fraction > 0.75      { color = NSColor.systemOrange.withAlphaComponent(alpha) }
