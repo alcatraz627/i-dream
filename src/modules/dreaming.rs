@@ -37,6 +37,11 @@ pub struct ExtractedPattern {
     pub confidence: f64,
     pub category: String,
     pub source_sessions: Vec<String>,
+    /// Distinct project ids (folder names) where this pattern was observed.
+    /// Empty for legacy patterns from before D2 (2026-05-01) — readers should
+    /// treat absent/empty as "unknown project".
+    #[serde(default)]
+    pub source_projects: Vec<String>,
     pub occurrences: u64,
     pub first_seen: String,
     pub last_seen: String,
@@ -70,15 +75,94 @@ pub struct DreamEntry {
     pub tokens_used: u64,
 }
 
-/// Per-turn summary used to build the SWS consolidation prompt. Kept
-/// tiny so we can dump hundreds of them into a single API call.
+/// Per-turn summary used to build the SWS consolidation prompt.
+///
+/// **D1 (2026-05-01):** previously this carried only `prompt_preview =
+/// topic_keywords[:5]` — a "noun salad" that the model couldn't usefully
+/// reason over. Now carries truncated raw user text + assistant excerpt +
+/// tool names, so SWS sees what the user actually said and what the agent
+/// actually did. The dump format / system prompt updated in lockstep.
 #[derive(Debug)]
 struct SessionSummary {
     session_id: String,
-    prompt_preview: String,
+    /// D2: project folder name (e.g. "i-dream"), derived from `TranscriptFile.project_dir`.
+    project_id: String,
+    /// Truncated raw user message text (~400 chars).
+    user_text: String,
+    /// First text block from the assistant reply, truncated (~250 chars).
+    assistant_excerpt: String,
+    /// Distinct tool names used in this turn.
+    tool_names: Vec<String>,
     is_correction: bool,
-    tool_count: usize,
     reply_length: usize,
+}
+
+/// Truncate a string at a char (not byte) boundary, appending "…" if cut.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Collapse runs of whitespace to single spaces. Keeps SWS dump compact.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Walk transcript entries and produce (user_text, assistant_excerpt, tool_names)
+/// triples per User→Assistant pair. Aligned with `into_execution_units` ordering
+/// so an `Iterator::zip` over (units, pairs) gives matching turns.
+///
+/// Skips:
+///   - Synthetic user blocks (tool results) — those carry no human input.
+///   - Assistant turns whose first text block is empty (pure tool-call turns).
+fn build_turn_pairs(entries: &[transcript::TranscriptEntry])
+    -> Vec<(String, String, Vec<String>)>
+{
+    use transcript::{AssistantBlock, TranscriptEntry, UserContent};
+    let mut pairs: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut pending_user: Option<String> = None;
+
+    for entry in entries {
+        match entry {
+            TranscriptEntry::User(u) => {
+                if let UserContent::Text(t) = &u.message.content {
+                    let text = collapse_ws(t);
+                    if !text.is_empty() {
+                        pending_user = Some(truncate_chars(&text, 400));
+                    }
+                }
+                // Block-content user entries (tool results) don't reset
+                // the pending user prompt — they're plumbing, not input.
+            }
+            TranscriptEntry::Assistant(a) => {
+                if let Some(user_text) = pending_user.take() {
+                    let mut excerpt = String::new();
+                    let mut tool_names: Vec<String> = Vec::new();
+                    for block in &a.message.content {
+                        match block {
+                            AssistantBlock::Text { text } if excerpt.is_empty() => {
+                                excerpt = truncate_chars(&collapse_ws(text), 250);
+                            }
+                            AssistantBlock::ToolUse { name, .. } => {
+                                if !tool_names.contains(name) {
+                                    tool_names.push(name.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    pairs.push((user_text, excerpt, tool_names));
+                }
+            }
+            _ => {}
+        }
+    }
+    pairs
 }
 
 // ── Raw API response shapes ───────────────────────────────────────────────────
@@ -179,15 +263,31 @@ impl<'a> DreamingModule<'a> {
         // it as the payload of the SessionsScanned event (the "what" the
         // scanner actually saw). We re-use the same string below when
         // building the API prompt.
+        // D1 (2026-05-01): dump now carries the actual user prompt + assistant
+        // excerpt + tool names, instead of the old `topic_keywords` noun-salad.
+        // Also tags every line with the project_id (D2) so the model can spot
+        // cross-project regularities. Kept compact: one block per turn,
+        // ~700 chars worst case → ~40 turns per 30KB cap.
         let mut dump = String::new();
         for s in &summaries {
+            let correction_tag = if s.is_correction { " [CORRECTION]" } else { "" };
+            let tools_str = if s.tool_names.is_empty() {
+                String::new()
+            } else {
+                format!("  tools: {}\n", s.tool_names.join(", "))
+            };
             dump.push_str(&format!(
-                "[{}] {}{} → {} tools, {} reply chars\n",
+                "─── session={} project={}{}─\n  USER: {}\n  ASSISTANT: {}\n{}",
                 s.session_id,
-                if s.is_correction { "CORRECTION: " } else { "" },
-                s.prompt_preview,
-                s.tool_count,
-                s.reply_length,
+                s.project_id,
+                correction_tag,
+                if s.user_text.is_empty() { "<no text>".into() } else { s.user_text.clone() },
+                if s.assistant_excerpt.is_empty() {
+                    format!("<{} chars, tool-only turn>", s.reply_length)
+                } else {
+                    s.assistant_excerpt.clone()
+                },
+                tools_str,
             ));
             if dump.len() > 30_000 {
                 dump.push_str("...(truncated)\n");
@@ -239,20 +339,27 @@ impl<'a> DreamingModule<'a> {
 
         let system_prompt = r#"You are a memory consolidation system for a software engineering AI assistant. Analyze session transcripts and extract reusable behavioral learnings.
 
+The input is a sequence of turn-blocks. Each block contains:
+  USER: <what the developer typed, truncated>
+  ASSISTANT: <first text reply from the agent, truncated>
+  tools: <names of tools the assistant invoked in this turn>
+A `[CORRECTION]` tag on the session line marks turns that look like the user pushing back on the previous assistant action. Each block is also tagged with `project=<id>` — when you see the same behavior across multiple distinct projects, that is high-confidence evidence the pattern is general (not project-specific).
+
 For each learning, output a JSON object with:
-- pattern: one concise sentence describing an abstract, reusable insight (no file paths, variable names, or session-specific details)
+- pattern: one concise sentence describing an abstract, reusable insight (no file paths, variable names, or session-specific details). Refer to roles ("the user", "the agent"), not names.
 - valence: "positive" (approach worked), "negative" (approach failed or was corrected), or "neutral" (observation)
-- confidence: 0.0–1.0 (start at 0.5; only go higher with multiple clear signals)
+- confidence: 0.0–1.0 (start at 0.5; raise only with multiple clear signals; cross-project repetition is one such signal)
 - category: one of approach|tool-use|domain|user-preference|architecture
 
 Prioritization rules:
-1. Explicit user corrections ("no", "revert", "wrong", "stop doing X") → always extract, confidence ≥ 0.85
+1. Explicit user corrections ("no", "revert", "wrong", "stop doing X", `[CORRECTION]` tag) → always extract, confidence ≥ 0.85
 2. Repeated failure on the same type of task → negative pattern, confidence 0.70–0.85
 3. Novel successful approaches the assistant hasn't tried before → positive pattern, confidence 0.60–0.75
-4. Patterns that reinforce already-obvious behavior → skip
-5. Session handoff boilerplate (/catchup, /core-dump, context summaries, "this session is continued from") → skip entirely
+4. Behavior that recurs in ≥2 distinct projects → bump confidence by +0.10
+5. Patterns that reinforce already-obvious behavior → skip
+6. Session handoff boilerplate (/catchup, /core-dump, context summaries, "this session is continued from") → skip entirely
 
-Skip: one-off incidents with no generalization value, trivia, transient errors.
+Skip: one-off incidents with no generalization value, trivia, transient errors, individual file-edit mechanics.
 Output ONLY a JSON array of objects. No preamble, no commentary."#;
 
         let prompt = format!("Analyze the following session data and extract key learnings:\n\n{dump}");
@@ -301,6 +408,17 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
         // append them to dreams/patterns.json. The model wraps its output in
         // ```json … ``` fences; parse_json_codeblock handles that stripping.
         let now = Utc::now().to_rfc3339();
+
+        // D2: derive the distinct project set from this batch's summaries —
+        // attached to every pattern this cycle produces so cross-project
+        // queries can later filter / colour by project.
+        let mut batch_projects: Vec<String> = Vec::new();
+        for s in &summaries {
+            if !s.project_id.is_empty() && !batch_projects.contains(&s.project_id) {
+                batch_projects.push(s.project_id.clone());
+            }
+        }
+
         let mut new_patterns: Vec<ExtractedPattern> = Vec::new();
         if let Some(json_str) = parse_json_codeblock(&response.content) {
             match serde_json::from_str::<Vec<RawPattern>>(&json_str) {
@@ -313,6 +431,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                             confidence: r.confidence,
                             category: r.category,
                             source_sessions: sessions_seen.iter().map(|(sid, _)| sid.clone()).collect(),
+                            source_projects: batch_projects.clone(),
                             occurrences: 1,
                             first_seen: now.clone(),
                             last_seen: now.clone(),
@@ -360,6 +479,13 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                 for sid in &p.source_sessions {
                     if !all[idx].source_sessions.contains(sid) {
                         all[idx].source_sessions.push(sid.clone());
+                    }
+                }
+                // D2: union the source projects too — lets a pattern accumulate
+                // cross-project evidence over many cycles.
+                for pid in &p.source_projects {
+                    if !all[idx].source_projects.contains(pid) {
+                        all[idx].source_projects.push(pid.clone());
                     }
                 }
                 had_merges = true;
@@ -451,27 +577,39 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                 }
             };
 
+            // D2: project_id = the leaf folder name, e.g.
+            // "/Users/x/.claude/projects/-Users-alcatraz-Code-i-dream/abc.jsonl"
+            // → "-Users-alcatraz-Code-i-dream".
+            let project_id = file
+                .project_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Use the existing ExecutionUnit pipeline for the
+            // metadata fields metacog already curates (is_correction,
+            // tool_count, reply_length). D1 also walks `entries` directly
+            // to pair raw user text with the next assistant reply so SWS
+            // sees something the model can actually reason over.
             let units = transcript::into_execution_units(&entries, &file.session_id);
-            for unit in units {
-                // Build a one-line summary per execution unit. We reuse
-                // metacog's ExecutionUnit shape here rather than walking
-                // turns again.
-                let preview: String = unit
-                    .input
-                    .topic_keywords
-                    .join(" ")
-                    .chars()
-                    .take(120)
-                    .collect();
+
+            // Build an ordered list of (user_text, assistant_excerpt, tool_names)
+            // by walking entries: each User block is paired with the immediately
+            // following Assistant block.
+            let pairs = build_turn_pairs(&entries);
+            for (i, unit) in units.into_iter().enumerate() {
+                let (user_text, assistant_excerpt, tool_names) = pairs
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_default();
                 summaries.push(SessionSummary {
                     session_id: file.session_id.clone(),
-                    prompt_preview: if preview.is_empty() {
-                        format!("<{} chars>", unit.input.message_length)
-                    } else {
-                        preview
-                    },
+                    project_id: project_id.clone(),
+                    user_text,
+                    assistant_excerpt,
+                    tool_names,
                     is_correction: unit.input.is_correction,
-                    tool_count: unit.tools.len(),
                     reply_length: unit.output.message_length,
                 });
             }

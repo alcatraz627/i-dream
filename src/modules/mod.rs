@@ -16,10 +16,26 @@ use crate::api::ClaudeClient;
 use crate::config::Config;
 use anyhow::Result;
 
+/// Strip ASCII control characters (0x00–0x1F) from a string except for
+/// the three whitespace controls JSON allows (\t, \n, \r). Models very
+/// occasionally emit raw control bytes (``, ``, etc.) inside
+/// JSON string values which then crash `serde_json::from_str` with
+/// `control character ... while parsing a string`. Backlog from
+/// _20260422-dream-hard-8a (D23).
+fn sanitize_json_control_chars(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            let code = *c as u32;
+            code >= 0x20 || matches!(*c, '\t' | '\n' | '\r')
+        })
+        .collect()
+}
+
 /// Extract JSON from an LLM response that may be wrapped in markdown code fences.
 ///
 /// Handles: ````json ... ````, bare ```` ... ````, and raw JSON.
 /// Returns `None` if no JSON-like content (starting with `[` or `{`) is found.
+/// Always sanitizes control characters from the output.
 pub fn parse_json_codeblock(content: &str) -> Option<String> {
     // Primary: ```json ... ``` (closing fence optional — LLMs sometimes omit it)
     if let Some(start) = content.find("```json") {
@@ -27,7 +43,7 @@ pub fn parse_json_codeblock(content: &str) -> Option<String> {
         let end = after.find("```").unwrap_or(after.len());
         let candidate = after[..end].trim();
         if candidate.starts_with('[') || candidate.starts_with('{') {
-            return Some(candidate.to_string());
+            return Some(sanitize_json_control_chars(candidate));
         }
     }
     // Fallback: bare ``` ... ```
@@ -36,15 +52,30 @@ pub fn parse_json_codeblock(content: &str) -> Option<String> {
         let end = after.find("```").unwrap_or(after.len());
         let candidate = after[..end].trim();
         if candidate.starts_with('[') || candidate.starts_with('{') {
-            return Some(candidate.to_string());
+            return Some(sanitize_json_control_chars(candidate));
         }
     }
     // Last resort: the whole content if it already looks like JSON
     let trimmed = content.trim();
     if trimmed.starts_with('[') || trimmed.starts_with('{') {
-        return Some(trimmed.to_string());
+        return Some(sanitize_json_control_chars(trimmed));
     }
     None
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_json_control_chars;
+    #[test]
+    fn keeps_tab_newline_cr() {
+        let s = "a\tb\nc\rd";
+        assert_eq!(sanitize_json_control_chars(s), s);
+    }
+    #[test]
+    fn strips_bell_and_escape() {
+        let s = "a\u{0007}b\u{001b}c";
+        assert_eq!(sanitize_json_control_chars(s), "abc");
+    }
 }
 
 /// Trait that all subconscious modules implement.
