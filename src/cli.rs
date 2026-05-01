@@ -127,6 +127,19 @@ pub enum Command {
         action: WidgetAction,
     },
 
+    /// D8 — auto-promote high-confidence, actionable, already-promoted
+    /// associations into Context-triggered intentions. Idempotent: an
+    /// association won't be auto-promoted twice (tracked via
+    /// Association.auto_intention_id).
+    AutoIntentions {
+        /// Preview without writing intentions or mutating associations.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confidence threshold. Below this, associations are skipped.
+        #[arg(long, default_value_t = 0.85)]
+        min_confidence: f64,
+    },
+
     /// D17 — prune dormant low-confidence patterns from dreams/patterns.json.
     ///
     /// Default rule: confidence < 0.4 AND last_seen older than 60 days. The

@@ -69,6 +69,12 @@ pub struct Association {
     /// missing the field deserialize as not-dismissed.
     #[serde(default)]
     pub dismissed: bool,
+    /// D8 (2026-05-02): id of an Intention auto-promoted from this
+    /// association, or None if no auto-promotion has happened yet. Lets
+    /// `auto-intentions` be safely re-run without spawning duplicate
+    /// intentions for the same association.
+    #[serde(default)]
+    pub auto_intention_id: Option<String>,
 }
 
 /// Dream journal entry (appended after each dream cycle).
@@ -780,6 +786,7 @@ Output ONLY a JSON array. No commentary."#;
                             suggested_rule: r.suggested_rule,
                             promoted: false,
                             dismissed: false,
+                            auto_intention_id: None,
                         });
                     }
                 }
@@ -821,6 +828,7 @@ Output ONLY a JSON array. No commentary."#;
                                         suggested_rule: r.suggested_rule,
                                         promoted: false,
                                         dismissed: false,
+                                        auto_intention_id: None,
                                     });
                                 }
                             }

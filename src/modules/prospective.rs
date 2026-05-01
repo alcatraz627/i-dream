@@ -161,6 +161,96 @@ impl<'a> ProspectiveModule<'a> {
 
         Ok(())
     }
+
+    /// D8 — auto-promote high-confidence, actionable, already-promoted
+    /// associations into Context-triggered intentions. Idempotent via
+    /// `Association.auto_intention_id`; re-running does not duplicate.
+    ///
+    /// Returns (n_created, n_skipped). Caller is responsible for
+    /// persisting the mutated associations vector back to disk.
+    pub fn auto_promote_associations(
+        &self,
+        associations: &mut [crate::modules::dreaming::Association],
+        patterns: &[crate::modules::dreaming::ExtractedPattern],
+        min_confidence: f64,
+        dry_run: bool,
+    ) -> Result<(usize, usize)> {
+        use chrono::Duration as ChronoDuration;
+        let now = Utc::now();
+        // Pattern lookup so we can pull keywords from linked patterns.
+        let pat_by_id: std::collections::HashMap<&str, &crate::modules::dreaming::ExtractedPattern> =
+            patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+
+        let mut created = 0usize;
+        let mut skipped = 0usize;
+        let mut new_intentions: Vec<Intention> = Vec::new();
+
+        for a in associations.iter_mut() {
+            // Eligibility: actionable, promoted, not dismissed, has a
+            // suggested rule, above threshold, not already auto-promoted.
+            let eligible = a.actionable
+                && a.promoted
+                && !a.dismissed
+                && a.suggested_rule.is_some()
+                && a.confidence >= min_confidence
+                && a.auto_intention_id.is_none();
+            if !eligible { skipped += 1; continue; }
+
+            // Keyword extraction: combine the linked patterns' text into
+            // a stop-word-stripped, deduped, lowercase keyword set. Cap
+            // at 8 keywords so the trigger isn't over-specific.
+            let mut keywords: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            const STOP: &[&str] = &[
+                "the","a","an","is","of","to","in","on","for","and","or","but",
+                "with","that","this","these","those","be","been","are","was","were",
+                "by","at","as","it","its","from","into","when","while","then",
+            ];
+            for pid in &a.patterns_linked {
+                let Some(p) = pat_by_id.get(pid.as_str()) else { continue };
+                for w in p.pattern.split(|c: char| !c.is_alphanumeric()) {
+                    let lw = w.to_lowercase();
+                    if lw.len() < 3 || STOP.contains(&lw.as_str()) { continue }
+                    if seen.insert(lw.clone()) {
+                        keywords.push(lw);
+                        if keywords.len() >= 8 { break }
+                    }
+                }
+                if keywords.len() >= 8 { break }
+            }
+            if keywords.is_empty() { skipped += 1; continue; }
+
+            let intention_id = uuid::Uuid::new_v4().to_string();
+            let intention = Intention {
+                id: intention_id.clone(),
+                trigger: Trigger::Context {
+                    keywords,
+                    min_keyword_matches: 2,
+                },
+                action: Action {
+                    message: a.suggested_rule.clone().unwrap_or_default(),
+                    priority: Priority::Medium,
+                    source: format!("D8 auto-promote from association {}", a.id),
+                },
+                created: now,
+                expires: now + ChronoDuration::days(90),
+                fire_count: 0,
+                max_fires: 12,
+                last_fired: None,
+            };
+            new_intentions.push(intention);
+            a.auto_intention_id = Some(intention_id);
+            created += 1;
+        }
+
+        if !dry_run && !new_intentions.is_empty() {
+            for i in &new_intentions {
+                self.store.append_jsonl("intentions/registry.jsonl", i)?;
+            }
+            info!(created, "D8 auto-promoted associations to intentions");
+        }
+        Ok((created, skipped))
+    }
 }
 
 impl<'a> Module for ProspectiveModule<'a> {

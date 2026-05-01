@@ -220,6 +220,28 @@ async fn main() -> Result<()> {
             println!("{}", toml::to_string_pretty(&config)?);
         }
 
+        Command::AutoIntentions { dry_run, min_confidence } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let mut associations: Vec<modules::dreaming::Association> =
+                store.read_json("dreams/associations.json").unwrap_or_default();
+            let patterns: Vec<modules::dreaming::ExtractedPattern> =
+                store.read_json("dreams/patterns.json").unwrap_or_default();
+            let pm = modules::prospective::ProspectiveModule::new(&config, &store);
+            let (created, skipped) = pm.auto_promote_associations(
+                &mut associations, &patterns, min_confidence, dry_run,
+            )?;
+            // Persist mutated associations only if we actually wrote intentions.
+            if !dry_run && created > 0 {
+                store.write_json("dreams/associations.json", &associations)?;
+            }
+            println!(
+                "{}D8 auto-intentions: {} created, {} skipped (threshold: confidence ≥ {:.2}, actionable ∧ promoted ∧ ¬dismissed ∧ ¬already-promoted).",
+                if dry_run { "[dry-run] " } else { "" },
+                created, skipped, min_confidence,
+            );
+        }
+
         Command::PrunePatterns { dry_run, max_confidence, days, restore } => {
             use chrono::{DateTime, Duration, Utc};
             let config = config::Config::load(&cli.config)?;
