@@ -2191,6 +2191,11 @@ final class DashboardWindowController: NSObject {
         p.level                = .floating
         p.minSize              = NSSize(width: 960, height: 640)
         p.center()
+        // Pin the dashboard to dark appearance — the project has a dark
+        // brand identity and our color choices (cyan/purple/orange accents,
+        // category palette) only read correctly against a dark surface.
+        // Following system theme blew out the palette in light mode.
+        p.appearance           = NSAppearance(named: .darkAqua)
         self.panel = p
 
         // Wire keyboard shortcuts (Cmd+1-9, Cmd+R)
@@ -5028,6 +5033,16 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var theMenu: NSMenu!
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // Force dark appearance for the entire i-dream-bar process. Our
+        // brand palette (dark navy gradients, cyan/purple/orange accents,
+        // category colors) was tuned exclusively for dark mode — letting
+        // the app follow system theme blew out the visual identity in
+        // light mode and was reported as a hard regression. Setting
+        // NSApp.appearance covers every NSPanel/NSView constructed
+        // anywhere in the process, including the dashboard, the HUD, all
+        // detail popovers, and the menubar widget itself.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
         CrashReporter.install()
         CrashReporter.checkForPreviousCrash()
         dlog("launched PID=\(ProcessInfo.processInfo.processIdentifier) build=\(BuildInfo.commitHash)/\(BuildInfo.sourceHash) at=\(BuildInfo.builtAt)")
@@ -6607,6 +6622,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.isOpaque                    = false
         panel.collectionBehavior          = [.canJoinAllSpaces, .stationary]
         panel.titlebarAppearsTransparent  = true
+        // Pin the HUD to dark appearance regardless of system theme. The
+        // floating widget has its own brand identity (dark navy gradient,
+        // cyan/purple accents, glow on hover) — letting it follow system
+        // light/dark would blow out the whole palette and was reported as
+        // a hard bug. NSAppearance applies to all child views.
+        panel.appearance                  = NSAppearance(named: .darkAqua)
 
         // Replace the auto-created contentView with a custom one that catches right-click
         // and forwards it to the menubar menu (theMenu).
@@ -6941,20 +6962,24 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let dotColor: NSColor = isCycling ? dreamAnimColors[animFrame % dreamAnimColors.count]
                                           : cachedRunning ? .systemGreen : .systemOrange
         let buf   = NSMutableAttributedString()
-        let fSz1: CGFloat = 14   // title / status line
-        let fSz2: CGFloat = 13   // primary stats
-        let fSz3: CGFloat = 12   // secondary / labels
+        // Type scale collapsed to two sizes (was 3): TITLE 14sb, BODY 12m.
+        // Tabular numerals for all numeric values so columns line up.
+        // Status colors (green/orange) reserved for status meaning ONLY —
+        // counts and KPIs use semantic .labelColor / .secondaryLabelColor.
+        let fTitle: CGFloat = 14
+        let fBody:  CGFloat = 12
 
         func label(_ text: String) {
             buf.append(NSAttributedString(string: text, attributes: [
-                .font:            NSFont.systemFont(ofSize: fSz3),
+                .font:            NSFont.systemFont(ofSize: fBody),
                 .foregroundColor: NSColor.tertiaryLabelColor,
             ]))
         }
-        func value(_ text: String, color: NSColor = .labelColor, mono: Bool = false) {
+        func value(_ text: String, color: NSColor = .labelColor, mono: Bool = true) {
+            // Default mono-digit so all numeric values align in columns.
             let f: NSFont = mono
-                ? NSFont.monospacedSystemFont(ofSize: fSz3, weight: .medium)
-                : NSFont.systemFont(ofSize: fSz3, weight: .medium)
+                ? NSFont.monospacedDigitSystemFont(ofSize: fBody, weight: .medium)
+                : NSFont.systemFont(ofSize: fBody, weight: .medium)
             buf.append(NSAttributedString(string: text, attributes: [
                 .font: f, .foregroundColor: color,
             ]))
@@ -6962,17 +6987,17 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // ── Line 1: status dot + name + cycle count or elapsed ───────────────
         buf.append(NSAttributedString(string: "\(dot) i-dream  ", attributes: [
-            .font:            NSFont.systemFont(ofSize: fSz1, weight: .semibold),
+            .font:            NSFont.systemFont(ofSize: fTitle, weight: .semibold),
             .foregroundColor: dotColor,
         ]))
         if isCycling, let start = cycleStartTime {
             buf.append(NSAttributedString(string: "dreaming \(fmtElapsed(Date().timeIntervalSince(start)))", attributes: [
-                .font:            NSFont.systemFont(ofSize: fSz2),
+                .font:            NSFont.monospacedDigitSystemFont(ofSize: fBody, weight: .regular),
                 .foregroundColor: NSColor.systemCyan,
             ]))
         } else if let n = cachedState?.totalCycles {
             buf.append(NSAttributedString(string: "\(n) cycles", attributes: [
-                .font:            NSFont.systemFont(ofSize: fSz2),
+                .font:            NSFont.monospacedDigitSystemFont(ofSize: fBody, weight: .regular),
                 .foregroundColor: NSColor.secondaryLabelColor,
             ]))
         }
@@ -6988,12 +7013,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                     : load >= 0.4 ? .systemYellow
                                     : .systemGreen
             buf.append(NSAttributedString(string: "\(gauge)  ", attributes: [
-                .font:            NSFont.monospacedSystemFont(ofSize: fSz2, weight: .regular),
+                .font:            NSFont.monospacedDigitSystemFont(ofSize: fBody, weight: .regular),
                 .foregroundColor: gaugeColor,
             ]))
             buf.append(NSAttributedString(string: "\(spark)\n", attributes: [
-                .font:            NSFont.monospacedSystemFont(ofSize: fSz2, weight: .regular),
-                .foregroundColor: NSColor.systemCyan,
+                .font:            NSFont.monospacedDigitSystemFont(ofSize: fBody, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor,
             ]))
         }
 
@@ -7013,7 +7038,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             label("patterns  ")
             value("\(cachedPatternCount)")
             if cachedHighConfCount > 0 {
-                value("  (\(cachedHighConfCount) high-conf)\n", color: .systemGreen)
+                // De-greenified per dashboard review — green is reserved for status
+                // signaling, not category counts. High-conf goes in dim secondary.
+                value("  (\(cachedHighConfCount) high-conf)\n", color: .secondaryLabelColor)
             } else {
                 buf.append(NSAttributedString(string: "\n"))
             }
@@ -7093,14 +7120,14 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let rangeLabels = ["7d", "30d", "all-time"]
         buf.append(NSAttributedString(string: "  load·spark·tokens: \(rangeLabels[hudTimeRangeIndex])\n",
             attributes: [
-                .font:            NSFont.systemFont(ofSize: fSz3 - 2),
+                .font:            NSFont.systemFont(ofSize: fBody - 1),
                 .foregroundColor: NSColor.tertiaryLabelColor,
             ]))
 
         // ── Line 11: error line (only if error is newer than last cycle) ─────
         if let err = cachedBoard?.lastError {
             buf.append(NSAttributedString(string: "⚠  \(err)", attributes: [
-                .font:            NSFont.systemFont(ofSize: fSz3 - 1),
+                .font:            NSFont.systemFont(ofSize: fBody - 1),
                 .foregroundColor: NSColor.systemOrange,
             ]))
         }
