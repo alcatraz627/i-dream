@@ -4,6 +4,21 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-01 patch
+
+### Fixed
+- **API client respects `budget.use_claude_code_cli`**: `Briefing` + `BriefProjects` CLI commands and the daemon-side weekly briefing trigger were all hardcoded to `ClaudeClient::new()` (direct API), failing with "credit balance too low" for users on Pro/Max subscriptions. New `ClaudeClient::for_config(&Config)` is the single source of truth; all three sites route through it.
+- **`brief-projects` returned "0 projects"**: legacy patterns from before D2 had empty `source_projects`. Added `backfill_source_projects()` that walks `~/.claude/projects/*/<sid>.jsonl`, builds a session→project map, and unions each pattern's `source_sessions` into its `source_projects`. `generate_all` auto-runs the backfill.
+- **HTML Patterns Graph rendered empty**: ESM `import` from jsdelivr.net is blocked by browser CORS on `file://` origins. Switched to UMD `<script>` tags (Sigma 2.4 + graphology UMD + ForceAtlas2 plain script).
+- **HTML store-files section dumped raw content as visible text**: `js_string_escape` didn't escape `<`, so file content containing literal `</script>` substrings closed the wrapping `<script>` early. Now escapes `<` as `\\x3c`.
+- **`pre.config` / `pre.diagram` blocks** gained `max-height: 360px` + `overflow: auto` so a 50K-line file doesn't dominate the page.
+
+### Added
+- **Dashboard theme picker** (Light / Dark / System) in the sidebar — persists to `dev.i-dream.dashboard.theme`. Defaults to Dark.
+- **Dashboard "Always on top" checkbox** — persists to `dev.i-dream.dashboard.alwaysOnTop`.
+
+---
+
 ### Added — 2026-05-01 session
 - **Patterns Graph foundations** (`graph_metrics.rs`): degree centrality, top-10 hubs, isolated-pattern count, snapshot-for-diff. New CLI: `i-dream graph-metrics [--snapshot]`.
 - **HTML dashboard graph view**: bipartite Pattern↔Association graph rendered with Sigma + Graphology + ForceAtlas2 (CDN). Edge modes (`from-selected` default / `all` / `off`), actionable-only toggle, click-to-focus 1-hop drill-down. Lives at `#patterns-graph`.
