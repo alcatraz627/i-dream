@@ -135,7 +135,7 @@ fn status_with_stale_pid_file_reports_stale() {
         .assert()
         .success()
         .stdout(predicate::str::contains("stale PID file"))
-        .stdout(predicate::str::contains(&i32::MAX.to_string()));
+        .stdout(predicate::str::contains(i32::MAX.to_string()));
 
     // Status is read-only: it reports the stale file but does NOT
     // remove it. That's `stop`'s job.

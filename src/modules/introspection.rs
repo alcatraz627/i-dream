@@ -250,7 +250,7 @@ mod tests {
         config.modules.introspection.min_chains_for_report = 10;
         // Point projects_dir at the empty temp dir so load_new_chains()
         // doesn't scan real sessions during the should_run() bootstrap.
-        config.ingestion.projects_dir = dir.path().join("empty-projects").into();
+        config.ingestion.projects_dir = dir.path().join("empty-projects");
         // Only create 3 chains
         let chains_dir = store.path("introspection/chains");
         for i in 0..3 {
@@ -269,7 +269,7 @@ mod tests {
 
         let mut config = Config::default();
         config.modules.introspection.min_chains_for_report = 3;
-        config.ingestion.projects_dir = dir.path().join("empty-projects").into();
+        config.ingestion.projects_dir = dir.path().join("empty-projects");
         let chains_dir = store.path("introspection/chains");
         for i in 0..5 {
             std::fs::write(chains_dir.join(format!("chain-{i}.jsonl")), "{}").unwrap();
@@ -288,7 +288,7 @@ mod tests {
         let mut config = Config::default();
         config.modules.introspection.min_chains_for_report = 2;
         config.modules.introspection.report_interval_days = 7;
-        config.ingestion.projects_dir = dir.path().join("empty-projects").into();
+        config.ingestion.projects_dir = dir.path().join("empty-projects");
 
         let chains_dir = store.path("introspection/chains");
         for i in 0..5 {

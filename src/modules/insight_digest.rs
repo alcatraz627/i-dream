@@ -63,14 +63,13 @@ impl<'a> InsightDigestModule<'a> {
         }
 
         // Enforce the 3h cooldown.
-        if let Ok(meta) = self.store.read_json::<DigestMeta>(DIGEST_META_PATH) {
-            if let Some(last_run) = meta.last_run {
+        if let Ok(meta) = self.store.read_json::<DigestMeta>(DIGEST_META_PATH)
+            && let Some(last_run) = meta.last_run {
                 let elapsed_secs = (Utc::now() - last_run).num_seconds();
                 if elapsed_secs < (COOLDOWN_HOURS * 3600.0) as i64 {
                     return Ok(false);
                 }
             }
-        }
 
         Ok(true)
     }

@@ -65,21 +65,6 @@ pub fn parse_json_codeblock(content: &str) -> Option<String> {
     None
 }
 
-#[cfg(test)]
-mod sanitize_tests {
-    use super::sanitize_json_control_chars;
-    #[test]
-    fn keeps_tab_newline_cr() {
-        let s = "a\tb\nc\rd";
-        assert_eq!(sanitize_json_control_chars(s), s);
-    }
-    #[test]
-    fn strips_bell_and_escape() {
-        let s = "a\u{0007}b\u{001b}c";
-        assert_eq!(sanitize_json_control_chars(s), "abc");
-    }
-}
-
 /// Trait that all subconscious modules implement.
 ///
 /// The daemon calls `should_run()` to check if the module needs to execute,
@@ -148,5 +133,20 @@ pub fn inspect(config: &Config, module_name: &str) -> Result<String> {
             ))
         }
         _ => anyhow::bail!("Unknown module: {module_name}. Available: dreaming, metacog, intuition, introspection, prospective"),
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize_json_control_chars;
+    #[test]
+    fn keeps_tab_newline_cr() {
+        let s = "a\tb\nc\rd";
+        assert_eq!(sanitize_json_control_chars(s), s);
+    }
+    #[test]
+    fn strips_bell_and_escape() {
+        let s = "a\u{0007}b\u{001b}c";
+        assert_eq!(sanitize_json_control_chars(s), "abc");
     }
 }

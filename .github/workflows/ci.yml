@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Opt into Node.js 24 for actions; Node 20 is being removed Sept 2026.
+  # Removes the deprecation warning on every CI run.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   rust:

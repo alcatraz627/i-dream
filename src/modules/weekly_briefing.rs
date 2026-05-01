@@ -112,7 +112,7 @@ impl<'a> WeeklyBriefingModule<'a> {
         info!("Weekly briefing: synthesizing past 7 days");
         let now_local = Local::now();
         let week_label = iso_week_label(&now_local);
-        let cutoff: DateTime<Utc> = (Utc::now() - chrono::Duration::days(7)).into();
+        let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::days(7);
 
         // ── Gather inputs ─────────────────────────────────────────────────
         let patterns: Vec<ExtractedPattern> = self.store
@@ -168,28 +168,28 @@ impl<'a> WeeklyBriefingModule<'a> {
         for (proj, count) in project_rank.iter().take(6) {
             prompt.push_str(&format!("  - {proj}: {count} pattern hits\n"));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
 
         if !wins.is_empty() {
             prompt.push_str("Positive patterns this week:\n");
             for p in &wins {
                 prompt.push_str(&format!("  + {}\n", truncate(&p.pattern, 160)));
             }
-            prompt.push_str("\n");
+            prompt.push('\n');
         }
         if !frustrations.is_empty() {
             prompt.push_str("Negative / corrective patterns this week:\n");
             for p in &frustrations {
                 prompt.push_str(&format!("  - {}\n", truncate(&p.pattern, 160)));
             }
-            prompt.push_str("\n");
+            prompt.push('\n');
         }
         if !recent_promoted.is_empty() {
             prompt.push_str(&format!("Promoted insights ({}):\n", recent_promoted.len()));
             for a in recent_promoted.iter().take(10) {
                 prompt.push_str(&format!("  > {}\n", truncate(&a.hypothesis, 200)));
             }
-            prompt.push_str("\n");
+            prompt.push('\n');
         }
 
         let system_prompt = r#"You are writing a Sunday Morning Briefing for a developer who uses Claude Code as a primary coding partner. The data below is one week of your subconscious system's observations of their work.

@@ -163,6 +163,20 @@ impl<'a> ProspectiveModule<'a> {
     }
 }
 
+impl<'a> Module for ProspectiveModule<'a> {
+    fn should_run(&self) -> Result<bool> {
+        // Prospective module runs at session start (matching) and during
+        // cleanup, not as a full analysis cycle
+        Ok(false)
+    }
+
+    async fn run(&self, _client: &ClaudeClient, _budget: u64) -> Result<u64> {
+        // Prospective module doesn't use API tokens
+        self.cleanup_expired()?;
+        Ok(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,19 +542,5 @@ mod tests {
         let json = serde_json::to_string(&record).unwrap();
         let parsed: FiredRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
-    }
-}
-
-impl<'a> Module for ProspectiveModule<'a> {
-    fn should_run(&self) -> Result<bool> {
-        // Prospective module runs at session start (matching) and during
-        // cleanup, not as a full analysis cycle
-        Ok(false)
-    }
-
-    async fn run(&self, _client: &ClaudeClient, _budget: u64) -> Result<u64> {
-        // Prospective module doesn't use API tokens
-        self.cleanup_expired()?;
-        Ok(0)
     }
 }

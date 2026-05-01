@@ -285,12 +285,11 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length â
         for p in patterns.iter_mut() {
             let mut added = false;
             for sid in &p.source_sessions {
-                if let Some(proj) = sid_to_proj.get(sid) {
-                    if !p.source_projects.contains(proj) {
+                if let Some(proj) = sid_to_proj.get(sid)
+                    && !p.source_projects.contains(proj) {
                         p.source_projects.push(proj.clone());
                         added = true;
                     }
-                }
             }
             if added { changed += 1; }
         }

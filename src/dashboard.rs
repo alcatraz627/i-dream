@@ -247,6 +247,7 @@ pub struct InventoryGroup {
 }
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct InventoryFile {
     pub name: String,
     pub size: u64,
@@ -256,16 +257,6 @@ pub struct InventoryFile {
     pub content_preview: Option<String>,
 }
 
-impl Default for InventoryFile {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            size: 0,
-            modified: None,
-            content_preview: None,
-        }
-    }
-}
 
 impl Snapshot {
     /// Read the filesystem and assemble a snapshot.

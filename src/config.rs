@@ -297,11 +297,10 @@ impl Default for Config {
 /// Expand ~ to the user's home directory
 pub fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
-    if s.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
+    if s.starts_with("~/")
+        && let Some(home) = dirs::home_dir() {
             return home.join(&s[2..]);
         }
-    }
     path.to_path_buf()
 }
 

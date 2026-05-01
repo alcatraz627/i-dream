@@ -439,13 +439,12 @@ impl<'a> IntuitionModule<'a> {
                     // strings, so we do a coarser match: same-day +
                     // session ID association.
                     let fired_date = fired_ts.format("%Y-%m-%d").to_string();
-                    if outcome.date == fired_date {
-                        if let Some(&(p, n)) = session_scores.get(&outcome.session) {
+                    if outcome.date == fired_date
+                        && let Some(&(p, n)) = session_scores.get(&outcome.session) {
                             pos_total += p;
                             neg_total += n;
                             break; // count each session once
                         }
-                    }
                 }
             }
 
@@ -526,6 +525,33 @@ impl<'a> IntuitionModule<'a> {
             .concepts
             .retain(|_, v| v.activation > 0.05);
         cache.last_updated = Utc::now();
+    }
+}
+
+/// Deterministic key for a context-tag set. Order-insensitive, lowercased —
+/// `["Rust","async"]` and `["ASYNC","rust"]` collapse to the same signature
+/// so merge_outcomes lands them on the same ValenceEntry.
+fn tag_signature(tags: &[String]) -> String {
+    let mut lowered: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+    lowered.sort();
+    lowered.join("|")
+}
+
+impl<'a> Module for IntuitionModule<'a> {
+    fn should_run(&self) -> Result<bool> {
+        Ok(self.config.modules.intuition.enabled)
+    }
+
+    async fn run(&self, _client: &ClaudeClient, _budget: u64) -> Result<u64> {
+        // Intuition's learning loop: replay new sessions, classify their
+        // outcomes, and update valence memory. No API calls — pure transcript
+        // analysis. The matching side (match_patterns) runs at SessionStart
+        // via the daemon hook handler.
+        let (scanned, collected) = self.collect_valence_batch()?;
+        info!(
+            "Intuition consolidation: scanned {scanned} sessions, collected {collected} outcomes"
+        );
+        Ok(0) // No tokens used — all local analysis
     }
 }
 
@@ -1157,32 +1183,5 @@ mod tests {
         let json = serde_json::to_string(&si).unwrap();
         let parsed: SurfacedIntuition = serde_json::from_str(&json).unwrap();
         assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
-    }
-}
-
-/// Deterministic key for a context-tag set. Order-insensitive, lowercased —
-/// `["Rust","async"]` and `["ASYNC","rust"]` collapse to the same signature
-/// so merge_outcomes lands them on the same ValenceEntry.
-fn tag_signature(tags: &[String]) -> String {
-    let mut lowered: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
-    lowered.sort();
-    lowered.join("|")
-}
-
-impl<'a> Module for IntuitionModule<'a> {
-    fn should_run(&self) -> Result<bool> {
-        Ok(self.config.modules.intuition.enabled)
-    }
-
-    async fn run(&self, _client: &ClaudeClient, _budget: u64) -> Result<u64> {
-        // Intuition's learning loop: replay new sessions, classify their
-        // outcomes, and update valence memory. No API calls — pure transcript
-        // analysis. The matching side (match_patterns) runs at SessionStart
-        // via the daemon hook handler.
-        let (scanned, collected) = self.collect_valence_batch()?;
-        info!(
-            "Intuition consolidation: scanned {scanned} sessions, collected {collected} outcomes"
-        );
-        Ok(0) // No tokens used — all local analysis
     }
 }

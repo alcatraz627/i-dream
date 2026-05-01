@@ -383,6 +383,450 @@ impl<'a> MetacogModule<'a> {
     }
 }
 
+impl<'a> Module for MetacogModule<'a> {
+    fn should_run(&self) -> Result<bool> {
+        if !self.config.modules.metacog.enabled {
+            return Ok(false);
+        }
+
+        // Check if there are unanalyzed samples
+        // TODO: Compare sample count vs audit count
+        Ok(true)
+    }
+
+    async fn run(&self, client: &ClaudeClient, budget: u64) -> Result<u64> {
+        info!("Running metacognitive analysis on recent session samples");
+
+        let batch = self.load_new_samples()?;
+
+        if batch.units.is_empty() {
+            info!(
+                "Metacog: no new samples (scanned {} sessions), skipping API call",
+                batch.sessions_scanned
+            );
+            // Still record that we looked at these sessions so we don't
+            // rescan empty ones forever.
+            self.persist_processed(&batch.sessions_seen)?;
+            return Ok(0);
+        }
+
+        info!(
+            "Metacog: sampled {} units from {} new sessions",
+            batch.units.len(),
+            batch.sessions_scanned
+        );
+
+        // ── Adaptive effort classification ──────────────────────
+        let signals = self.compute_effort_signals(&batch, budget);
+        let effort = signals.classify();
+        let params = effort.params();
+
+        info!(
+            "Metacog effort: {:?} (units={}, corrections={:.0}%, novelty={:.2}, dream_fresh={}, budget={})",
+            effort,
+            signals.unit_count,
+            signals.correction_density * 100.0,
+            signals.novelty_score,
+            signals.fresh_dream_insights,
+            budget,
+        );
+
+        // ── Build system prompt, enriched at higher effort levels ──
+        let mut system_prompt = r#"You are a background analysis subprocess. Output ONLY raw JSON — no markdown, no code fences, no decorative formatting, no "★ Insight" blocks or similar stylistic elements.
+
+You are analyzing execution units from Claude Code sessions
+for metacognitive assessment. For each unit, assess:
+
+1. Confidence calibration: Was expressed confidence appropriate for the outcome?
+   Score: -1.0 (overconfident+wrong) to +1.0 (well-calibrated)
+2. Strategy quality: Was the approach efficient? Score 0-1.
+3. Bias indicators: List any detected biases (anchoring, sunk cost, authority)
+4. Error pattern match: Does this match known error patterns?
+
+Then provide session-level assessment:
+- Overall calibration score (-1.0 to +1.0)
+- Dominant biases detected
+- Recommended adjustments
+
+Output as JSON matching this shape:
+{
+  "calibration_score": number,
+  "overconfident_count": integer,
+  "underconfident_count": integer,
+  "well_calibrated_count": integer,
+  "biases_detected": [string],
+  "recommendations": [string]
+}"#
+        .to_string();
+
+        // Enrich prompt with calibration history at Standard+Deep
+        if params.include_calibration_history
+            && let Some(history) = self.format_calibration_history(params.calibration_lookback) {
+                system_prompt.push_str("\n\n--- CALIBRATION HISTORY ---\n");
+                system_prompt.push_str(&history);
+                system_prompt.push_str("\n\nCompare current findings against this history. Flag biases that are NEW (not seen before) vs RECURRING. For recurring biases, note if the situation has improved or worsened. Deprioritize recommending fixes for issues already flagged in prior cycles unless they show no improvement.");
+            }
+
+        // Enrich prompt with dream insights at Deep level
+        if params.include_dream_insights
+            && let Some(insights) = self.load_dream_insights_context() {
+                system_prompt.push_str("\n\n--- DREAM INSIGHTS (cross-reference) ---\n");
+                system_prompt.push_str(&insights);
+                system_prompt.push_str("\n\nCross-reference the execution patterns above against these dream-synthesized insights. Note any execution units where an existing insight was violated or confirmed. Add a 'cross_references' array to your output with brief notes.");
+            }
+
+        // Compact JSON (not pretty) to keep token cost down. Fit as many
+        // complete units as possible within the effort-level's char budget
+        // instead of raw-truncating (which would send malformed JSON).
+        // Newer sessions come first due to rev() scan, so the budget
+        // naturally prioritizes recent activity.
+        let sample_budget = params.sample_budget_chars;
+        let total_units = batch.units.len();
+        let mut budget_units: Vec<&ExecutionUnit> = Vec::new();
+        let mut running_len = 2usize; // account for "[]" wrapper
+        for unit in &batch.units {
+            let unit_json = serde_json::to_string(unit)?;
+            let sep = if budget_units.is_empty() { 0 } else { 1 }; // comma separator
+            if running_len + sep + unit_json.len() > sample_budget {
+                break;
+            }
+            running_len += sep + unit_json.len();
+            budget_units.push(unit);
+        }
+        let analyzed_count = budget_units.len();
+        let serialized = serde_json::to_string(&budget_units)?;
+
+        if analyzed_count < total_units {
+            info!(
+                "Metacog: analyzing {}/{} units (budget-limited to {}k chars)",
+                analyzed_count,
+                total_units,
+                sample_budget / 1000,
+            );
+        }
+
+        let prompt = format!("Analyze these execution units:\n\n{serialized}");
+
+        let response = client
+            .analyze(
+                &system_prompt,
+                &prompt,
+                &self.config.budget.model,
+                params.max_response_tokens,
+                params.temperature,
+            )
+            .await?;
+
+        // Strip markdown fences from LLM response (same issue as REM/introspection).
+        let cleaned = super::parse_json_codeblock(&response.content)
+            .unwrap_or_else(|| response.content.trim().to_string());
+
+        // Persist the audit response. Store the cleaned JSON as a parsed value
+        // (not double-encoded string) when possible.
+        let audit_name = Store::timestamped_name("audit", "json");
+        let audit_path = format!("metacog/audits/{audit_name}");
+        let response_value = serde_json::from_str::<serde_json::Value>(&cleaned)
+            .unwrap_or_else(|_| serde_json::Value::String(cleaned.clone()));
+        if let Err(e) = self.store.write_json(
+            &audit_path,
+            &serde_json::json!({
+                "timestamp": Utc::now(),
+                "sessions": batch.sessions_seen,
+                "units_analyzed": analyzed_count,
+                "units_total": total_units,
+                "tokens_used": response.tokens_used,
+                "effort_level": effort,
+                "effort_signals": {
+                    "unit_count": signals.unit_count,
+                    "correction_density": signals.correction_density,
+                    "novelty_score": signals.novelty_score,
+                    "fresh_dream_insights": signals.fresh_dream_insights,
+                    "budget_tokens": signals.budget_tokens,
+                },
+                "response": response_value,
+            }),
+        ) {
+            warn!("failed to persist metacog audit: {e:#}");
+        }
+
+        self.persist_processed(&batch.sessions_seen)?;
+
+        // Parse the LLM response and append to calibration.jsonl.
+        #[derive(Deserialize)]
+        struct LlmCalibration {
+            calibration_score: f64,
+            overconfident_count: u64,
+            underconfident_count: u64,
+            well_calibrated_count: u64,
+            #[serde(default)]
+            biases_detected: Vec<String>,
+            #[serde(default)]
+            recommendations: Vec<String>,
+        }
+        match serde_json::from_str::<LlmCalibration>(&cleaned) {
+            Ok(llm) => {
+                let entry = CalibrationEntry {
+                    date: Utc::now().format("%Y-%m-%d").to_string(),
+                    session_id: batch.sessions_seen.first().map(|(s, _)| s.clone()).unwrap_or_default(),
+                    units_sampled: analyzed_count as u64,
+                    calibration_score: llm.calibration_score,
+                    overconfident_count: llm.overconfident_count,
+                    underconfident_count: llm.underconfident_count,
+                    well_calibrated_count: llm.well_calibrated_count,
+                    biases_detected: llm.biases_detected,
+                    recommendations: llm.recommendations,
+                };
+                if let Err(e) = self.store.append_jsonl("metacog/calibration.jsonl", &entry) {
+                    warn!("failed to persist calibration entry: {e:#}");
+                }
+            }
+            Err(e) => {
+                warn!("metacog: failed to parse LLM calibration response: {e:#}");
+            }
+        }
+
+        // Prune samples.jsonl — keep only entries from the last 30 days.
+        // Without this the file grows without bound; 8k+ entries → 21 MB
+        // seen in practice, and the truncation warning fires every cycle.
+        if let Err(e) = self.trim_old_samples(30) {
+            warn!("metacog sample pruning failed (non-fatal): {e:#}");
+        }
+
+        info!("Metacog analysis complete ({} tokens)", response.tokens_used);
+        Ok(response.tokens_used)
+    }
+}
+
+impl<'a> MetacogModule<'a> {
+    /// Build effort signals from the current batch and persisted state.
+    /// This is the bridge between raw data and the effort classifier.
+    fn compute_effort_signals(&self, batch: &SampleBatch, budget_tokens: u64) -> EffortSignals {
+        let unit_count = batch.units.len();
+
+        // Correction density
+        let correction_count = batch.units.iter()
+            .filter(|u| u.input.is_correction)
+            .count();
+        let correction_density = if unit_count > 0 {
+            correction_count as f64 / unit_count as f64
+        } else {
+            0.0
+        };
+
+        // Novelty: compare current batch's bias signals against recent calibration
+        let novelty_score = self.compute_novelty_score(batch);
+
+        // Dream insight freshness: check if insights.md was modified since
+        // the last metacog audit timestamp
+        let fresh_dream_insights = self.check_dream_freshness();
+
+        EffortSignals {
+            unit_count,
+            correction_density,
+            novelty_score,
+            fresh_dream_insights,
+            budget_tokens,
+        }
+    }
+
+    /// Estimate novelty by checking how many recent calibration entries
+    /// reported the same biases. If the last N entries all found the same
+    /// biases, novelty is low. If corrections or multi-failure triggers
+    /// are present (which indicate new problem types), novelty is higher.
+    fn compute_novelty_score(&self, batch: &SampleBatch) -> f64 {
+        // Load recent calibration entries
+        let entries = self.load_recent_calibrations(5);
+        if entries.is_empty() {
+            // No history → everything is novel
+            return 1.0;
+        }
+
+        // Collect all biases seen in recent history
+        let mut historical_biases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for entry in &entries {
+            for bias in &entry.biases_detected {
+                // Normalize: lowercase, trim
+                historical_biases.insert(bias.to_lowercase().trim().to_string());
+            }
+        }
+
+        // Check what fraction of the current batch has trigger-based samples
+        // (corrections, consecutive failures) — these indicate new problem types
+        let trigger_count = batch.units.iter()
+            .filter(|u| {
+                u.input.is_correction || u.tools.windows(2).any(|w| !w[0].success && !w[1].success)
+            })
+            .count();
+
+        let trigger_ratio = if batch.units.is_empty() {
+            0.0
+        } else {
+            trigger_count as f64 / batch.units.len() as f64
+        };
+
+        // Score: high trigger ratio = novel problems; also boost if calibration
+        // scores have been trending (variance indicates instability worth investigating)
+        let score_variance = if entries.len() >= 2 {
+            let mean = entries.iter().map(|e| e.calibration_score).sum::<f64>() / entries.len() as f64;
+            let var = entries.iter()
+                .map(|e| (e.calibration_score - mean).powi(2))
+                .sum::<f64>() / entries.len() as f64;
+            var.sqrt() // standard deviation
+        } else {
+            0.0
+        };
+
+        // Combine: trigger ratio (0-1) + stddev contribution (0-0.5)
+        // Clamp to 0-1 range
+        (trigger_ratio + score_variance.min(0.5)).min(1.0)
+    }
+
+    /// Load the N most recent calibration entries from calibration.jsonl.
+    fn load_recent_calibrations(&self, n: usize) -> Vec<CalibrationEntry> {
+        let path = self.store.path("metacog/calibration.jsonl");
+        if !path.exists() {
+            return Vec::new();
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut entries: Vec<CalibrationEntry> = content
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+
+        // Take the last N entries (most recent)
+        if entries.len() > n {
+            entries.drain(..entries.len() - n);
+        }
+        entries
+    }
+
+    /// Check if dream insights have been updated since the last metacog audit.
+    fn check_dream_freshness(&self) -> bool {
+        let insights_path = self.store.path("dreams/insights.md");
+        let audits_dir = self.store.path("metacog/audits");
+
+        let insights_mtime = std::fs::metadata(&insights_path)
+            .and_then(|m| m.modified())
+            .ok();
+        let latest_audit_mtime = std::fs::read_dir(&audits_dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
+                    .max()
+            });
+
+        match (insights_mtime, latest_audit_mtime) {
+            (Some(insight_t), Some(audit_t)) => insight_t > audit_t,
+            (Some(_), None) => true, // insights exist but no audits yet
+            _ => false,
+        }
+    }
+
+    /// Load recent dream insights text for inclusion in the Deep analysis prompt.
+    fn load_dream_insights_context(&self) -> Option<String> {
+        let path = self.store.path("dreams/insights.md");
+        let content = std::fs::read_to_string(&path).ok()?;
+        // Take first ~4000 chars to avoid bloating the prompt
+        if content.len() > 4000 {
+            Some(content[..4000].to_string())
+        } else {
+            Some(content)
+        }
+    }
+
+    /// Build the calibration history context string for enriched prompts.
+    fn format_calibration_history(&self, lookback: usize) -> Option<String> {
+        let entries = self.load_recent_calibrations(lookback);
+        if entries.is_empty() {
+            return None;
+        }
+
+        let mut lines = vec!["Recent calibration history (newest first):".to_string()];
+        for entry in entries.iter().rev() {
+            lines.push(format!(
+                "- {} | score={:.2} | overconfident={} underconfident={} calibrated={} | biases: {}",
+                entry.date,
+                entry.calibration_score,
+                entry.overconfident_count,
+                entry.underconfident_count,
+                entry.well_calibrated_count,
+                entry.biases_detected.join(", "),
+            ));
+        }
+        Some(lines.join("\n"))
+    }
+
+    /// Remove samples older than `keep_days` from `metacog/samples.jsonl`.
+    /// Rewrites the file in-place. No-ops if the file doesn't exist or is
+    /// already within the retention window.
+    fn trim_old_samples(&self, keep_days: i64) -> Result<()> {
+        let path = self.store.path("metacog/samples.jsonl");
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(&path)?;
+        let cutoff = Utc::now() - chrono::Duration::days(keep_days);
+
+        let kept: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                // Keep lines whose timestamp field is on or after the cutoff.
+                // Lines that don't parse (e.g. blank lines, corrupt entries)
+                // are kept rather than silently discarded.
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
+                    && let Some(ts_str) = val.get("timestamp").and_then(|v| v.as_str())
+                        && let Ok(ts) = ts_str.parse::<DateTime<Utc>>() {
+                            return ts >= cutoff;
+                        }
+                true
+            })
+            .collect();
+
+        let original_count = content.lines().count();
+        let kept_count = kept.len();
+        if kept_count < original_count {
+            let new_content = kept.join("\n") + if kept.is_empty() { "" } else { "\n" };
+            std::fs::write(&path, new_content)?;
+            info!(
+                "Metacog samples pruned: {original_count} → {kept_count} entries \
+                 (removed {} entries older than {keep_days} days)",
+                original_count - kept_count
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Add newly-processed sessions (with their file sizes) to the ledger
+    /// and persist. Storing the file size at scan time enables the staleness
+    /// check in `load_new_samples` — a session is re-queued when its JSONL
+    /// file has grown, meaning new turns have been appended.
+    fn persist_processed(&self, sessions: &[(String, u64)]) -> Result<()> {
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let mut state: ProcessedState = if self.store.exists("metacog/processed.json") {
+            self.store
+                .read_json("metacog/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+        for (sid, size) in sessions {
+            state.sessions.insert(sid.clone(), *size);
+        }
+        self.store.write_json("metacog/processed.json", &state)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,453 +1168,5 @@ mod tests {
         assert_eq!(signals.budget_tokens, 0);
         // Zero budget → Light
         assert_eq!(signals.classify(), EffortLevel::Light);
-    }
-}
-
-impl<'a> Module for MetacogModule<'a> {
-    fn should_run(&self) -> Result<bool> {
-        if !self.config.modules.metacog.enabled {
-            return Ok(false);
-        }
-
-        // Check if there are unanalyzed samples
-        // TODO: Compare sample count vs audit count
-        Ok(true)
-    }
-
-    async fn run(&self, client: &ClaudeClient, budget: u64) -> Result<u64> {
-        info!("Running metacognitive analysis on recent session samples");
-
-        let batch = self.load_new_samples()?;
-
-        if batch.units.is_empty() {
-            info!(
-                "Metacog: no new samples (scanned {} sessions), skipping API call",
-                batch.sessions_scanned
-            );
-            // Still record that we looked at these sessions so we don't
-            // rescan empty ones forever.
-            self.persist_processed(&batch.sessions_seen)?;
-            return Ok(0);
-        }
-
-        info!(
-            "Metacog: sampled {} units from {} new sessions",
-            batch.units.len(),
-            batch.sessions_scanned
-        );
-
-        // ── Adaptive effort classification ──────────────────────
-        let signals = self.compute_effort_signals(&batch, budget);
-        let effort = signals.classify();
-        let params = effort.params();
-
-        info!(
-            "Metacog effort: {:?} (units={}, corrections={:.0}%, novelty={:.2}, dream_fresh={}, budget={})",
-            effort,
-            signals.unit_count,
-            signals.correction_density * 100.0,
-            signals.novelty_score,
-            signals.fresh_dream_insights,
-            budget,
-        );
-
-        // ── Build system prompt, enriched at higher effort levels ──
-        let mut system_prompt = r#"You are a background analysis subprocess. Output ONLY raw JSON — no markdown, no code fences, no decorative formatting, no "★ Insight" blocks or similar stylistic elements.
-
-You are analyzing execution units from Claude Code sessions
-for metacognitive assessment. For each unit, assess:
-
-1. Confidence calibration: Was expressed confidence appropriate for the outcome?
-   Score: -1.0 (overconfident+wrong) to +1.0 (well-calibrated)
-2. Strategy quality: Was the approach efficient? Score 0-1.
-3. Bias indicators: List any detected biases (anchoring, sunk cost, authority)
-4. Error pattern match: Does this match known error patterns?
-
-Then provide session-level assessment:
-- Overall calibration score (-1.0 to +1.0)
-- Dominant biases detected
-- Recommended adjustments
-
-Output as JSON matching this shape:
-{
-  "calibration_score": number,
-  "overconfident_count": integer,
-  "underconfident_count": integer,
-  "well_calibrated_count": integer,
-  "biases_detected": [string],
-  "recommendations": [string]
-}"#
-        .to_string();
-
-        // Enrich prompt with calibration history at Standard+Deep
-        if params.include_calibration_history {
-            if let Some(history) = self.format_calibration_history(params.calibration_lookback) {
-                system_prompt.push_str("\n\n--- CALIBRATION HISTORY ---\n");
-                system_prompt.push_str(&history);
-                system_prompt.push_str("\n\nCompare current findings against this history. Flag biases that are NEW (not seen before) vs RECURRING. For recurring biases, note if the situation has improved or worsened. Deprioritize recommending fixes for issues already flagged in prior cycles unless they show no improvement.");
-            }
-        }
-
-        // Enrich prompt with dream insights at Deep level
-        if params.include_dream_insights {
-            if let Some(insights) = self.load_dream_insights_context() {
-                system_prompt.push_str("\n\n--- DREAM INSIGHTS (cross-reference) ---\n");
-                system_prompt.push_str(&insights);
-                system_prompt.push_str("\n\nCross-reference the execution patterns above against these dream-synthesized insights. Note any execution units where an existing insight was violated or confirmed. Add a 'cross_references' array to your output with brief notes.");
-            }
-        }
-
-        // Compact JSON (not pretty) to keep token cost down. Fit as many
-        // complete units as possible within the effort-level's char budget
-        // instead of raw-truncating (which would send malformed JSON).
-        // Newer sessions come first due to rev() scan, so the budget
-        // naturally prioritizes recent activity.
-        let sample_budget = params.sample_budget_chars;
-        let total_units = batch.units.len();
-        let mut budget_units: Vec<&ExecutionUnit> = Vec::new();
-        let mut running_len = 2usize; // account for "[]" wrapper
-        for unit in &batch.units {
-            let unit_json = serde_json::to_string(unit)?;
-            let sep = if budget_units.is_empty() { 0 } else { 1 }; // comma separator
-            if running_len + sep + unit_json.len() > sample_budget {
-                break;
-            }
-            running_len += sep + unit_json.len();
-            budget_units.push(unit);
-        }
-        let analyzed_count = budget_units.len();
-        let serialized = serde_json::to_string(&budget_units)?;
-
-        if analyzed_count < total_units {
-            info!(
-                "Metacog: analyzing {}/{} units (budget-limited to {}k chars)",
-                analyzed_count,
-                total_units,
-                sample_budget / 1000,
-            );
-        }
-
-        let prompt = format!("Analyze these execution units:\n\n{serialized}");
-
-        let response = client
-            .analyze(
-                &system_prompt,
-                &prompt,
-                &self.config.budget.model,
-                params.max_response_tokens,
-                params.temperature,
-            )
-            .await?;
-
-        // Strip markdown fences from LLM response (same issue as REM/introspection).
-        let cleaned = super::parse_json_codeblock(&response.content)
-            .unwrap_or_else(|| response.content.trim().to_string());
-
-        // Persist the audit response. Store the cleaned JSON as a parsed value
-        // (not double-encoded string) when possible.
-        let audit_name = Store::timestamped_name("audit", "json");
-        let audit_path = format!("metacog/audits/{audit_name}");
-        let response_value = serde_json::from_str::<serde_json::Value>(&cleaned)
-            .unwrap_or_else(|_| serde_json::Value::String(cleaned.clone()));
-        if let Err(e) = self.store.write_json(
-            &audit_path,
-            &serde_json::json!({
-                "timestamp": Utc::now(),
-                "sessions": batch.sessions_seen,
-                "units_analyzed": analyzed_count,
-                "units_total": total_units,
-                "tokens_used": response.tokens_used,
-                "effort_level": effort,
-                "effort_signals": {
-                    "unit_count": signals.unit_count,
-                    "correction_density": signals.correction_density,
-                    "novelty_score": signals.novelty_score,
-                    "fresh_dream_insights": signals.fresh_dream_insights,
-                    "budget_tokens": signals.budget_tokens,
-                },
-                "response": response_value,
-            }),
-        ) {
-            warn!("failed to persist metacog audit: {e:#}");
-        }
-
-        self.persist_processed(&batch.sessions_seen)?;
-
-        // Parse the LLM response and append to calibration.jsonl.
-        #[derive(Deserialize)]
-        struct LlmCalibration {
-            calibration_score: f64,
-            overconfident_count: u64,
-            underconfident_count: u64,
-            well_calibrated_count: u64,
-            #[serde(default)]
-            biases_detected: Vec<String>,
-            #[serde(default)]
-            recommendations: Vec<String>,
-        }
-        match serde_json::from_str::<LlmCalibration>(&cleaned) {
-            Ok(llm) => {
-                let entry = CalibrationEntry {
-                    date: Utc::now().format("%Y-%m-%d").to_string(),
-                    session_id: batch.sessions_seen.first().map(|(s, _)| s.clone()).unwrap_or_default(),
-                    units_sampled: analyzed_count as u64,
-                    calibration_score: llm.calibration_score,
-                    overconfident_count: llm.overconfident_count,
-                    underconfident_count: llm.underconfident_count,
-                    well_calibrated_count: llm.well_calibrated_count,
-                    biases_detected: llm.biases_detected,
-                    recommendations: llm.recommendations,
-                };
-                if let Err(e) = self.store.append_jsonl("metacog/calibration.jsonl", &entry) {
-                    warn!("failed to persist calibration entry: {e:#}");
-                }
-            }
-            Err(e) => {
-                warn!("metacog: failed to parse LLM calibration response: {e:#}");
-            }
-        }
-
-        // Prune samples.jsonl — keep only entries from the last 30 days.
-        // Without this the file grows without bound; 8k+ entries → 21 MB
-        // seen in practice, and the truncation warning fires every cycle.
-        if let Err(e) = self.trim_old_samples(30) {
-            warn!("metacog sample pruning failed (non-fatal): {e:#}");
-        }
-
-        info!("Metacog analysis complete ({} tokens)", response.tokens_used);
-        Ok(response.tokens_used)
-    }
-}
-
-impl<'a> MetacogModule<'a> {
-    /// Build effort signals from the current batch and persisted state.
-    /// This is the bridge between raw data and the effort classifier.
-    fn compute_effort_signals(&self, batch: &SampleBatch, budget_tokens: u64) -> EffortSignals {
-        let unit_count = batch.units.len();
-
-        // Correction density
-        let correction_count = batch.units.iter()
-            .filter(|u| u.input.is_correction)
-            .count();
-        let correction_density = if unit_count > 0 {
-            correction_count as f64 / unit_count as f64
-        } else {
-            0.0
-        };
-
-        // Novelty: compare current batch's bias signals against recent calibration
-        let novelty_score = self.compute_novelty_score(batch);
-
-        // Dream insight freshness: check if insights.md was modified since
-        // the last metacog audit timestamp
-        let fresh_dream_insights = self.check_dream_freshness();
-
-        EffortSignals {
-            unit_count,
-            correction_density,
-            novelty_score,
-            fresh_dream_insights,
-            budget_tokens,
-        }
-    }
-
-    /// Estimate novelty by checking how many recent calibration entries
-    /// reported the same biases. If the last N entries all found the same
-    /// biases, novelty is low. If corrections or multi-failure triggers
-    /// are present (which indicate new problem types), novelty is higher.
-    fn compute_novelty_score(&self, batch: &SampleBatch) -> f64 {
-        // Load recent calibration entries
-        let entries = self.load_recent_calibrations(5);
-        if entries.is_empty() {
-            // No history → everything is novel
-            return 1.0;
-        }
-
-        // Collect all biases seen in recent history
-        let mut historical_biases: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for entry in &entries {
-            for bias in &entry.biases_detected {
-                // Normalize: lowercase, trim
-                historical_biases.insert(bias.to_lowercase().trim().to_string());
-            }
-        }
-
-        // Check what fraction of the current batch has trigger-based samples
-        // (corrections, consecutive failures) — these indicate new problem types
-        let trigger_count = batch.units.iter()
-            .filter(|u| {
-                u.input.is_correction || u.tools.windows(2).any(|w| !w[0].success && !w[1].success)
-            })
-            .count();
-
-        let trigger_ratio = if batch.units.is_empty() {
-            0.0
-        } else {
-            trigger_count as f64 / batch.units.len() as f64
-        };
-
-        // Score: high trigger ratio = novel problems; also boost if calibration
-        // scores have been trending (variance indicates instability worth investigating)
-        let score_variance = if entries.len() >= 2 {
-            let mean = entries.iter().map(|e| e.calibration_score).sum::<f64>() / entries.len() as f64;
-            let var = entries.iter()
-                .map(|e| (e.calibration_score - mean).powi(2))
-                .sum::<f64>() / entries.len() as f64;
-            var.sqrt() // standard deviation
-        } else {
-            0.0
-        };
-
-        // Combine: trigger ratio (0-1) + stddev contribution (0-0.5)
-        // Clamp to 0-1 range
-        (trigger_ratio + score_variance.min(0.5)).min(1.0)
-    }
-
-    /// Load the N most recent calibration entries from calibration.jsonl.
-    fn load_recent_calibrations(&self, n: usize) -> Vec<CalibrationEntry> {
-        let path = self.store.path("metacog/calibration.jsonl");
-        if !path.exists() {
-            return Vec::new();
-        }
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-
-        let mut entries: Vec<CalibrationEntry> = content
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-
-        // Take the last N entries (most recent)
-        if entries.len() > n {
-            entries.drain(..entries.len() - n);
-        }
-        entries
-    }
-
-    /// Check if dream insights have been updated since the last metacog audit.
-    fn check_dream_freshness(&self) -> bool {
-        let insights_path = self.store.path("dreams/insights.md");
-        let audits_dir = self.store.path("metacog/audits");
-
-        let insights_mtime = std::fs::metadata(&insights_path)
-            .and_then(|m| m.modified())
-            .ok();
-        let latest_audit_mtime = std::fs::read_dir(&audits_dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
-                    .max()
-            });
-
-        match (insights_mtime, latest_audit_mtime) {
-            (Some(insight_t), Some(audit_t)) => insight_t > audit_t,
-            (Some(_), None) => true, // insights exist but no audits yet
-            _ => false,
-        }
-    }
-
-    /// Load recent dream insights text for inclusion in the Deep analysis prompt.
-    fn load_dream_insights_context(&self) -> Option<String> {
-        let path = self.store.path("dreams/insights.md");
-        let content = std::fs::read_to_string(&path).ok()?;
-        // Take first ~4000 chars to avoid bloating the prompt
-        if content.len() > 4000 {
-            Some(content[..4000].to_string())
-        } else {
-            Some(content)
-        }
-    }
-
-    /// Build the calibration history context string for enriched prompts.
-    fn format_calibration_history(&self, lookback: usize) -> Option<String> {
-        let entries = self.load_recent_calibrations(lookback);
-        if entries.is_empty() {
-            return None;
-        }
-
-        let mut lines = vec!["Recent calibration history (newest first):".to_string()];
-        for entry in entries.iter().rev() {
-            lines.push(format!(
-                "- {} | score={:.2} | overconfident={} underconfident={} calibrated={} | biases: {}",
-                entry.date,
-                entry.calibration_score,
-                entry.overconfident_count,
-                entry.underconfident_count,
-                entry.well_calibrated_count,
-                entry.biases_detected.join(", "),
-            ));
-        }
-        Some(lines.join("\n"))
-    }
-
-    /// Remove samples older than `keep_days` from `metacog/samples.jsonl`.
-    /// Rewrites the file in-place. No-ops if the file doesn't exist or is
-    /// already within the retention window.
-    fn trim_old_samples(&self, keep_days: i64) -> Result<()> {
-        let path = self.store.path("metacog/samples.jsonl");
-        if !path.exists() {
-            return Ok(());
-        }
-
-        let content = std::fs::read_to_string(&path)?;
-        let cutoff = Utc::now() - chrono::Duration::days(keep_days);
-
-        let kept: Vec<&str> = content
-            .lines()
-            .filter(|line| {
-                // Keep lines whose timestamp field is on or after the cutoff.
-                // Lines that don't parse (e.g. blank lines, corrupt entries)
-                // are kept rather than silently discarded.
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                    if let Some(ts_str) = val.get("timestamp").and_then(|v| v.as_str()) {
-                        if let Ok(ts) = ts_str.parse::<DateTime<Utc>>() {
-                            return ts >= cutoff;
-                        }
-                    }
-                }
-                true
-            })
-            .collect();
-
-        let original_count = content.lines().count();
-        let kept_count = kept.len();
-        if kept_count < original_count {
-            let new_content = kept.join("\n") + if kept.is_empty() { "" } else { "\n" };
-            std::fs::write(&path, new_content)?;
-            info!(
-                "Metacog samples pruned: {original_count} → {kept_count} entries \
-                 (removed {} entries older than {keep_days} days)",
-                original_count - kept_count
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Add newly-processed sessions (with their file sizes) to the ledger
-    /// and persist. Storing the file size at scan time enables the staleness
-    /// check in `load_new_samples` — a session is re-queued when its JSONL
-    /// file has grown, meaning new turns have been appended.
-    fn persist_processed(&self, sessions: &[(String, u64)]) -> Result<()> {
-        if sessions.is_empty() {
-            return Ok(());
-        }
-        let mut state: ProcessedState = if self.store.exists("metacog/processed.json") {
-            self.store
-                .read_json("metacog/processed.json")
-                .unwrap_or_default()
-        } else {
-            ProcessedState::default()
-        };
-        for (sid, size) in sessions {
-            state.sessions.insert(sid.clone(), *size);
-        }
-        self.store.write_json("metacog/processed.json", &state)?;
-        Ok(())
     }
 }

@@ -157,11 +157,10 @@ fn build_turn_pairs(entries: &[transcript::TranscriptEntry])
                             AssistantBlock::Text { text } if excerpt.is_empty() => {
                                 excerpt = truncate_chars(&collapse_ws(text), 250);
                             }
-                            AssistantBlock::ToolUse { name, .. } => {
-                                if !tool_names.contains(name) {
+                            AssistantBlock::ToolUse { name, .. }
+                                if !tool_names.contains(name) => {
                                     tool_names.push(name.clone());
                                 }
-                            }
                             _ => {}
                         }
                     }
@@ -1516,10 +1515,8 @@ mod tests {
     #[test]
     fn wake_promotion_empty_when_all_promoted() {
         const THRESHOLD: f64 = 0.5;
-        let assocs = vec![
-            make_assoc(0.9, true, true),
-            make_assoc(0.8, true, true),
-        ];
+        let assocs = [make_assoc(0.9, true, true),
+            make_assoc(0.8, true, true)];
 
         let candidates: Vec<&Association> = assocs
             .iter()

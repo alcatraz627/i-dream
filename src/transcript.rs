@@ -703,11 +703,9 @@ mod tests {
     #[test]
     fn unknown_top_level_type_becomes_other() {
         // `progress`, `file-history-snapshot`, etc. must parse to Other, not error
-        let payload = vec![
-            r#"{"type":"progress","data":{"type":"hook_progress"}}"#,
+        let payload = [r#"{"type":"progress","data":{"type":"hook_progress"}}"#,
             r#"{"type":"file-history-snapshot","messageId":"abc"}"#,
-            r#"{"type":"queue-operation","op":"foo"}"#,
-        ]
+            r#"{"type":"queue-operation","op":"foo"}"#]
         .join("\n");
         let entries = parse_transcript_str(&payload).unwrap();
         assert_eq!(entries.len(), 3);

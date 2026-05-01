@@ -140,7 +140,7 @@ fn status() -> Result<()> {
             let get = |key: &str| -> String {
                 info.lines()
                     .find(|l| l.starts_with(key))
-                    .and_then(|l| l.splitn(2, '=').nth(1))
+                    .and_then(|l| l.split_once('=').map(|x| x.1))
                     .unwrap_or("?")
                     .to_string()
             };

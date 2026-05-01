@@ -184,8 +184,8 @@ fn add_hook_entry(
     let cmd_matches = |c: &str| c.contains(&script_str);
     let already_exists = arr.iter().any(|e| {
         // Wrapped shape: e.hooks[*].command
-        if let Some(inner) = e.get("hooks").and_then(|h| h.as_array()) {
-            if inner.iter().any(|h| {
+        if let Some(inner) = e.get("hooks").and_then(|h| h.as_array())
+            && inner.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
                     .map(cmd_matches)
@@ -193,7 +193,6 @@ fn add_hook_entry(
             }) {
                 return true;
             }
-        }
         // Bare shape (legacy bug): e.command
         e.get("command")
             .and_then(|c| c.as_str())
@@ -203,193 +202,6 @@ fn add_hook_entry(
 
     if !already_exists {
         arr.push(entry);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── add_hook_entry: JSON manipulation ─────────────────────
-    // This function modifies the user's ~/.claude/settings.json.
-    // Getting the JSON structure wrong means Claude Code won't
-    // recognize the hooks. Idempotency is critical — running
-    // `i-dream hooks install` twice must not create duplicates.
-
-    #[test]
-    fn add_hook_creates_entry_with_correct_wrapped_format() {
-        // 2026-05-02 schema fix: every event-array entry must be
-        // wrapped in {hooks: [{type, command}]} — the bare-command
-        // form `{type, command}` directly in the array fails Claude
-        // Code's `claude /doctor` schema validation with
-        // "Expected array, but received undefined" for the missing
-        // `hooks` field.
-        let mut hooks = serde_json::Map::new();
-        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
-
-        add_hook_entry(&mut hooks, "SessionStart", script);
-
-        let arr = hooks["SessionStart"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-        let inner = arr[0]["hooks"].as_array().expect("hooks array");
-        assert_eq!(inner.len(), 1);
-        assert_eq!(inner[0]["type"], "command");
-        assert_eq!(
-            inner[0]["command"].as_str().unwrap(),
-            "bash /tmp/hooks/session-start.sh"
-        );
-    }
-
-    #[test]
-    fn add_hook_dedup_against_legacy_bare_shape() {
-        // The pre-fix installer wrote bare {type, command} entries
-        // directly into the event array. Re-running install after the
-        // fix must NOT duplicate those — it must recognize them as
-        // already-present and skip.
-        let mut hooks = serde_json::Map::new();
-        hooks.insert("SessionStart".into(), serde_json::json!([
-            { "type": "command", "command": "bash /tmp/hooks/session-start.sh" }
-        ]));
-
-        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
-        add_hook_entry(&mut hooks, "SessionStart", script);
-
-        let arr = hooks["SessionStart"].as_array().unwrap();
-        assert_eq!(arr.len(), 1, "must dedup against legacy bare shape");
-    }
-
-    #[test]
-    fn add_hook_is_idempotent() {
-        let mut hooks = serde_json::Map::new();
-        let script = std::path::Path::new("/tmp/hooks/test.sh");
-
-        add_hook_entry(&mut hooks, "PostToolUse", script);
-        add_hook_entry(&mut hooks, "PostToolUse", script);
-        add_hook_entry(&mut hooks, "PostToolUse", script);
-
-        let arr = hooks["PostToolUse"].as_array().unwrap();
-        assert_eq!(arr.len(), 1, "Duplicate entries must not be created");
-    }
-
-    #[test]
-    fn add_hook_preserves_existing_entries() {
-        let mut hooks = serde_json::Map::new();
-
-        // Simulate an existing hook from another tool, in the schema-correct
-        // wrapped shape that other tools should also use.
-        hooks.insert("SessionStart".into(), serde_json::json!([
-            { "hooks": [{ "type": "command", "command": "bash /other-tool/hook.sh" }] }
-        ]));
-
-        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
-        add_hook_entry(&mut hooks, "SessionStart", script);
-
-        let arr = hooks["SessionStart"].as_array().unwrap();
-        assert_eq!(arr.len(), 2, "Should preserve the existing hook entry");
-        assert!(
-            arr[0]["hooks"][0]["command"].as_str().unwrap().contains("other-tool"),
-            "Original hook should be first"
-        );
-    }
-
-    #[test]
-    fn add_hook_creates_array_if_event_missing() {
-        let mut hooks = serde_json::Map::new();
-        // No "Stop" key exists yet
-
-        let script = std::path::Path::new("/tmp/hooks/stop.sh");
-        add_hook_entry(&mut hooks, "Stop", script);
-
-        assert!(hooks.contains_key("Stop"));
-        let arr = hooks["Stop"].as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-    }
-
-    // ── Hook script generation ────────────────────────────────
-    // The generated bash scripts are the bridge between Claude Code
-    // hooks and the i-dream daemon. They must include the correct
-    // socket path and activity signal path from config.
-
-    #[test]
-    fn session_start_hook_contains_socket_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
-
-        write_session_start_hook(dir.path(), &config).unwrap();
-
-        let script = std::fs::read_to_string(dir.path().join("session-start.sh")).unwrap();
-        let expected_socket = config.data_dir().join("daemon.sock");
-        assert!(
-            script.contains(&expected_socket.to_string_lossy().to_string()),
-            "Script must reference the daemon socket path"
-        );
-        assert!(script.starts_with("#!/bin/bash"), "Must have bash shebang");
-        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
-        assert!(script.contains("session_start"), "Must send session_start event");
-    }
-
-    #[test]
-    fn post_tool_use_hook_contains_activity_signal() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
-
-        write_post_tool_use_hook(dir.path(), &config).unwrap();
-
-        let script = std::fs::read_to_string(dir.path().join("post-tool-use.sh")).unwrap();
-        let activity_path = expand_tilde(&config.idle.activity_signal);
-        assert!(
-            script.contains(&activity_path.to_string_lossy().to_string()),
-            "Script must touch the activity signal file"
-        );
-        assert!(script.contains("tool_use"), "Must send tool_use event");
-    }
-
-    #[test]
-    fn stop_hook_sends_session_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
-
-        write_stop_hook(dir.path(), &config).unwrap();
-
-        let script = std::fs::read_to_string(dir.path().join("stop.sh")).unwrap();
-        assert!(script.contains("session_end"), "Must send session_end event");
-    }
-
-    #[test]
-    fn user_prompt_submit_hook_emits_no_stdout() {
-        // The hook MUST NOT print to stdout — Claude Code injects stdout
-        // into the user's message for UserPromptSubmit hooks.
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
-
-        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
-
-        let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh")).unwrap();
-        // The only `echo` allowed is inside the Python heredoc or the `touch` command.
-        // There must be no bare `echo "$RESPONSE"` that prints to stdout.
-        assert!(script.contains("user_signal"), "Must send user_signal event");
-        assert!(script.contains("IDREAM_INPUT"), "Must pass prompt via env var");
-        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
-        // Key safety check: no raw echo that would inject into user's message
-        assert!(
-            !script.contains("\necho \"$RESULT\""),
-            "Must NOT echo result to stdout — that would corrupt user messages"
-        );
-    }
-
-    #[test]
-    fn user_prompt_submit_hook_contains_socket_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
-
-        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
-
-        let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh")).unwrap();
-        let expected_socket = config.data_dir().join("daemon.sock");
-        assert!(
-            script.contains(&expected_socket.to_string_lossy().to_string()),
-            "Script must reference the daemon socket path"
-        );
     }
 }
 
@@ -590,4 +402,191 @@ fi
     );
     std::fs::write(dir.join("stop.sh"), &script)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── add_hook_entry: JSON manipulation ─────────────────────
+    // This function modifies the user's ~/.claude/settings.json.
+    // Getting the JSON structure wrong means Claude Code won't
+    // recognize the hooks. Idempotency is critical — running
+    // `i-dream hooks install` twice must not create duplicates.
+
+    #[test]
+    fn add_hook_creates_entry_with_correct_wrapped_format() {
+        // 2026-05-02 schema fix: every event-array entry must be
+        // wrapped in {hooks: [{type, command}]} — the bare-command
+        // form `{type, command}` directly in the array fails Claude
+        // Code's `claude /doctor` schema validation with
+        // "Expected array, but received undefined" for the missing
+        // `hooks` field.
+        let mut hooks = serde_json::Map::new();
+        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
+
+        add_hook_entry(&mut hooks, "SessionStart", script);
+
+        let arr = hooks["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let inner = arr[0]["hooks"].as_array().expect("hooks array");
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0]["type"], "command");
+        assert_eq!(
+            inner[0]["command"].as_str().unwrap(),
+            "bash /tmp/hooks/session-start.sh"
+        );
+    }
+
+    #[test]
+    fn add_hook_dedup_against_legacy_bare_shape() {
+        // The pre-fix installer wrote bare {type, command} entries
+        // directly into the event array. Re-running install after the
+        // fix must NOT duplicate those — it must recognize them as
+        // already-present and skip.
+        let mut hooks = serde_json::Map::new();
+        hooks.insert("SessionStart".into(), serde_json::json!([
+            { "type": "command", "command": "bash /tmp/hooks/session-start.sh" }
+        ]));
+
+        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
+        add_hook_entry(&mut hooks, "SessionStart", script);
+
+        let arr = hooks["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "must dedup against legacy bare shape");
+    }
+
+    #[test]
+    fn add_hook_is_idempotent() {
+        let mut hooks = serde_json::Map::new();
+        let script = std::path::Path::new("/tmp/hooks/test.sh");
+
+        add_hook_entry(&mut hooks, "PostToolUse", script);
+        add_hook_entry(&mut hooks, "PostToolUse", script);
+        add_hook_entry(&mut hooks, "PostToolUse", script);
+
+        let arr = hooks["PostToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "Duplicate entries must not be created");
+    }
+
+    #[test]
+    fn add_hook_preserves_existing_entries() {
+        let mut hooks = serde_json::Map::new();
+
+        // Simulate an existing hook from another tool, in the schema-correct
+        // wrapped shape that other tools should also use.
+        hooks.insert("SessionStart".into(), serde_json::json!([
+            { "hooks": [{ "type": "command", "command": "bash /other-tool/hook.sh" }] }
+        ]));
+
+        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
+        add_hook_entry(&mut hooks, "SessionStart", script);
+
+        let arr = hooks["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "Should preserve the existing hook entry");
+        assert!(
+            arr[0]["hooks"][0]["command"].as_str().unwrap().contains("other-tool"),
+            "Original hook should be first"
+        );
+    }
+
+    #[test]
+    fn add_hook_creates_array_if_event_missing() {
+        let mut hooks = serde_json::Map::new();
+        // No "Stop" key exists yet
+
+        let script = std::path::Path::new("/tmp/hooks/stop.sh");
+        add_hook_entry(&mut hooks, "Stop", script);
+
+        assert!(hooks.contains_key("Stop"));
+        let arr = hooks["Stop"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+    }
+
+    // ── Hook script generation ────────────────────────────────
+    // The generated bash scripts are the bridge between Claude Code
+    // hooks and the i-dream daemon. They must include the correct
+    // socket path and activity signal path from config.
+
+    #[test]
+    fn session_start_hook_contains_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_session_start_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("session-start.sh")).unwrap();
+        let expected_socket = config.data_dir().join("daemon.sock");
+        assert!(
+            script.contains(&expected_socket.to_string_lossy().to_string()),
+            "Script must reference the daemon socket path"
+        );
+        assert!(script.starts_with("#!/bin/bash"), "Must have bash shebang");
+        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
+        assert!(script.contains("session_start"), "Must send session_start event");
+    }
+
+    #[test]
+    fn post_tool_use_hook_contains_activity_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_post_tool_use_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("post-tool-use.sh")).unwrap();
+        let activity_path = expand_tilde(&config.idle.activity_signal);
+        assert!(
+            script.contains(&activity_path.to_string_lossy().to_string()),
+            "Script must touch the activity signal file"
+        );
+        assert!(script.contains("tool_use"), "Must send tool_use event");
+    }
+
+    #[test]
+    fn stop_hook_sends_session_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_stop_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("stop.sh")).unwrap();
+        assert!(script.contains("session_end"), "Must send session_end event");
+    }
+
+    #[test]
+    fn user_prompt_submit_hook_emits_no_stdout() {
+        // The hook MUST NOT print to stdout — Claude Code injects stdout
+        // into the user's message for UserPromptSubmit hooks.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh")).unwrap();
+        // The only `echo` allowed is inside the Python heredoc or the `touch` command.
+        // There must be no bare `echo "$RESPONSE"` that prints to stdout.
+        assert!(script.contains("user_signal"), "Must send user_signal event");
+        assert!(script.contains("IDREAM_INPUT"), "Must pass prompt via env var");
+        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
+        // Key safety check: no raw echo that would inject into user's message
+        assert!(
+            !script.contains("\necho \"$RESULT\""),
+            "Must NOT echo result to stdout — that would corrupt user messages"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_hook_contains_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
+
+        let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh")).unwrap();
+        let expected_socket = config.data_dir().join("daemon.sock");
+        assert!(
+            script.contains(&expected_socket.to_string_lossy().to_string()),
+            "Script must reference the daemon socket path"
+        );
+    }
 }

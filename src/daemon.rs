@@ -284,11 +284,10 @@ impl Daemon {
         // Always attempt to clean the PID file on exit — whether the
         // foreground loop returned Ok or Err. Best-effort: if the file
         // already vanished (someone ran `i-dream stop`), that's fine.
-        if let Err(e) = std::fs::remove_file(&pid_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
+        if let Err(e) = std::fs::remove_file(&pid_path)
+            && e.kind() != std::io::ErrorKind::NotFound {
                 debug!("Failed to remove PID file on shutdown: {e}");
             }
-        }
 
         // Flush the in-memory state snapshot one last time so `status`
         // sees the final `last_activity` after a graceful SIGTERM.
@@ -451,8 +450,8 @@ impl Daemon {
                     continue;
                 }
                 // Quick mtime check to skip files untouched in 7 days.
-                if let Ok(meta) = session.metadata() {
-                    if let Ok(modified) = meta.modified() {
+                if let Ok(meta) = session.metadata()
+                    && let Ok(modified) = meta.modified() {
                         let age = std::time::SystemTime::now()
                             .duration_since(modified)
                             .unwrap_or_default();
@@ -460,7 +459,6 @@ impl Daemon {
                             continue;
                         }
                     }
-                }
                 let Ok(content) = std::fs::read_to_string(&path) else { continue };
                 for line in content.lines() {
                     // Parse only assistant entries (they carry usage).
@@ -1155,11 +1153,10 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // `UserSignal` gets a secondary write to logs/signals.jsonl so the
     // dreaming module can query sentiment trends independently of the
     // general event stream. Best-effort like the metacog activity write.
-    if let HookEvent::UserSignal { .. } = &event {
-        if let Err(e) = store.append_jsonl(SIGNALS_LOG, &record) {
+    if let HookEvent::UserSignal { .. } = &event
+        && let Err(e) = store.append_jsonl(SIGNALS_LOG, &record) {
             warn!("Failed to write user signal to signals log: {e:#}");
         }
-    }
 
     // D3 v2 (2026-05-01): if this user prompt is a correction and any
     // dream-spawned intention fired in the recent past, infer that the
@@ -1167,11 +1164,10 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // insight-feedback.jsonl. The next Wake cycle will apply it; per D3 v1,
     // confidence dropping below 0.2 then marks the source association
     // dismissed permanently.
-    if let HookEvent::UserSignal { correction: true, .. } = &event {
-        if let Err(e) = auto_downvote_recently_fired_intentions(store) {
+    if let HookEvent::UserSignal { correction: true, .. } = &event
+        && let Err(e) = auto_downvote_recently_fired_intentions(store) {
             warn!("D3 v2 auto-downvote failed: {e:#}");
         }
-    }
 
     // SessionStart is the only event that gets a non-empty response —
     // the hook script echoes whatever we write back into Claude's context.

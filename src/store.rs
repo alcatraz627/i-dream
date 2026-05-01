@@ -368,7 +368,7 @@ mod tests {
         use std::io::Write;
         let path = store.path("log.jsonl");
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(file, "").unwrap();
+        writeln!(file).unwrap();
         writeln!(file, "  ").unwrap();
 
         let loaded: Vec<TestEntry> = store.read_jsonl("log.jsonl").unwrap();
