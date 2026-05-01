@@ -2112,22 +2112,20 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 <!-- UMD script tags (NOT ES modules) so the page works opened from
      file:// — ESM imports from CDN are blocked by browser CORS on
      file:// origins. UMD attaches `graphology` and `Sigma` to window. -->
-<script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/dist/graphology-layout-forceatlas2.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/sigma@2.4.0/build/sigma.min.js"></script>
+<!-- Vendored libs (#45) — embedded inline so the dashboard works offline.
+     ~170 KB total. The original CDN script tags worked but failed when
+     the user opened the HTML from file:// without an internet connection
+     OR when jsdelivr was blocked. -->
+<script>{graphology_js}</script>
+<script>{sigma_js}</script>
 <script>
 (function() {{
-  // Sigma 2.x exports a global `Sigma`; graphology UMD exports `graphology`.
   var Graph = (window.graphology && window.graphology.Graph) || window.Graph;
   var Sigma = window.Sigma;
-  var forceAtlas2 = window.graphologyLibrary
-    ? window.graphologyLibrary.layoutForceAtlas2
-    : window.forceAtlas2;
-  if (!Graph || !Sigma || !forceAtlas2) {{
+  if (!Graph || !Sigma) {{
     document.getElementById('pg-canvas').innerHTML =
       '<div style="padding:24px;color:#999">Graph libraries failed to load. ' +
-      'If opening from file:// some browsers block CDN scripts. Serve via ' +
-      '<code>python3 -m http.server</code> instead.</div>';
+      'Check the browser console for parse errors.</div>';
     return;
   }}
   const data = JSON.parse(document.getElementById('pg-data').textContent);
@@ -2175,8 +2173,65 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
     }}
   }}
 
-  // Force-directed layout — 200 iterations, gravity 1, scaling ratio 10.
-  forceAtlas2.assign(graph, {{ iterations: 200, settings: {{ gravity: 1, scalingRatio: 10 }} }});
+  // Inline wedge layout — replaces the FA2 dependency. Pattern nodes
+  // get a pie-wedge position by category (high-confidence near outer
+  // rim, low-confidence near center). Association nodes are centroid-
+  // placed across the patterns they link. Mirrors the Swift dashboard's
+  // wedge layout so both renderers feel structurally identical.
+  (function layout() {{
+    var patternsByCat = {{}};
+    var assocs = [];
+    graph.forEachNode(function(id, attrs) {{
+      var d = attrs._data;
+      if (d.kind === 'pattern') {{
+        var cat = d.category || 'other';
+        (patternsByCat[cat] = patternsByCat[cat] || []).push(id);
+      }} else {{
+        assocs.push(id);
+      }}
+    }});
+    var cats = Object.keys(patternsByCat).sort();
+    var nCats = Math.max(cats.length, 1);
+    var gapAng = 6 * Math.PI / 180;
+    var availArc = 2 * Math.PI - gapAng * nCats;
+    var totalP = 0;
+    cats.forEach(function(c) {{ totalP += patternsByCat[c].length; }});
+    var startAng = -Math.PI / 2;
+    cats.forEach(function(cat) {{
+      var pats = patternsByCat[cat];
+      pats.sort(function(a,b) {{ return graph.getNodeAttribute(b, '_data').confidence - graph.getNodeAttribute(a, '_data').confidence; }});
+      var arc = availArc * (pats.length / totalP);
+      pats.forEach(function(pid, j) {{
+        var t = pats.length === 1 ? 0.5 : (0.05 + 0.9 * j / (pats.length - 1));
+        var ang = startAng + t * arc;
+        var conf = graph.getNodeAttribute(pid, '_data').confidence || 0;
+        var radius = 0.2 + conf * 0.75;
+        graph.setNodeAttribute(pid, 'x', radius * Math.cos(ang));
+        graph.setNodeAttribute(pid, 'y', radius * Math.sin(ang));
+      }});
+      startAng += arc + gapAng;
+    }});
+    // Associations sit at the centroid of their linked pattern positions,
+    // pulled slightly toward center so they don't overlap pattern nodes.
+    assocs.forEach(function(aid) {{
+      var sumX = 0, sumY = 0, n = 0;
+      graph.forEachNeighbor(aid, function(nid) {{
+        sumX += graph.getNodeAttribute(nid, 'x') || 0;
+        sumY += graph.getNodeAttribute(nid, 'y') || 0;
+        n += 1;
+      }});
+      if (n === 0) {{
+        // Orphan association — put it in a small inner ring.
+        var i = assocs.indexOf(aid);
+        var ang = (i / Math.max(assocs.length, 1)) * 2 * Math.PI;
+        graph.setNodeAttribute(aid, 'x', 0.1 * Math.cos(ang));
+        graph.setNodeAttribute(aid, 'y', 0.1 * Math.sin(ang));
+      }} else {{
+        graph.setNodeAttribute(aid, 'x', (sumX / n) * 0.7);
+        graph.setNodeAttribute(aid, 'y', (sumY / n) * 0.7);
+      }}
+    }});
+  }})();
 
   let edgeMode = 'from-selected';
   let actionableOnly = false;
@@ -2277,6 +2332,8 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 </section>
 "##,
         payload = payload,
+        graphology_js = include_str!("../static/graphology.umd.min.js"),
+        sigma_js      = include_str!("../static/sigma.min.js"),
     )
 }
 

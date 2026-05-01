@@ -4,6 +4,21 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-01 D4v2 + D6v2 + offline graph
+
+Three loop-closing changes. Bumping minor since the dashboard graph
+section now ships entirely self-contained (no CDN dependency).
+
+### Added
+- **D4 v2** — widget fires a system notification when a new Sunday briefing lands. Polls `dreams/briefings/state.json` every ~5 min; when `last_iso_week` changes from the value previously seen, fires via `osascript display notification` (UNUserNotificationCenter doesn't work for unbundled processes). First-run primes silently to avoid "welcome — here's a briefing from 3 weeks ago."
+- **D6 v2** — daemon auto-regenerates per-project briefs after each consolidation cycle. Walks `patterns.json`, finds max `last_seen` per project, regenerates briefs that are missing OR older than the latest pattern activity. Closes the "brief is 3 weeks out of date" failure mode.
+- **`static/`** — vendored `sigma.min.js` (97KB) + `graphology.umd.min.js` (74KB). Embedded into the HTML dashboard via `include_str!`.
+
+### Changed
+- **HTML dashboard graph section** — removed the three jsdelivr CDN `<script>` tags; now embeds the two libraries inline via `include_str!`. ForceAtlas2 dependency removed entirely; replaced with a 50-line inline wedge layout that matches the Swift dashboard's wedge geometry. Pattern nodes get a pie-wedge position by category (radius proportional to confidence); association nodes are placed at the centroid of their linked patterns. Dashboard now works offline.
+
+---
+
 ## [0.2.5] — 2026-05-01 doc audit pass
 
 ### Added
