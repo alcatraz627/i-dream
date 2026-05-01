@@ -11,6 +11,7 @@ pub mod intuition;
 pub mod metacog;
 pub mod prospective;
 pub mod user_settings;
+pub mod weekly_briefing;
 
 use crate::api::ClaudeClient;
 use crate::config::Config;

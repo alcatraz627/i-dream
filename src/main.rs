@@ -158,6 +158,31 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::Briefing { force } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let client = api::ClaudeClient::new()?;
+            let bm = modules::weekly_briefing::WeeklyBriefingModule::new(&config, &store);
+            let result = if force {
+                Some(bm.run_force(&client).await?)
+            } else {
+                bm.run(&client).await?
+            };
+            match result {
+                Some((tokens, path)) => {
+                    println!(
+                        "✓ Weekly briefing written to {}\n  Tokens used: {tokens}",
+                        path.display()
+                    );
+                }
+                None => {
+                    println!(
+                        "Skipping — already ran this ISO week. Use --force to regenerate."
+                    );
+                }
+            }
+        }
+
         Command::Config => {
             let config = config::Config::load(&cli.config)?;
             println!("{}", toml::to_string_pretty(&config)?);

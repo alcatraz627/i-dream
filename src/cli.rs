@@ -83,6 +83,19 @@ pub enum Command {
         run_tests: bool,
     },
 
+    /// Synthesize a weekly briefing from the past 7 days of dream activity.
+    ///
+    /// Writes a 5-section markdown brief (worked-on / improved / recurring
+    /// frustration / one idea / one question) to
+    /// `~/.claude/subconscious/dreams/briefings/<YYYY-Www>.md` and prints
+    /// the path on success. Without --force, refuses to re-run within the
+    /// same ISO week.
+    Briefing {
+        /// Force regeneration even if a briefing already exists for this ISO week.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Show current configuration
     Config,
 

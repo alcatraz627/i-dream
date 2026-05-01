@@ -249,6 +249,7 @@ impl Daemon {
                 }
                 _ = tokio::time::sleep(check_interval) => {
                     self.check_and_run().await;
+                    self.check_and_run_briefing().await;
                 }
                 accept = listener.accept() => {
                     match accept {
@@ -307,6 +308,41 @@ impl Daemon {
     /// loop) is all in `run_foreground`.
     pub async fn daemonize(&self) -> Result<()> {
         self.run_foreground().await
+    }
+
+    /// D4 (2026-05-01): wall-clock check for the Sunday morning briefing.
+    /// Cheap — early-exits on weekday/hour mismatch before any I/O. The
+    /// underlying module guarantees one-fire-per-ISO-week via state.json.
+    async fn check_and_run_briefing(&self) {
+        let bm = crate::modules::weekly_briefing::WeeklyBriefingModule::new(
+            &self.config,
+            &self.store,
+        );
+        if !bm.should_run_now() {
+            return;
+        }
+        let client = match crate::api::ClaudeClient::new() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("weekly briefing: failed to construct API client: {e:#}");
+                return;
+            }
+        };
+        match bm.run(&client).await {
+            Ok(Some((tokens, path))) => {
+                info!(
+                    "weekly briefing: wrote {} ({tokens} tokens)",
+                    path.display()
+                );
+            }
+            Ok(None) => {
+                // should_run_now said yes but the inner check refused (race
+                // with manual --force run). Silent skip.
+            }
+            Err(e) => {
+                warn!("weekly briefing failed: {e:#}");
+            }
+        }
     }
 
     /// Check idle state and run consolidation if appropriate.
