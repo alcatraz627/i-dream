@@ -127,6 +127,29 @@ pub enum Command {
         action: WidgetAction,
     },
 
+    /// D17 — prune dormant low-confidence patterns from dreams/patterns.json.
+    ///
+    /// Default rule: confidence < 0.4 AND last_seen older than 60 days. The
+    /// removed entries are written to `dreams/pruned/<ts>.json` first so
+    /// they can be restored later via --restore. No pattern is ever
+    /// silently destroyed.
+    PrunePatterns {
+        /// Preview without modifying patterns.json.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confidence cutoff. Patterns at or above are kept.
+        #[arg(long, default_value_t = 0.4)]
+        max_confidence: f64,
+        /// Dormancy cutoff in days. Patterns seen within this window are kept.
+        #[arg(long, default_value_t = 60)]
+        days: i64,
+        /// Restore patterns from a previously-written backup file. Accepts
+        /// either a bare timestamp ("20260502-1310") matching a file in
+        /// dreams/pruned/, or a full path to a backup JSON.
+        #[arg(long)]
+        restore: Option<String>,
+    },
+
     /// Prune oldest entries from JSONL stores to reclaim disk space.
     ///
     /// Removes the oldest events/activity/signals/journal entries so each

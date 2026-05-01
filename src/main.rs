@@ -220,6 +220,102 @@ async fn main() -> Result<()> {
             println!("{}", toml::to_string_pretty(&config)?);
         }
 
+        Command::PrunePatterns { dry_run, max_confidence, days, restore } => {
+            use chrono::{DateTime, Duration, Utc};
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+
+            // --restore: merge a backup file's patterns back into patterns.json.
+            // No-op if any restored id already exists (idempotent rescue).
+            if let Some(backup_id) = restore {
+                let backup_path = if std::path::Path::new(&backup_id).is_file() {
+                    std::path::PathBuf::from(&backup_id)
+                } else {
+                    store.path(&format!("dreams/pruned/{}.json", backup_id))
+                };
+                if !backup_path.exists() {
+                    anyhow::bail!("Backup not found: {}", backup_path.display());
+                }
+                let backup_bytes = std::fs::read(&backup_path)?;
+                let pruned: Vec<modules::dreaming::ExtractedPattern> =
+                    serde_json::from_slice(&backup_bytes)?;
+                let mut current: Vec<modules::dreaming::ExtractedPattern> =
+                    store.read_json("dreams/patterns.json").unwrap_or_default();
+                let existing_ids: std::collections::HashSet<String> =
+                    current.iter().map(|p| p.id.clone()).collect();
+                let mut restored = 0usize;
+                for p in pruned {
+                    if !existing_ids.contains(&p.id) {
+                        current.push(p);
+                        restored += 1;
+                    }
+                }
+                if !dry_run {
+                    store.write_json("dreams/patterns.json", &current)?;
+                }
+                println!(
+                    "{}Restored {restored} pattern(s) from {}\n  Total now: {}",
+                    if dry_run { "[dry-run] " } else { "" },
+                    backup_path.display(),
+                    current.len(),
+                );
+                return Ok(());
+            }
+
+            // Normal pruning path.
+            let all: Vec<modules::dreaming::ExtractedPattern> =
+                store.read_json("dreams/patterns.json").unwrap_or_default();
+            let cutoff = Utc::now() - Duration::days(days);
+            let (to_prune, to_keep): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| {
+                if p.confidence >= max_confidence { return false; }
+                // Unparseable last_seen → treat as dormant (very old).
+                let last_seen = DateTime::parse_from_rfc3339(&p.last_seen)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or(cutoff - Duration::days(1));
+                last_seen < cutoff
+            });
+
+            if to_prune.is_empty() {
+                println!(
+                    "Nothing to prune. {} patterns kept (threshold: confidence < {:.2} AND last_seen > {} days old).",
+                    to_keep.len(), max_confidence, days,
+                );
+                return Ok(());
+            }
+
+            // Always write a backup before mutating patterns.json. Backup
+            // path is timestamped so successive prunes don't overwrite.
+            let stamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+            let backup_rel = format!("dreams/pruned/{}.json", stamp);
+            let backup_path = store.path(&backup_rel);
+            if !dry_run {
+                if let Some(parent) = backup_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                store.write_json(&backup_rel, &to_prune)?;
+                store.write_json("dreams/patterns.json", &to_keep)?;
+            }
+
+            println!(
+                "{}Pruned {} pattern(s) (kept {}).\n  Backup: {}\n  Restore: i-dream prune-patterns --restore {}",
+                if dry_run { "[dry-run] " } else { "" },
+                to_prune.len(),
+                to_keep.len(),
+                backup_path.display(),
+                stamp,
+            );
+            // Show the lowest-confidence prunees so the user can sanity-check.
+            let mut preview: Vec<_> = to_prune.iter().collect();
+            preview.sort_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap());
+            for p in preview.iter().take(5) {
+                let snippet = p.pattern.chars().take(72).collect::<String>();
+                println!("    [{:.2}] {} — {}", p.confidence, p.category, snippet);
+            }
+            if preview.len() > 5 {
+                println!("    … +{} more", preview.len() - 5);
+            }
+        }
+
         Command::Prune {
             dry_run,
             keep_events,
