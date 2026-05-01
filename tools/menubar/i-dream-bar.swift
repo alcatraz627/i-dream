@@ -8,6 +8,11 @@
 
 import AppKit
 import Foundation
+// D4 v2 note: we deliberately do NOT import UserNotifications. The
+// widget runs as an ad-hoc-signed loose binary (no .app bundle), and
+// `+[UNUserNotificationCenter currentNotificationCenter]` crashes for
+// unbundled processes. Falling back to `osascript display notification`
+// which works for any process and gives the same end-user experience.
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -19,6 +24,9 @@ private let iDream    = home + "/.cargo/bin/i-dream"
 private let debugLog  = "/tmp/i-dream-bar.log"
 private let tracesDir   = subDir + "/dreams/traces"
 private let activityFile = subDir + "/.last-activity"
+
+// D4 v2 — UN notification dedup
+private let lastSeenBriefingKey = "dev.i-dream.lastSeenBriefingWeek"
 private let signalsFile  = subDir + "/logs/signals.jsonl"
 
 /// Falls back to the mtime of .last-activity since state.json always has
@@ -5456,6 +5464,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var animFrame       = 0
     private var animTimer:      Timer?
 
+    /// D4 v2 — throttle for the briefing-state poll. refresh() ticks
+    /// roughly once a minute; we only want to check briefing state every
+    /// ~5 minutes (a Sunday briefing fires at most once per ISO week
+    /// anyway).
+    private var briefingCheckCounter = 0
+
     // Persistent menu instance (rebuilt in-place via NSMenuDelegate)
     private var theMenu: NSMenu!
 
@@ -5466,6 +5480,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // dark regardless of system theme. The dashboard panel's
         // .appearance overrides the process default for that panel only.
         NSApp.appearance = NSAppearance(named: .darkAqua)
+
+        // D4 v2: no permission request needed — using osascript fallback
+        // (see top-of-file comment). Authorization on macOS for shell
+        // notifications happens once via System Settings → Notifications
+        // → Script Editor → allow notifications, but the first call will
+        // also prompt the user inline.
 
         CrashReporter.install()
         CrashReporter.checkForPreviousCrash()
@@ -5534,6 +5554,14 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cachedHighConfCount    = allPats.filter { $0.confidence >= 0.8 }.count
         dlog("refresh: running=\(cachedRunning) cycles=\(cachedState?.totalCycles ?? -1)")
         checkCycleCompletion()
+        // D4 v2: poll briefing state every ~5min (refresh runs ~1min,
+        // counter throttles to 5). Reads dreams/briefings/state.json,
+        // compares last_iso_week to UserDefaults; if changed → notify.
+        briefingCheckCounter += 1
+        if briefingCheckCounter >= 5 {
+            briefingCheckCounter = 0
+            checkForNewBriefing()
+        }
         updateButton()
         // Keep HUD current if visible
         if let panel = hudPanel, let tv = panel.contentView?.subviews.first as? NSTextView {
@@ -7348,6 +7376,56 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let s = sample(["-x", "i-dream-bar"],    label: "bar")    { parts.append(s) }
         hudProcSample = parts.isEmpty ? "—" : parts.joined(separator: " · ")
         return hudProcSample
+    }
+
+    /// D4 v2: read dreams/briefings/state.json and compare its
+    /// last_iso_week against the previously-seen value in UserDefaults.
+    /// On change → fire a UNUserNotification linking to the new
+    /// briefing file. Silently degrades on read errors / missing file
+    /// (briefings may not exist yet).
+    private func checkForNewBriefing() {
+        let path = subDir + "/dreams/briefings/state.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let week = json["last_iso_week"] as? String, !week.isEmpty
+        else { return }
+        let lastSeen = UserDefaults.standard.string(forKey: lastSeenBriefingKey) ?? ""
+        guard week != lastSeen else { return }
+        // First run after install: don't fire for the historical state.
+        // Just record the current week as seen and bail out.
+        if lastSeen.isEmpty {
+            UserDefaults.standard.set(week, forKey: lastSeenBriefingKey)
+            dlog("briefing: priming lastSeen=\(week) (no notification on first run)")
+            return
+        }
+        // New briefing — fire via osascript (works for unbundled processes).
+        UserDefaults.standard.set(week, forKey: lastSeenBriefingKey)
+        let briefingPath = subDir + "/dreams/briefings/\(week).md"
+        let body: String = (try? String(contentsOfFile: briefingPath, encoding: .utf8))
+            .map { String($0.prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines) }
+            ?? "Tap to read this week's briefing."
+        // Sanitize — osascript double-quote strings can't contain unescaped
+        // quotes, newlines, or backslashes.
+        func escape(_ s: String) -> String {
+            s.replacingOccurrences(of: "\\", with: "\\\\")
+             .replacingOccurrences(of: "\"", with: "\\\"")
+             .replacingOccurrences(of: "\n", with: " ")
+             .replacingOccurrences(of: "\r", with: " ")
+        }
+        let title = "i-dream — \(week) briefing"
+        let cmd = "display notification \"\(escape(body))\" with title \"\(escape(title))\" sound name \"Glass\""
+        DispatchQueue.global(qos: .background).async {
+            let task = Process()
+            task.launchPath = "/usr/bin/osascript"
+            task.arguments  = ["-e", cmd]
+            do {
+                try task.run()
+                task.waitUntilExit()
+                dlog("briefing notification fired for week \(week)")
+            } catch {
+                dlog("briefing notification osascript failed: \(error)")
+            }
+        }
     }
 
     /// Set the HUD hover-label text + colour. Called by HoverButton on
