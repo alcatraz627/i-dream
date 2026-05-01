@@ -2625,8 +2625,11 @@ final class DashboardWindowController: NSObject {
         return (sv, tv)
     }
 
-    /// Horizontal stats banner — 40px strip with key metrics.
-    /// `stats` items are displayed as   Label: Value  │  Label: Value  │ …
+    /// Horizontal stats banner — T-A1 (2026-05-01): rendered as a row of
+    /// "stat chips" instead of the comma-soup that round-2 reviewer A
+    /// flagged as "a paragraph to read." Each chip is a stacked
+    /// caption-on-top + value-below pair, with tabular numerals so values
+    /// align column-by-column across chips.
     private func makeStatsBanner(frame: NSRect,
                                  stats: [(label: String, value: String, color: NSColor?)]) -> NSView {
         let banner = NSView(frame: frame)
@@ -2639,30 +2642,39 @@ final class DashboardWindowController: NSObject {
         sep.boxType = .separator; sep.autoresizingMask = [.width]
         banner.addSubview(sep)
 
-        var x: CGFloat = 18
-        let midY = frame.height / 2
+        // Lay out chips evenly across the banner width.
+        let chipW: CGFloat = 88
+        let gap:   CGFloat = 4
+        let totalW = CGFloat(stats.count) * chipW + CGFloat(max(stats.count - 1, 0)) * gap
+        var x: CGFloat = max(14, (frame.width - totalW) / 2)
+        let chipY:    CGFloat = 4
+        let chipH:    CGFloat = frame.height - 8
 
-        for (i, stat) in stats.enumerated() {
-            if i > 0 {
-                let pipe = NSTextField(labelWithString: "│")
-                pipe.font = .systemFont(ofSize: 11); pipe.textColor = .separatorColor
-                pipe.sizeToFit()
-                pipe.setFrameOrigin(CGPoint(x: x, y: midY - pipe.frame.height / 2))
-                banner.addSubview(pipe)
-                x += pipe.frame.width + 10
-            }
-            let lbl = NSTextField(labelWithString: stat.label + ": ")
-            lbl.font = .systemFont(ofSize: 11); lbl.textColor = .secondaryLabelColor
-            lbl.sizeToFit()
-            lbl.setFrameOrigin(CGPoint(x: x, y: midY - lbl.frame.height / 2))
-            banner.addSubview(lbl); x += lbl.frame.width + 1
+        for stat in stats {
+            let chip = NSView(frame: NSRect(x: x, y: chipY, width: chipW, height: chipH))
+            chip.wantsLayer = true
+            chip.layer?.cornerRadius = 4
+            chip.layer?.backgroundColor = NSColor.windowBackgroundColor
+                .blended(withFraction: 0.06, of: .labelColor)?.cgColor
+
+            let lbl = NSTextField(labelWithString: stat.label.uppercased())
+            lbl.font = .systemFont(ofSize: 9, weight: .semibold)
+            lbl.textColor = .tertiaryLabelColor
+            lbl.alignment = .center
+            lbl.frame = NSRect(x: 4, y: chipH - 14, width: chipW - 8, height: 12)
+            lbl.backgroundColor = .clear; lbl.drawsBackground = false; lbl.isBordered = false
+            chip.addSubview(lbl)
 
             let val = NSTextField(labelWithString: stat.value)
-            val.font = .systemFont(ofSize: 11, weight: .semibold)
+            val.font = NSFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
             val.textColor = stat.color ?? .labelColor
-            val.sizeToFit()
-            val.setFrameOrigin(CGPoint(x: x, y: midY - val.frame.height / 2))
-            banner.addSubview(val); x += val.frame.width + 14
+            val.alignment = .center
+            val.frame = NSRect(x: 4, y: 2, width: chipW - 8, height: 18)
+            val.backgroundColor = .clear; val.drawsBackground = false; val.isBordered = false
+            chip.addSubview(val)
+
+            banner.addSubview(chip)
+            x += chipW + gap
         }
         return banner
     }
