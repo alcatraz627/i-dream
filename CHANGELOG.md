@@ -4,6 +4,20 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-02 hooks installer schema fix
+
+### Fixed
+- **`hooks install` was emitting bare `{type, command}` entries** directly into each event array. `claude /doctor` rejected them with `Expected array, but received undefined` for the missing `hooks` field. The Claude Code hook schema requires every event-array item be wrapped in `{hooks: [{type, command}]}` — `matcher` is optional and only meaningful for tool-scoped events. Fixed in `src/hooks.rs::add_hook_entry`.
+- **Dedup now checks both shapes.** The bug above shipped wrapped entries earlier in the same arrays and bare entries later. The original dedup only looked at `e.command` (bare shape) and missed the wrapped ones, so a re-run kept appending duplicates. New dedup walks `e.hooks[*].command` first AND falls back to `e.command` for legacy bare entries.
+- **Tests updated**: `add_hook_creates_entry_with_correct_wrapped_format` asserts the new shape; new `add_hook_dedup_against_legacy_bare_shape` test locks in the migration behavior. 286 tests pass (1 new).
+
+### Migration note
+If your `~/.claude/settings.json` has existing bare-shape entries from a pre-0.3.1 install, either:
+1. Run a one-shot `jq` to prune them: `jq '.hooks |= with_entries(.value |= map(select(.hooks != null)))' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json`
+2. OR delete and re-install: `i-dream hooks uninstall && i-dream hooks install` — the new dedup will keep wrapped, the uninstall already removed bare.
+
+---
+
 ## [0.3.0] — 2026-05-01 D4v2 + D6v2 + offline graph
 
 Three loop-closing changes. Bumping minor since the dashboard graph

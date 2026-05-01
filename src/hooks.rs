@@ -155,9 +155,18 @@ fn add_hook_entry(
     event: &str,
     script_path: &std::path::Path,
 ) {
+    // Schema-correct entry: every event-array item must be wrapped in
+    // `{hooks: [{type, command}]}`. `matcher` is optional and only
+    // meaningful for tool-scoped events (PostToolUse / PreToolUse) — we
+    // omit it so the entry matches all tools, which matches the prior
+    // intent. Bug history (2026-05-02): the original installer emitted
+    // bare `{type, command}` objects which `claude /doctor` rejected
+    // with "Expected array, but received undefined" for `hooks`.
     let entry = serde_json::json!({
-        "type": "command",
-        "command": format!("bash {}", script_path.display())
+        "hooks": [{
+            "type": "command",
+            "command": format!("bash {}", script_path.display())
+        }]
     });
 
     let arr = hooks
@@ -166,12 +175,29 @@ fn add_hook_entry(
         .as_array_mut()
         .unwrap();
 
-    // Don't add duplicates
+    // Dedup: the script path appears in BOTH legal places — wrapped in
+    // `e.hooks[*].command` (correct shape) AND historically in
+    // `e.command` (the bare-shape bug). Check both so a re-run of
+    // install never appends a duplicate, regardless of how the
+    // previous version wrote it.
     let script_str = script_path.display().to_string();
+    let cmd_matches = |c: &str| c.contains(&script_str);
     let already_exists = arr.iter().any(|e| {
+        // Wrapped shape: e.hooks[*].command
+        if let Some(inner) = e.get("hooks").and_then(|h| h.as_array()) {
+            if inner.iter().any(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(cmd_matches)
+                    .unwrap_or(false)
+            }) {
+                return true;
+            }
+        }
+        // Bare shape (legacy bug): e.command
         e.get("command")
             .and_then(|c| c.as_str())
-            .map(|cmd| cmd.contains(&script_str))
+            .map(cmd_matches)
             .unwrap_or(false)
     });
 
@@ -191,7 +217,13 @@ mod tests {
     // `i-dream hooks install` twice must not create duplicates.
 
     #[test]
-    fn add_hook_creates_entry_with_correct_format() {
+    fn add_hook_creates_entry_with_correct_wrapped_format() {
+        // 2026-05-02 schema fix: every event-array entry must be
+        // wrapped in {hooks: [{type, command}]} — the bare-command
+        // form `{type, command}` directly in the array fails Claude
+        // Code's `claude /doctor` schema validation with
+        // "Expected array, but received undefined" for the missing
+        // `hooks` field.
         let mut hooks = serde_json::Map::new();
         let script = std::path::Path::new("/tmp/hooks/session-start.sh");
 
@@ -199,11 +231,31 @@ mod tests {
 
         let arr = hooks["SessionStart"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["type"], "command");
+        let inner = arr[0]["hooks"].as_array().expect("hooks array");
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0]["type"], "command");
         assert_eq!(
-            arr[0]["command"].as_str().unwrap(),
+            inner[0]["command"].as_str().unwrap(),
             "bash /tmp/hooks/session-start.sh"
         );
+    }
+
+    #[test]
+    fn add_hook_dedup_against_legacy_bare_shape() {
+        // The pre-fix installer wrote bare {type, command} entries
+        // directly into the event array. Re-running install after the
+        // fix must NOT duplicate those — it must recognize them as
+        // already-present and skip.
+        let mut hooks = serde_json::Map::new();
+        hooks.insert("SessionStart".into(), serde_json::json!([
+            { "type": "command", "command": "bash /tmp/hooks/session-start.sh" }
+        ]));
+
+        let script = std::path::Path::new("/tmp/hooks/session-start.sh");
+        add_hook_entry(&mut hooks, "SessionStart", script);
+
+        let arr = hooks["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "must dedup against legacy bare shape");
     }
 
     #[test]
@@ -223,9 +275,10 @@ mod tests {
     fn add_hook_preserves_existing_entries() {
         let mut hooks = serde_json::Map::new();
 
-        // Simulate an existing hook from another tool
+        // Simulate an existing hook from another tool, in the schema-correct
+        // wrapped shape that other tools should also use.
         hooks.insert("SessionStart".into(), serde_json::json!([
-            { "type": "command", "command": "bash /other-tool/hook.sh" }
+            { "hooks": [{ "type": "command", "command": "bash /other-tool/hook.sh" }] }
         ]));
 
         let script = std::path::Path::new("/tmp/hooks/session-start.sh");
@@ -234,7 +287,7 @@ mod tests {
         let arr = hooks["SessionStart"].as_array().unwrap();
         assert_eq!(arr.len(), 2, "Should preserve the existing hook entry");
         assert!(
-            arr[0]["command"].as_str().unwrap().contains("other-tool"),
+            arr[0]["hooks"][0]["command"].as_str().unwrap().contains("other-tool"),
             "Original hook should be first"
         );
     }
