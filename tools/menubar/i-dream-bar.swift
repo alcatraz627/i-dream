@@ -5728,13 +5728,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // ─ Daemon controls ────────────────────────────────────────────────────
         if running {
-            let s = add(menu, "Stop Daemon", #selector(stopDaemon))
+            let s = add(menu, "Stop Daemon", #selector(stopDaemon), key: "s")
             setIcon(s, "stop.fill")
         } else {
-            let s = add(menu, "Start Daemon", #selector(startDaemon))
+            let s = add(menu, "Start Daemon", #selector(startDaemon), key: "s")
             setIcon(s, "play.fill")
         }
-        let t = add(menu, "Trigger Dream Cycle", #selector(triggerCycleWithUsageCheck))
+        let t = add(menu, "Trigger Dream Cycle", #selector(triggerCycleWithUsageCheck), key: "t")
         setIcon(t, "arrow.triangle.2.circlepath")
         t.isEnabled = running && !isCycling
 
@@ -6013,7 +6013,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let traceFiles = (try? FileManager.default.contentsOfDirectory(atPath: tracesDir))?.filter { $0.hasSuffix(".jsonl") } ?? []
         replay.isEnabled = !traceFiles.isEmpty
 
-        let dash = add(menu, "Open Dashboard", #selector(openDashboard))
+        let dash = add(menu, "Open Dashboard", #selector(openDashboard), key: "d")
         setIcon(dash, "chart.bar.doc.horizontal.fill")
 
         let howTo = add(menu, "Show How-To…", #selector(showHowTo))
@@ -6082,11 +6082,14 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // ── Menu item helpers ──────────────────────────────────────────────────────
 
     @discardableResult
-    private func add(_ menu: NSMenu, _ title: String, _ sel: Selector) -> NSMenuItem {
-        let i = NSMenuItem()
+    private func add(_ menu: NSMenu, _ title: String, _ sel: Selector, key: String = "") -> NSMenuItem {
+        // `key` adds a ⌘-prefixed keyboard shortcut shown in the menu
+        // (mirrors the claude-instances pattern). Empty string = no
+        // shortcut. Standard convention: lowercase = ⌘key, uppercase = ⌘⇧key.
+        let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
         i.attributedTitle = NSAttributedString(string: title,
                                                attributes: [.font: NSFont.systemFont(ofSize: 14)])
-        i.action = sel; i.target = self; i.isEnabled = true
+        i.target = self; i.isEnabled = true
         menu.addItem(i); return i
     }
 
