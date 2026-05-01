@@ -220,6 +220,84 @@ async fn main() -> Result<()> {
             println!("{}", toml::to_string_pretty(&config)?);
         }
 
+        Command::Drift { threshold, json } => {
+            use chrono::{DateTime, Duration, Utc};
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let patterns: Vec<modules::dreaming::ExtractedPattern> =
+                store.read_json("dreams/patterns.json").unwrap_or_default();
+
+            let now = Utc::now();
+            let cutoff_recent = now - Duration::days(7);
+            let cutoff_prior  = now - Duration::days(14);
+
+            // Group confidences by category for the two windows.
+            let mut recent: std::collections::HashMap<&str, (f64, usize)> =
+                std::collections::HashMap::new();
+            let mut prior:  std::collections::HashMap<&str, (f64, usize)> =
+                std::collections::HashMap::new();
+            for p in &patterns {
+                let Ok(ts) = DateTime::parse_from_rfc3339(&p.last_seen) else { continue };
+                let ts = ts.with_timezone(&Utc);
+                let bucket: Option<&mut std::collections::HashMap<&str, (f64, usize)>> =
+                    if ts >= cutoff_recent {
+                        Some(&mut recent)
+                    } else if ts >= cutoff_prior {
+                        Some(&mut prior)
+                    } else { None };
+                if let Some(b) = bucket {
+                    let e = b.entry(p.category.as_str()).or_insert((0.0, 0));
+                    e.0 += p.confidence;
+                    e.1 += 1;
+                }
+            }
+
+            let mut drifts: Vec<(String, f64, f64, f64, usize, usize)> = Vec::new(); // cat, prior_avg, recent_avg, rel_drop, n_prior, n_recent
+            for (cat, (sum_p, n_p)) in &prior {
+                if *n_p < 3 { continue }  // Sample-size floor — noisy below 3.
+                let prior_avg = sum_p / *n_p as f64;
+                let (sum_r, n_r) = recent.get(cat).copied().unwrap_or((0.0, 0));
+                if n_r < 3 { continue }
+                let recent_avg = sum_r / n_r as f64;
+                let rel_drop = (prior_avg - recent_avg) / prior_avg.max(1e-9);
+                if rel_drop >= threshold {
+                    drifts.push((cat.to_string(), prior_avg, recent_avg, rel_drop, *n_p, n_r));
+                }
+            }
+            drifts.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
+
+            if json {
+                for (cat, prior_avg, recent_avg, rel_drop, np, nr) in &drifts {
+                    let v = serde_json::json!({
+                        "category": cat,
+                        "prior_avg": prior_avg,
+                        "recent_avg": recent_avg,
+                        "relative_drop": rel_drop,
+                        "n_prior": np, "n_recent": nr,
+                    });
+                    println!("{}", v);
+                }
+            } else if drifts.is_empty() {
+                println!(
+                    "No category-level drift detected (threshold: {:.0}% week-over-week drop, min sample size 3 per window).",
+                    threshold * 100.0,
+                );
+            } else {
+                println!(
+                    "{} categor{} drifted ≥ {:.0}% week-over-week:",
+                    drifts.len(),
+                    if drifts.len() == 1 { "y" } else { "ies" },
+                    threshold * 100.0,
+                );
+                for (cat, prior_avg, recent_avg, rel_drop, np, nr) in &drifts {
+                    println!(
+                        "  {:<20} {:.2} → {:.2}  ({:+.0}%)  n={}/{}",
+                        cat, prior_avg, recent_avg, -rel_drop * 100.0, np, nr,
+                    );
+                }
+            }
+        }
+
         Command::AutoIntentions { dry_run, min_confidence } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;

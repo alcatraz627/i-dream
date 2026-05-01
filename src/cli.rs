@@ -127,6 +127,19 @@ pub enum Command {
         action: WidgetAction,
     },
 
+    /// D19 — detect category-level confidence drift week-over-week.
+    /// Compares average confidence per category for the last 7 days vs
+    /// the prior 7 days; reports any categories where the drop exceeds
+    /// the threshold.
+    Drift {
+        /// Drop threshold as a fraction (0.10 = 10% relative drop).
+        #[arg(long, default_value_t = 0.10)]
+        threshold: f64,
+        /// Emit one JSON object per drift event (machine-readable).
+        #[arg(long)]
+        json: bool,
+    },
+
     /// D8 — auto-promote high-confidence, actionable, already-promoted
     /// associations into Context-triggered intentions. Idempotent: an
     /// association won't be auto-promoted twice (tracked via
