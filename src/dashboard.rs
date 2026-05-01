@@ -298,7 +298,11 @@ impl Snapshot {
             let mut entries: Vec<DreamEntry> =
                 store.read_jsonl("dreams/journal.jsonl").unwrap_or_default();
             entries.reverse(); // newest first
-            entries.truncate(10);
+            // Was 10. Bumped to 90 so the date-range filter (7d/30d/90d/all)
+            // in the dream-chart toolbar has something to filter from. UI
+            // table still shows all returned rows; client-side JS hides
+            // bars older than the selected window.
+            entries.truncate(90);
             entries
         };
 
@@ -1060,9 +1064,12 @@ fn render_dream_chart(entries: &[crate::modules::dreaming::DreamEntry]) -> Strin
             entry.timestamp.format("%m/%d"),
             entry.patterns_extracted, entry.associations_found, entry.insights_promoted
         );
+        // Tag each bar with its age-in-days so client-side filter can
+        // toggle visibility per the selected date range.
+        let age_days = (chrono::Utc::now() - entry.timestamp).num_days().max(0);
         bars.push_str(&format!(
-            "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" rx=\"3\" class=\"{cls}\"><title>{t}</title></rect>",
-            x=x, y=y, w=bar_w, h=h, cls=cls, t=html_escape(&title),
+            "<rect x=\"{x}\" y=\"{y}\" width=\"{w}\" height=\"{h}\" rx=\"3\" class=\"{cls}\" data-age-days=\"{age}\"><title>{t}</title></rect>",
+            x=x, y=y, w=bar_w, h=h, cls=cls, t=html_escape(&title), age=age_days,
         ));
         // Date tick every ~3 bars or first/last
         if i == 0 || i == n - 1 || (n > 4 && i % 3 == 0) {
@@ -1075,12 +1082,42 @@ fn render_dream_chart(entries: &[crate::modules::dreaming::DreamEntry]) -> Strin
     }
 
     format!(
-        r#"<div class="dream-chart-wrap">
-<div class="dream-chart-label">Dream activity — outputs per cycle (green = promoted insights)</div>
+        r##"<div class="dream-chart-wrap">
+<div class="dream-chart-header">
+  <div class="dream-chart-label">Dream activity — outputs per cycle (green = promoted insights)</div>
+  <div class="dream-chart-range" role="group" aria-label="date range">
+    <button class="dc-range-btn" data-days="7">7d</button>
+    <button class="dc-range-btn" data-days="30">30d</button>
+    <button class="dc-range-btn" data-days="90">90d</button>
+    <button class="dc-range-btn dc-range-active" data-days="0">all</button>
+  </div>
+</div>
 <svg class="dream-chart-svg" viewBox="0 0 {w} {h}" preserveAspectRatio="none">
   <line x1="{pl}" y1="{bl}" x2="{tw}" y2="{bl}" class="dc-axis"/>
   {bars}
-</svg></div>"#,
+</svg>
+<script>
+(function(){{
+  var btns = document.querySelectorAll('.dc-range-btn');
+  var bars = document.querySelectorAll('.dream-chart-svg rect[data-age-days]');
+  btns.forEach(function(b) {{
+    b.addEventListener('click', function() {{
+      btns.forEach(function(x) {{ x.classList.remove('dc-range-active'); }});
+      b.classList.add('dc-range-active');
+      var max = parseInt(b.dataset.days, 10);
+      bars.forEach(function(r) {{
+        var age = parseInt(r.dataset.ageDays, 10);
+        if (max === 0 || age <= max) {{
+          r.style.display = '';
+        }} else {{
+          r.style.display = 'none';
+        }}
+      }});
+    }});
+  }});
+}})();
+</script>
+</div>"##,
         w = total_w, h = svg_h,
         pl = pad_left, bl = baseline_y, tw = total_w - pad_right,
         bars = bars,
@@ -4277,7 +4314,12 @@ code.inv-ext-txt    { color: var(--dim); }
 
 /* ── Dream activity chart ────────────────────────────────────── */
 .dream-chart-wrap { margin-bottom: 16px; }
-.dream-chart-label { font-size: 11px; color: var(--dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.dream-chart-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; gap: 12px; flex-wrap: wrap; }
+.dream-chart-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.dream-chart-range { display: flex; gap: 4px; }
+.dc-range-btn { font: 500 11px/1 var(--mono); padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--dim); cursor: pointer; }
+.dc-range-btn:hover { color: var(--text); border-color: var(--accent); }
+.dc-range-btn.dc-range-active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .dream-chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
 .dc-bar { fill: var(--accent); opacity: 0.7; }
 .dc-bar.dc-has-insights { fill: var(--ok); opacity: 0.85; }

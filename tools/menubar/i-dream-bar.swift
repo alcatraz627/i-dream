@@ -2308,7 +2308,7 @@ final class DashboardWindowController: NSObject {
 
     // Sidebar footer state
     private var lastRefreshedLabel:    NSTextField?
-    private var themePickerControl:    NSSegmentedControl?
+    private var themePickerButtons:    [HoverButton] = []
     private let dashAlwaysOnTopKey = "dev.i-dream.dashboard.alwaysOnTop"
     private let dashThemeKey       = "dev.i-dream.dashboard.theme"  // "light"|"dark"|"system"
 
@@ -2339,21 +2339,47 @@ final class DashboardWindowController: NSObject {
         _ = appearance  // silence unused
     }
 
-    @objc private func themePicked(_ sender: NSSegmentedControl) {
+    @objc private func themeIconClicked(_ sender: NSButton) {
+        // Tag 0=light, 1=dark, 2=system
         let v: String
-        switch sender.selectedSegment {
+        switch sender.tag {
         case 0:  v = "light"
         case 2:  v = "system"
         default: v = "dark"
         }
         UserDefaults.standard.set(v, forKey: dashThemeKey)
         applyDashboardAppearance()
+        // Re-tint buttons: selected = full color, others = dim.
+        let tints: [NSColor] = [
+            .systemYellow,
+            NSColor(red: 0.55, green: 0.41, blue: 0.85, alpha: 1),
+            .systemTeal,
+        ]
+        for (i, btn) in themePickerButtons.enumerated() {
+            btn.contentTintColor = (i == sender.tag) ? tints[i] : NSColor.tertiaryLabelColor
+        }
     }
 
     @objc private func toggleDashboardAlwaysOnTop(_ sender: NSButton) {
         let on = sender.state == .on
         UserDefaults.standard.set(on, forKey: dashAlwaysOnTopKey)
-        panel?.level = on ? .statusBar : .floating
+        guard let panel = panel else {
+            dlog("AOT: no panel reference (state=\(on))")
+            return
+        }
+        // .popUpMenu (level 101) is the most reliable always-on-top level
+        // on macOS — sits above .statusBar (25) and above other apps'
+        // floating windows. Combined with .canJoinAllSpaces it stays
+        // visible across Spaces switches.
+        if on {
+            panel.level = .popUpMenu
+            panel.collectionBehavior.insert(.canJoinAllSpaces)
+            panel.orderFrontRegardless()
+        } else {
+            panel.level = .floating
+            panel.collectionBehavior.remove(.canJoinAllSpaces)
+        }
+        dlog("AOT toggled: \(on) → level=\(panel.level.rawValue)")
     }
     private var lastRefreshedDate:     Date?
 
@@ -2433,9 +2459,12 @@ final class DashboardWindowController: NSObject {
         case 2:  p.appearance = nil   // follow system
         default: p.appearance = NSAppearance(named: .darkAqua)
         }
-        // Apply user's always-on-top preference if set.
+        // Apply user's always-on-top preference if set. Use .popUpMenu
+        // (level 101) for reliable above-other-apps behavior; .statusBar
+        // sometimes loses to certain system overlays.
         if UserDefaults.standard.bool(forKey: dashAlwaysOnTopKey) {
-            p.level = .statusBar
+            p.level = .popUpMenu
+            p.collectionBehavior.insert(.canJoinAllSpaces)
         }
         self.panel = p
 
@@ -2511,23 +2540,39 @@ final class DashboardWindowController: NSObject {
         refreshBtn.contentTintColor = .secondaryLabelColor
         sidebar.addSubview(refreshBtn)
 
-        // ── Theme picker (T-S6 follow-up) ─────────────────────────────────
-        // 3-segment control: Light / Dark / System. Persists to UserDefaults.
-        // Default Dark — the brand palette is dark-tuned and the round-2
-        // reviewers' "force dark" recommendation still applies — but the
-        // user can override here without an app rebuild.
-        let themePicker = NSSegmentedControl(labels: ["☀", "☾", "⏚"],
-                                              trackingMode: .selectOne,
-                                              target: self, action: #selector(themePicked(_:)))
-        themePicker.frame  = NSRect(x: 8, y: 80, width: sideW - 16, height: 22)
-        themePicker.font   = .systemFont(ofSize: 11)
-        themePicker.selectedSegment = currentThemeIndex()
-        themePicker.toolTip = "Appearance: Light / Dark / System"
-        themePicker.setLabel("Light", forSegment: 0)
-        themePicker.setLabel("Dark",  forSegment: 1)
-        themePicker.setLabel("Sys",   forSegment: 2)
-        sidebar.addSubview(themePicker)
-        themePickerControl = themePicker
+        // ── Theme picker — three icon-only HoverButtons ───────────────────
+        // No background unless hovered (uses the same HoverButton class as
+        // the floating HUD action row). Each button has a tooltip; the
+        // currently-selected theme is shown by tinting its icon brighter.
+        let themeRow = NSView(frame: NSRect(x: 8, y: 80, width: sideW - 16, height: 28))
+        let themes: [(symbol: String, tooltip: String, value: String, tint: NSColor)] = [
+            ("sun.max.fill",          "Light theme",  "light",  NSColor.systemYellow),
+            ("moon.fill",             "Dark theme",   "dark",   NSColor(red: 0.55, green: 0.41, blue: 0.85, alpha: 1)),
+            ("circle.lefthalf.filled","Follow system","system", NSColor.systemTeal),
+        ]
+        let bw  = (themeRow.bounds.width - 12) / 3   // 3 buttons + 2x6px gaps
+        let cur = UserDefaults.standard.string(forKey: dashThemeKey) ?? "dark"
+        themePickerButtons.removeAll()
+        for (i, t) in themes.enumerated() {
+            let btn = HoverButton(frame: NSRect(x: CGFloat(i) * (bw + 6), y: 0,
+                                                width: bw, height: 28))
+            btn.hoverLabel = t.tooltip   // also drives the HUD-style hover label if delegate set
+            btn.tintColor  = t.tint
+            btn.toolTip    = t.tooltip
+            if let img = NSImage(systemSymbolName: t.symbol, accessibilityDescription: t.tooltip) {
+                let cfg = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+                btn.image = img.withSymbolConfiguration(cfg) ?? img
+                btn.imagePosition = .imageOnly
+            }
+            // Selected theme: full-color tint. Unselected: dim.
+            btn.contentTintColor = (t.value == cur) ? t.tint : NSColor.tertiaryLabelColor
+            btn.tag    = i
+            btn.target = self
+            btn.action = #selector(themeIconClicked(_:))
+            themeRow.addSubview(btn)
+            themePickerButtons.append(btn)
+        }
+        sidebar.addSubview(themeRow)
 
         // ── Always-on-top toggle ──────────────────────────────────────────
         let aotBtn = NSButton(checkboxWithTitle: "  Always on top",

@@ -64,11 +64,18 @@ jobs:
           EOF
 
       - name: swiftc compile check (no codesign)
+        # swiftc requires the file containing top-level expressions to be
+        # named `main.swift`. Copy the widget file under that name so
+        # the compile check works without renaming the source.
         run: |
           cd tools/menubar
+          mkdir -p /tmp/swiftbuild
+          cp i-dream-bar.swift /tmp/swiftbuild/main.swift
+          cp build-info.swift  /tmp/swiftbuild/build-info.swift
+          cd /tmp/swiftbuild
           swiftc -O \
             -framework Cocoa \
             -framework UserNotifications \
             -o /tmp/i-dream-bar \
-            i-dream-bar.swift build-info.swift
+            main.swift build-info.swift
           ls -la /tmp/i-dream-bar
