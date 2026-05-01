@@ -338,6 +338,7 @@ mod tests {
             suggested_rule: None,
             promoted,
             dismissed: false,
+            auto_intention_id: None,
         }
     }
 

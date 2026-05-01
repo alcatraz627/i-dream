@@ -690,6 +690,63 @@ impl Daemon {
             self.regen_dirty_project_briefs(client).await;
         }
 
+        // D17 daemon-side weekly auto-prune (opt-in via config).
+        if self.config.modules.dreaming.auto_prune_weekly {
+            if let Err(e) = Self::weekly_auto_prune_patterns(&self.store) {
+                tracing::warn!("auto-prune (D17) failed: {e:#}");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// D17 — runs at most once per ISO week. State tracked in
+    /// dreams/auto-prune-state.json (last_run_iso). Conservative defaults:
+    /// confidence < 0.40 AND last_seen older than 60 days. Backups are
+    /// always written to dreams/pruned/<ts>.json so the user can restore
+    /// via `i-dream prune-patterns --restore <ts>`.
+    fn weekly_auto_prune_patterns(store: &Store) -> Result<()> {
+        use chrono::{DateTime, Datelike, Duration, Utc};
+
+        #[derive(serde::Serialize, serde::Deserialize, Default)]
+        struct State { last_run_iso_week: String, last_run_ts: String, last_pruned: usize }
+
+        let now = Utc::now();
+        let iso = now.iso_week();
+        let this_week = format!("{}-W{:02}", iso.year(), iso.week());
+        let state: State = store.read_json("dreams/auto-prune-state.json").unwrap_or_default();
+        if state.last_run_iso_week == this_week { return Ok(()); }
+
+        let cutoff = now - Duration::days(60);
+        let all: Vec<crate::modules::dreaming::ExtractedPattern> =
+            store.read_json("dreams/patterns.json").unwrap_or_default();
+        let (to_prune, to_keep): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| {
+            if p.confidence >= 0.40 { return false; }
+            let last_seen = DateTime::parse_from_rfc3339(&p.last_seen)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or(cutoff - Duration::days(1));
+            last_seen < cutoff
+        });
+
+        // Even when nothing is pruned, advance the iso-week marker so we
+        // don't re-scan every cycle within the same week.
+        let stamp = now.format("%Y%m%d-%H%M%S").to_string();
+        if !to_prune.is_empty() {
+            let backup_rel = format!("dreams/pruned/{}.json", stamp);
+            if let Some(parent) = store.path(&backup_rel).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            store.write_json(&backup_rel, &to_prune)?;
+            store.write_json("dreams/patterns.json", &to_keep)?;
+            tracing::info!(pruned = to_prune.len(), backup = %store.path(&backup_rel).display(),
+                "D17 auto-prune (weekly) ran");
+        }
+        let new_state = State {
+            last_run_iso_week: this_week,
+            last_run_ts: now.to_rfc3339(),
+            last_pruned: to_prune.len(),
+        };
+        store.write_json("dreams/auto-prune-state.json", &new_state)?;
         Ok(())
     }
 

@@ -131,6 +131,13 @@ pub struct DreamingConfig {
     /// Minimum confidence score for Wake phase to promote an association to insights.md.
     #[serde(default = "default_wake_threshold")]
     pub wake_promotion_threshold: f64,
+    /// D17 daemon-side weekly auto-prune. When true, the daemon runs
+    /// `prune-patterns` once per ISO week with the conservative defaults
+    /// (confidence < 0.40, dormant > 60 days). Backups are still always
+    /// written, so re-running --restore is the recovery path. Off by
+    /// default — opt-in.
+    #[serde(default)]
+    pub auto_prune_weekly: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -251,6 +258,7 @@ impl Default for Config {
                     min_sessions_since_last: 1,
                     journal_max_entries: 500,
                     wake_promotion_threshold: 0.5,
+                    auto_prune_weekly: false,
                 },
                 metacog: MetacogConfig {
                     enabled: true,
