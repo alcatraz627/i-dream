@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="i-dream — a subconsciousness layer for Claude Code">
+  <title>i-dream — a subconsciousness layer for Claude Code</title>
+
+  <defs>
+    <!-- Dusk gradient background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#0a0d1a"/>
+      <stop offset="55%" stop-color="#1a1530"/>
+      <stop offset="100%" stop-color="#251a40"/>
+    </linearGradient>
+    <!-- Brand violet glow -->
+    <radialGradient id="brand-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#8c69d9" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#8c69d9" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Soft node glow shared by all dream nodes -->
+    <filter id="nodeglow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- Sparse star background pattern -->
+    <radialGradient id="star" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#fff" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <!-- Wordmark gradient -->
+    <linearGradient id="wm" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"  stop-color="#cdd5ff"/>
+      <stop offset="55%" stop-color="#a5b3ff"/>
+      <stop offset="100%" stop-color="#8c69d9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="300" fill="url(#bg)" rx="12"/>
+
+  <!-- Subtle dusk glow behind moon -->
+  <circle cx="980" cy="100" r="180" fill="url(#brand-glow)"/>
+
+  <!-- Twinkling stars -->
+  <g opacity="0.85">
+    <circle cx="120" cy="50"  r="2"   fill="url(#star)"/>
+    <circle cx="220" cy="35"  r="1.5" fill="url(#star)"/>
+    <circle cx="380" cy="80"  r="1"   fill="url(#star)"/>
+    <circle cx="520" cy="40"  r="1.5" fill="url(#star)"/>
+    <circle cx="680" cy="55"  r="2"   fill="url(#star)"/>
+    <circle cx="840" cy="30"  r="1"   fill="url(#star)"/>
+    <circle cx="1110" cy="60" r="1.5" fill="url(#star)"/>
+    <circle cx="60"  cy="200" r="1"   fill="url(#star)"/>
+    <circle cx="290" cy="240" r="1.5" fill="url(#star)"/>
+    <circle cx="600" cy="265" r="1"   fill="url(#star)"/>
+    <circle cx="1140" cy="220" r="2"  fill="url(#star)"/>
+  </g>
+
+  <!-- Crescent moon (dusk-violet body, dark dusk-blue mask cuts the crescent) -->
+  <g transform="translate(980 100)">
+    <circle r="58" fill="#cdb6ff"/>
+    <circle r="58" cx="-22" cy="-8" fill="#1a1530"/>
+  </g>
+
+  <!-- Bipartite dream graph: 5 "pattern" category nodes connected to 3 "association" diamonds -->
+  <g transform="translate(0 0)" filter="url(#nodeglow)">
+    <!-- Edges (drawn first so nodes paint on top) -->
+    <g stroke-opacity="0.45" stroke-width="1.5" fill="none">
+      <path d="M 130,170 Q 200,140 260,160" stroke="#8c69d9"/>
+      <path d="M 200,210 Q 240,180 260,160" stroke="#8c69d9"/>
+      <path d="M 260,160 Q 320,140 380,170" stroke="#8c69d9"/>
+      <path d="M 380,170 Q 460,150 520,180" stroke="#8c69d9"/>
+      <path d="M 520,180 Q 590,170 650,190" stroke="#8c69d9"/>
+      <path d="M 650,190 Q 720,170 780,200" stroke="#8c69d9"/>
+      <path d="M 130,170 Q 290,90  450,140" stroke="#22c1c3" stroke-opacity="0.32"/>
+      <path d="M 200,210 Q 380,260 600,240" stroke="#f5a623" stroke-opacity="0.28"/>
+      <path d="M 380,170 Q 600,80  780,200" stroke="#3ddc84" stroke-opacity="0.22"/>
+    </g>
+
+    <!-- Pattern nodes (circles, category colors) -->
+    <circle cx="130" cy="170" r="9"  fill="#22c1c3"/>  <!-- approach (teal) -->
+    <circle cx="200" cy="210" r="11" fill="#5b8def"/>  <!-- domain (blue) -->
+    <circle cx="380" cy="170" r="13" fill="#a673de"/>  <!-- user-preference (purple) -->
+    <circle cx="520" cy="180" r="9"  fill="#f5a623"/>  <!-- tool-use (orange) -->
+    <circle cx="650" cy="190" r="10" fill="#3ddc84"/>  <!-- architecture (green) -->
+    <circle cx="780" cy="200" r="11" fill="#22c1c3"/>  <!-- approach (teal) -->
+
+    <!-- Association nodes (diamonds, brand violet) -->
+    <g fill="#cdb6ff" stroke="#8c69d9" stroke-width="1">
+      <polygon points="260,150 270,160 260,170 250,160"/>
+      <polygon points="450,130 462,142 450,154 438,142"/>
+      <polygon points="600,230 612,242 600,254 588,242"/>
+    </g>
+  </g>
+
+  <!-- Wordmark "i-dream" -->
+  <text x="60" y="115"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif"
+        font-size="78" font-weight="800" letter-spacing="-2"
+        fill="url(#wm)">i-dream</text>
+
+  <!-- Tagline -->
+  <text x="62" y="148"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Mono', monospace"
+        font-size="14" font-weight="500" letter-spacing="2"
+        fill="#a5b3ff" opacity="0.85">A SUBCONSCIOUSNESS LAYER FOR CLAUDE CODE</text>
+
+  <!-- EEG-style waveform along the bottom — subtle activity hint -->
+  <g stroke="#8c69d9" stroke-width="1.4" fill="none" opacity="0.55">
+    <path d="M 60,265 L 110,265 L 130,250 L 150,278 L 170,265 L 220,265 L 240,254 L 260,272 L 290,265 L 360,265 L 380,248 L 400,278 L 430,265 L 510,265 L 530,256 L 555,272 L 590,265 L 670,265 L 695,248 L 725,278 L 760,265 L 850,265 L 875,255 L 900,272 L 940,265 L 1140,265"/>
+  </g>
+
+  <!-- Tiny module legend bottom-right (5 dots = 5 modules) -->
+  <g transform="translate(950 270)" font-family="-apple-system, system-ui, sans-serif" font-size="10" fill="#a5b3ff" opacity="0.7">
+    <circle cx="0"   cy="0" r="3" fill="#22c1c3"/>
+    <circle cx="14"  cy="0" r="3" fill="#5b8def"/>
+    <circle cx="28"  cy="0" r="3" fill="#a673de"/>
+    <circle cx="42"  cy="0" r="3" fill="#f5a623"/>
+    <circle cx="56"  cy="0" r="3" fill="#3ddc84"/>
+    <text x="70" y="3" letter-spacing="1.5">FIVE MODULES</text>
+  </g>
+</svg>

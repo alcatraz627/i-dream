@@ -1,29 +1,150 @@
 <div align="center">
 
-<pre>
-<b>
-  ╔══════════════════════════════════════════════════════════════╗
-  ║                                                              ║
-  ║   ██╗      ██████╗ ██████╗ ███████╗ █████╗ ███╗   ███╗      ║
-  ║   ██║      ██╔══██╗██╔══██╗██╔════╝██╔══██╗████╗ ████║      ║
-  ║   ██║█████╗██║  ██║██████╔╝█████╗  ███████║██╔████╔██║      ║
-  ║   ██║╚════╝██║  ██║██╔══██╗██╔══╝  ██╔══██║██║╚██╔╝██║      ║
-  ║   ██║      ██████╔╝██║  ██║███████╗██║  ██║██║ ╚═╝ ██║      ║
-  ║   ╚═╝      ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝      ║
-  ║                                                              ║
-  ║          A subconsciousness layer for Claude Code            ║
-  ║                                                              ║
-  ╚══════════════════════════════════════════════════════════════╝
-</b>
-</pre>
+<img src="docs/banner.svg" alt="i-dream — a subconsciousness layer for Claude Code" width="100%"/>
 
 **Background memory consolidation, pattern extraction, intuition, metacognition, and introspective self-analysis — running silently while you work.**
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 [![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org/)
-[![Claude API](https://img.shields.io/badge/Claude-API-blueviolet.svg)](https://docs.anthropic.com/)
+[![Claude API](https://img.shields.io/badge/Claude-API%20%2B%20CLI-8c69d9.svg)](docs/09-cli-vs-api.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/alcatraz627/i-dream/ci.yml?branch=master&label=CI)](.github/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Falcatraz627%2Fi-dream%2Fmaster%2FCargo.toml&query=%24.package.version&label=version&color=8c69d9)](CHANGELOG.md)
+[![macOS](https://img.shields.io/badge/macOS-13%2B-lightgrey.svg)](docs/06-menubar-widget.md)
 
 </div>
+
+---
+
+## Top highlight insights — and how they got there
+
+These are real insights surfaced by i-dream from one developer's recent Claude Code sessions. Each one shows the **full journey** from raw input to surfaceable artifact — what the dreaming pipeline actually *does*.
+
+### Insight 1 — "Treat /core-dump as a save-point primitive"
+
+```
+RAW INPUT (USER prompt, captured by D1):
+  "I'm about to clear context — make a core-dump first so we don't
+   lose the design we just nailed down."
+
+  + 8 similar prompts across 4 projects, all involving /core-dump
+  fired BEFORE risky ops, not just at session end.
+
+           │
+           ▼  SWS — pattern extraction
+  Pattern  68% confident  ◆ actionable  user-preference
+    "Core-dump has evolved from session-end ritual to mid-session
+     checkpoint tool — proactive use is now the norm, not the
+     exception."
+
+           │
+           ▼  REM — cross-pattern association
+  Association  68% confident  ◆ actionable
+    "/core-dump is now a 'save point' primitive, not a 'goodbye'
+     primitive. The pattern of 20-80% mid-session usage indicates
+     the user has trained the +17 more associated patterns."
+    → Rule: Treat /core-dump as a save-point primitive: invoke
+      proactively at milestones, before risky ops, and before long
+      autonomous stretches — not only at session end.
+
+           │
+           ▼  Wake — promotion to insights.md
+  Becomes a Context-trigger Intention with that rule.
+  The next SessionStart hook surfaces it into Claude's context
+  whenever the new session looks like a checkpoint candidate.
+
+           │
+           ▼  Where it lives globally (gcc = global Claude config)
+  Promoted into ~/.claude/CLAUDE.md once it recurs in ≥3 projects
+  (the project-transfer detector — D12, planned).
+```
+
+### Insight 2 — "Read before write — the failure mode is acting on stale state"
+
+```
+RAW INPUT:
+  Repeated user corrections across projects:
+    "no, re-read the file first"
+    "you assumed the variable was still X but I renamed it"
+    "check git status before opening that PR"
+
+           ▼  Pattern (SWS)
+  Pattern  93% confident  ◆ actionable  approach  negative
+    "Acting on stale or assumed state is the primary failure mode,
+     whether in UI coordinates, repository context, or file contents."
+
+           ▼  Association (REM)
+  Promoted insight: "Read before write" — the discipline that links
+  the patterns of stale-state failure across all 5 i-dream projects.
+
+           ▼  Where it lands
+  ~/.claude/CLAUDE.md ← top-level rule (graduated via cross-project
+                        recurrence)
+  + Active intention: surfaces "verify state before any side-effect"
+    whenever a session start looks like edit-heavy work.
+```
+
+### Insight 3 — "Match response length to user message length"
+
+```
+RAW INPUT:
+  Dozens of single-word continuation prompts ("yes", "next",
+  "keep going") followed by Claude responding with multi-paragraph
+  summaries — followed by user corrections like "stop summarizing
+  what you just did, I can read the diff."
+
+           ▼  Pattern (SWS, both positive and negative)
+  Pattern  72% confident  ◆ actionable  user-preference
+    "The user's terse interaction style ('keep going', 'next', 'move')
+     and the fire-and-forget notification pattern share a common
+     communication philosophy: minimal-signal, maximum-context-inference."
+
+           ▼  Association (REM)
+  Promoted: "When receiving a terse continuation command, reconstruct
+  intent from the last WAL checkpoint rather than asking clarifying
+  questions — the user has already optimized for low-bandwidth
+  signaling. Match response length to user message length."
+
+           ▼  Surfacing
+  Auto-injected at every SessionStart for projects where the
+  pattern was observed.
+```
+
+**The complete pipeline**, in one diagram:
+
+```
+Claude Code sessions → ~/.claude/projects/<project>/<sid>.jsonl
+                              │
+                              ▼
+           ┌─────────── i-dream daemon ───────────┐
+           │  SWS  (Sonnet, temp 0.3)             │
+           │   raw user/assistant pairs +         │  ← D1 fix this session
+           │   project_id tags                    │  ← D2 fix this session
+           │              ▼                       │
+           │   patterns.json   (deduped, capped)  │
+           │              │                       │
+           │  REM  (Opus, temp 0.9)               │
+           │              ▼                       │
+           │   associations.json   (hypotheses)   │
+           │              │                       │
+           │  Wake  (local)                       │
+           │   promotes conf≥0.5 actionable       │  ← D7 evidence chips
+           │              ▼                       │
+           │   dreams/insights.md                 │
+           │              │                       │
+           │   creates Context Intentions         │
+           │              ▼                       │
+           │   intentions/registry.jsonl          │
+           └──────────────┬───────────────────────┘
+                          │
+              SessionStart hook fires
+                          ▼
+           ┌── Claude Code (your next session) ──┐
+           │  Briefing injected as system msg:    │
+           │   - Per-project brief (D6)           │  ← D6 this session
+           │   - Active intentions matched        │
+           │   - Latest introspection patterns    │
+           └──────────────────────────────────────┘
+```
 
 ---
 
@@ -392,6 +513,36 @@ i-dream/
 | Prospective Memory | Einstein & McDaniel | Condition-action intentions with trigger matching |
 
 Full research notes: [docs/01-research-human-subconsciousness.md](docs/01-research-human-subconsciousness.md) · [docs/02-research-ai-metacognition.md](docs/02-research-ai-metacognition.md)
+
+## Documentation index
+
+| Doc | What's inside |
+|---|---|
+| [01 — Human subconsciousness research](docs/01-research-human-subconsciousness.md) | The cognitive-science foundations |
+| [02 — AI metacognition research](docs/02-research-ai-metacognition.md) | Reflexion, MemGPT, Voyager, sleep-time compute |
+| [03 — Implementation details](docs/03-implementation-details.md) | Internal Rust architecture |
+| [04 — Architecture diagram](docs/04-architecture-diagram.md) | Visual overview |
+| [05 — How to](docs/05-how-to.md) | Common workflows |
+| [06 — Menubar widget](docs/06-menubar-widget.md) | Every menu entry of `i-dream-bar` |
+| [07 — Floating HUD](docs/07-floating-hud.md) | Ambient widget reference |
+| [08 — Native dashboard](docs/08-native-dashboard.md) | Full dashboard tab map |
+| [09 — Local CLI vs API](docs/09-cli-vs-api.md) | Why CLI is the default + when to switch |
+| [USAGE.md](USAGE.md) | Full CLI command reference |
+| [CHANGELOG.md](CHANGELOG.md) | Versioned change history |
+| [.env.example](.env.example) | Every env var the daemon reads |
+
+## Contributing
+
+CI runs `cargo fmt`, `clippy`, `cargo test --release`, and a Swift compile check on every push and PR. Local checks before opening a PR:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --release -- -D warnings
+cargo test --release --bins
+bash tools/menubar/build.sh
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for the recent change log; bump `Cargo.toml` `version` for any user-visible feature/fix and add an entry to the `[Unreleased]` section.
 
 ## License
 
