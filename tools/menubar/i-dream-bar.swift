@@ -7029,7 +7029,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hudTimeRangeBtn = nil
 
         let w: CGFloat       = 360
-        let h: CGFloat       = 372  // grew to fit action row + hover-label slot + extra stats line
+        let h: CGFloat       = 396  // grew further for HUD task #7 quick-jump cells row
         let cornerR: CGFloat = 12
         guard let screen = NSScreen.main else { return }
         let sv = screen.visibleFrame
@@ -7104,8 +7104,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let actionY: CGFloat = 6
         let hoverH:  CGFloat = 14   // hover-label slot above the action row
         let hoverY:  CGFloat = actionY + actionH + 2
+        // HUD task #7: quick-jump row of 4 cell-buttons that open the
+        // dashboard at a specific tab (Patterns/Associations/Insights/Metacog).
+        let jumpH:   CGFloat = 22
+        let jumpY:   CGFloat = hoverY + hoverH + 2
         let chartH:  CGFloat = 50
-        let chartY:  CGFloat = hoverY + hoverH + 4
+        let chartY:  CGFloat = jumpY + jumpH + 6
         let tvY:     CGFloat = chartY + chartH + 4
         let tvH:     CGFloat = h - tvY - btnH - 6
 
@@ -7122,6 +7126,41 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         chart.delegate = self
         panel.contentView?.addSubview(chart)
         hudBarChart = chart
+
+        // ── HUD task #7: quick-jump cell row ─────────────────────────────────
+        // Four small icon-only HoverButtons sitting between the hover-label
+        // slot and the bar chart. Each opens the dashboard scrolled to the
+        // matching tab via showOrFront(tab:). Same HoverButton class as the
+        // action row so they get hover-bg + tooltip + the hover-label
+        // animation for free.
+        let jumps: [(symbol: String, label: String, tint: NSColor, sel: Selector)] = [
+            ("brain",                 "Patterns →",     NSColor.systemTeal,    #selector(openDashboardPatterns)),
+            ("link",                  "Associations →", NSColor.systemOrange,  #selector(openDashboardAssociations)),
+            ("sparkles",              "Insights →",     NSColor.systemYellow,  #selector(openDashboardInsights)),
+            ("checkmark.seal.fill",   "Metacog →",      NSColor.systemPink,    #selector(openDashboardMetacog)),
+        ]
+        let jGap:    CGFloat = 6
+        let jTotalGap = jGap * CGFloat(jumps.count + 1)
+        let jBtnW   = (w - jTotalGap) / CGFloat(jumps.count)
+        for (i, j) in jumps.enumerated() {
+            let bx = jGap + CGFloat(i) * (jBtnW + jGap)
+            let b = HoverButton(frame: NSRect(x: bx, y: jumpY, width: jBtnW, height: jumpH))
+            b.hoverLabel = j.label
+            b.delegate   = self
+            b.tintColor  = j.tint
+            b.toolTip    = j.label
+            if let img = NSImage(systemSymbolName: j.symbol, accessibilityDescription: j.label) {
+                let cfg = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+                b.image = img.withSymbolConfiguration(cfg) ?? img
+                b.imagePosition = .imageOnly
+                b.contentTintColor = j.tint
+            } else {
+                b.title = j.label
+            }
+            b.target = self
+            b.action = j.sel
+            panel.contentView?.addSubview(b)
+        }
 
         // ── Bottom action button row ─────────────────────────────────────────
         // 4 evenly-spaced HoverButtons with SF-symbol icons. Each carries a

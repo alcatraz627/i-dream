@@ -4,6 +4,15 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-05-01 third patch (final pending items)
+
+### Added
+- **HUD quick-jump cells** (task #7 closed): four small icon-only HoverButtons between the hover-label slot and the bar chart — Patterns / Associations / Insights / Metacog. Each opens the dashboard at the matching tab via `showOrFront(tab:)` (the API shipped earlier in the session). Panel grew 372 → 396 to fit the row.
+- **`docs/11-shared-widget-utils.md`** (task #13 partial): documents the six reusable macOS-widget patterns proven across `claude-instances` + `i-dream` — the `addAction(...,key:)` helper, dark appearance pinning, `HoverButton`, SF-symbol icon button + tooltip pattern, `showOrFront(tab:)` tab-routing, `.popUpMenu` always-on-top. Future-extraction goal: factor into a shared Swift package at `~/.claude/widgets/_shared/`.
+- **Project memory entry**: `macos_widget_lookup_path.md` registers `~/.claude/widgets/` as the canonical lookup path for any future Claude session asked to build a macOS widget. Indexed in the project's `MEMORY.md`.
+
+---
+
 ## [0.2.2] — 2026-05-01 second patch
 
 ### Fixed
