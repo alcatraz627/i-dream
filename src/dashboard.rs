@@ -153,6 +153,14 @@ pub struct Snapshot {
     pub store_file_stats: Vec<StoreFileStat>,
     /// Results of the test suite, if it was run at dashboard generation time.
     pub test_results: Option<TestRunResult>,
+    /// JSON blob `{nodes:[…], edges:[…], categories:[…]}` for the bipartite
+    /// Patterns↔Associations graph. Populated from patterns.json +
+    /// associations.json + the precomputed graph-metrics.json (degree
+    /// centrality, hubs, isolated count). Consumed by render_patterns_graph_section
+    /// which embeds the JSON inline + loads sigma+graphology via CDN to
+    /// render an interactive force-directed bipartite graph.
+    /// `None` if no data is present yet (no dream cycles run).
+    pub patterns_graph_json: Option<String>,
 }
 
 /// Per-file stats for a JSONL store, shown in the widget Store tab.
@@ -329,6 +337,11 @@ impl Snapshot {
             None
         };
 
+        // Patterns Graph data — combine patterns + associations into a
+        // single payload the inline Sigma script can parse. Cheap (in-memory
+        // join). Returns None if neither file exists yet.
+        let patterns_graph_json = build_patterns_graph_payload(&store);
+
         Ok(Snapshot {
             generated_at: Utc::now(),
             data_dir,
@@ -346,8 +359,92 @@ impl Snapshot {
             store_warnings,
             store_file_stats,
             test_results,
+            patterns_graph_json,
         })
     }
+}
+
+/// Build the JSON payload for the bipartite Patterns↔Associations graph.
+/// Returns the JSON string ready to be embedded inline in the dashboard,
+/// or `None` if both data files are missing/empty.
+fn build_patterns_graph_payload(store: &Store) -> Option<String> {
+    use crate::modules::dreaming::{Association, ExtractedPattern};
+    use serde_json::json;
+
+    let patterns: Vec<ExtractedPattern> = store
+        .read_json("dreams/patterns.json")
+        .unwrap_or_default();
+    let associations: Vec<Association> = store
+        .read_json("dreams/associations.json")
+        .unwrap_or_default();
+    if patterns.is_empty() && associations.is_empty() {
+        return None;
+    }
+
+    // Compute degree per pattern in one pass for sizing.
+    let mut deg: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for a in &associations {
+        for pid in &a.patterns_linked {
+            *deg.entry(pid.as_str()).or_insert(0) += 1;
+        }
+    }
+
+    // Distinct categories (stable order) for color legend.
+    let mut categories: Vec<String> = Vec::new();
+    for p in &patterns {
+        if !categories.contains(&p.category) { categories.push(p.category.clone()); }
+    }
+    categories.sort();
+
+    // Pattern nodes: kind = "pattern", color from category, size from sqrt(degree).
+    let mut nodes_json: Vec<serde_json::Value> = Vec::new();
+    for p in &patterns {
+        let d = *deg.get(p.id.as_str()).unwrap_or(&0);
+        nodes_json.push(json!({
+            "id": p.id,
+            "kind": "pattern",
+            "category": p.category,
+            "valence": p.valence,
+            "label": p.pattern.chars().take(80).collect::<String>(),
+            "confidence": p.confidence,
+            "occurrences": p.occurrences,
+            "degree": d,
+            "projects": p.source_projects,
+        }));
+    }
+    for a in &associations {
+        nodes_json.push(json!({
+            "id": a.id,
+            "kind": "association",
+            "label": a.hypothesis.chars().take(80).collect::<String>(),
+            "confidence": a.confidence,
+            "actionable": a.actionable,
+            "promoted": a.promoted,
+            "dismissed": a.dismissed,
+            "degree": a.patterns_linked.len(),
+        }));
+    }
+
+    // Edges: every Association links to its referenced Patterns.
+    let mut edges_json: Vec<serde_json::Value> = Vec::new();
+    for a in &associations {
+        for pid in &a.patterns_linked {
+            edges_json.push(json!({
+                "source": a.id,
+                "target": pid,
+                "weight": a.confidence,
+            }));
+        }
+    }
+
+    let payload = json!({
+        "nodes": nodes_json,
+        "edges": edges_json,
+        "categories": categories,
+        "n_patterns": patterns.len(),
+        "n_associations": associations.len(),
+    });
+    Some(payload.to_string())
 }
 
 /// Roll up store-wide KPIs for the summary strip. All inputs are
@@ -1062,6 +1159,7 @@ pub fn render_html(snap: &Snapshot) -> String {
     body.push_str(&render_status_card(snap));
     body.push_str(&render_module_grid(snap));
     body.push_str(&render_dream_traces_section(snap));
+    body.push_str(&render_patterns_graph_section(snap));
     body.push_str(&render_events_section(snap));
     body.push_str(&render_architecture_section());
     body.push_str(&render_inventory_section(snap));
@@ -1106,6 +1204,7 @@ function registerFileContent(key, content) {{
     <a href="#daemon">Daemon</a>
     <a href="#modules">Modules</a>
     <a href="#dreams">Dreams</a>
+    <a href="#patterns-graph">Graph</a>
     <a href="#events">Events</a>
     <a href="#arch">Architecture</a>
     <a href="#files">Files</a>
@@ -1935,6 +2034,199 @@ fn event_detail(label: &str) -> String {
         return "⚠ frustration detected".into();
     }
     html_escape(label)
+}
+
+/// Patterns Graph — bipartite Pattern↔Association graph rendered with
+/// Sigma.js + Graphology loaded from a CDN. Uses ForceAtlas2 layout
+/// (graphology). Pattern nodes are colored by category, association nodes
+/// are diamond-shaped and colored by actionability + dismissed state.
+/// Edges go Association → Pattern (every association references its
+/// linked patterns).
+///
+/// The graph data is embedded inline as JSON (Snapshot.patterns_graph_json
+/// — built in collect()). Empty state shows a placeholder.
+fn render_patterns_graph_section(snap: &Snapshot) -> String {
+    let Some(payload) = &snap.patterns_graph_json else {
+        return r#"<section class="dash-section" id="patterns-graph"><h2>Patterns Graph</h2>
+<p class="muted">No patterns or associations yet — run a dream cycle.</p></section>"#.to_string();
+    };
+    // Inject the JSON via a <script type="application/json"> block so the
+    // browser doesn't try to parse the inline JSON as JS.
+    format!(
+        r##"<section class="dash-section" id="patterns-graph">
+<h2>Patterns Graph <span class="count">(bipartite)</span></h2>
+<p class="muted">
+  Pattern↔Association graph. Pattern nodes colored by category;
+  association nodes are diamonds. Click any node to focus its 1-hop
+  neighborhood; double-click empty space to reset.
+</p>
+<div class="pg-toolbar">
+  <button id="pg-mode-from-selected" class="pg-btn pg-btn-active">Edges: from-selected</button>
+  <button id="pg-mode-all" class="pg-btn">All</button>
+  <button id="pg-mode-off" class="pg-btn">Off</button>
+  <span class="pg-sep">·</span>
+  <label class="pg-check"><input type="checkbox" id="pg-actionable-only"> Actionable only</label>
+  <span class="pg-sep">·</span>
+  <span class="muted" id="pg-stats"></span>
+</div>
+<div id="pg-canvas" style="width:100%;height:560px;background:var(--surface,#0d1117);border-radius:6px;border:1px solid var(--border,#30363d);position:relative;overflow:hidden"></div>
+<div id="pg-detail" class="pg-detail muted">Click a node to inspect.</div>
+<script type="application/json" id="pg-data">{payload}</script>
+<script type="module">
+// Loaded from CDN — sigma + graphology + ForceAtlas2 layout.
+import Graph from 'https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js';
+import Sigma from 'https://cdn.jsdelivr.net/npm/sigma@3.0.0/dist/sigma.min.js';
+import forceAtlas2 from 'https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm';
+
+(function() {{
+  const data = JSON.parse(document.getElementById('pg-data').textContent);
+  const canvas = document.getElementById('pg-canvas');
+  const stats  = document.getElementById('pg-stats');
+  const detail = document.getElementById('pg-detail');
+  stats.textContent = data.n_patterns + ' patterns · ' + data.n_associations + ' associations · ' + data.edges.length + ' edges';
+
+  // Category palette — match the Swift dashboard's wedge colors.
+  const catColor = {{
+    'approach':        '#22c1c3',
+    'tool-use':        '#f5a623',
+    'user-preference': '#a673de',
+    'domain':          '#5b8def',
+    'architecture':    '#3ddc84',
+  }};
+  const fallbackPalette = ['#e08bd1','#dccc4d','#7e7eff','#4ddec0','#cfa37b'];
+  function colorFor(cat) {{
+    if (catColor[cat]) return catColor[cat];
+    let h = 0; for (let i = 0; i < cat.length; i++) h = (h*31 + cat.charCodeAt(i))|0;
+    return fallbackPalette[Math.abs(h) % fallbackPalette.length];
+  }}
+
+  const graph = new Graph();
+  for (const n of data.nodes) {{
+    const isPattern = n.kind === 'pattern';
+    const color = isPattern
+      ? colorFor(n.category)
+      : (n.dismissed ? '#666' : (n.actionable ? '#3ddc84' : '#5b8def'));
+    const size = isPattern
+      ? Math.max(2, Math.min(12, 2 + Math.sqrt(n.degree || 1) * 2))
+      : Math.max(3, Math.min(10, 3 + Math.sqrt(n.degree || 1) * 1.5));
+    graph.addNode(n.id, {{
+      x: Math.random(), y: Math.random(),
+      size, color,
+      label: n.label,
+      type: isPattern ? 'circle' : 'square',
+      kind: n.kind,
+      _data: n,
+    }});
+  }}
+  for (const e of data.edges) {{
+    if (graph.hasNode(e.source) && graph.hasNode(e.target)) {{
+      graph.addEdge(e.source, e.target, {{ size: 0.4 + (e.weight || 0) * 0.6, color: '#444' }});
+    }}
+  }}
+
+  // Force-directed layout — 200 iterations, gravity 1, scaling ratio 10.
+  forceAtlas2.assign(graph, {{ iterations: 200, settings: {{ gravity: 1, scalingRatio: 10 }} }});
+
+  let edgeMode = 'from-selected';
+  let actionableOnly = false;
+  let focusedId = null;
+
+  function neighbors(id) {{
+    const set = new Set([id]);
+    graph.forEachNeighbor(id, (n) => set.add(n));
+    return set;
+  }}
+  function reducer(node, attrs) {{
+    let res = Object.assign({{}}, attrs);
+    if (focusedId) {{
+      const ns = neighbors(focusedId);
+      if (!ns.has(node)) {{ res.color = '#222'; res.label = ''; }}
+    }} else if (actionableOnly) {{
+      const d = attrs._data;
+      if (d.kind === 'association' && !d.actionable) {{ res.color = '#2a2a2a'; res.size = res.size * 0.5; }}
+      if (d.kind === 'pattern' && d.degree === 0)    {{ res.color = '#2a2a2a'; res.size = res.size * 0.6; }}
+    }}
+    return res;
+  }}
+  function edgeReducer(edge, attrs) {{
+    if (edgeMode === 'off') return Object.assign({{}}, attrs, {{ hidden: true }});
+    if (edgeMode === 'all') return attrs;
+    // from-selected: hide edges unless they touch focusedId
+    if (!focusedId) return Object.assign({{}}, attrs, {{ hidden: true }});
+    const [s, t] = graph.extremities(edge);
+    if (s === focusedId || t === focusedId) return attrs;
+    return Object.assign({{}}, attrs, {{ hidden: true }});
+  }}
+
+  const renderer = new Sigma(graph, canvas, {{
+    nodeReducer: reducer,
+    edgeReducer: edgeReducer,
+    renderEdgeLabels: false,
+    labelDensity: 0.3,
+    labelGridCellSize: 100,
+  }});
+
+  renderer.on('clickNode', ({{ node }}) => {{
+    focusedId = node;
+    const d = graph.getNodeAttribute(node, '_data');
+    detail.innerHTML = renderDetail(d);
+    renderer.refresh();
+  }});
+  renderer.on('clickStage', () => {{
+    focusedId = null;
+    detail.innerHTML = 'Click a node to inspect.';
+    renderer.refresh();
+  }});
+
+  function escapeHtml(s) {{
+    return String(s).replace(/[&<>"']/g, (c) => ({{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }}[c]));
+  }}
+  function renderDetail(d) {{
+    const conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '—';
+    if (d.kind === 'pattern') {{
+      const proj = (d.projects || []).join(', ') || '—';
+      return '<strong>Pattern</strong> &middot; ' + escapeHtml(d.category) + ' &middot; ' + conf + ' &middot; degree ' + d.degree
+           + '<br><span class="muted">' + escapeHtml(d.label) + '</span>'
+           + '<br><span class="muted">Projects: ' + escapeHtml(proj) + '</span>';
+    }} else {{
+      const tags = [
+        d.actionable ? 'actionable' : null,
+        d.promoted ? 'promoted' : null,
+        d.dismissed ? 'dismissed' : null,
+      ].filter(Boolean).join(' &middot; ') || 'unmarked';
+      return '<strong>Association</strong> &middot; ' + conf + ' &middot; ' + tags + ' &middot; degree ' + d.degree
+           + '<br><span class="muted">' + escapeHtml(d.label) + '</span>';
+    }}
+  }}
+
+  // Toolbar wiring
+  function setMode(m, btn) {{
+    edgeMode = m;
+    document.querySelectorAll('.pg-btn').forEach(b => b.classList.remove('pg-btn-active'));
+    btn.classList.add('pg-btn-active');
+    renderer.refresh();
+  }}
+  document.getElementById('pg-mode-from-selected').onclick = (e) => setMode('from-selected', e.currentTarget);
+  document.getElementById('pg-mode-all').onclick           = (e) => setMode('all', e.currentTarget);
+  document.getElementById('pg-mode-off').onclick           = (e) => setMode('off', e.currentTarget);
+  document.getElementById('pg-actionable-only').onchange = (e) => {{
+    actionableOnly = e.target.checked;
+    renderer.refresh();
+  }};
+}})();
+</script>
+<style>
+.pg-toolbar {{ display:flex; align-items:center; gap:8px; padding:8px 0; flex-wrap:wrap; }}
+.pg-btn {{ font:500 12px/1.4 -apple-system,system-ui,sans-serif; padding:4px 10px; border-radius:4px; border:1px solid var(--border,#30363d); background:transparent; color:var(--text,#c9d1d9); cursor:pointer; }}
+.pg-btn-active {{ background:var(--accent,#5b8def); color:#fff; border-color:var(--accent,#5b8def); }}
+.pg-check {{ font:500 12px/1.4 -apple-system,system-ui,sans-serif; color:var(--text,#c9d1d9); cursor:pointer; }}
+.pg-sep {{ color:var(--dim,#666); margin:0 4px; }}
+.pg-detail {{ font:13px/1.5 -apple-system,system-ui,sans-serif; padding:10px 12px; background:var(--surface,#0d1117); border-radius:6px; border:1px solid var(--border,#30363d); margin-top:8px; min-height:60px; }}
+</style>
+</section>
+"##,
+        payload = payload,
+    )
 }
 
 /// Recent hook events, newest first. Shows count-of-total, paginated.
@@ -4372,6 +4664,7 @@ mod tests {
             store_warnings: vec![],
             store_file_stats: vec![],
             test_results: None,
+            patterns_graph_json: None,
         }
     }
 
