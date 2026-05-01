@@ -180,6 +180,20 @@ impl ClaudeClient {
         }
     }
 
+    /// Single source of truth for "construct a client per the user's config."
+    /// Uses subprocess CLI when `budget.use_claude_code_cli = true` (default),
+    /// falls back to the direct API only when explicitly configured AND
+    /// `ANTHROPIC_API_KEY` is set. Fixes the three sites that were
+    /// hardcoding `new()` and hitting "credit balance too low" for users
+    /// running on Pro/Max subscriptions.
+    pub fn for_config(config: &crate::config::Config) -> Result<Self> {
+        if config.budget.use_claude_code_cli {
+            Ok(Self::new_subprocess(&config.budget.claude_code_cli_path))
+        } else {
+            Self::new()
+        }
+    }
+
     /// Override the default retry policy. Primarily for tests that
     /// want faster failure; production code can rely on `Default`.
     #[allow(dead_code)]

@@ -321,7 +321,7 @@ impl Daemon {
         if !bm.should_run_now() {
             return;
         }
-        let client = match crate::api::ClaudeClient::new() {
+        let client = match crate::api::ClaudeClient::for_config(&self.config) {
             Ok(c) => c,
             Err(e) => {
                 warn!("weekly briefing: failed to construct API client: {e:#}");

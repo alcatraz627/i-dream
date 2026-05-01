@@ -2072,13 +2072,27 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 <div id="pg-canvas" style="width:100%;height:560px;background:var(--surface,#0d1117);border-radius:6px;border:1px solid var(--border,#30363d);position:relative;overflow:hidden"></div>
 <div id="pg-detail" class="pg-detail muted">Click a node to inspect.</div>
 <script type="application/json" id="pg-data">{payload}</script>
-<script type="module">
-// Loaded from CDN — sigma + graphology + ForceAtlas2 layout.
-import Graph from 'https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js';
-import Sigma from 'https://cdn.jsdelivr.net/npm/sigma@3.0.0/dist/sigma.min.js';
-import forceAtlas2 from 'https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/+esm';
-
+<!-- UMD script tags (NOT ES modules) so the page works opened from
+     file:// — ESM imports from CDN are blocked by browser CORS on
+     file:// origins. UMD attaches `graphology` and `Sigma` to window. -->
+<script src="https://cdn.jsdelivr.net/npm/graphology@0.25.4/dist/graphology.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/graphology-layout-forceatlas2@0.10.1/dist/graphology-layout-forceatlas2.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sigma@2.4.0/build/sigma.min.js"></script>
+<script>
 (function() {{
+  // Sigma 2.x exports a global `Sigma`; graphology UMD exports `graphology`.
+  var Graph = (window.graphology && window.graphology.Graph) || window.Graph;
+  var Sigma = window.Sigma;
+  var forceAtlas2 = window.graphologyLibrary
+    ? window.graphologyLibrary.layoutForceAtlas2
+    : window.forceAtlas2;
+  if (!Graph || !Sigma || !forceAtlas2) {{
+    document.getElementById('pg-canvas').innerHTML =
+      '<div style="padding:24px;color:#999">Graph libraries failed to load. ' +
+      'If opening from file:// some browsers block CDN scripts. Serve via ' +
+      '<code>python3 -m http.server</code> instead.</div>';
+    return;
+  }}
   const data = JSON.parse(document.getElementById('pg-data').textContent);
   const canvas = document.getElementById('pg-canvas');
   const stats  = document.getElementById('pg-stats');
@@ -2209,7 +2223,7 @@ import forceAtlas2 from 'https://cdn.jsdelivr.net/npm/graphology-layout-forceatl
   document.getElementById('pg-mode-from-selected').onclick = (e) => setMode('from-selected', e.currentTarget);
   document.getElementById('pg-mode-all').onclick           = (e) => setMode('all', e.currentTarget);
   document.getElementById('pg-mode-off').onclick           = (e) => setMode('off', e.currentTarget);
-  document.getElementById('pg-actionable-only').onchange = (e) => {{
+  document.getElementById('pg-actionable-only').onchange = function(e) {{
     actionableOnly = e.target.checked;
     renderer.refresh();
   }};
@@ -3165,6 +3179,16 @@ fn js_string_escape(s: &str) -> String {
             '\'' => out.push_str("\\'"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
+            // CRITICAL: '<' must be escaped to defeat early </script>
+            // termination. File previews can contain literal HTML/script
+            // fragments (shell scripts that emit HTML, JSONL with HTML
+            // samples, etc.) — without this, a `</script>` substring
+            // inside the JS string closes the surrounding <script> tag
+            // and dumps the rest of the content as visible HTML. Common
+            // workaround: escape `<` as `\x3c`. Browsers parse `\x3c`
+            // back to `<` inside the string, but the HTML parser doesn't
+            // treat it as a tag-open.
+            '<' => out.push_str("\\x3c"),
             _ => out.push(c),
         }
     }
@@ -3785,7 +3809,11 @@ pre.diagram, pre.config {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px 16px;
-  overflow-x: auto;
+  overflow: auto;
+  /* Cap config-file previews so a 50K-line JSONL doesn't dominate the
+     page. The full content is still in `<pre>` (right-click → Save As
+     to export); just bounded visually. */
+  max-height: 360px;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;

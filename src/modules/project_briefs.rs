@@ -209,7 +209,17 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length â
     /// Returns (project_count, total_tokens). Skips projects with <3
     /// patterns (insufficient signal). Errors per-project are logged but
     /// don't abort the run.
+    ///
+    /// If patterns.json has no source_projects coverage (legacy data from
+    /// before D2 landed), auto-runs a one-shot backfill from source_sessions
+    /// before generating, so existing data isn't excluded silently.
     pub async fn generate_all(&self, client: &ClaudeClient) -> Result<(u64, u64)> {
+        // Backfill if needed (idempotent â€” does nothing when coverage is full).
+        let backfilled = self.backfill_source_projects()?;
+        if backfilled > 0 {
+            info!("Project briefs: backfilled source_projects on {backfilled} legacy patterns");
+        }
+
         let patterns: Vec<ExtractedPattern> = self.store
             .read_json("dreams/patterns.json")
             .unwrap_or_default();
@@ -237,6 +247,57 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length â
             }
         }
         Ok((succeeded, total_tokens))
+    }
+
+    /// Walk ~/.claude/projects/*/<sid>.jsonl to build a session_id â†’
+    /// project_id map, then update each pattern's source_projects field
+    /// from its source_sessions. Writes patterns.json back if anything
+    /// changed. Returns the number of patterns that gained at least one
+    /// project_id.
+    ///
+    /// Idempotent: patterns already with non-empty source_projects are
+    /// only added to (union), never overwritten.
+    pub fn backfill_source_projects(&self) -> Result<usize> {
+        use crate::transcript;
+        use crate::config::expand_tilde;
+
+        let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
+        let files = transcript::scan_projects(&projects_dir)?;
+        if files.is_empty() { return Ok(0); }
+
+        // session_id â†’ project_id (basename of project_dir)
+        let mut sid_to_proj: HashMap<String, String> = HashMap::new();
+        for f in &files {
+            let proj = f.project_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            sid_to_proj.insert(f.session_id.clone(), proj);
+        }
+
+        let mut patterns: Vec<ExtractedPattern> = self.store
+            .read_json("dreams/patterns.json")
+            .unwrap_or_default();
+        if patterns.is_empty() { return Ok(0); }
+
+        let mut changed = 0usize;
+        for p in patterns.iter_mut() {
+            let mut added = false;
+            for sid in &p.source_sessions {
+                if let Some(proj) = sid_to_proj.get(sid) {
+                    if !p.source_projects.contains(proj) {
+                        p.source_projects.push(proj.clone());
+                        added = true;
+                    }
+                }
+            }
+            if added { changed += 1; }
+        }
+        if changed > 0 {
+            self.store.write_json("dreams/patterns.json", &patterns)?;
+        }
+        Ok(changed)
     }
 }
 

@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         Command::BriefProjects { cwd } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
-            let client = api::ClaudeClient::new()?;
+            let client = api::ClaudeClient::for_config(&config)?;
             let pbm = modules::project_briefs::ProjectBriefsModule::new(&config, &store);
             if let Some(c) = cwd {
                 let project_id = modules::project_briefs::ProjectBriefsModule::encode_cwd(&c);
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
         Command::Briefing { force } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
-            let client = api::ClaudeClient::new()?;
+            let client = api::ClaudeClient::for_config(&config)?;
             let bm = modules::weekly_briefing::WeeklyBriefingModule::new(&config, &store);
             let result = if force {
                 Some(bm.run_force(&client).await?)
