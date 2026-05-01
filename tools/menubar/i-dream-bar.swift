@@ -2308,6 +2308,53 @@ final class DashboardWindowController: NSObject {
 
     // Sidebar footer state
     private var lastRefreshedLabel:    NSTextField?
+    private var themePickerControl:    NSSegmentedControl?
+    private let dashAlwaysOnTopKey = "dev.i-dream.dashboard.alwaysOnTop"
+    private let dashThemeKey       = "dev.i-dream.dashboard.theme"  // "light"|"dark"|"system"
+
+    /// 0=light, 1=dark, 2=system. Defaults to dark when key missing.
+    private func currentThemeIndex() -> Int {
+        switch UserDefaults.standard.string(forKey: dashThemeKey) {
+        case "light":  return 0
+        case "system": return 2
+        default:       return 1   // dark default (brand identity)
+        }
+    }
+
+    private func applyDashboardAppearance() {
+        guard let panel = panel else { return }
+        let appearance: NSAppearance? = {
+            switch currentThemeIndex() {
+            case 0:  return NSAppearance(named: .darkAqua) // placeholder — see note below
+            case 2:  return nil  // follow system
+            default: return NSAppearance(named: .darkAqua)
+            }
+        }()
+        // Actual mapping: 0=light → .aqua, 1=dark → .darkAqua, 2=system → nil
+        switch currentThemeIndex() {
+        case 0:  panel.appearance = NSAppearance(named: .aqua)
+        case 2:  panel.appearance = nil
+        default: panel.appearance = NSAppearance(named: .darkAqua)
+        }
+        _ = appearance  // silence unused
+    }
+
+    @objc private func themePicked(_ sender: NSSegmentedControl) {
+        let v: String
+        switch sender.selectedSegment {
+        case 0:  v = "light"
+        case 2:  v = "system"
+        default: v = "dark"
+        }
+        UserDefaults.standard.set(v, forKey: dashThemeKey)
+        applyDashboardAppearance()
+    }
+
+    @objc private func toggleDashboardAlwaysOnTop(_ sender: NSButton) {
+        let on = sender.state == .on
+        UserDefaults.standard.set(on, forKey: dashAlwaysOnTopKey)
+        panel?.level = on ? .statusBar : .floating
+    }
     private var lastRefreshedDate:     Date?
 
     private let tabs: [(title: String, symbol: String)] = [
@@ -2376,11 +2423,20 @@ final class DashboardWindowController: NSObject {
         p.level                = .floating
         p.minSize              = NSSize(width: 960, height: 640)
         p.center()
-        // Pin the dashboard to dark appearance — the project has a dark
-        // brand identity and our color choices (cyan/purple/orange accents,
-        // category palette) only read correctly against a dark surface.
-        // Following system theme blew out the palette in light mode.
-        p.appearance           = NSAppearance(named: .darkAqua)
+        // Apply user's theme choice (defaults to dark — the brand
+        // identity — but light / system are available via the sidebar
+        // segmented control). NB: this sets the panel-only appearance;
+        // the rest of the process (HUD + menubar) stays dark via the
+        // NSApp.appearance pin in applicationDidFinishLaunching.
+        switch currentThemeIndex() {
+        case 0:  p.appearance = NSAppearance(named: .aqua)
+        case 2:  p.appearance = nil   // follow system
+        default: p.appearance = NSAppearance(named: .darkAqua)
+        }
+        // Apply user's always-on-top preference if set.
+        if UserDefaults.standard.bool(forKey: dashAlwaysOnTopKey) {
+            p.level = .statusBar
+        }
         self.panel = p
 
         // Wire keyboard shortcuts (Cmd+1-9, Cmd+R)
@@ -2440,25 +2496,52 @@ final class DashboardWindowController: NSObject {
             navButtons.append(btn)
         }
 
-        // Bottom: export + refresh + version + last-refreshed
+        // Bottom: export + refresh + theme + always-on-top + version + last-refreshed
         let exportBtn = NSButton(title: "⬇  Export JSON", target: self, action: #selector(exportDashboardData))
-        exportBtn.frame            = NSRect(x: 8, y: 72, width: sideW - 16, height: 28)
+        exportBtn.frame            = NSRect(x: 8, y: 132, width: sideW - 16, height: 28)
         exportBtn.isBordered       = false
         exportBtn.font             = .systemFont(ofSize: 12)
         exportBtn.contentTintColor = .secondaryLabelColor
         sidebar.addSubview(exportBtn)
 
         let refreshBtn = NSButton(title: "↺  Refresh  (⌘R)", target: self, action: #selector(refreshDashboard))
-        refreshBtn.frame            = NSRect(x: 8, y: 48, width: sideW - 16, height: 28)
+        refreshBtn.frame            = NSRect(x: 8, y: 108, width: sideW - 16, height: 28)
         refreshBtn.isBordered       = false
         refreshBtn.font             = .systemFont(ofSize: 12)
         refreshBtn.contentTintColor = .secondaryLabelColor
         sidebar.addSubview(refreshBtn)
 
+        // ── Theme picker (T-S6 follow-up) ─────────────────────────────────
+        // 3-segment control: Light / Dark / System. Persists to UserDefaults.
+        // Default Dark — the brand palette is dark-tuned and the round-2
+        // reviewers' "force dark" recommendation still applies — but the
+        // user can override here without an app rebuild.
+        let themePicker = NSSegmentedControl(labels: ["☀", "☾", "⏚"],
+                                              trackingMode: .selectOne,
+                                              target: self, action: #selector(themePicked(_:)))
+        themePicker.frame  = NSRect(x: 8, y: 80, width: sideW - 16, height: 22)
+        themePicker.font   = .systemFont(ofSize: 11)
+        themePicker.selectedSegment = currentThemeIndex()
+        themePicker.toolTip = "Appearance: Light / Dark / System"
+        themePicker.setLabel("Light", forSegment: 0)
+        themePicker.setLabel("Dark",  forSegment: 1)
+        themePicker.setLabel("Sys",   forSegment: 2)
+        sidebar.addSubview(themePicker)
+        themePickerControl = themePicker
+
+        // ── Always-on-top toggle ──────────────────────────────────────────
+        let aotBtn = NSButton(checkboxWithTitle: "  Always on top",
+                               target: self, action: #selector(toggleDashboardAlwaysOnTop(_:)))
+        aotBtn.frame = NSRect(x: 8, y: 56, width: sideW - 16, height: 18)
+        aotBtn.font  = .systemFont(ofSize: 11)
+        aotBtn.state = UserDefaults.standard.bool(forKey: dashAlwaysOnTopKey) ? .on : .off
+        if let panel = panel, aotBtn.state == .on { panel.level = .statusBar }
+        sidebar.addSubview(aotBtn)
+
         let verLabel = NSTextField(labelWithString: "build \(BuildInfo.commitHash.prefix(7))")
         verLabel.font      = .monospacedSystemFont(ofSize: 9.5, weight: .regular)
         verLabel.textColor = .tertiaryLabelColor
-        verLabel.frame     = NSRect(x: 14, y: 28, width: sideW - 28, height: 14)
+        verLabel.frame     = NSRect(x: 14, y: 30, width: sideW - 28, height: 14)
         sidebar.addSubview(verLabel)
 
         let refreshedLbl = NSTextField(labelWithString: "Refreshed just now")
@@ -5332,14 +5415,11 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var theMenu: NSMenu!
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        // Force dark appearance for the entire i-dream-bar process. Our
-        // brand palette (dark navy gradients, cyan/purple/orange accents,
-        // category colors) was tuned exclusively for dark mode — letting
-        // the app follow system theme blew out the visual identity in
-        // light mode and was reported as a hard regression. Setting
-        // NSApp.appearance covers every NSPanel/NSView constructed
-        // anywhere in the process, including the dashboard, the HUD, all
-        // detail popovers, and the menubar widget itself.
+        // Default-pin to dark (brand identity), but the dashboard's theme
+        // picker can override per-panel (light / dark / system). Process
+        // default still wins for the HUD + menubar — those are always
+        // dark regardless of system theme. The dashboard panel's
+        // .appearance overrides the process default for that panel only.
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
         CrashReporter.install()
