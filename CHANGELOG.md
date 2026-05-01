@@ -4,6 +4,20 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-01 second patch
+
+### Fixed
+- **Always-on-Top toggle now works**: was using `.statusBar` (level 25); switched to `.popUpMenu` (level 101) + `.canJoinAllSpaces` collection behavior + `orderFrontRegardless()` after the level change.
+- **CI Swift build**: swiftc requires top-level expressions in a file named `main.swift`. CI now copies `i-dream-bar.swift` to `/tmp/swiftbuild/main.swift` before compiling.
+
+### Added
+- **Theme picker icons**: replaced segmented control with three SF-symbol HoverButtons (`sun.max.fill` / `moon.fill` / `circle.lefthalf.filled`), no chrome by default, hover-tinted background, tooltips per icon, full-color tint on the active theme.
+- **Dream Cycles date-range filter**: 7d / 30d / 90d / all toggle in the chart header; bars carry `data-age-days`; client-side JS hides bars older than the selected window. Journal cap bumped 10 → 90 entries to give the filter meaningful range.
+- **Menubar shortcuts**: `⌘D` Open Dashboard / `⌘T` Trigger Dream Cycle / `⌘S` Start/Stop Daemon. Added `key:` parameter to the existing `add(menu, ...)` helper, mirroring the claude-instances pattern.
+- **`docs/10-claude-redesign-prompt.md`**: a self-contained Claude.ai prompt the user can paste alongside dashboard screenshots to get a polished design proposal — bridges the gap between "needs design direction" and "needs implementation."
+
+---
+
 ## [0.2.1] — 2026-05-01 patch
 
 ### Fixed
