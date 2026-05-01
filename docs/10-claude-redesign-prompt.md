@@ -1,4 +1,135 @@
-# Claude.ai UI Redesign Prompt
+# UI Redesign Prompts — Claude Design + Claude.ai chat
+
+Two prompts, pick one. **Claude Design (Anthropic Labs, launched 2026-04-17)** is the right choice if you have Pro/Max/Team/Enterprise — it can point at the repo, extract a design system from existing code, and produce interactive prototypes. **Claude.ai chat** is the fallback if you don't have Design access.
+
+| Tool | Best when | Output you'll get |
+|---|---|---|
+| **Claude Design** (`claude.ai/design`, research preview) | You have Pro/Max/Team/Enterprise + want interactive prototypes anchored in the actual codebase | Live design system (palette + tokens + components) extracted from your code, plus per-view interactive mockups exportable as code |
+| **Claude.ai chat** (web or desktop app) | No Claude Design access OR you prefer a single conversational thread | Design proposals as text + ASCII mockups + CSS/SwiftUI snippets + roadmap |
+
+---
+
+## Prompt 1 — for Claude Design (recommended)
+
+Open https://claude.ai/design (or the desktop app's Design surface). When it asks for input, do this 3-step setup, then paste the prompt:
+
+**Step 1 — Point Claude Design at the repo.**
+Use the "Connect codebase" / "Add code source" option to point at `https://github.com/alcatraz627/i-dream` (or upload the local clone). The two files Claude Design should prioritize for the design system:
+- `tools/menubar/i-dream-bar.swift` — every native widget + the brand palette + every NSColor / NSFont call
+- `src/dashboard.rs` — the HTML dashboard's CSS variables + section structure
+
+**Step 2 — Upload current-state screenshots.**
+4–6 screenshots covering: Overview tab, Patterns tab (with wedge graph), Associations tab (with focus-mode graph), the floating HUD, the HTML dashboard top section, the sidebar zoomed.
+
+**Step 3 — Paste this prompt:**
+
+```
+i-dream is a Rust + Swift macOS app that runs background dream cycles
+on a developer's Claude Code transcripts. There's a native NSPanel
+dashboard (AppKit / NSView / NSBezierPath rendering, single-file Swift)
+and an HTML dashboard generated from src/dashboard.rs (vanilla CSS +
+small inline JS only — no React, no build step).
+
+I've connected the codebase and uploaded screenshots of the current
+state. Two rounds of opus-agent design reviews (in /tmp/i-dream-
+dashboard-review-{A,B,A2,B2}.md inside the repo) flagged the same
+gaps: invisible selection, no filter strip, scroll-only lists at
+500+ rows, decorative graphs, no command palette, generic Tokyo
+Night palette without brand identity. The most recent fixes (commits
+v0.2.0 → v0.2.3) addressed structural bugs (force-dark, wedge layout,
+edge modes, default summary cards, stat chips, sidebar accent, brand
+mark, theme picker, always-on-top, ⌘D/⌘T/⌘S menubar shortcuts) but
+the surface still doesn't feel "designed."
+
+Please do the following, in this order:
+
+## A. Extract the existing design system
+
+Read the codebase and produce the canonical design system you find:
+- Color palette (semantic + categorical, separately)
+- Typography stack and scale
+- Spacing rhythm
+- Component inventory (HoverButton, NavSidebarButton, MiniBarChartView,
+  PatternGraphView, AssociationGraphView, stat chips, list rows, etc.)
+- Iconography conventions (which SF Symbols, where, when)
+
+Show this as a design-system page I can browse — palette swatches,
+type specimens, component cards.
+
+## B. Diagnose what's wrong with the current visual language
+
+Brutal but specific. Each issue tied to a screenshot or component name.
+Don't repeat the round-1/2 reviews — build forward.
+
+## C. Propose the new design system
+
+The brand identity is sleep / dreams. Current accent: dusk-violet
+#8c69d9. Categorical palette: teal #22c1c3 / orange #f5a623 / purple
+#a673de / blue #5b8def / green #3ddc84.
+
+Constraints I need you to honor:
+- Dark surface is canonical (HUD + menubar + dashboard default)
+- Light mode supported but secondary
+- AppKit on the native side (no SwiftUI rewrite — but new SwiftUI
+  components inside NSHostingView are fine)
+- Vanilla CSS + minimal vanilla JS on the HTML side
+- System font + monospace only (no external font loading on HTML)
+
+Propose:
+- New color tokens (4 surface elevations + 5 categorical + 3 semantic
+  + 4 text weights) with exact hex codes
+- New type scale (5 sizes max), tabular nums everywhere for numeric values
+- Spacing: 8px grid, list rows 36–44px, card padding 16px
+- Motion language (specific durations + easings)
+- One signature visual moment that says "this is i-dream"
+
+## D. Build interactive prototypes for each view
+
+Use Claude Design's prototype builder for these five views:
+1. Overview tab — exec summary as scannable metric cards
+2. Patterns tab — list (with filter strip + sort dropdown + selection
+   accent) + wedge graph (more depth, motion on focus)
+3. Associations tab — list + bipartite graph (better focus drill-down,
+   replace floating popover with right-edge inspector drawer)
+4. Search tab — ⌘K command palette as the primary surface, not a
+   schema directory
+5. Sidebar — better brand mark, three-row footer (actions / build hash
+   pill / freshness indicator)
+
+Each prototype: spatial layout, interaction notes (hover/click/keyboard),
+specific tokens used.
+
+## E. Export the design system as code
+
+For each token + component, give me the export in BOTH:
+- CSS custom properties (for src/dashboard.rs to embed)
+- Swift constants / NSColor extensions (for tools/menubar/
+  i-dream-bar.swift to use)
+
+I want to be able to drop the export straight into the codebase.
+
+## F. Implementation roadmap
+
+Three phases, prioritized by user-felt impact:
+- Phase 1 (1–2 days): the visual changes that "stop feeling broken"
+- Phase 2 (1 week): the interaction loop that "feels like a tool"
+- Phase 3 (longer): the polish that "feels designed"
+
+Each phase: ordered list with rough effort estimate per item + which
+file/component changes.
+
+## Output format
+
+A single Claude Design project I can revisit and iterate on.
+Save the design system as the project's canonical system so future
+iterations build on it instead of starting over.
+```
+
+When Claude Design finishes, **save the project URL** (or export a snapshot) somewhere I can read in the next session — `~/.claude/topics/i-dream-redesign-2026-05-01.md` or similar. Start the next session with: *"I have a Claude Design project at \<url\> — implement it commit-by-commit."*
+
+---
+
+## Prompt 2 — for Claude.ai chat (fallback)
 
 This is the **prompt to paste into Claude.ai (the chat interface)** alongside your dashboard screenshots to get a polished redesign. Claude can interpret images natively in the chat, so attach the screenshots directly. The output will be design proposals (annotated layouts, CSS specs, interaction notes) you can hand back to me to implement.
 
@@ -133,11 +264,14 @@ director.
 
 ---
 
-## After you get Claude.ai's response
+## After you get the response (either tool)
 
-1. Save the response to `~/.claude/topics/i-dream-redesign-2026-05-01.md` (or a similar topic-keyed path).
-2. In your next session with me, start with: *"I have a redesign proposal from Claude.ai at `<path>` — implement it."*
-3. I'll read the proposal, build a focused implementation plan keyed to the existing files (`src/dashboard.rs`, `tools/menubar/i-dream-bar.swift`), and ship it commit-by-commit.
+| Tool | What to save | How to start next session |
+|---|---|---|
+| Claude Design | The project URL + an exported snapshot if available | *"I have a Claude Design project at `<url>` (snapshot at `<path>`) — implement it commit-by-commit."* |
+| Claude.ai chat | The full response text saved at `~/.claude/topics/i-dream-redesign-2026-05-01.md` | *"I have a redesign proposal from Claude.ai at `<path>` — implement it."* |
+
+I'll read the proposal, build a focused implementation plan keyed to the existing files (`src/dashboard.rs`, `tools/menubar/i-dream-bar.swift`), and ship it commit-by-commit.
 
 ## What to attach to the Claude.ai chat
 
