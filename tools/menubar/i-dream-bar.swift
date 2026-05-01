@@ -2332,6 +2332,16 @@ final class DashboardWindowController: NSObject {
 
     // ── Public interface ───────────────────────────────────────────────────────
 
+    /// HUD task #7: open the dashboard scrolled to a specific tab index.
+    /// Convenience overload of showOrFront() for HUD cells / external
+    /// callers that know which tab they want.
+    func showOrFront(tab: Int) {
+        showOrFront()
+        // Defer one tick so the panel + selectTab order is deterministic
+        // on first construction.
+        DispatchQueue.main.async { [weak self] in self?.selectTab(tab) }
+    }
+
     func showOrFront() {
         patterns     = allPatterns()
         associations = allAssociations()
@@ -2546,7 +2556,7 @@ final class DashboardWindowController: NSObject {
 
     @objc private func navTapped(_ sender: NSButton) { selectTab(sender.tag) }
 
-    private func selectTab(_ index: Int) {
+    func selectTab(_ index: Int) {
         guard index >= 0 && index < tabs.count else { return }
         for (i, btn) in navButtons.enumerated() { btn.isSelectedTab = (i == index) }
         for (i, v) in contentViews.enumerated()  { v.isHidden        = (i != index) }
@@ -8153,6 +8163,27 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             dashboardController = DashboardWindowController()
         }
         dashboardController!.showOrFront()
+    }
+
+    /// HUD task #7: openDashboard variants for the HUD cells. Each opens
+    /// the dashboard scrolled to the matching tab. Tab index map:
+    /// 0=Overview · 1=Patterns · 2=Associations · 3=Journal · 4=Insights
+    /// · 5=Metacog · 6=Search · 7=Help · 8=About.
+    @objc private func openDashboardPatterns() {
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showOrFront(tab: 1)
+    }
+    @objc private func openDashboardAssociations() {
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showOrFront(tab: 2)
+    }
+    @objc private func openDashboardInsights() {
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showOrFront(tab: 4)
+    }
+    @objc private func openDashboardMetacog() {
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showOrFront(tab: 5)
     }
 
     @objc private func openLogs() {
