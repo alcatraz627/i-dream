@@ -483,6 +483,13 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
     // historically rate either kind under the same `insight_id` field.
     let (brier_score, brier_n) = compute_brier_score(store, &patterns, &associations);
 
+    // D11 — 30-day pattern-extraction sparkline. Bucket pattern.first_seen
+    // by UTC day; emit oldest→newest. Answers "is dreaming productive
+    // lately?" Pattern occurrences themselves aren't timestamped in the
+    // schema, so the sparkline measures *new pattern arrivals*, not
+    // re-observations.
+    let activity_30d: Vec<u64> = compute_activity_sparkline_30d(&patterns);
+
     // M9 — emit community summary so the legend can list them.
     let mut comm_sizes: std::collections::HashMap<&String, usize> =
         std::collections::HashMap::new();
@@ -503,12 +510,36 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
         "categories": categories,
         "hubs": hubs_json,
         "communities": comm_summary,       // M9 — [{id, size, idx}]
+        "activity_30d": activity_30d,      // D11 — new patterns per day, oldest→newest
         "brier_score": brier_score,        // null if no rated associations yet
         "brier_n": brier_n,                // sample size
         "n_patterns": patterns.len(),
         "n_associations": associations.len(),
     });
     Some(payload.to_string())
+}
+
+/// D11 — bucket pattern.first_seen timestamps into one count per UTC day,
+/// returning the last 30 days oldest→newest. Today is the rightmost bucket.
+/// Patterns with unparseable timestamps are skipped silently — the
+/// sparkline is a directional signal, not a precise audit.
+fn compute_activity_sparkline_30d(
+    patterns: &[crate::modules::dreaming::ExtractedPattern],
+) -> Vec<u64> {
+    use chrono::{Duration, NaiveDate, Utc};
+    let today = Utc::now().date_naive();
+    let start = today - Duration::days(29); // 30-day inclusive window
+    let mut buckets = vec![0u64; 30];
+    for p in patterns {
+        // first_seen is RFC3339 like "2026-04-11T11:57:11.798799Z".
+        // Trim to the date prefix and parse.
+        let date_str = p.first_seen.get(..10).unwrap_or("");
+        let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else { continue };
+        if d < start || d > today { continue }
+        let idx = (d - start).num_days() as usize;
+        if idx < buckets.len() { buckets[idx] += 1; }
+    }
+    buckets
 }
 
 /// D10 Brier calibration score helper. Reads dreams/insight-feedback.jsonl,
@@ -2223,6 +2254,11 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   <label class="pg-check" title="Color pattern nodes by emergent community (M9 label propagation) instead of category"><input type="checkbox" id="pg-color-by-community"> Color by community</label>
   <span class="pg-sep">·</span>
   <span class="muted" id="pg-stats"></span>
+  <span class="pg-sep">·</span>
+  <span class="pg-spark-wrap" title="New patterns extracted per day, last 30 days. Hover any column for details.">
+    <span class="pg-spark-label">30d</span>
+    <svg id="pg-spark" width="120" height="20" viewBox="0 0 120 20" preserveAspectRatio="none"></svg>
+  </span>
 </div>
 <div class="pg-grid">
   <div id="pg-canvas" style="width:100%;height:560px;background:var(--surface,#0d1117);border-radius:6px;border:1px solid var(--border,#30363d);position:relative;overflow:hidden"></div>
@@ -2271,6 +2307,39 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
     statsLine += ' · <span style="color:' + color + '" title="Brier calibration over ' + data.brier_n + ' user-rated associations. Lower=better. 0.25=uninformed, 0.10 well-calibrated.">Brier ' + b.toFixed(3) + ' (n=' + data.brier_n + ')</span>';
   }}
   stats.innerHTML = statsLine;
+
+  // D11 — render the 30-day pattern-extraction sparkline as a bar chart.
+  // Each bar is 4px wide with 0px gap; height scales to max bucket. Bars
+  // are tinted by accent color, with hover tooltips showing the date +
+  // count via a single <title> child per bar.
+  (function renderSparkline() {{
+    var svg = document.getElementById('pg-spark');
+    if (!svg || !Array.isArray(data.activity_30d)) return;
+    var arr = data.activity_30d;
+    var max = Math.max.apply(null, arr.concat([1]));
+    var W = 120, H = 20, n = arr.length;
+    var bw = W / n;
+    var today = new Date();
+    var ns = 'http://www.w3.org/2000/svg';
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    arr.forEach(function(v, i) {{
+      var h = max > 0 ? (v / max) * (H - 2) : 0;
+      var rect = document.createElementNS(ns, 'rect');
+      rect.setAttribute('x', (i * bw + 0.3).toFixed(2));
+      rect.setAttribute('y', (H - h).toFixed(2));
+      rect.setAttribute('width', (bw - 0.6).toFixed(2));
+      rect.setAttribute('height', h.toFixed(2));
+      // Today's bar (rightmost) is brightened so the user sees "now".
+      rect.setAttribute('fill', i === n - 1 ? '#3ddc84' : '#5b8def');
+      rect.setAttribute('opacity', v === 0 ? '0.25' : '1');
+      var d = new Date(today); d.setDate(today.getDate() - (n - 1 - i));
+      var iso = d.toISOString().slice(0, 10);
+      var t = document.createElementNS(ns, 'title');
+      t.textContent = iso + ' — ' + v + ' new pattern' + (v === 1 ? '' : 's');
+      rect.appendChild(t);
+      svg.appendChild(rect);
+    }});
+  }})();
 
   // M9 palette — hoisted up here (vs declared inside the IIFE state
   // block below) because the hub list and the node reducer both need
@@ -2530,6 +2599,9 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 </script>
 <style>
 .pg-toolbar {{ display:flex; align-items:center; gap:8px; padding:8px 0; flex-wrap:wrap; }}
+.pg-spark-wrap {{ display:inline-flex; align-items:center; gap:6px; }}
+.pg-spark-label {{ font:600 10px/1 -apple-system,system-ui,sans-serif; color:var(--dim,#666); text-transform:uppercase; letter-spacing:0.5px; }}
+#pg-spark {{ display:block; }}
 .pg-btn {{ font:500 12px/1.4 -apple-system,system-ui,sans-serif; padding:4px 10px; border-radius:4px; border:1px solid var(--border,#30363d); background:transparent; color:var(--text,#c9d1d9); cursor:pointer; }}
 .pg-btn-active {{ background:var(--accent,#5b8def); color:#fff; border-color:var(--accent,#5b8def); }}
 .pg-check {{ font:500 12px/1.4 -apple-system,system-ui,sans-serif; color:var(--text,#c9d1d9); cursor:pointer; }}
