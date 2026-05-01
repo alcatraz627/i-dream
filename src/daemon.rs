@@ -683,7 +683,66 @@ impl Daemon {
         // Run post-consolidation hooks (dream-metrics refresh, etc.)
         Self::run_post_wake_hooks();
 
+        // D6 v2 — auto-regenerate per-project briefs for any project
+        // whose patterns moved this cycle. Cheap because we already
+        // recomputed graph_metrics + the brief module is project-scoped.
+        // Errors are logged but don't fail the cycle (briefs are an
+        // ergonomic surface, not load-bearing).
+        if let Some(client) = self.client.as_ref() {
+            self.regen_dirty_project_briefs(client).await;
+        }
+
         Ok(())
+    }
+
+    /// D6 v2: refresh per-project briefs that have new pattern activity
+    /// since the last brief generation. Compares each project's most
+    /// recent pattern last_seen against the brief file's mtime; if newer,
+    /// regenerates the brief.
+    async fn regen_dirty_project_briefs(&self, client: &ClaudeClient) {
+        use crate::modules::dreaming::ExtractedPattern;
+        use std::collections::HashMap;
+        let patterns: Vec<ExtractedPattern> = self
+            .store
+            .read_json("dreams/patterns.json")
+            .unwrap_or_default();
+        if patterns.is_empty() { return; }
+        // Map project_id → max(last_seen) across its patterns.
+        let mut latest: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+        for p in &patterns {
+            for proj in &p.source_projects {
+                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&p.last_seen) {
+                    let ts_utc = ts.with_timezone(&chrono::Utc);
+                    latest
+                        .entry(proj.clone())
+                        .and_modify(|cur| { if ts_utc > *cur { *cur = ts_utc; } })
+                        .or_insert(ts_utc);
+                }
+            }
+        }
+        let pbm = crate::modules::project_briefs::ProjectBriefsModule::new(
+            &self.config, &self.store);
+        let mut regen = 0u32;
+        for (proj, ts) in latest {
+            let brief_path = self.store.path(&format!("dreams/project-briefs/{proj}.md"));
+            // Regenerate if missing OR pattern activity is newer than the brief mtime.
+            let needs = !brief_path.exists() || std::fs::metadata(&brief_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|sys| chrono::DateTime::<chrono::Utc>::from(sys) < ts)
+                .unwrap_or(true);
+            if !needs { continue; }
+            match pbm.generate_for_project(client, &proj).await {
+                Ok((tokens, _)) => {
+                    info!("D6 v2: regenerated brief for {proj} ({tokens} tokens)");
+                    regen += 1;
+                }
+                Err(e) => warn!("D6 v2: brief regen failed for {proj}: {e:#}"),
+            }
+        }
+        if regen > 0 {
+            info!("D6 v2: refreshed {regen} project brief(s) post-cycle");
+        }
     }
 
     /// Manually trigger a dream cycle.
