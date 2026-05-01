@@ -459,13 +459,20 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
         .iter()
         .take(10)
         .filter_map(|(id, d)| pat_lookup.get(id).map(|p| (id, d, *p)))
-        .map(|(id, d, p)| json!({
-            "id": *id,
-            "degree": d,
-            "category": p.category,
-            "confidence": p.confidence,
-            "label": p.pattern.chars().take(120).collect::<String>(),
-        }))
+        .map(|(id, d, p)| {
+            // M9 polish — surface community membership on hubs so the
+            // sidebar can render a colored bullet matching graph nodes.
+            let community = communities.get(&p.id).and_then(|c| c.as_ref());
+            let community_idx = community.and_then(|c| comm_index.get(c)).copied();
+            json!({
+                "id": *id,
+                "degree": d,
+                "category": p.category,
+                "confidence": p.confidence,
+                "label": p.pattern.chars().take(120).collect::<String>(),
+                "community_idx": community_idx,
+            })
+        })
         .collect();
 
     // D10 — Brier calibration score over user-rated patterns + associations.
@@ -2265,6 +2272,16 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   }}
   stats.innerHTML = statsLine;
 
+  // M9 palette — hoisted up here (vs declared inside the IIFE state
+  // block below) because the hub list and the node reducer both need
+  // it. Same palette in both places means a hub's color dot matches
+  // its node tint when "Color by community" is on.
+  const commPalette = [
+    '#e879f9','#34d399','#fbbf24','#60a5fa','#f87171',
+    '#a78bfa','#22d3ee','#fb923c','#84cc16','#ec4899',
+    '#14b8a6','#facc15','#818cf8','#f472b6','#4ade80',
+  ];
+
   // M10 — populate the Top hubs sidebar list. Each entry is clickable
   // and will set focusedId on the graph, dimming everything except the
   // hub's 1-hop neighborhood (same as clicking the node directly).
@@ -2278,8 +2295,15 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
       var deg  = h.degree;
       var conf = Math.round(h.confidence * 100);
       var label = h.label || '(unnamed)';
+      // M9 polish — community color dot. Uses the same palette as the
+      // "Color by community" toggle so the same hub reads consistently
+      // whether the user is in category-color or community-color mode.
+      var commIdx = (h.community_idx === null || h.community_idx === undefined) ? -1 : h.community_idx;
+      var commColor = commIdx < 0 ? '#555' : commPalette[commIdx % commPalette.length];
+      var commTitle = commIdx < 0 ? 'isolated (no community)' : 'community #' + (commIdx + 1);
       li.innerHTML =
         '<span class="pg-hub-rank">' + (i + 1) + '</span>' +
+        '<span class="pg-hub-comm" title="' + commTitle + '" style="background:' + commColor + '"></span>' +
         '<span class="pg-hub-deg" title="degree (associations referencing this pattern)">' + deg + '</span>' +
         '<span class="pg-hub-conf" title="confidence">' + conf + '%</span>' +
         '<span class="pg-hub-cat">' + escapeHtml(h.category) + '</span>' +
@@ -2402,15 +2426,7 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   let colorByCommunity = false;
   let focusedId = null;
 
-  // M9 — community palette. Reused per community_idx so the same
-  // community keeps the same color across re-tints. Picked to be
-  // visually distinct from the category palette so toggling reads
-  // immediately. Falls back through the array on overflow.
-  const commPalette = [
-    '#e879f9','#34d399','#fbbf24','#60a5fa','#f87171',
-    '#a78bfa','#22d3ee','#fb923c','#84cc16','#ec4899',
-    '#14b8a6','#facc15','#818cf8','#f472b6','#4ade80',
-  ];
+  // commPalette declared above (hoisted so the hubs list can reach it).
   function communityColorFor(idx) {{
     if (idx === null || idx === undefined) return '#555';
     return commPalette[idx % commPalette.length];
@@ -2526,7 +2542,8 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 .pg-hubs {{ background:var(--surface,#0d1117); border:1px solid var(--border,#30363d); border-radius:6px; padding:10px 8px; max-height:560px; overflow-y:auto; }}
 .pg-hubs-title {{ margin:0 0 6px 4px; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text,#c9d1d9); font-weight:600; }}
 .pg-hubs-list {{ list-style:none; padding:0; margin:0; counter-reset:hub; }}
-.pg-hub-item {{ display:grid; grid-template-columns: 18px 30px 36px auto 1fr; gap:6px; align-items:baseline; padding:6px 4px; border-radius:4px; cursor:pointer; font:12px/1.35 -apple-system,system-ui,sans-serif; }}
+.pg-hub-item {{ display:grid; grid-template-columns: 18px 8px 30px 36px auto 1fr; gap:6px; align-items:baseline; padding:6px 4px; border-radius:4px; cursor:pointer; font:12px/1.35 -apple-system,system-ui,sans-serif; }}
+.pg-hub-comm {{ display:inline-block; width:8px; height:8px; border-radius:50%; align-self:center; box-shadow:0 0 0 1px rgba(0,0,0,0.4) inset; }}
 .pg-hub-item:hover {{ background:rgba(140,105,217,0.12); }}
 .pg-hub-active {{ background:rgba(140,105,217,0.28); }}
 .pg-hub-rank {{ color:var(--dim,#666); font-variant-numeric:tabular-nums; text-align:right; }}
