@@ -2329,6 +2329,11 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   <span class="pg-sep">·</span>
   <button id="pg-export" class="pg-btn" title="Download the patterns graph as a standalone HTML file (includes data + libs)">⤓ Export</button>
   <span class="pg-sep">·</span>
+  <select id="pg-views" class="pg-views" title="Saved views (filter + focus + color combinations)">
+    <option value="">▾ Saved views</option>
+  </select>
+  <button id="pg-views-save" class="pg-btn" title="Save current filters + focus as a named view">+ Save view</button>
+  <span class="pg-sep">·</span>
   <span class="muted" id="pg-stats"></span>
   <span class="pg-sep">·</span>
   <span class="pg-spark-wrap" title="New patterns extracted per day, last 30 days. Hover any column for details.">
@@ -2672,6 +2677,92 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
     renderer.refresh();
   }};
 
+  // M16 — saved views. Persist (focusedId, edgeMode, actionableOnly,
+  // colorByCommunity) under a user-named key in localStorage. Survives
+  // reloads. Each saved view is restored by setting state vars + ticking
+  // the corresponding toolbar inputs, then calling renderer.refresh().
+  // Storage key: 'i-dream-pg-views' → {{ name: viewObject, ... }}
+  var VIEWS_KEY = 'i-dream-pg-views';
+  function loadViews() {{
+    try {{ return JSON.parse(localStorage.getItem(VIEWS_KEY) || '{{}}'); }}
+    catch (e) {{ return {{}}; }}
+  }}
+  function saveViews(v) {{
+    try {{ localStorage.setItem(VIEWS_KEY, JSON.stringify(v)); }}
+    catch (e) {{ /* private mode / quota */ }}
+  }}
+  function refreshViewSelect() {{
+    var sel = document.getElementById('pg-views');
+    if (!sel) return;
+    var views = loadViews();
+    var names = Object.keys(views).sort();
+    sel.innerHTML = '<option value="">▾ Saved views (' + names.length + ')</option>';
+    names.forEach(function(name) {{
+      var opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    }});
+    if (names.length > 0) {{
+      var sep = document.createElement('option');
+      sep.disabled = true; sep.textContent = '──────';
+      sel.appendChild(sep);
+      names.forEach(function(name) {{
+        var del = document.createElement('option');
+        del.value = '__delete__:' + name;
+        del.textContent = '✕ Delete: ' + name;
+        sel.appendChild(del);
+      }});
+    }}
+  }}
+  function applyView(v) {{
+    edgeMode         = v.edgeMode || 'from-selected';
+    actionableOnly   = !!v.actionableOnly;
+    colorByCommunity = !!v.colorByCommunity;
+    focusedId        = v.focusedId || null;
+    document.getElementById('pg-actionable-only').checked = actionableOnly;
+    document.getElementById('pg-color-by-community').checked = colorByCommunity;
+    document.querySelectorAll('.pg-btn').forEach(function(b) {{ b.classList.remove('pg-btn-active'); }});
+    var btnId = 'pg-mode-' + edgeMode;
+    var btn = document.getElementById(btnId);
+    if (btn) btn.classList.add('pg-btn-active');
+    if (focusedId && graph.hasNode(focusedId)) {{
+      var d = graph.getNodeAttribute(focusedId, '_data');
+      detail.innerHTML = renderDetail(d);
+    }}
+    renderer.refresh();
+  }}
+  refreshViewSelect();
+  document.getElementById('pg-views').onchange = function(e) {{
+    var val = e.target.value;
+    if (!val) return;
+    if (val.indexOf('__delete__:') === 0) {{
+      var name = val.slice('__delete__:'.length);
+      if (confirm('Delete saved view "' + name + '"?')) {{
+        var v = loadViews(); delete v[name]; saveViews(v); refreshViewSelect();
+      }} else {{ e.target.value = ''; }}
+      return;
+    }}
+    var views = loadViews();
+    if (views[val]) applyView(views[val]);
+    e.target.value = '';
+  }};
+  document.getElementById('pg-views-save').onclick = function() {{
+    var name = prompt('Name for this view:');
+    if (!name) return;
+    name = name.trim().slice(0, 40);
+    if (!name) return;
+    var views = loadViews();
+    views[name] = {{
+      edgeMode: edgeMode,
+      actionableOnly: actionableOnly,
+      colorByCommunity: colorByCommunity,
+      focusedId: focusedId,
+      savedAt: new Date().toISOString(),
+    }};
+    saveViews(views);
+    refreshViewSelect();
+  }};
+
   // M11 — export the patterns graph as a fully standalone HTML file.
   // The trick: graphology+sigma are already inlined in the parent
   // dashboard, and the section markup + IIFE are just DOM. Grab them
@@ -2727,6 +2818,8 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 </script>
 <style>
 .pg-toolbar {{ display:flex; align-items:center; gap:8px; padding:8px 0; flex-wrap:wrap; }}
+.pg-views {{ font:500 12px/1.4 -apple-system,system-ui,sans-serif; padding:4px 8px; border-radius:4px; border:1px solid var(--border,#30363d); background:transparent; color:var(--text,#c9d1d9); cursor:pointer; min-width:140px; }}
+.pg-views option {{ background:var(--bg,#0d1117); color:var(--text,#c9d1d9); }}
 .pg-spark-wrap {{ display:inline-flex; align-items:center; gap:6px; }}
 .pg-spark-label {{ font:600 10px/1 -apple-system,system-ui,sans-serif; color:var(--dim,#666); text-transform:uppercase; letter-spacing:0.5px; }}
 #pg-spark {{ display:block; }}

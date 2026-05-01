@@ -138,7 +138,26 @@ pub struct DreamingConfig {
     /// default — opt-in.
     #[serde(default)]
     pub auto_prune_weekly: bool,
+    /// D8 daemon — automatically run `auto-intentions` after each
+    /// consolidation cycle. Idempotent (Association.auto_intention_id
+    /// guards against duplicates). Off by default — opt-in until the
+    /// user has watched manual auto-intentions behave correctly on
+    /// their data.
+    #[serde(default)]
+    pub auto_intentions_after_cycle: bool,
+    /// D8 daemon — confidence threshold used by the daemon-side
+    /// auto-promotion. Mirrors the CLI default.
+    #[serde(default = "default_auto_intention_threshold")]
+    pub auto_intention_threshold: f64,
+    /// D19 daemon — log a tracing::warn line each cycle for any
+    /// category with ≥10% week-over-week confidence drop. Off by
+    /// default; opt-in surfaces drift events in the daemon log
+    /// without spamming when the dataset is too small to be reliable.
+    #[serde(default)]
+    pub drift_warnings: bool,
 }
+
+fn default_auto_intention_threshold() -> f64 { 0.85 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetacogConfig {
@@ -259,6 +278,9 @@ impl Default for Config {
                     journal_max_entries: 500,
                     wake_promotion_threshold: 0.5,
                     auto_prune_weekly: false,
+                    auto_intentions_after_cycle: false,
+                    auto_intention_threshold: 0.85,
+                    drift_warnings: false,
                 },
                 metacog: MetacogConfig {
                     enabled: true,

@@ -697,6 +697,83 @@ impl Daemon {
             }
         }
 
+        // D8 daemon-side — opt-in. Idempotent via Association.auto_intention_id
+        // so re-running across cycles only acts on newly-eligible associations.
+        if self.config.modules.dreaming.auto_intentions_after_cycle {
+            if let Err(e) = self.cycle_auto_intentions() {
+                tracing::warn!("auto-intentions (D8) failed: {e:#}");
+            }
+        }
+
+        // D19 daemon-side — opt-in drift warnings. Just logs to tracing,
+        // doesn't write any files. Surfaces in the daemon's normal log
+        // stream so the user notices via existing observability.
+        if self.config.modules.dreaming.drift_warnings {
+            if let Err(e) = Self::cycle_drift_warnings(&self.store) {
+                tracing::warn!("drift check (D19) failed: {e:#}");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// D8 daemon hook — promote eligible associations using the configured
+    /// threshold. Reuses ProspectiveModule::auto_promote_associations so the
+    /// CLI and daemon paths share one implementation.
+    fn cycle_auto_intentions(&self) -> Result<()> {
+        let mut associations: Vec<crate::modules::dreaming::Association> =
+            self.store.read_json("dreams/associations.json").unwrap_or_default();
+        let patterns: Vec<crate::modules::dreaming::ExtractedPattern> =
+            self.store.read_json("dreams/patterns.json").unwrap_or_default();
+        let pm = crate::modules::prospective::ProspectiveModule::new(&self.config, &self.store);
+        let threshold = self.config.modules.dreaming.auto_intention_threshold;
+        let (created, _skipped) =
+            pm.auto_promote_associations(&mut associations, &patterns, threshold, false)?;
+        if created > 0 {
+            self.store.write_json("dreams/associations.json", &associations)?;
+            tracing::info!(created, threshold, "D8 daemon: promoted associations to intentions");
+        }
+        Ok(())
+    }
+
+    /// D19 daemon hook — emit a tracing::warn for each category whose
+    /// average confidence dropped ≥10% week-over-week. Mirrors the
+    /// `drift` CLI command's logic (sample-size floor of 3 per window).
+    fn cycle_drift_warnings(store: &Store) -> Result<()> {
+        use chrono::{DateTime, Duration, Utc};
+        let patterns: Vec<crate::modules::dreaming::ExtractedPattern> =
+            store.read_json("dreams/patterns.json").unwrap_or_default();
+        let now = Utc::now();
+        let cutoff_recent = now - Duration::days(7);
+        let cutoff_prior  = now - Duration::days(14);
+        let mut recent: std::collections::HashMap<&str, (f64, usize)> = std::collections::HashMap::new();
+        let mut prior:  std::collections::HashMap<&str, (f64, usize)> = std::collections::HashMap::new();
+        for p in &patterns {
+            let Ok(ts) = DateTime::parse_from_rfc3339(&p.last_seen) else { continue };
+            let ts = ts.with_timezone(&Utc);
+            let bucket = if ts >= cutoff_recent { Some(&mut recent) }
+                         else if ts >= cutoff_prior { Some(&mut prior) }
+                         else { None };
+            if let Some(b) = bucket {
+                let e = b.entry(p.category.as_str()).or_insert((0.0, 0));
+                e.0 += p.confidence; e.1 += 1;
+            }
+        }
+        for (cat, (sum_p, n_p)) in &prior {
+            if *n_p < 3 { continue }
+            let prior_avg = sum_p / *n_p as f64;
+            let (sum_r, n_r) = recent.get(cat).copied().unwrap_or((0.0, 0));
+            if n_r < 3 { continue }
+            let recent_avg = sum_r / n_r as f64;
+            let rel_drop = (prior_avg - recent_avg) / prior_avg.max(1e-9);
+            if rel_drop >= 0.10 {
+                tracing::warn!(
+                    category = cat, prior_avg, recent_avg,
+                    relative_drop = rel_drop, n_prior = n_p, n_recent = n_r,
+                    "D19: category-level confidence drift detected (≥10% week-over-week drop)",
+                );
+            }
+        }
         Ok(())
     }
 

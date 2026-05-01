@@ -4,6 +4,39 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-02 M9/M11/M14/M15 graph polish + D8/D11/D17/D19 dreaming maturity
+
+A 10-feature batch covering both the dashboard (visual polish, exports, keyboard discoverability, right-click actions) and the dreaming pipeline (community detection, drift monitoring, auto-promotion, dormancy pruning). No breaking changes to on-disk formats — all schema additions use `#[serde(default)]` so existing data deserializes cleanly.
+
+### Added — Dashboard / Graph
+
+- **M9 — Community detection via label propagation.** Synchronous label propagation over the bipartite pattern↔association graph (~80 LOC, deterministic). Each pattern node now carries `community` + `community_idx`; the payload top-level emits a size-sorted community summary. New "Color by community" checkbox in the graph toolbar re-tints pattern nodes via the Sigma `nodeReducer` instantly (no graph rebuild). Cheap inline computation (sub-millisecond at n_patterns < 1000) — no stale `dreams/graph-metrics.json` dependency.
+- **M9 polish — Community color dot per hub** in the Top hubs sidebar, using the same 15-color palette as the graph toggle so a hub's badge matches its node tint when "Color by community" is on. Hover shows community number.
+- **M11 — Standalone graph export.** New "⤓ Export" button in the patterns-graph toolbar downloads the full graph (data + libs + interactivity) as a single self-contained ~250KB HTML file. Works offline, no data dir required. Filename: `i-dream-patterns-graph-YYYY-MM-DD.html`.
+- **M14 — Pattern context menu.** Right-click a pattern node in the Swift dashboard's PatternGraphView opens an actions menu: "Export as CLAUDE.md guideline…" / "Export as hook scaffold…" / "Copy pattern text". Both file actions write to `~/.i-dream/exports/<ts>-<kind>-<slug>/` and reveal in Finder rather than auto-mutating CLAUDE.md / settings.json. Hook scaffolds default to UserPromptSubmit (safest event); each ships with a paste-ready `settings-snippet.json` using the wrapped schema we fixed in 0.3.1.
+- **M15 — Keyboard shortcut overlay.** Press `?` anywhere outside an input field to open a modal listing all dashboard hotkeys. Sections: Global / Patterns Graph / Tables. Esc or backdrop-click closes. Built lazily on first open.
+- **D11 — 30-day pattern-extraction sparkline** in the patterns-graph toolbar. Buckets `pattern.first_seen` by UTC day; today's bar tinted green as a "you are here" anchor; other days blue, empty days dim. SVG `<title>` per bar gives hover tooltips with no JS event handlers. Aggregate "new patterns/day" because per-occurrence timestamps don't exist in the schema — answers "is dreaming productive lately?"
+
+### Added — Dreaming pipeline
+
+- **D8 — Auto-promote high-confidence associations to intentions.** New `i-dream auto-intentions [--dry-run] [--min-confidence 0.85]`. Eligibility: actionable ∧ promoted ∧ ¬dismissed ∧ has suggested_rule ∧ confidence ≥ threshold ∧ ¬already-promoted. Each becomes a Context-triggered Intention with up-to-8 keywords mined from linked patterns (stop-words stripped), 90-day expiry, max 12 fires. Idempotent via new `Association.auto_intention_id` field. Default threshold: 35 of 300 associations qualify on test data.
+- **D17 — Pattern pruning with rescue.** New `i-dream prune-patterns [--dry-run] [--max-confidence 0.4] [--days 60] [--restore <ts|path>]`. Pruned entries always written to `dreams/pruned/<ts>.json` first (backup is unconditional, not a flag). `--restore` is idempotent via id-based dedup. Output prints the 5 lowest-confidence prunees as a sanity-check preview.
+- **D17 daemon side — opt-in weekly auto-prune** via new `modules.dreaming.auto_prune_weekly` config flag (default `false`). Daemon runs the conservative prune at most once per ISO week, after each cycle. State + observability tracked in `dreams/auto-prune-state.json`. Recovery still via `i-dream prune-patterns --restore <ts>`.
+- **D19 — Category-level confidence drift detection.** New `i-dream drift [--threshold 0.10] [--json]`. Compares per-category average confidence for the last 7 days vs the prior 7 days; flags any categories where the relative drop exceeds the threshold. Sample-size floor of 3 patterns per window (signal too noisy below). Useful for catching dreaming-quality regressions.
+
+### Schema migrations
+
+Both additive, both `#[serde(default)]`, both safe with existing data:
+
+- `Association.auto_intention_id: Option<String>` (D8) — set when an association is auto-promoted to an intention; lets the next run skip it.
+- `DreamingConfig.auto_prune_weekly: bool` (D17 daemon) — defaults to false.
+
+### Tests
+
+286 tests pass. Test fixtures in `dreaming.rs` and `graph_metrics.rs` updated for the new `auto_intention_id` field.
+
+---
+
 ## [0.3.2] — 2026-05-02 M10 hubs sidebar + D10 Brier + clippy + Node 24
 
 ### Added
