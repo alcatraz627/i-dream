@@ -7,8 +7,31 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
+
+/// Process-wide map of per-file write mutexes. Used by `write_json` and
+/// `append_jsonl` to serialise writers that touch the same path. Without
+/// this, two concurrent dream cycles + an upcoming panel-side write
+/// (T-A12 multi-select bulk dismiss/promote) could race the tmp+rename
+/// dance and clobber each other's flags. The map itself is guarded by an
+/// RwLock — readers (each grabbing a Mutex<()>) are common, writers
+/// (inserting a new key) are rare. Round-2 reviewer B flagged this as
+/// the prerequisite for shipping panel writes.
+fn file_lock(path: &PathBuf) -> Arc<Mutex<()>> {
+    use std::sync::OnceLock;
+    static LOCKS: OnceLock<RwLock<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(lk) = map.read().unwrap().get(path) {
+        return lk.clone();
+    }
+    let mut w = map.write().unwrap();
+    w.entry(path.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// Root data directory for all subconscious state.
 #[derive(Clone)]
@@ -47,8 +70,12 @@ impl Store {
     }
 
     /// Atomically write a JSON file (write to .tmp, then rename).
+    /// Serialised per-path via a process-wide mutex map so concurrent
+    /// writers (dream cycle + panel actions) can't race the tmp+rename.
     pub fn write_json<T: Serialize>(&self, rel_path: &str, data: &T) -> Result<PathBuf> {
         let path = self.root.join(rel_path);
+        let lock = file_lock(&path);
+        let _guard = lock.lock().unwrap();
         let tmp_path = path.with_extension("tmp");
 
         if let Some(parent) = path.parent() {
@@ -71,9 +98,13 @@ impl Store {
         Ok(data)
     }
 
-    /// Append a line to a JSONL file.
+    /// Append a line to a JSONL file. Per-path lock matches write_json so
+    /// the daemon hook handler and panel-side feedback writes can't
+    /// interleave a half-written line into another writer's append.
     pub fn append_jsonl<T: Serialize>(&self, rel_path: &str, entry: &T) -> Result<()> {
         let path = self.root.join(rel_path);
+        let lock = file_lock(&path);
+        let _guard = lock.lock().unwrap();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
