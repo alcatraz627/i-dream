@@ -2300,6 +2300,58 @@ final class DashboardWindowController: NSObject {
     private var assocListDelegate:   JournalLinkDelegate?
     private var overviewLinkDelegate: JournalLinkDelegate?
 
+    /// SelectionModel — phase-1 foundation for #42 (NSTableView refactor).
+    /// Lifts per-tab selection state into a single observable struct so
+    /// future filter strips, sort dropdowns, hover icons, keyboard nav,
+    /// and multi-select can all read/write the same source of truth.
+    /// The current RichText-based list rendering already drives selection
+    /// through ad-hoc closures; this struct will replace those once the
+    /// list rendering switches to NSTableView in phase 2.
+    ///
+    /// Kept as a value type so it diffs cleanly with `oldValue` in
+    /// observers (didSet on whichever container holds it).
+    struct SelectionModel: Equatable {
+        var primary: String? = nil       // single-select current row id
+        var multi:   Set<String> = []    // multi-select set (for T-A12)
+        var sortKey: SortKey = .confidenceDesc
+        var filter:  FilterModel = .init()
+        // Convenience: was anything selected?
+        var hasSelection: Bool { primary != nil || !multi.isEmpty }
+    }
+    enum SortKey: String, CaseIterable, Equatable {
+        case confidenceDesc = "Confidence ↓"
+        case confidenceAsc  = "Confidence ↑"
+        case recentDesc     = "Recent"
+        case linkedDesc     = "Linked count"
+        case categoryAsc    = "Category"
+        case occurrencesDesc = "Occurrences"
+    }
+    /// FilterModel mirrors the round-2 reviewer B's recommended filter
+    /// strip schema — every chip the eventual T-S2 filter strip will drive.
+    /// Empty defaults = "show everything." Filter eval is in-memory predicate
+    /// matching against the loaded patterns/associations arrays.
+    struct FilterModel: Equatable {
+        var actionableOnly: Bool = false
+        var minConfidence:  Double = 0.0     // [0.0, 1.0]
+        var category:       Set<String> = [] // empty = all categories
+        var valence:        Set<String> = [] // "positive"/"negative"/"neutral"
+        var minLinked:      Int = 0          // associations only
+        var sinceDays:      Int? = nil       // nil = all-time, else last N days
+        var hideDismissed:  Bool = true      // T-S4 default behavior
+        var freeText:       String = ""      // fuzzy match against text body
+        var isActive: Bool {
+            actionableOnly || minConfidence > 0 || !category.isEmpty
+                || !valence.isEmpty || minLinked > 0 || sinceDays != nil
+                || !freeText.isEmpty || !hideDismissed
+        }
+    }
+    /// Per-tab selection state. Phase-2 wiring (NSTableView + the
+    /// existing buildPatternView / buildAssociationView paths) will
+    /// observe these via didSet and drive list rendering + graph
+    /// highlight + detail card from a single source of truth.
+    private var patternsSelection:     SelectionModel = SelectionModel()
+    private var associationsSelection: SelectionModel = SelectionModel()
+
     // Detail panels for selection context (Patterns + Associations tabs)
     private var patternDetailTextView:  NSTextView?
     private var assocDetailTextView:    NSTextView?
