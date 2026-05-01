@@ -346,8 +346,16 @@ fn write_session_start_hook(dir: &std::path::Path, config: &Config) -> Result<()
         r#"#!/bin/bash
 # i-dream: SessionStart hook — injects subconscious signals
 SOCKET="{socket}"
+# D6: send the working directory so the daemon can inject a per-project brief.
+# jq escapes the path for safe JSON; falls back to no-cwd payload if jq is missing.
+if command -v jq >/dev/null 2>&1; then
+    PAYLOAD=$(jq -nc --arg cwd "$PWD" --argjson ts "$(date +%s)" \
+        '{{event:"session_start",ts:$ts,cwd:$cwd}}')
+else
+    PAYLOAD='{{"event":"session_start","ts":'$(date +%s)'}}'
+fi
 if [ -S "$SOCKET" ]; then
-    RESPONSE=$(echo '{{"event":"session_start","ts":'$(date +%s)'}}' \
+    RESPONSE=$(printf '%s' "$PAYLOAD" \
         | python3 -c "
 import sys, socket as S
 s = S.socket(S.AF_UNIX)

@@ -158,6 +158,21 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::BriefProjects { cwd } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let client = api::ClaudeClient::new()?;
+            let pbm = modules::project_briefs::ProjectBriefsModule::new(&config, &store);
+            if let Some(c) = cwd {
+                let project_id = modules::project_briefs::ProjectBriefsModule::encode_cwd(&c);
+                let (tokens, path) = pbm.generate_for_project(&client, &project_id).await?;
+                println!("✓ Brief written to {}\n  Tokens used: {tokens}", path.display());
+            } else {
+                let (count, total_tokens) = pbm.generate_all(&client).await?;
+                println!("✓ Generated briefs for {count} projects\n  Total tokens: {total_tokens}");
+            }
+        }
+
         Command::Briefing { force } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;

@@ -21,7 +21,16 @@ use serde::{Deserialize, Serialize};
 pub enum HookEvent {
     /// Claude Code started a new session. Injected intuitions/intentions
     /// are returned in the response body.
-    SessionStart { ts: i64 },
+    /// D6 (2026-05-01): `cwd` carries the working directory the session
+    /// started in. Used to look up a per-project brief from
+    /// `dreams/project-briefs/<encoded_cwd>.md` and inject it into the
+    /// session response. Optional with `#[serde(default)]` so older hook
+    /// scripts that don't send the field continue to deserialize.
+    SessionStart {
+        ts: i64,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     /// A tool invocation just finished. Used for metacog sampling and
     /// activity-signal updates.
     ToolUse {
@@ -79,7 +88,7 @@ mod tests {
         // This is byte-for-byte what session-start.sh sends
         let payload = r#"{"event":"session_start","ts":1712345678}"#;
         let parsed: HookEvent = serde_json::from_str(payload).unwrap();
-        assert_eq!(parsed, HookEvent::SessionStart { ts: 1712345678 });
+        assert_eq!(parsed, HookEvent::SessionStart { ts: 1712345678, cwd: None });
     }
 
     #[test]
@@ -148,12 +157,12 @@ mod tests {
     #[test]
     fn record_wraps_event_with_timestamp() {
         let before = Utc::now();
-        let rec = HookEventRecord::new(HookEvent::SessionStart { ts: 42 });
+        let rec = HookEventRecord::new(HookEvent::SessionStart { ts: 42, cwd: None });
         let after = Utc::now();
 
         assert!(rec.received_at >= before);
         assert!(rec.received_at <= after);
-        assert_eq!(rec.event, HookEvent::SessionStart { ts: 42 });
+        assert_eq!(rec.event, HookEvent::SessionStart { ts: 42, cwd: None });
     }
 
     #[test]

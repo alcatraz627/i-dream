@@ -83,6 +83,17 @@ pub enum Command {
         run_tests: bool,
     },
 
+    /// Generate per-project briefs (D6) for every project_id seen in
+    /// patterns.json with ≥3 patterns. Each brief is a 4-section markdown
+    /// auto-injected at SessionStart when Claude Code starts a session
+    /// in that working directory.
+    BriefProjects {
+        /// Generate only the brief for this specific cwd / project_id.
+        /// Accepts both "/Users/.../path" and "-Users-...-path" forms.
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+
     /// Synthesize a weekly briefing from the past 7 days of dream activity.
     ///
     /// Writes a 5-section markdown brief (worked-on / improved / recurring

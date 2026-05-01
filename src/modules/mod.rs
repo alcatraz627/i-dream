@@ -10,6 +10,7 @@ pub mod introspection;
 pub mod intuition;
 pub mod metacog;
 pub mod prospective;
+pub mod project_briefs;
 pub mod user_settings;
 pub mod weekly_briefing;
 
