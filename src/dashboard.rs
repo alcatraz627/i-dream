@@ -432,14 +432,101 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
         }
     }
 
+    // M10 — top-10 hubs by degree. The graph_metrics CLI computes the
+    // same thing into dreams/graph-metrics.json; we recompute here so the
+    // dashboard renders correct hubs even if the user hasn't run the CLI.
+    let mut hub_pairs: Vec<(&str, usize)> = deg.iter().map(|(k, v)| (*k, *v)).collect();
+    hub_pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let pat_lookup: std::collections::HashMap<&str, &ExtractedPattern> =
+        patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+    let hubs_json: Vec<serde_json::Value> = hub_pairs
+        .iter()
+        .take(10)
+        .filter_map(|(id, d)| pat_lookup.get(id).map(|p| (id, d, *p)))
+        .map(|(id, d, p)| json!({
+            "id": *id,
+            "degree": d,
+            "category": p.category,
+            "confidence": p.confidence,
+            "label": p.pattern.chars().take(120).collect::<String>(),
+        }))
+        .collect();
+
+    // D10 — Brier calibration score over user-rated patterns + associations.
+    // Brier = mean((confidence - actual_outcome)^2) where outcome = 1.0
+    // for "up" feedback, 0.0 for "down". Lower = better calibrated;
+    // 0.0 perfect, 0.25 = uninformed prior, 1.0 worst. Joins on either
+    // pattern.id OR association.id since insight-feedback.jsonl entries
+    // historically rate either kind under the same `insight_id` field.
+    let (brier_score, brier_n) = compute_brier_score(store, &patterns, &associations);
+
     let payload = json!({
         "nodes": nodes_json,
         "edges": edges_json,
         "categories": categories,
+        "hubs": hubs_json,
+        "brier_score": brier_score,        // null if no rated associations yet
+        "brier_n": brier_n,                // sample size
         "n_patterns": patterns.len(),
         "n_associations": associations.len(),
     });
     Some(payload.to_string())
+}
+
+/// D10 Brier calibration score helper. Reads dreams/insight-feedback.jsonl,
+/// joins to either patterns.json OR associations.json by id, returns
+/// (score, sample_size). Both manual feedback (CLI/widget) and D3 v2
+/// auto-downvotes count.
+fn compute_brier_score(
+    store: &Store,
+    patterns: &[crate::modules::dreaming::ExtractedPattern],
+    associations: &[crate::modules::dreaming::Association],
+) -> (Option<f64>, usize) {
+    let path = store.path("dreams/insight-feedback.jsonl");
+    let Ok(content) = std::fs::read_to_string(&path) else { return (None, 0); };
+    // Build a single id → confidence lookup spanning both kinds. Pattern
+    // and association IDs are UUIDs so collisions are vanishingly rare.
+    let mut conf_by_id: std::collections::HashMap<&str, f64> =
+        std::collections::HashMap::with_capacity(patterns.len() + associations.len());
+    for p in patterns     { conf_by_id.insert(p.id.as_str(), p.confidence); }
+    for a in associations { conf_by_id.insert(a.id.as_str(), a.confidence); }
+
+    // Dedup by (insight_id, ts) — the file historically has triplicate
+    // copies of the same feedback event written by parallel paths.
+    let mut seen: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+
+    let mut sum_sq_err = 0.0;
+    let mut n = 0usize;
+    for line in content.lines() {
+        if line.trim().is_empty() { continue; }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
+        let id = v.get("insight_id").or_else(|| v.get("pattern_id"))
+            .and_then(|x| x.as_str()).unwrap_or("");
+        let ts = v.get("ts").and_then(|x| x.as_str()).unwrap_or("");
+        let key = (id.to_string(), ts.to_string());
+        if !seen.insert(key) { continue; }
+
+        let outcome: Option<f64> = match v.get("rating") {
+            Some(r) if r.is_string() => match r.as_str().unwrap_or("") {
+                "up"   => Some(1.0),
+                "down" => Some(0.0),
+                _      => None,
+            },
+            Some(r) if r.is_number() => match r.as_i64().unwrap_or(0) {
+                x if x > 0 => Some(1.0),
+                x if x < 0 => Some(0.0),
+                _          => None,
+            },
+            _ => None,
+        };
+        let Some(outcome) = outcome else { continue };
+        let Some(conf) = conf_by_id.get(id) else { continue };
+        let err = conf - outcome;
+        sum_sq_err += err * err;
+        n += 1;
+    }
+    if n == 0 { (None, 0) } else { (Some(sum_sq_err / n as f64), n) }
 }
 
 /// Roll up store-wide KPIs for the summary strip. All inputs are
@@ -2097,7 +2184,14 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   <span class="pg-sep">·</span>
   <span class="muted" id="pg-stats"></span>
 </div>
-<div id="pg-canvas" style="width:100%;height:560px;background:var(--surface,#0d1117);border-radius:6px;border:1px solid var(--border,#30363d);position:relative;overflow:hidden"></div>
+<div class="pg-grid">
+  <div id="pg-canvas" style="width:100%;height:560px;background:var(--surface,#0d1117);border-radius:6px;border:1px solid var(--border,#30363d);position:relative;overflow:hidden"></div>
+  <aside class="pg-hubs" aria-label="Top hubs">
+    <h3 class="pg-hubs-title">Top hubs <span class="muted">by degree</span></h3>
+    <ol id="pg-hubs-list" class="pg-hubs-list"><li class="muted">Loading…</li></ol>
+    <p class="muted pg-hubs-hint">Click a hub to focus its 1-hop neighborhood.</p>
+  </aside>
+</div>
 <div id="pg-detail" class="pg-detail muted">Click a node to inspect.</div>
 <script type="application/json" id="pg-data">{payload}</script>
 <!-- UMD script tags (NOT ES modules) so the page works opened from
@@ -2123,7 +2217,53 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   const canvas = document.getElementById('pg-canvas');
   const stats  = document.getElementById('pg-stats');
   const detail = document.getElementById('pg-detail');
-  stats.textContent = data.n_patterns + ' patterns · ' + data.n_associations + ' associations · ' + data.edges.length + ' edges';
+  // Headline stats include Brier calibration when sample size > 0.
+  // Brier = mean((conf - outcome)^2) over user-rated associations.
+  // 0.0 perfect, 0.25 = uninformed prior, 1.0 worst. Grade UI:
+  //   < 0.10 green ("well-calibrated")
+  //   < 0.20 yellow
+  //   ≥ 0.20 orange
+  // null/missing → omitted (no rated samples yet).
+  var statsLine = data.n_patterns + ' patterns · ' + data.n_associations + ' associations · ' + data.edges.length + ' edges';
+  if (data.brier_n && data.brier_n > 0 && data.brier_score !== null && data.brier_score !== undefined) {{
+    var b = data.brier_score;
+    var color = b < 0.10 ? '#3ddc84' : b < 0.20 ? '#f5a623' : '#e86053';
+    statsLine += ' · <span style="color:' + color + '" title="Brier calibration over ' + data.brier_n + ' user-rated associations. Lower=better. 0.25=uninformed, 0.10 well-calibrated.">Brier ' + b.toFixed(3) + ' (n=' + data.brier_n + ')</span>';
+  }}
+  stats.innerHTML = statsLine;
+
+  // M10 — populate the Top hubs sidebar list. Each entry is clickable
+  // and will set focusedId on the graph, dimming everything except the
+  // hub's 1-hop neighborhood (same as clicking the node directly).
+  var hubsList = document.getElementById('pg-hubs-list');
+  if (hubsList && Array.isArray(data.hubs) && data.hubs.length > 0) {{
+    hubsList.innerHTML = '';
+    data.hubs.forEach(function(h, i) {{
+      var li = document.createElement('li');
+      li.className = 'pg-hub-item';
+      li.dataset.id = h.id;
+      var deg  = h.degree;
+      var conf = Math.round(h.confidence * 100);
+      var label = h.label || '(unnamed)';
+      li.innerHTML =
+        '<span class="pg-hub-rank">' + (i + 1) + '</span>' +
+        '<span class="pg-hub-deg" title="degree (associations referencing this pattern)">' + deg + '</span>' +
+        '<span class="pg-hub-conf" title="confidence">' + conf + '%</span>' +
+        '<span class="pg-hub-cat">' + escapeHtml(h.category) + '</span>' +
+        '<span class="pg-hub-label" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</span>';
+      li.addEventListener('click', function() {{
+        focusedId = h.id;
+        var d = graph.getNodeAttribute(h.id, '_data');
+        detail.innerHTML = renderDetail(d);
+        document.querySelectorAll('.pg-hub-item').forEach(function(x) {{ x.classList.remove('pg-hub-active'); }});
+        li.classList.add('pg-hub-active');
+        renderer.refresh();
+      }});
+      hubsList.appendChild(li);
+    }});
+  }} else if (hubsList) {{
+    hubsList.innerHTML = '<li class="muted">No hubs yet — run a dream cycle.</li>';
+  }}
 
   // Category palette — match the Swift dashboard's wedge colors.
   const catColor = {{
@@ -2319,6 +2459,22 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 .pg-check {{ font:500 12px/1.4 -apple-system,system-ui,sans-serif; color:var(--text,#c9d1d9); cursor:pointer; }}
 .pg-sep {{ color:var(--dim,#666); margin:0 4px; }}
 .pg-detail {{ font:13px/1.5 -apple-system,system-ui,sans-serif; padding:10px 12px; background:var(--surface,#0d1117); border-radius:6px; border:1px solid var(--border,#30363d); margin-top:8px; min-height:60px; }}
+
+/* M10 — Top hubs sidebar */
+.pg-grid {{ display:grid; grid-template-columns: minmax(0,1fr) 280px; gap:8px; align-items:stretch; }}
+@media (max-width: 900px) {{ .pg-grid {{ grid-template-columns: 1fr; }} }}
+.pg-hubs {{ background:var(--surface,#0d1117); border:1px solid var(--border,#30363d); border-radius:6px; padding:10px 8px; max-height:560px; overflow-y:auto; }}
+.pg-hubs-title {{ margin:0 0 6px 4px; font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text,#c9d1d9); font-weight:600; }}
+.pg-hubs-list {{ list-style:none; padding:0; margin:0; counter-reset:hub; }}
+.pg-hub-item {{ display:grid; grid-template-columns: 18px 30px 36px auto 1fr; gap:6px; align-items:baseline; padding:6px 4px; border-radius:4px; cursor:pointer; font:12px/1.35 -apple-system,system-ui,sans-serif; }}
+.pg-hub-item:hover {{ background:rgba(140,105,217,0.12); }}
+.pg-hub-active {{ background:rgba(140,105,217,0.28); }}
+.pg-hub-rank {{ color:var(--dim,#666); font-variant-numeric:tabular-nums; text-align:right; }}
+.pg-hub-deg {{ font-variant-numeric:tabular-nums; font-weight:600; color:var(--accent,#5b8def); text-align:right; }}
+.pg-hub-conf {{ font-variant-numeric:tabular-nums; color:var(--dim,#888); text-align:right; }}
+.pg-hub-cat {{ color:var(--dim,#888); text-transform:lowercase; font-size:10px; padding:0 4px; border:1px solid var(--border,#30363d); border-radius:3px; align-self:center; }}
+.pg-hub-label {{ color:var(--text,#c9d1d9); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.pg-hubs-hint {{ font-size:11px; color:var(--dim,#666); margin:8px 4px 0; }}
 </style>
 </section>
 "##,

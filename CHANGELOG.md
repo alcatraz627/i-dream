@@ -4,6 +4,18 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-05-02 M10 hubs sidebar + D10 Brier + clippy + Node 24
+
+### Added
+- **M10 — Top hubs sidebar** in the HTML dashboard's Patterns Graph section. Right-side panel lists the top-10 patterns by association-degree with `rank · degree · confidence% · category · label`. Click a hub → focuses its 1-hop neighborhood in the Sigma graph (same effect as clicking the node directly). Mobile-responsive (collapses to single column < 900px).
+- **D10 — Brier calibration score** computed over user-rated patterns + associations from `dreams/insight-feedback.jsonl`. Displayed inline with the graph stats line as `Brier 0.0009 (n=3)`, color-graded green/yellow/orange. Lower = better calibrated. Joins on either pattern.id or association.id; dedups triplicate feedback entries. First reading on this user's data: **0.0009 over n=3** (extremely well-calibrated — the rated entries scored ~0.97 confidence and outcome was `up`).
+
+### Changed
+- **CI workflow** opts into Node 24 via `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true`. Stops the deprecation warning that fires on every push (Node 20 sunset Sept 2026).
+- **Clippy auto-fix swept 14 files** — useless_vec, useless_conversion, manual_strip, single_char_add_str, match_like_matches_macro, etc. 48 → 11 warnings; remaining ones are dead_code on scaffolded helpers + type_complexity on legitimately deep generic chains. 286 tests pass unchanged.
+
+---
+
 ## [0.3.1] — 2026-05-02 hooks installer schema fix
 
 ### Fixed
