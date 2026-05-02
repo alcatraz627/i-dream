@@ -5,7 +5,7 @@
 //! strategy quality.
 
 use crate::api::ClaudeClient;
-use crate::config::{expand_tilde, Config};
+use crate::config::{Config, expand_tilde};
 use crate::modules::Module;
 use crate::store::Store;
 use crate::transcript;
@@ -347,7 +347,11 @@ impl<'a> MetacogModule<'a> {
             // A stored size of 0 means we can't stat the file — include it
             // to be safe. This mirrors the dreaming module's staleness check.
             let current_size = std::fs::metadata(&file.path).map(|m| m.len()).unwrap_or(0);
-            let last_size = processed.sessions.get(&file.session_id).copied().unwrap_or(0);
+            let last_size = processed
+                .sessions
+                .get(&file.session_id)
+                .copied()
+                .unwrap_or(0);
             if last_size > 0 && current_size <= last_size {
                 continue;
             }
@@ -355,7 +359,10 @@ impl<'a> MetacogModule<'a> {
             let entries = match transcript::read_transcript(&file.path) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!("skipping unreadable transcript {}: {e:#}", file.path.display());
+                    warn!(
+                        "skipping unreadable transcript {}: {e:#}",
+                        file.path.display()
+                    );
                     continue;
                 }
             };
@@ -375,7 +382,9 @@ impl<'a> MetacogModule<'a> {
             }
 
             batch.units.extend(sampled);
-            batch.sessions_seen.push((file.session_id.clone(), current_size));
+            batch
+                .sessions_seen
+                .push((file.session_id.clone(), current_size));
             batch.sessions_scanned += 1;
         }
 
@@ -461,19 +470,21 @@ Output as JSON matching this shape:
 
         // Enrich prompt with calibration history at Standard+Deep
         if params.include_calibration_history
-            && let Some(history) = self.format_calibration_history(params.calibration_lookback) {
-                system_prompt.push_str("\n\n--- CALIBRATION HISTORY ---\n");
-                system_prompt.push_str(&history);
-                system_prompt.push_str("\n\nCompare current findings against this history. Flag biases that are NEW (not seen before) vs RECURRING. For recurring biases, note if the situation has improved or worsened. Deprioritize recommending fixes for issues already flagged in prior cycles unless they show no improvement.");
-            }
+            && let Some(history) = self.format_calibration_history(params.calibration_lookback)
+        {
+            system_prompt.push_str("\n\n--- CALIBRATION HISTORY ---\n");
+            system_prompt.push_str(&history);
+            system_prompt.push_str("\n\nCompare current findings against this history. Flag biases that are NEW (not seen before) vs RECURRING. For recurring biases, note if the situation has improved or worsened. Deprioritize recommending fixes for issues already flagged in prior cycles unless they show no improvement.");
+        }
 
         // Enrich prompt with dream insights at Deep level
         if params.include_dream_insights
-            && let Some(insights) = self.load_dream_insights_context() {
-                system_prompt.push_str("\n\n--- DREAM INSIGHTS (cross-reference) ---\n");
-                system_prompt.push_str(&insights);
-                system_prompt.push_str("\n\nCross-reference the execution patterns above against these dream-synthesized insights. Note any execution units where an existing insight was violated or confirmed. Add a 'cross_references' array to your output with brief notes.");
-            }
+            && let Some(insights) = self.load_dream_insights_context()
+        {
+            system_prompt.push_str("\n\n--- DREAM INSIGHTS (cross-reference) ---\n");
+            system_prompt.push_str(&insights);
+            system_prompt.push_str("\n\nCross-reference the execution patterns above against these dream-synthesized insights. Note any execution units where an existing insight was violated or confirmed. Add a 'cross_references' array to your output with brief notes.");
+        }
 
         // Compact JSON (not pretty) to keep token cost down. Fit as many
         // complete units as possible within the effort-level's char budget
@@ -567,7 +578,11 @@ Output as JSON matching this shape:
             Ok(llm) => {
                 let entry = CalibrationEntry {
                     date: Utc::now().format("%Y-%m-%d").to_string(),
-                    session_id: batch.sessions_seen.first().map(|(s, _)| s.clone()).unwrap_or_default(),
+                    session_id: batch
+                        .sessions_seen
+                        .first()
+                        .map(|(s, _)| s.clone())
+                        .unwrap_or_default(),
                     units_sampled: analyzed_count as u64,
                     calibration_score: llm.calibration_score,
                     overconfident_count: llm.overconfident_count,
@@ -592,7 +607,10 @@ Output as JSON matching this shape:
             warn!("metacog sample pruning failed (non-fatal): {e:#}");
         }
 
-        info!("Metacog analysis complete ({} tokens)", response.tokens_used);
+        info!(
+            "Metacog analysis complete ({} tokens)",
+            response.tokens_used
+        );
         Ok(response.tokens_used)
     }
 }
@@ -604,9 +622,7 @@ impl<'a> MetacogModule<'a> {
         let unit_count = batch.units.len();
 
         // Correction density
-        let correction_count = batch.units.iter()
-            .filter(|u| u.input.is_correction)
-            .count();
+        let correction_count = batch.units.iter().filter(|u| u.input.is_correction).count();
         let correction_density = if unit_count > 0 {
             correction_count as f64 / unit_count as f64
         } else {
@@ -642,7 +658,8 @@ impl<'a> MetacogModule<'a> {
         }
 
         // Collect all biases seen in recent history
-        let mut historical_biases: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut historical_biases: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for entry in &entries {
             for bias in &entry.biases_detected {
                 // Normalize: lowercase, trim
@@ -652,7 +669,9 @@ impl<'a> MetacogModule<'a> {
 
         // Check what fraction of the current batch has trigger-based samples
         // (corrections, consecutive failures) — these indicate new problem types
-        let trigger_count = batch.units.iter()
+        let trigger_count = batch
+            .units
+            .iter()
             .filter(|u| {
                 u.input.is_correction || u.tools.windows(2).any(|w| !w[0].success && !w[1].success)
             })
@@ -667,10 +686,13 @@ impl<'a> MetacogModule<'a> {
         // Score: high trigger ratio = novel problems; also boost if calibration
         // scores have been trending (variance indicates instability worth investigating)
         let score_variance = if entries.len() >= 2 {
-            let mean = entries.iter().map(|e| e.calibration_score).sum::<f64>() / entries.len() as f64;
-            let var = entries.iter()
+            let mean =
+                entries.iter().map(|e| e.calibration_score).sum::<f64>() / entries.len() as f64;
+            let var = entries
+                .iter()
                 .map(|e| (e.calibration_score - mean).powi(2))
-                .sum::<f64>() / entries.len() as f64;
+                .sum::<f64>()
+                / entries.len() as f64;
             var.sqrt() // standard deviation
         } else {
             0.0
@@ -712,14 +734,12 @@ impl<'a> MetacogModule<'a> {
         let insights_mtime = std::fs::metadata(&insights_path)
             .and_then(|m| m.modified())
             .ok();
-        let latest_audit_mtime = std::fs::read_dir(&audits_dir)
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
-                    .max()
-            });
+        let latest_audit_mtime = std::fs::read_dir(&audits_dir).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
+                .max()
+        });
 
         match (insights_mtime, latest_audit_mtime) {
             (Some(insight_t), Some(audit_t)) => insight_t > audit_t,
@@ -782,9 +802,10 @@ impl<'a> MetacogModule<'a> {
                 // are kept rather than silently discarded.
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
                     && let Some(ts_str) = val.get("timestamp").and_then(|v| v.as_str())
-                        && let Ok(ts) = ts_str.parse::<DateTime<Utc>>() {
-                            return ts >= cutoff;
-                        }
+                    && let Ok(ts) = ts_str.parse::<DateTime<Utc>>()
+                {
+                    return ts >= cutoff;
+                }
                 true
             })
             .collect();
@@ -887,10 +908,14 @@ mod tests {
         let store = Store::new(std::env::temp_dir().join("idream-test-metacog-fail")).unwrap();
         let module = MetacogModule::new(&config, &store);
 
-        let unit = make_unit("unit-2", false, vec![
-            tool("Edit", false),
-            tool("Edit", false), // consecutive failures
-        ]);
+        let unit = make_unit(
+            "unit-2",
+            false,
+            vec![
+                tool("Edit", false),
+                tool("Edit", false), // consecutive failures
+            ],
+        );
         assert!(
             module.should_sample(&unit),
             "Consecutive tool failures indicate a struggling strategy — must sample"
@@ -904,17 +929,23 @@ mod tests {
         let _module = MetacogModule::new(&config, &store);
 
         // Failure followed by success — not consecutive
-        let unit = make_unit("unit-3", false, vec![
-            tool("Edit", false),
-            tool("Edit", true),
-        ]);
+        let unit = make_unit(
+            "unit-3",
+            false,
+            vec![tool("Edit", false), tool("Edit", true)],
+        );
         // This might or might not sample based on hash — we can't assert
         // it's definitely NOT sampled (hash might land in the 25% window).
         // But we CAN verify the consecutive failure path isn't triggered:
-        let consecutive = unit.tools.windows(2)
+        let consecutive = unit
+            .tools
+            .windows(2)
             .filter(|w| !w[0].success && !w[1].success)
             .count();
-        assert_eq!(consecutive, 0, "Single failure + success should not trigger consecutive failure path");
+        assert_eq!(
+            consecutive, 0,
+            "Single failure + success should not trigger consecutive failure path"
+        );
     }
 
     #[test]
@@ -1007,7 +1038,12 @@ mod tests {
 
     #[test]
     fn reaction_variants_serde() {
-        for reaction in [Reaction::Accepted, Reaction::Corrected, Reaction::Ignored, Reaction::Unknown] {
+        for reaction in [
+            Reaction::Accepted,
+            Reaction::Corrected,
+            Reaction::Ignored,
+            Reaction::Unknown,
+        ] {
             let json = serde_json::to_string(&reaction).unwrap();
             let parsed: Reaction = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, reaction);

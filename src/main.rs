@@ -66,7 +66,11 @@ async fn main() -> Result<()> {
             println!("{status}");
         }
 
-        Command::Dream { phase, backlog, modules: module_list } => {
+        Command::Dream {
+            phase,
+            backlog,
+            modules: module_list,
+        } => {
             let config = config::Config::load(&cli.config)?;
 
             if backlog {
@@ -102,7 +106,10 @@ async fn main() -> Result<()> {
                         info!("Reset {path} (backup at {path}.bak)");
                     }
                 }
-                println!("Backlog: reset processed state for {} module(s). Running cycle...", targets.len());
+                println!(
+                    "Backlog: reset processed state for {} module(s). Running cycle...",
+                    targets.len()
+                );
             }
 
             info!("Running manual dream cycle (phase: {phase:?})");
@@ -140,13 +147,14 @@ async fn main() -> Result<()> {
                     .output();
                 if let Ok(out) = pgrep
                     && let Ok(pid_str) = std::str::from_utf8(&out.stdout)
-                        && let Ok(pid) = pid_str.trim().parse::<u32>() {
-                            let _ = std::process::Command::new("kill")
-                                .args(["-USR1", &pid.to_string()])
-                                .status();
-                            println!("Opening native dashboard (sent SIGUSR1 to widget PID {pid})");
-                            return Ok(());
-                        }
+                    && let Ok(pid) = pid_str.trim().parse::<u32>()
+                {
+                    let _ = std::process::Command::new("kill")
+                        .args(["-USR1", &pid.to_string()])
+                        .status();
+                    println!("Opening native dashboard (sent SIGUSR1 to widget PID {pid})");
+                    return Ok(());
+                }
             }
             // Fallback: generate and open HTML dashboard.
             let config = config::Config::load(&cli.config)?;
@@ -183,7 +191,10 @@ async fn main() -> Result<()> {
             if let Some(c) = cwd {
                 let project_id = modules::project_briefs::ProjectBriefsModule::encode_cwd(&c);
                 let (tokens, path) = pbm.generate_for_project(&client, &project_id).await?;
-                println!("✓ Brief written to {}\n  Tokens used: {tokens}", path.display());
+                println!(
+                    "✓ Brief written to {}\n  Tokens used: {tokens}",
+                    path.display()
+                );
             } else {
                 let (count, total_tokens) = pbm.generate_all(&client).await?;
                 println!("✓ Generated briefs for {count} projects\n  Total tokens: {total_tokens}");
@@ -208,9 +219,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 None => {
-                    println!(
-                        "Skipping — already ran this ISO week. Use --force to regenerate."
-                    );
+                    println!("Skipping — already ran this ISO week. Use --force to regenerate.");
                 }
             }
         }
@@ -220,7 +229,11 @@ async fn main() -> Result<()> {
             println!("{}", toml::to_string_pretty(&config)?);
         }
 
-        Command::SnapshotDiff { from, to, shift_threshold } => {
+        Command::SnapshotDiff {
+            from,
+            to,
+            shift_threshold,
+        } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
 
@@ -249,14 +262,19 @@ async fn main() -> Result<()> {
                     .filter_map(|e| e.ok().map(|e| e.path()))
                     .filter(|p| p.extension().is_some_and(|e| e == "json"))
                     .collect()
-            } else { Vec::new() };
+            } else {
+                Vec::new()
+            };
             all_snaps.sort();
 
             let from_path = match from {
                 Some(s) => resolve(&s),
                 None => {
                     if all_snaps.len() < 2 {
-                        anyhow::bail!("Need ≥2 snapshots in dreams/snapshots/ (found {}). Run `i-dream graph-metrics --snapshot` to create one.", all_snaps.len());
+                        anyhow::bail!(
+                            "Need ≥2 snapshots in dreams/snapshots/ (found {}). Run `i-dream graph-metrics --snapshot` to create one.",
+                            all_snaps.len()
+                        );
                     }
                     all_snaps[all_snaps.len() - 2].clone()
                 }
@@ -270,24 +288,45 @@ async fn main() -> Result<()> {
                     all_snaps[all_snaps.len() - 1].clone()
                 }
             };
-            if !from_path.exists() { anyhow::bail!("Snapshot not found: {}", from_path.display()); }
-            if !to_path.exists()   { anyhow::bail!("Snapshot not found: {}", to_path.display()); }
+            if !from_path.exists() {
+                anyhow::bail!("Snapshot not found: {}", from_path.display());
+            }
+            if !to_path.exists() {
+                anyhow::bail!("Snapshot not found: {}", to_path.display());
+            }
 
             let from_snap: Snap = serde_json::from_slice(&std::fs::read(&from_path)?)?;
-            let to_snap:   Snap = serde_json::from_slice(&std::fs::read(&to_path)?)?;
+            let to_snap: Snap = serde_json::from_slice(&std::fs::read(&to_path)?)?;
 
             // Build id→pattern lookups for both sides.
             let from_p: std::collections::HashMap<&str, &modules::dreaming::ExtractedPattern> =
-                from_snap.patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+                from_snap
+                    .patterns
+                    .iter()
+                    .map(|p| (p.id.as_str(), p))
+                    .collect();
             let to_p: std::collections::HashMap<&str, &modules::dreaming::ExtractedPattern> =
-                to_snap.patterns.iter().map(|p| (p.id.as_str(), p)).collect();
-            let from_a: std::collections::HashSet<&str> =
-                from_snap.associations.iter().map(|a| a.id.as_str()).collect();
+                to_snap
+                    .patterns
+                    .iter()
+                    .map(|p| (p.id.as_str(), p))
+                    .collect();
+            let from_a: std::collections::HashSet<&str> = from_snap
+                .associations
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect();
             let to_a: std::collections::HashSet<&str> =
                 to_snap.associations.iter().map(|a| a.id.as_str()).collect();
 
-            let added: Vec<_> = to_p.iter().filter(|(id, _)| !from_p.contains_key(*id)).collect();
-            let removed: Vec<_> = from_p.iter().filter(|(id, _)| !to_p.contains_key(*id)).collect();
+            let added: Vec<_> = to_p
+                .iter()
+                .filter(|(id, _)| !from_p.contains_key(*id))
+                .collect();
+            let removed: Vec<_> = from_p
+                .iter()
+                .filter(|(id, _)| !to_p.contains_key(*id))
+                .collect();
             let mut shifted: Vec<(&str, f64, f64)> = Vec::new();
             for (id, p_to) in &to_p {
                 if let Some(p_from) = from_p.get(id) {
@@ -303,35 +342,73 @@ async fn main() -> Result<()> {
             let removed_a = from_a.difference(&to_a).count();
 
             println!("Snapshot diff");
-            println!("  from: {} ({})", from_path.file_name().unwrap_or_default().to_string_lossy(), from_snap.ts);
-            println!("  to:   {} ({})", to_path.file_name().unwrap_or_default().to_string_lossy(), to_snap.ts);
+            println!(
+                "  from: {} ({})",
+                from_path.file_name().unwrap_or_default().to_string_lossy(),
+                from_snap.ts
+            );
+            println!(
+                "  to:   {} ({})",
+                to_path.file_name().unwrap_or_default().to_string_lossy(),
+                to_snap.ts
+            );
             println!();
-            println!("Patterns: +{} added · -{} removed · {} shifted (≥{:.2} confidence delta)",
-                     added.len(), removed.len(), shifted.len(), shift_threshold);
+            println!(
+                "Patterns: +{} added · -{} removed · {} shifted (≥{:.2} confidence delta)",
+                added.len(),
+                removed.len(),
+                shifted.len(),
+                shift_threshold
+            );
             println!("Associations: +{} added · -{} removed", added_a, removed_a);
             if !added.is_empty() {
                 println!("\n+ Added patterns:");
                 for (id, p) in added.iter().take(10) {
                     let snip = p.pattern.chars().take(72).collect::<String>();
-                    println!("    [{:.2}] {} — {} ({})", p.confidence, p.category, snip, &id[..8.min(id.len())]);
+                    println!(
+                        "    [{:.2}] {} — {} ({})",
+                        p.confidence,
+                        p.category,
+                        snip,
+                        &id[..8.min(id.len())]
+                    );
                 }
-                if added.len() > 10 { println!("    … +{} more", added.len() - 10); }
+                if added.len() > 10 {
+                    println!("    … +{} more", added.len() - 10);
+                }
             }
             if !removed.is_empty() {
                 println!("\n- Removed patterns:");
                 for (id, p) in removed.iter().take(10) {
                     let snip = p.pattern.chars().take(72).collect::<String>();
-                    println!("    [{:.2}] {} — {} ({})", p.confidence, p.category, snip, &id[..8.min(id.len())]);
+                    println!(
+                        "    [{:.2}] {} — {} ({})",
+                        p.confidence,
+                        p.category,
+                        snip,
+                        &id[..8.min(id.len())]
+                    );
                 }
-                if removed.len() > 10 { println!("    … +{} more", removed.len() - 10); }
+                if removed.len() > 10 {
+                    println!("    … +{} more", removed.len() - 10);
+                }
             }
             if !shifted.is_empty() {
                 println!("\n~ Shifted patterns (top 10 by |Δconfidence|):");
                 for (id, c_from, c_to) in shifted.iter().take(10) {
                     let p = to_p.get(id).copied();
                     let cat = p.map(|p| p.category.as_str()).unwrap_or("?");
-                    let snip = p.map(|p| p.pattern.chars().take(60).collect::<String>()).unwrap_or_default();
-                    println!("    {:.2} → {:.2}  ({:+.2})  {} — {}", c_from, c_to, c_to - c_from, cat, snip);
+                    let snip = p
+                        .map(|p| p.pattern.chars().take(60).collect::<String>())
+                        .unwrap_or_default();
+                    println!(
+                        "    {:.2} → {:.2}  ({:+.2})  {} — {}",
+                        c_from,
+                        c_to,
+                        c_to - c_from,
+                        cat,
+                        snip
+                    );
                 }
             }
         }
@@ -345,22 +422,26 @@ async fn main() -> Result<()> {
 
             let now = Utc::now();
             let cutoff_recent = now - Duration::days(7);
-            let cutoff_prior  = now - Duration::days(14);
+            let cutoff_prior = now - Duration::days(14);
 
             // Group confidences by category for the two windows.
             let mut recent: std::collections::HashMap<&str, (f64, usize)> =
                 std::collections::HashMap::new();
-            let mut prior:  std::collections::HashMap<&str, (f64, usize)> =
+            let mut prior: std::collections::HashMap<&str, (f64, usize)> =
                 std::collections::HashMap::new();
             for p in &patterns {
-                let Ok(ts) = DateTime::parse_from_rfc3339(&p.last_seen) else { continue };
+                let Ok(ts) = DateTime::parse_from_rfc3339(&p.last_seen) else {
+                    continue;
+                };
                 let ts = ts.with_timezone(&Utc);
                 let bucket: Option<&mut std::collections::HashMap<&str, (f64, usize)>> =
                     if ts >= cutoff_recent {
                         Some(&mut recent)
                     } else if ts >= cutoff_prior {
                         Some(&mut prior)
-                    } else { None };
+                    } else {
+                        None
+                    };
                 if let Some(b) = bucket {
                     let e = b.entry(p.category.as_str()).or_insert((0.0, 0));
                     e.0 += p.confidence;
@@ -370,10 +451,14 @@ async fn main() -> Result<()> {
 
             let mut drifts: Vec<(String, f64, f64, f64, usize, usize)> = Vec::new(); // cat, prior_avg, recent_avg, rel_drop, n_prior, n_recent
             for (cat, (sum_p, n_p)) in &prior {
-                if *n_p < 3 { continue }  // Sample-size floor — noisy below 3.
+                if *n_p < 3 {
+                    continue;
+                } // Sample-size floor — noisy below 3.
                 let prior_avg = sum_p / *n_p as f64;
                 let (sum_r, n_r) = recent.get(cat).copied().unwrap_or((0.0, 0));
-                if n_r < 3 { continue }
+                if n_r < 3 {
+                    continue;
+                }
                 let recent_avg = sum_r / n_r as f64;
                 let rel_drop = (prior_avg - recent_avg) / prior_avg.max(1e-9);
                 if rel_drop >= threshold {
@@ -408,22 +493,34 @@ async fn main() -> Result<()> {
                 for (cat, prior_avg, recent_avg, rel_drop, np, nr) in &drifts {
                     println!(
                         "  {:<20} {:.2} → {:.2}  ({:+.0}%)  n={}/{}",
-                        cat, prior_avg, recent_avg, -rel_drop * 100.0, np, nr,
+                        cat,
+                        prior_avg,
+                        recent_avg,
+                        -rel_drop * 100.0,
+                        np,
+                        nr,
                     );
                 }
             }
         }
 
-        Command::AutoIntentions { dry_run, min_confidence } => {
+        Command::AutoIntentions {
+            dry_run,
+            min_confidence,
+        } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
-            let mut associations: Vec<modules::dreaming::Association> =
-                store.read_json("dreams/associations.json").unwrap_or_default();
+            let mut associations: Vec<modules::dreaming::Association> = store
+                .read_json("dreams/associations.json")
+                .unwrap_or_default();
             let patterns: Vec<modules::dreaming::ExtractedPattern> =
                 store.read_json("dreams/patterns.json").unwrap_or_default();
             let pm = modules::prospective::ProspectiveModule::new(&config, &store);
             let (created, skipped) = pm.auto_promote_associations(
-                &mut associations, &patterns, min_confidence, dry_run,
+                &mut associations,
+                &patterns,
+                min_confidence,
+                dry_run,
             )?;
             // Persist mutated associations only if we actually wrote intentions.
             if !dry_run && created > 0 {
@@ -432,11 +529,18 @@ async fn main() -> Result<()> {
             println!(
                 "{}D8 auto-intentions: {} created, {} skipped (threshold: confidence ≥ {:.2}, actionable ∧ promoted ∧ ¬dismissed ∧ ¬already-promoted).",
                 if dry_run { "[dry-run] " } else { "" },
-                created, skipped, min_confidence,
+                created,
+                skipped,
+                min_confidence,
             );
         }
 
-        Command::PrunePatterns { dry_run, max_confidence, days, restore } => {
+        Command::PrunePatterns {
+            dry_run,
+            max_confidence,
+            days,
+            restore,
+        } => {
             use chrono::{DateTime, Duration, Utc};
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
@@ -483,7 +587,9 @@ async fn main() -> Result<()> {
                 store.read_json("dreams/patterns.json").unwrap_or_default();
             let cutoff = Utc::now() - Duration::days(days);
             let (to_prune, to_keep): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| {
-                if p.confidence >= max_confidence { return false; }
+                if p.confidence >= max_confidence {
+                    return false;
+                }
                 // Unparseable last_seen → treat as dormant (very old).
                 let last_seen = DateTime::parse_from_rfc3339(&p.last_seen)
                     .map(|dt| dt.with_timezone(&Utc))
@@ -494,7 +600,9 @@ async fn main() -> Result<()> {
             if to_prune.is_empty() {
                 println!(
                     "Nothing to prune. {} patterns kept (threshold: confidence < {:.2} AND last_seen > {} days old).",
-                    to_keep.len(), max_confidence, days,
+                    to_keep.len(),
+                    max_confidence,
+                    days,
                 );
                 return Ok(());
             }
@@ -543,10 +651,10 @@ async fn main() -> Result<()> {
             let store = store::Store::new(config.data_dir().clone())?;
 
             let targets = [
-                ("logs/events.jsonl",       keep_events,   "hook events"),
-                ("metacog/activity.jsonl",  keep_activity, "metacog activity"),
-                ("logs/signals.jsonl",      keep_signals,  "signals"),
-                ("dreams/journal.jsonl",    keep_journal,  "dream journal"),
+                ("logs/events.jsonl", keep_events, "hook events"),
+                ("metacog/activity.jsonl", keep_activity, "metacog activity"),
+                ("logs/signals.jsonl", keep_signals, "signals"),
+                ("dreams/journal.jsonl", keep_journal, "dream journal"),
             ];
 
             let mut total_removed = 0usize;
@@ -557,7 +665,10 @@ async fn main() -> Result<()> {
                     println!("[dry-run] {label}: {current} entries → would remove {would_remove}");
                 } else {
                     let removed = store.prune_jsonl(path, *keep)?;
-                    println!("{label}: removed {removed} of {current} entries ({} remain)", current - removed);
+                    println!(
+                        "{label}: removed {removed} of {current} entries ({} remain)",
+                        current - removed
+                    );
                     total_removed += removed;
                 }
             }

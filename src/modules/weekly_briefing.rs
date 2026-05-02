@@ -25,8 +25,8 @@
 
 use crate::api::ClaudeClient;
 use crate::config::Config;
-use crate::store::Store;
 use crate::modules::dreaming::{Association, ExtractedPattern};
+use crate::store::Store;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
@@ -56,7 +56,11 @@ pub struct BriefingConfig {
 impl Default for BriefingConfig {
     fn default() -> Self {
         // Sunday = num_days_from_monday == 6
-        Self { enabled: true, weekday: 6, hour: 9 }
+        Self {
+            enabled: true,
+            weekday: 6,
+            hour: 9,
+        }
     }
 }
 
@@ -79,8 +83,12 @@ impl<'a> WeeklyBriefingModule<'a> {
         }
         let now = Local::now();
         let cfg = &self.config.modules.briefing;
-        if now.weekday().num_days_from_monday() != cfg.weekday { return false; }
-        if now.hour() < cfg.hour { return false; }
+        if now.weekday().num_days_from_monday() != cfg.weekday {
+            return false;
+        }
+        if now.hour() < cfg.hour {
+            return false;
+        }
         // Only fire once per ISO week, no matter how many times the
         // wall-clock window is hit.
         let state = self.load_state();
@@ -106,26 +114,30 @@ impl<'a> WeeklyBriefingModule<'a> {
         Ok(Some(r))
     }
 
-    async fn run_inner(&self, client: &ClaudeClient)
-        -> Result<(u64, std::path::PathBuf)>
-    {
+    async fn run_inner(&self, client: &ClaudeClient) -> Result<(u64, std::path::PathBuf)> {
         info!("Weekly briefing: synthesizing past 7 days");
         let now_local = Local::now();
         let week_label = iso_week_label(&now_local);
         let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::days(7);
 
         // ── Gather inputs ─────────────────────────────────────────────────
-        let patterns: Vec<ExtractedPattern> = self.store
+        let patterns: Vec<ExtractedPattern> = self
+            .store
             .read_json("dreams/patterns.json")
             .unwrap_or_default();
-        let associations: Vec<Association> = self.store
+        let associations: Vec<Association> = self
+            .store
             .read_json("dreams/associations.json")
             .unwrap_or_default();
 
         // Recent patterns: last_seen within the 7-day window.
         let recent_patterns: Vec<&ExtractedPattern> = patterns
             .iter()
-            .filter(|p| parse_rfc3339(&p.last_seen).map(|d| d >= cutoff).unwrap_or(false))
+            .filter(|p| {
+                parse_rfc3339(&p.last_seen)
+                    .map(|d| d >= cutoff)
+                    .unwrap_or(false)
+            })
             .collect();
 
         // Project distribution across recent patterns.
@@ -159,7 +171,11 @@ impl<'a> WeeklyBriefingModule<'a> {
 
         // ── Build prompt ──────────────────────────────────────────────────
         let mut prompt = String::new();
-        prompt.push_str(&format!("Week: {} (ending {})\n\n", week_label, now_local.format("%A %Y-%m-%d")));
+        prompt.push_str(&format!(
+            "Week: {} (ending {})\n\n",
+            week_label,
+            now_local.format("%A %Y-%m-%d")
+        ));
 
         prompt.push_str(&format!(
             "Project activity (top {}):\n",
@@ -216,13 +232,7 @@ Tone: concise, direct, no preamble, no headers besides the five above. Do not in
 
         // ── Call API ──────────────────────────────────────────────────────
         let response = client
-            .analyze(
-                system_prompt,
-                &prompt,
-                &self.config.budget.model,
-                2048,
-                0.5,
-            )
+            .analyze(system_prompt, &prompt, &self.config.budget.model, 2048, 0.5)
             .await
             .context("weekly_briefing API call")?;
 
@@ -236,13 +246,14 @@ Tone: concise, direct, no preamble, no headers besides the five above. Do not in
         let body = response.content.trim();
         let full = format!("{header}{body}\n");
 
-        let path = self.store.path(&format!("dreams/briefings/{week_label}.md"));
+        let path = self
+            .store
+            .path(&format!("dreams/briefings/{week_label}.md"));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create_dir_all {}", parent.display()))?;
         }
-        std::fs::write(&path, &full)
-            .with_context(|| format!("write {}", path.display()))?;
+        std::fs::write(&path, &full).with_context(|| format!("write {}", path.display()))?;
 
         // ── Update state ──────────────────────────────────────────────────
         let state = BriefingState {
@@ -275,14 +286,17 @@ Tone: concise, direct, no preamble, no headers besides the five above. Do not in
 
 /// Format a chrono Local time as ISO week, e.g. "2026-W18".
 fn iso_week_label<Tz: TimeZone>(dt: &DateTime<Tz>) -> String
-where Tz::Offset: std::fmt::Display
+where
+    Tz::Offset: std::fmt::Display,
 {
     let iso = dt.iso_week();
     format!("{}-W{:02}", iso.year(), iso.week())
 }
 
 fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -323,4 +337,3 @@ mod tests {
         assert_eq!(c.hour, 9);
     }
 }
-

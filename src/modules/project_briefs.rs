@@ -26,8 +26,8 @@
 
 use crate::api::ClaudeClient;
 use crate::config::Config;
-use crate::store::Store;
 use crate::modules::dreaming::{Association, ExtractedPattern};
+use crate::store::Store;
 
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -69,7 +69,9 @@ impl<'a> ProjectBriefsModule<'a> {
     pub fn read_for_cwd(&self, cwd: &str) -> Option<String> {
         let id = Self::encode_cwd(cwd);
         let path = self.store.path(&format!("dreams/project-briefs/{id}.md"));
-        if !path.exists() { return None; }
+        if !path.exists() {
+            return None;
+        }
         std::fs::read_to_string(&path).ok()
     }
 
@@ -83,10 +85,12 @@ impl<'a> ProjectBriefsModule<'a> {
     ) -> Result<(u64, std::path::PathBuf)> {
         info!("Project brief: synthesising for {project_id}");
 
-        let patterns: Vec<ExtractedPattern> = self.store
+        let patterns: Vec<ExtractedPattern> = self
+            .store
             .read_json("dreams/patterns.json")
             .unwrap_or_default();
-        let associations: Vec<Association> = self.store
+        let associations: Vec<Association> = self
+            .store
             .read_json("dreams/associations.json")
             .unwrap_or_default();
 
@@ -98,8 +102,11 @@ impl<'a> ProjectBriefsModule<'a> {
             .filter(|p| p.source_projects.iter().any(|pid| pid == project_id))
             .collect();
         matched.sort_by(|a, b| {
-            b.occurrences.cmp(&a.occurrences)
-                .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+            b.occurrences.cmp(&a.occurrences).then(
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
         let top_patterns: Vec<&&ExtractedPattern> = matched.iter().take(20).collect();
 
@@ -109,7 +116,11 @@ impl<'a> ProjectBriefsModule<'a> {
         let promoted_assocs: Vec<&Association> = associations
             .iter()
             .filter(|a| a.promoted && !a.dismissed)
-            .filter(|a| a.patterns_linked.iter().any(|pid| project_pattern_ids.contains(pid.as_str())))
+            .filter(|a| {
+                a.patterns_linked
+                    .iter()
+                    .any(|pid| project_pattern_ids.contains(pid.as_str()))
+            })
             .take(10)
             .collect();
 
@@ -142,7 +153,10 @@ impl<'a> ProjectBriefsModule<'a> {
             prompt.push('\n');
         }
         if !promoted_assocs.is_empty() {
-            prompt.push_str(&format!("Promoted insights linking these patterns ({}):\n", promoted_assocs.len()));
+            prompt.push_str(&format!(
+                "Promoted insights linking these patterns ({}):\n",
+                promoted_assocs.len()
+            ));
             for a in &promoted_assocs {
                 prompt.push_str(&format!("  > {}\n", truncate(&a.hypothesis, 200)));
                 if let Some(rule) = &a.suggested_rule {
@@ -172,18 +186,14 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length �
 "#;
 
         let response = client
-            .analyze(
-                system_prompt,
-                &prompt,
-                &self.config.budget.model,
-                1024,
-                0.4,
-            )
+            .analyze(system_prompt, &prompt, &self.config.budget.model, 1024, 0.4)
             .await
             .with_context(|| format!("project_brief API call for {project_id}"))?;
 
         // ── Persist ───────────────────────────────────────────────────────
-        let path = self.store.path(&format!("dreams/project-briefs/{project_id}.md"));
+        let path = self
+            .store
+            .path(&format!("dreams/project-briefs/{project_id}.md"));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create_dir_all {}", parent.display()))?;
@@ -220,7 +230,8 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length �
             info!("Project briefs: backfilled source_projects on {backfilled} legacy patterns");
         }
 
-        let patterns: Vec<ExtractedPattern> = self.store
+        let patterns: Vec<ExtractedPattern> = self
+            .store
             .read_json("dreams/patterns.json")
             .unwrap_or_default();
         let mut counts: HashMap<String, u64> = HashMap::new();
@@ -229,11 +240,15 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length �
                 *counts.entry(proj.clone()).or_insert(0) += 1;
             }
         }
-        let projects: Vec<&String> = counts.iter()
+        let projects: Vec<&String> = counts
+            .iter()
             .filter(|(_, c)| **c >= 3)
             .map(|(k, _)| k)
             .collect();
-        info!("Project briefs: generating for {} projects (≥3 patterns each)", projects.len());
+        info!(
+            "Project briefs: generating for {} projects (≥3 patterns each)",
+            projects.len()
+        );
 
         let mut total_tokens = 0u64;
         let mut succeeded = 0u64;
@@ -258,17 +273,20 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length �
     /// Idempotent: patterns already with non-empty source_projects are
     /// only added to (union), never overwritten.
     pub fn backfill_source_projects(&self) -> Result<usize> {
-        use crate::transcript;
         use crate::config::expand_tilde;
+        use crate::transcript;
 
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
         let files = transcript::scan_projects(&projects_dir)?;
-        if files.is_empty() { return Ok(0); }
+        if files.is_empty() {
+            return Ok(0);
+        }
 
         // session_id → project_id (basename of project_dir)
         let mut sid_to_proj: HashMap<String, String> = HashMap::new();
         for f in &files {
-            let proj = f.project_dir
+            let proj = f
+                .project_dir
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
@@ -276,22 +294,28 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length �
             sid_to_proj.insert(f.session_id.clone(), proj);
         }
 
-        let mut patterns: Vec<ExtractedPattern> = self.store
+        let mut patterns: Vec<ExtractedPattern> = self
+            .store
             .read_json("dreams/patterns.json")
             .unwrap_or_default();
-        if patterns.is_empty() { return Ok(0); }
+        if patterns.is_empty() {
+            return Ok(0);
+        }
 
         let mut changed = 0usize;
         for p in patterns.iter_mut() {
             let mut added = false;
             for sid in &p.source_sessions {
                 if let Some(proj) = sid_to_proj.get(sid)
-                    && !p.source_projects.contains(proj) {
-                        p.source_projects.push(proj.clone());
-                        added = true;
-                    }
+                    && !p.source_projects.contains(proj)
+                {
+                    p.source_projects.push(proj.clone());
+                    added = true;
+                }
             }
-            if added { changed += 1; }
+            if added {
+                changed += 1;
+            }
         }
         if changed > 0 {
             self.store.write_json("dreams/patterns.json", &patterns)?;

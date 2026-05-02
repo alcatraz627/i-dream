@@ -100,21 +100,39 @@ impl<'a> ProspectiveModule<'a> {
         let matched: Vec<Intention> = registry
             .into_iter()
             .filter(|intent| {
-                if intent.expires < now { return false; }
-                if intent.fire_count >= intent.max_fires { return false; }
+                if intent.expires < now {
+                    return false;
+                }
+                if intent.fire_count >= intent.max_fires {
+                    return false;
+                }
                 match &intent.trigger {
-                    Trigger::Event { keywords, file_patterns: _, .. } => {
+                    Trigger::Event {
+                        keywords,
+                        file_patterns: _,
+                        ..
+                    } => {
                         let msg_lower = message.to_lowercase();
-                        keywords.iter().any(|k| msg_lower.contains(&k.to_lowercase()))
+                        keywords
+                            .iter()
+                            .any(|k| msg_lower.contains(&k.to_lowercase()))
                     }
                     Trigger::Time { after, keywords } => {
-                        if now < *after { return false; }
+                        if now < *after {
+                            return false;
+                        }
                         keywords.is_empty()
-                            || keywords.iter().any(|k| message.to_lowercase().contains(&k.to_lowercase()))
+                            || keywords
+                                .iter()
+                                .any(|k| message.to_lowercase().contains(&k.to_lowercase()))
                     }
-                    Trigger::Context { keywords, min_keyword_matches } => {
+                    Trigger::Context {
+                        keywords,
+                        min_keyword_matches,
+                    } => {
                         let msg_lower = message.to_lowercase();
-                        let matches = keywords.iter()
+                        let matches = keywords
+                            .iter()
                             .filter(|k| msg_lower.contains(&k.to_lowercase()))
                             .count();
                         matches >= *min_keyword_matches
@@ -133,9 +151,9 @@ impl<'a> ProspectiveModule<'a> {
             .read_jsonl("intentions/registry.jsonl")
             .unwrap_or_default();
 
-        let (active, expired): (Vec<_>, Vec<_>) = registry.into_iter().partition(|intent| {
-            intent.expires > now && intent.fire_count < intent.max_fires
-        });
+        let (active, expired): (Vec<_>, Vec<_>) = registry
+            .into_iter()
+            .partition(|intent| intent.expires > now && intent.fire_count < intent.max_fires);
 
         if !expired.is_empty() {
             info!("Cleaning up {} expired intentions", expired.len());
@@ -178,8 +196,10 @@ impl<'a> ProspectiveModule<'a> {
         use chrono::Duration as ChronoDuration;
         let now = Utc::now();
         // Pattern lookup so we can pull keywords from linked patterns.
-        let pat_by_id: std::collections::HashMap<&str, &crate::modules::dreaming::ExtractedPattern> =
-            patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+        let pat_by_id: std::collections::HashMap<
+            &str,
+            &crate::modules::dreaming::ExtractedPattern,
+        > = patterns.iter().map(|p| (p.id.as_str(), p)).collect();
 
         let mut created = 0usize;
         let mut skipped = 0usize;
@@ -194,7 +214,10 @@ impl<'a> ProspectiveModule<'a> {
                 && a.suggested_rule.is_some()
                 && a.confidence >= min_confidence
                 && a.auto_intention_id.is_none();
-            if !eligible { skipped += 1; continue; }
+            if !eligible {
+                skipped += 1;
+                continue;
+            }
 
             // Keyword extraction: combine the linked patterns' text into
             // a stop-word-stripped, deduped, lowercase keyword set. Cap
@@ -202,23 +225,34 @@ impl<'a> ProspectiveModule<'a> {
             let mut keywords: Vec<String> = Vec::new();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             const STOP: &[&str] = &[
-                "the","a","an","is","of","to","in","on","for","and","or","but",
-                "with","that","this","these","those","be","been","are","was","were",
-                "by","at","as","it","its","from","into","when","while","then",
+                "the", "a", "an", "is", "of", "to", "in", "on", "for", "and", "or", "but", "with",
+                "that", "this", "these", "those", "be", "been", "are", "was", "were", "by", "at",
+                "as", "it", "its", "from", "into", "when", "while", "then",
             ];
             for pid in &a.patterns_linked {
-                let Some(p) = pat_by_id.get(pid.as_str()) else { continue };
+                let Some(p) = pat_by_id.get(pid.as_str()) else {
+                    continue;
+                };
                 for w in p.pattern.split(|c: char| !c.is_alphanumeric()) {
                     let lw = w.to_lowercase();
-                    if lw.len() < 3 || STOP.contains(&lw.as_str()) { continue }
+                    if lw.len() < 3 || STOP.contains(&lw.as_str()) {
+                        continue;
+                    }
                     if seen.insert(lw.clone()) {
                         keywords.push(lw);
-                        if keywords.len() >= 8 { break }
+                        if keywords.len() >= 8 {
+                            break;
+                        }
                     }
                 }
-                if keywords.len() >= 8 { break }
+                if keywords.len() >= 8 {
+                    break;
+                }
             }
-            if keywords.is_empty() { skipped += 1; continue; }
+            if keywords.is_empty() {
+                skipped += 1;
+                continue;
+            }
 
             let intention_id = uuid::Uuid::new_v4().to_string();
             let intention = Intention {
@@ -313,14 +347,20 @@ mod tests {
                 keywords: vec!["migration".into(), "database".into()],
                 file_patterns: vec![],
             },
-            30, 0, 3,
+            30,
+            0,
+            3,
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
 
-        let matched = module.match_intentions("Running the database migration", None).unwrap();
+        let matched = module
+            .match_intentions("Running the database migration", None)
+            .unwrap();
         assert_eq!(matched.len(), 1, "Should match on keyword 'database'");
     }
 
@@ -337,15 +377,25 @@ mod tests {
                 keywords: vec!["DEPLOY".into()],
                 file_patterns: vec![],
             },
-            30, 0, 3,
+            30,
+            0,
+            3,
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
 
-        let matched = module.match_intentions("Starting deploy to production", None).unwrap();
-        assert_eq!(matched.len(), 1, "Keyword matching should be case-insensitive");
+        let matched = module
+            .match_intentions("Starting deploy to production", None)
+            .unwrap();
+        assert_eq!(
+            matched.len(),
+            1,
+            "Keyword matching should be case-insensitive"
+        );
     }
 
     #[test]
@@ -362,9 +412,12 @@ mod tests {
                 file_patterns: vec![],
             },
             -1, // expired yesterday
-            0, 3,
+            0,
+            3,
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
@@ -387,15 +440,22 @@ mod tests {
                 file_patterns: vec![],
             },
             30,
-            3, 3, // fire_count == max_fires
+            3,
+            3, // fire_count == max_fires
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
 
         let matched = module.match_intentions("test message", None).unwrap();
-        assert_eq!(matched.len(), 0, "Maxed-out intentions should not fire again");
+        assert_eq!(
+            matched.len(),
+            0,
+            "Maxed-out intentions should not fire again"
+        );
     }
 
     #[test]
@@ -411,15 +471,23 @@ mod tests {
                 after: Utc::now() + Duration::hours(2), // 2 hours from now
                 keywords: vec![],
             },
-            30, 0, 1,
+            30,
+            0,
+            1,
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
 
         let matched = module.match_intentions("anything", None).unwrap();
-        assert_eq!(matched.len(), 0, "Time trigger should not fire before 'after' gate");
+        assert_eq!(
+            matched.len(),
+            0,
+            "Time trigger should not fire before 'after' gate"
+        );
     }
 
     #[test]
@@ -432,17 +500,25 @@ mod tests {
             "int-6",
             Trigger::Time {
                 after: Utc::now() - Duration::hours(1), // 1 hour ago
-                keywords: vec![], // empty = match any message
+                keywords: vec![],                       // empty = match any message
             },
-            30, 0, 1,
+            30,
+            0,
+            1,
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
 
         let matched = module.match_intentions("anything", None).unwrap();
-        assert_eq!(matched.len(), 1, "Time trigger should fire after gate with empty keywords");
+        assert_eq!(
+            matched.len(),
+            1,
+            "Time trigger should fire after gate with empty keywords"
+        );
     }
 
     #[test]
@@ -457,20 +533,34 @@ mod tests {
                 keywords: vec!["auth".into(), "login".into(), "session".into()],
                 min_keyword_matches: 2,
             },
-            30, 0, 3,
+            30,
+            0,
+            3,
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
 
         // Only 1 match — below threshold
         let matched = module.match_intentions("fix the auth bug", None).unwrap();
-        assert_eq!(matched.len(), 0, "Should NOT match with only 1 of 2 required keywords");
+        assert_eq!(
+            matched.len(),
+            0,
+            "Should NOT match with only 1 of 2 required keywords"
+        );
 
         // 2 matches — meets threshold
-        let matched = module.match_intentions("fix the auth login flow", None).unwrap();
-        assert_eq!(matched.len(), 1, "Should match with 2 of 2 required keywords");
+        let matched = module
+            .match_intentions("fix the auth login flow", None)
+            .unwrap();
+        assert_eq!(
+            matched.len(),
+            1,
+            "Should match with 2 of 2 required keywords"
+        );
     }
 
     #[test]
@@ -505,7 +595,9 @@ mod tests {
                 keywords: vec!["test".into()],
                 file_patterns: vec![],
             },
-            30, 0, 3,
+            30,
+            0,
+            3,
         );
         let expired = make_intention(
             "expired-1",
@@ -515,10 +607,15 @@ mod tests {
                 file_patterns: vec![],
             },
             -5, // expired 5 days ago
-            0, 3,
+            0,
+            3,
         );
-        store.append_jsonl("intentions/registry.jsonl", &active).unwrap();
-        store.append_jsonl("intentions/registry.jsonl", &expired).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &active)
+            .unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &expired)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
@@ -548,9 +645,13 @@ mod tests {
                 keywords: vec!["test".into()],
                 file_patterns: vec![],
             },
-            30, 0, 3,
+            30,
+            0,
+            3,
         );
-        store.append_jsonl("intentions/registry.jsonl", &active).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &active)
+            .unwrap();
 
         let config = Config::default();
         let module = ProspectiveModule::new(&config, &store);
@@ -575,7 +676,9 @@ mod tests {
                 keywords: vec!["deploy".into()],
                 file_patterns: vec!["*.rs".into()],
             },
-            30, 0, 5,
+            30,
+            0,
+            5,
         );
         let json = serde_json::to_string(&intention).unwrap();
         let parsed: Intention = serde_json::from_str(&json).unwrap();
@@ -590,7 +693,9 @@ mod tests {
                 after: Utc::now(),
                 keywords: vec!["reminder".into()],
             },
-            7, 0, 1,
+            7,
+            0,
+            1,
         );
         let json = serde_json::to_string(&intention).unwrap();
         let parsed: Intention = serde_json::from_str(&json).unwrap();
@@ -605,7 +710,9 @@ mod tests {
                 keywords: vec!["auth".into(), "jwt".into()],
                 min_keyword_matches: 2,
             },
-            14, 1, 3,
+            14,
+            1,
+            3,
         );
         let json = serde_json::to_string(&intention).unwrap();
         let parsed: Intention = serde_json::from_str(&json).unwrap();

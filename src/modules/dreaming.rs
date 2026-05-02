@@ -5,10 +5,10 @@
 //! Phase 3 (Wake): Verify and promote high-value insights, discard speculation.
 
 use crate::api::ClaudeClient;
-use crate::config::{expand_tilde, Config};
+use crate::config::{Config, expand_tilde};
 use crate::dream_trace::{DreamTracer, EventKind, Phase as TracePhase};
-use crate::modules::prospective::{Action, Intention, Priority, Trigger};
 use crate::modules::Module;
+use crate::modules::prospective::{Action, Intention, Priority, Trigger};
 use crate::store::Store;
 use crate::transcript;
 use anyhow::Result;
@@ -148,9 +148,7 @@ fn collapse_ws(s: &str) -> String {
 /// Skips:
 ///   - Synthetic user blocks (tool results) — those carry no human input.
 ///   - Assistant turns whose first text block is empty (pure tool-call turns).
-fn build_turn_pairs(entries: &[transcript::TranscriptEntry])
-    -> Vec<(String, String, Vec<String>)>
-{
+fn build_turn_pairs(entries: &[transcript::TranscriptEntry]) -> Vec<(String, String, Vec<String>)> {
     use transcript::{AssistantBlock, TranscriptEntry, UserContent};
     let mut pairs: Vec<(String, String, Vec<String>)> = Vec::new();
     let mut pending_user: Option<String> = None;
@@ -176,10 +174,9 @@ fn build_turn_pairs(entries: &[transcript::TranscriptEntry])
                             AssistantBlock::Text { text } if excerpt.is_empty() => {
                                 excerpt = truncate_chars(&collapse_ws(text), 250);
                             }
-                            AssistantBlock::ToolUse { name, .. }
-                                if !tool_names.contains(name) => {
-                                    tool_names.push(name.clone());
-                                }
+                            AssistantBlock::ToolUse { name, .. } if !tool_names.contains(name) => {
+                                tool_names.push(name.clone());
+                            }
                             _ => {}
                         }
                     }
@@ -308,7 +305,11 @@ impl<'a> DreamingModule<'a> {
                 s.session_id,
                 s.project_id,
                 correction_tag,
-                if s.user_text.is_empty() { "<no text>".into() } else { s.user_text.clone() },
+                if s.user_text.is_empty() {
+                    "<no text>".into()
+                } else {
+                    s.user_text.clone()
+                },
                 if s.assistant_excerpt.is_empty() {
                     format!("<{} chars, tool-only turn>", s.reply_length)
                 } else {
@@ -336,7 +337,10 @@ impl<'a> DreamingModule<'a> {
                 summaries.len()
             ),
             vec![format!("{}", projects_dir.display())],
-            sessions_seen.iter().map(|(sid, _)| format!("session:{sid}")).collect(),
+            sessions_seen
+                .iter()
+                .map(|(sid, _)| format!("session:{sid}"))
+                .collect(),
             dump_payload,
             dump_kind,
         )?;
@@ -389,13 +393,13 @@ Prioritization rules:
 Skip: one-off incidents with no generalization value, trivia, transient errors, individual file-edit mechanics.
 Output ONLY a JSON array of objects. No preamble, no commentary."#;
 
-        let prompt = format!("Analyze the following session data and extract key learnings:\n\n{dump}");
+        let prompt =
+            format!("Analyze the following session data and extract key learnings:\n\n{dump}");
 
         // Attach the full prompt body (system + user) as the event
         // payload so the dashboard can show the exact text we sent to
         // Claude — invaluable when the extracted patterns look wrong.
-        let full_prompt_payload =
-            format!("{system_prompt}\n\n---\n\n{prompt}");
+        let full_prompt_payload = format!("{system_prompt}\n\n---\n\n{prompt}");
 
         tracer.emit_with_payload(
             TracePhase::Sws,
@@ -405,7 +409,10 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                 self.config.budget.model,
                 prompt.len()
             ),
-            sessions_seen.iter().map(|(sid, _)| format!("session:{sid}")).collect(),
+            sessions_seen
+                .iter()
+                .map(|(sid, _)| format!("session:{sid}"))
+                .collect(),
             vec![],
             Some(full_prompt_payload),
             Some("text"),
@@ -457,7 +464,10 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                             valence: r.valence,
                             confidence: r.confidence,
                             category: r.category,
-                            source_sessions: sessions_seen.iter().map(|(sid, _)| sid.clone()).collect(),
+                            source_sessions: sessions_seen
+                                .iter()
+                                .map(|(sid, _)| sid.clone())
+                                .collect(),
                             source_projects: batch_projects.clone(),
                             occurrences: 1,
                             first_seen: now.clone(),
@@ -470,12 +480,16 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
             }
         } else {
             let preview: String = response.content.chars().take(200).collect();
-            warn!("SWS: no JSON block found in API response — patterns not saved\n  response[:200]: {preview}");
+            warn!(
+                "SWS: no JSON block found in API response — patterns not saved\n  response[:200]: {preview}"
+            );
         }
 
         // Load existing patterns for deduplication and cap enforcement.
         let mut all: Vec<ExtractedPattern> = if self.store.exists("dreams/patterns.json") {
-            self.store.read_json("dreams/patterns.json").unwrap_or_default()
+            self.store
+                .read_json("dreams/patterns.json")
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -503,7 +517,9 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                 all[idx].occurrence_history.push(now_str.clone());
                 let len = all[idx].occurrence_history.len();
                 if len > OCCURRENCE_HISTORY_CAP {
-                    all[idx].occurrence_history.drain(..(len - OCCURRENCE_HISTORY_CAP));
+                    all[idx]
+                        .occurrence_history
+                        .drain(..(len - OCCURRENCE_HISTORY_CAP));
                 }
                 // Absorb confidence if this observation is more confident.
                 if p.confidence > all[idx].confidence {
@@ -559,13 +575,20 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
             TracePhase::Sws,
             EventKind::ProcessedStateUpdated,
             format!("+{} sessions marked processed", sessions_seen.len()),
-            sessions_seen.iter().map(|(sid, _)| format!("session:{sid}")).collect(),
+            sessions_seen
+                .iter()
+                .map(|(sid, _)| format!("session:{sid}"))
+                .collect(),
             vec!["dreams/processed.json".into()],
         )?;
 
         info!("SWS phase complete ({} tokens used)", response.tokens_used);
         tracer.note(TracePhase::Sws, EventKind::PhaseEnd, "complete")?;
-        Ok((response.tokens_used, sessions_seen.len() as u64, patterns_count))
+        Ok((
+            response.tokens_used,
+            sessions_seen.len() as u64,
+            patterns_count,
+        ))
     }
 
     /// Scan projects and build short per-turn summaries from new sessions.
@@ -598,7 +621,11 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
             // Re-scan only if the file has grown since last processing.
             // A size of 0 means we can't stat the file — include it to be safe.
             let current_size = std::fs::metadata(&file.path).map(|m| m.len()).unwrap_or(0);
-            let last_size = processed.sessions.get(&file.session_id).copied().unwrap_or(0);
+            let last_size = processed
+                .sessions
+                .get(&file.session_id)
+                .copied()
+                .unwrap_or(0);
             if last_size > 0 && current_size <= last_size {
                 continue;
             }
@@ -606,7 +633,10 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
             let entries = match transcript::read_transcript(&file.path) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!("skipping unreadable transcript {}: {e:#}", file.path.display());
+                    warn!(
+                        "skipping unreadable transcript {}: {e:#}",
+                        file.path.display()
+                    );
                     continue;
                 }
             };
@@ -633,10 +663,8 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
             // following Assistant block.
             let pairs = build_turn_pairs(&entries);
             for (i, unit) in units.into_iter().enumerate() {
-                let (user_text, assistant_excerpt, tool_names) = pairs
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_default();
+                let (user_text, assistant_excerpt, tool_names) =
+                    pairs.get(i).cloned().unwrap_or_default();
                 summaries.push(SessionSummary {
                     session_id: file.session_id.clone(),
                     project_id: project_id.clone(),
@@ -694,7 +722,9 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
         // Before this check existed every REM cycle burned Opus tokens on a
         // literal placeholder prompt — the model complained each time.
         let all_patterns: Vec<ExtractedPattern> = if self.store.exists("dreams/patterns.json") {
-            self.store.read_json("dreams/patterns.json").unwrap_or_default()
+            self.store
+                .read_json("dreams/patterns.json")
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -750,9 +780,8 @@ Look for:
 Skip obvious connections between directly-related patterns. If no genuine connection exists, return [].
 Output ONLY a JSON array. No commentary."#;
 
-        let prompt = format!(
-            "Find creative connections between these patterns:\n\n{pattern_digest}"
-        );
+        let prompt =
+            format!("Find creative connections between these patterns:\n\n{pattern_digest}");
 
         let full_prompt_payload = format!("{system_prompt}\n\n---\n\n{prompt}");
 
@@ -866,7 +895,9 @@ Output ONLY a JSON array. No commentary."#;
         let assoc_count = new_assocs.len() as u64;
         if assoc_count > 0 {
             let mut all: Vec<Association> = if self.store.exists("dreams/associations.json") {
-                self.store.read_json("dreams/associations.json").unwrap_or_default()
+                self.store
+                    .read_json("dreams/associations.json")
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -961,7 +992,9 @@ Output ONLY a JSON array. No commentary."#;
         let threshold = self.config.modules.dreaming.wake_promotion_threshold;
 
         let mut all_assocs: Vec<Association> = if self.store.exists("dreams/associations.json") {
-            self.store.read_json("dreams/associations.json").unwrap_or_default()
+            self.store
+                .read_json("dreams/associations.json")
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -986,16 +1019,12 @@ Output ONLY a JSON array. No commentary."#;
                             .unwrap_or("");
                         // Accept string "up"/"down" or numeric 1/-1
                         let vote = match fb.get("rating") {
-                            Some(v) if v.is_string() => {
-                                v.as_str().unwrap_or("").to_string()
-                            }
-                            Some(v) if v.is_number() => {
-                                match v.as_i64().unwrap_or(0) {
-                                    n if n > 0 => "up".to_string(),
-                                    n if n < 0 => "down".to_string(),
-                                    _ => String::new(),
-                                }
-                            }
+                            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+                            Some(v) if v.is_number() => match v.as_i64().unwrap_or(0) {
+                                n if n > 0 => "up".to_string(),
+                                n if n < 0 => "down".to_string(),
+                                _ => String::new(),
+                            },
                             _ => String::new(),
                         };
                         if id.is_empty() || vote.is_empty() {
@@ -1014,12 +1043,10 @@ Output ONLY a JSON array. No commentary."#;
                             if matched {
                                 match vote.as_str() {
                                     "up" => {
-                                        assoc.confidence =
-                                            (assoc.confidence + 0.05).min(1.0);
+                                        assoc.confidence = (assoc.confidence + 0.05).min(1.0);
                                     }
                                     "down" => {
-                                        assoc.confidence =
-                                            (assoc.confidence - 0.10).max(0.0);
+                                        assoc.confidence = (assoc.confidence - 0.10).max(0.0);
                                         assoc.promoted = false; // re-evaluate
                                         // D3 v1: when a down-vote drags
                                         // confidence below the dismissal
@@ -1053,7 +1080,9 @@ Output ONLY a JSON array. No commentary."#;
             // cite their evidence (pattern texts, source projects, session
             // count). Patterns are typically <500 entries — cheap to load.
             let all_patterns: Vec<ExtractedPattern> = if self.store.exists("dreams/patterns.json") {
-                self.store.read_json("dreams/patterns.json").unwrap_or_default()
+                self.store
+                    .read_json("dreams/patterns.json")
+                    .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -1184,8 +1213,7 @@ Output ONLY a JSON array. No commentary."#;
                     );
 
                     // Keep header + last N cycles
-                    let kept: Vec<&str> =
-                        sections[(sections.len() - KEEP_CYCLES)..].to_vec();
+                    let kept: Vec<&str> = sections[(sections.len() - KEEP_CYCLES)..].to_vec();
                     let kept_content = kept
                         .iter()
                         .map(|s| format!("\n## Wake Cycle{s}"))
@@ -1200,14 +1228,14 @@ Output ONLY a JSON array. No commentary."#;
             std::fs::write(&insights_path, content)?;
 
             // Mark promoted in the persisted associations array.
-            let promoted_ids: HashSet<&str> =
-                candidates.iter().map(|a| a.id.as_str()).collect();
+            let promoted_ids: HashSet<&str> = candidates.iter().map(|a| a.id.as_str()).collect();
             for assoc in all_assocs.iter_mut() {
                 if promoted_ids.contains(assoc.id.as_str()) {
                     assoc.promoted = true;
                 }
             }
-            self.store.write_json("dreams/associations.json", &all_assocs)?;
+            self.store
+                .write_json("dreams/associations.json", &all_assocs)?;
 
             info!("Wake: promoted {promoted_count} insights to dreams/insights.md");
 
@@ -1260,8 +1288,9 @@ Output ONLY a JSON array. No commentary."#;
                     max_fires: 5,
                     last_fired: None,
                 };
-                if let Err(e) =
-                    self.store.append_jsonl("intentions/registry.jsonl", &intention)
+                if let Err(e) = self
+                    .store
+                    .append_jsonl("intentions/registry.jsonl", &intention)
                 {
                     warn!("Wake: failed to create intention: {e:#}");
                 } else {
@@ -1312,7 +1341,11 @@ impl<'a> Module for DreamingModule<'a> {
         let mut new_count = 0usize;
         for file in &files {
             let current_size = std::fs::metadata(&file.path).map(|m| m.len()).unwrap_or(0);
-            let last_size = processed.sessions.get(&file.session_id).copied().unwrap_or(0);
+            let last_size = processed
+                .sessions
+                .get(&file.session_id)
+                .copied()
+                .unwrap_or(0);
             if last_size == 0 || current_size > last_size {
                 new_count += 1;
                 if new_count >= min_new {
@@ -1348,8 +1381,7 @@ impl<'a> Module for DreamingModule<'a> {
 
         // Phase 1: SWS
         if self.config.modules.dreaming.sws_enabled && remaining > 0 {
-            let (tokens, sessions, patterns) =
-                self.run_sws(client, remaining, &tracer).await?;
+            let (tokens, sessions, patterns) = self.run_sws(client, remaining, &tracer).await?;
             total_tokens += tokens;
             remaining = remaining.saturating_sub(tokens);
             sessions_analyzed = sessions;
@@ -1405,9 +1437,7 @@ impl<'a> Module for DreamingModule<'a> {
         tracer.emit_with_payload(
             TracePhase::Done,
             EventKind::JournalWritten,
-            format!(
-                "cycle recorded: sessions={sessions_analyzed}, tokens={total_tokens}"
-            ),
+            format!("cycle recorded: sessions={sessions_analyzed}, tokens={total_tokens}"),
             vec![],
             vec!["dreams/journal.jsonl".into()],
             entry_json,
@@ -1544,8 +1574,7 @@ mod tests {
     #[test]
     fn wake_promotion_empty_when_all_promoted() {
         const THRESHOLD: f64 = 0.5;
-        let assocs = [make_assoc(0.9, true, true),
-            make_assoc(0.8, true, true)];
+        let assocs = [make_assoc(0.9, true, true), make_assoc(0.8, true, true)];
 
         let candidates: Vec<&Association> = assocs
             .iter()

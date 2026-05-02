@@ -30,13 +30,13 @@ const DEBUG_LOG: &str = "/tmp/i-dream-bar.log";
 
 pub fn manage(action: WidgetAction) -> Result<()> {
     match action {
-        WidgetAction::Start   => start(),
-        WidgetAction::Stop    => stop(),
+        WidgetAction::Start => start(),
+        WidgetAction::Stop => stop(),
         WidgetAction::Restart => restart(),
-        WidgetAction::Build   => build(),
-        WidgetAction::Status  => status(),
+        WidgetAction::Build => build(),
+        WidgetAction::Status => status(),
         WidgetAction::Logs { lines } => logs(lines),
-        WidgetAction::Install   => run_build_sh(&["--install"]),
+        WidgetAction::Install => run_build_sh(&["--install"]),
         WidgetAction::Uninstall => run_build_sh(&["--uninstall"]),
     }
 }
@@ -45,7 +45,10 @@ pub fn manage(action: WidgetAction) -> Result<()> {
 
 fn start() -> Result<()> {
     if is_running() {
-        println!("Widget is already running (PID {}).", current_pid().unwrap_or(0));
+        println!(
+            "Widget is already running (PID {}).",
+            current_pid().unwrap_or(0)
+        );
         return Ok(());
     }
     let bin = widget_binary()?;
@@ -123,7 +126,8 @@ fn status() -> Result<()> {
         // `launchctl list <label>` prints a plist-like dict; pull out PID + LastExitStatus.
         for line in stdout.lines() {
             let t = line.trim();
-            if t.contains("\"PID\"") || t.contains("\"LastExitStatus\"") || t.contains("\"Label\"") {
+            if t.contains("\"PID\"") || t.contains("\"LastExitStatus\"") || t.contains("\"Label\"")
+            {
                 println!("  {t}");
             }
         }
@@ -135,8 +139,7 @@ fn status() -> Result<()> {
     println!("\nBuild:");
     if let Ok(build_info_path) = build_info_path() {
         if build_info_path.exists() {
-            let info = std::fs::read_to_string(&build_info_path)
-                .unwrap_or_default();
+            let info = std::fs::read_to_string(&build_info_path).unwrap_or_default();
             let get = |key: &str| -> String {
                 info.lines()
                     .find(|l| l.starts_with(key))
@@ -150,10 +153,7 @@ fn status() -> Result<()> {
 
             // Compare source hash to detect staleness.
             if let Ok(source) = source_path() {
-                let md5_out = Command::new("md5")
-                    .arg(&source)
-                    .output()
-                    .ok();
+                let md5_out = Command::new("md5").arg(&source).output().ok();
                 if let Some(out) = md5_out {
                     let current_hash: String = String::from_utf8_lossy(&out.stdout)
                         .split_whitespace()
@@ -198,11 +198,17 @@ fn run_build_sh(extra_args: &[&str]) -> Result<()> {
     let script = build_sh_path()?;
     let mut cmd = Command::new("bash");
     cmd.arg(&script);
-    for a in extra_args { cmd.arg(a); }
-    let status = cmd.status()
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    let status = cmd
+        .status()
         .with_context(|| format!("Failed to run {}", script.display()))?;
     if !status.success() {
-        bail!("build.sh exited with status {}", status.code().unwrap_or(-1));
+        bail!(
+            "build.sh exited with status {}",
+            status.code().unwrap_or(-1)
+        );
     }
     Ok(())
 }
@@ -220,7 +226,9 @@ fn current_pid() -> Option<u32> {
         .args(["-x", BINARY_NAME])
         .output()
         .ok()?;
-    if !out.status.success() { return None; }
+    if !out.status.success() {
+        return None;
+    }
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .next()

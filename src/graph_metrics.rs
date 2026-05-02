@@ -123,9 +123,13 @@ pub fn compute_metrics(
     let mut all_projects: Vec<String> = Vec::new();
     for p in patterns {
         let d = pattern_deg.get(p.id.as_str()).copied().unwrap_or(0);
-        if d == 0 { isolated += 1; }
+        if d == 0 {
+            isolated += 1;
+        }
         for proj in &p.source_projects {
-            if !all_projects.contains(proj) { all_projects.push(proj.clone()); }
+            if !all_projects.contains(proj) {
+                all_projects.push(proj.clone());
+            }
         }
         patterns_map.insert(
             p.id.clone(),
@@ -157,12 +161,13 @@ pub fn compute_metrics(
     }
 
     // Top-10 hubs by degree (ties broken by id for determinism).
-    let mut hub_pairs: Vec<(&str, usize)> = pattern_deg
-        .iter()
-        .map(|(k, v)| (*k, *v))
-        .collect();
+    let mut hub_pairs: Vec<(&str, usize)> = pattern_deg.iter().map(|(k, v)| (*k, *v)).collect();
     hub_pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    let hubs: Vec<String> = hub_pairs.iter().take(10).map(|(k, _)| k.to_string()).collect();
+    let hubs: Vec<String> = hub_pairs
+        .iter()
+        .take(10)
+        .map(|(k, _)| k.to_string())
+        .collect();
 
     // M9 — synchronous label propagation over the bipartite graph.
     // Returns pattern_id → community_label (the seed pattern id).
@@ -205,7 +210,9 @@ fn label_propagation_communities(
     let mut neighbors: HashMap<&str, HashSet<&str>> = HashMap::new();
     for a in associations {
         // Each association connects every pair of its linked patterns.
-        let valid: Vec<&str> = a.patterns_linked.iter()
+        let valid: Vec<&str> = a
+            .patterns_linked
+            .iter()
             .map(|s| s.as_str())
             .filter(|id| pattern_ids.contains(id))
             .collect();
@@ -219,7 +226,8 @@ fn label_propagation_communities(
     }
 
     // Initial labels: each pattern is its own community.
-    let mut labels: HashMap<&str, &str> = patterns.iter()
+    let mut labels: HashMap<&str, &str> = patterns
+        .iter()
         .map(|p| (p.id.as_str(), p.id.as_str()))
         .collect();
 
@@ -229,8 +237,12 @@ fn label_propagation_communities(
         let mut ids: Vec<&str> = labels.keys().copied().collect();
         ids.sort_unstable();
         for id in ids {
-            let Some(nbrs) = neighbors.get(id) else { continue };
-            if nbrs.is_empty() { continue; }
+            let Some(nbrs) = neighbors.get(id) else {
+                continue;
+            };
+            if nbrs.is_empty() {
+                continue;
+            }
             // Tally neighbor labels.
             let mut tally: HashMap<&str, usize> = HashMap::new();
             for n in nbrs {
@@ -239,36 +251,43 @@ fn label_propagation_communities(
                 }
             }
             // Pick max count, ties broken alphabetically (stable).
-            let Some((&best, _)) = tally.iter()
+            let Some((&best, _)) = tally
+                .iter()
                 .max_by(|(la, ca), (lb, cb)| ca.cmp(cb).then_with(|| lb.cmp(la)))
-            else { continue };
+            else {
+                continue;
+            };
             if labels.get(id) != Some(&best) {
                 labels.insert(id, best);
                 changed = true;
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
 
     // Output: borrowed → owned; isolated patterns → None.
-    patterns.iter().map(|p| {
-        let id = p.id.as_str();
-        if neighbors.get(id).map(|s| s.is_empty()).unwrap_or(true) {
-            (p.id.clone(), None)
-        } else {
-            let lbl = labels.get(id).copied().unwrap_or(id).to_string();
-            (p.id.clone(), Some(lbl))
-        }
-    }).collect()
+    patterns
+        .iter()
+        .map(|p| {
+            let id = p.id.as_str();
+            if neighbors.get(id).map(|s| s.is_empty()).unwrap_or(true) {
+                (p.id.clone(), None)
+            } else {
+                let lbl = labels.get(id).copied().unwrap_or(id).to_string();
+                (p.id.clone(), Some(lbl))
+            }
+        })
+        .collect()
 }
 
 /// Read patterns + associations from the store, compute metrics, persist.
 /// Idempotent — overwrites the metrics file each call. Returns the metrics
 /// in case the caller wants to use them directly.
 pub fn compute_and_persist(store: &Store) -> Result<GraphMetrics> {
-    let patterns: Vec<ExtractedPattern> = store
-        .read_json("dreams/patterns.json")
-        .unwrap_or_default();
+    let patterns: Vec<ExtractedPattern> =
+        store.read_json("dreams/patterns.json").unwrap_or_default();
     let associations: Vec<Association> = store
         .read_json("dreams/associations.json")
         .unwrap_or_default();
@@ -287,9 +306,8 @@ pub fn compute_and_persist(store: &Store) -> Result<GraphMetrics> {
 /// machinery (or a future targeted command).
 pub fn snapshot_for_diff(store: &Store) -> Result<std::path::PathBuf> {
     use serde_json::json;
-    let patterns: Vec<ExtractedPattern> = store
-        .read_json("dreams/patterns.json")
-        .unwrap_or_default();
+    let patterns: Vec<ExtractedPattern> =
+        store.read_json("dreams/patterns.json").unwrap_or_default();
     let associations: Vec<Association> = store
         .read_json("dreams/associations.json")
         .unwrap_or_default();
@@ -324,7 +342,7 @@ mod tests {
             source_projects: vec![],
             occurrences: 1,
             first_seen: "2026-05-01T00:00:00Z".into(),
-            last_seen:  "2026-05-01T00:00:00Z".into(),
+            last_seen: "2026-05-01T00:00:00Z".into(),
             occurrence_history: vec![],
         }
     }

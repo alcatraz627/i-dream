@@ -9,8 +9,8 @@ pub mod insight_digest;
 pub mod introspection;
 pub mod intuition;
 pub mod metacog;
-pub mod prospective;
 pub mod project_briefs;
+pub mod prospective;
 pub mod user_settings;
 pub mod weekly_briefing;
 
@@ -109,8 +109,7 @@ pub fn inspect(config: &Config, module_name: &str) -> Result<String> {
             let surface_count = store.count_jsonl("valence/surface-log.jsonl")?;
             Ok(format!(
                 "Intuition Engine\n  Enabled: {}\n  Valence entries: {valence_count}\n  Intuitions surfaced: {surface_count}\n  Decay halflife: {:.0} days",
-                config.modules.intuition.enabled,
-                config.modules.intuition.decay_halflife_days,
+                config.modules.intuition.enabled, config.modules.intuition.decay_halflife_days,
             ))
         }
         "introspection" => {
@@ -120,7 +119,11 @@ pub fn inspect(config: &Config, module_name: &str) -> Result<String> {
                 config.modules.introspection.enabled,
                 config.modules.introspection.sample_rate * 100.0,
                 config.modules.introspection.report_interval_days,
-                if pattern_exists { "exists" } else { "not yet generated" },
+                if pattern_exists {
+                    "exists"
+                } else {
+                    "not yet generated"
+                },
             ))
         }
         "prospective" | "intentions" => {
@@ -132,7 +135,9 @@ pub fn inspect(config: &Config, module_name: &str) -> Result<String> {
                 config.modules.prospective.max_active_intentions,
             ))
         }
-        _ => anyhow::bail!("Unknown module: {module_name}. Available: dreaming, metacog, intuition, introspection, prospective"),
+        _ => anyhow::bail!(
+            "Unknown module: {module_name}. Available: dreaming, metacog, intuition, introspection, prospective"
+        ),
     }
 }
 

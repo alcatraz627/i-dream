@@ -25,8 +25,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, warn};
 use tokio::io::AsyncWriteExt as _;
+use tracing::{debug, warn};
 
 /// Retry policy for transient Claude API errors.
 ///
@@ -150,8 +150,7 @@ struct Usage {
 
 impl ClaudeClient {
     pub fn new() -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY not set")?;
+        let api_key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
 
         Ok(Self {
             api_key,
@@ -262,8 +261,7 @@ impl ClaudeClient {
                         break;
                     }
 
-                    let delay = retry_after
-                        .unwrap_or_else(|| backoff_delay(attempt, &self.retry));
+                    let delay = retry_after.unwrap_or_else(|| backoff_delay(attempt, &self.retry));
                     warn!(
                         "API call failed (attempt {attempt}/{}): {message}. \
                          Retrying in {:?}",
@@ -372,9 +370,14 @@ impl ClaudeClient {
         let full_prompt = format!("{system}\n\n---\n\n{prompt}");
 
         let mut child = tokio::process::Command::new(&self.claude_path)
-            .args(["--print", "--model", model,
-                   "--append-system-prompt", format_override,
-                   "--no-session-persistence"])
+            .args([
+                "--print",
+                "--model",
+                model,
+                "--append-system-prompt",
+                format_override,
+                "--no-session-persistence",
+            ])
             // Run in /tmp so no project CLAUDE.md is discovered.
             .current_dir("/tmp")
             // Explicitly unset ANTHROPIC_API_KEY to prevent an empty string
@@ -384,11 +387,13 @@ impl ClaudeClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!(
-                "Failed to spawn '{}' — is the claude CLI installed? \
+            .with_context(|| {
+                format!(
+                    "Failed to spawn '{}' — is the claude CLI installed? \
                  Set budget.claude_code_cli_path in config if it's not on PATH.",
-                self.claude_path
-            ))?;
+                    self.claude_path
+                )
+            })?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
@@ -409,7 +414,10 @@ impl ClaudeClient {
             let detail = if !stderr.trim().is_empty() {
                 stderr.trim().to_string()
             } else if !stdout.trim().is_empty() {
-                format!("(stdout) {}", &stdout.trim()[..stdout.trim().len().min(300)])
+                format!(
+                    "(stdout) {}",
+                    &stdout.trim()[..stdout.trim().len().min(300)]
+                )
             } else {
                 "(no output)".into()
             };
@@ -501,7 +509,10 @@ fn backoff_delay(attempt: u32, config: &RetryConfig) -> Duration {
     // `attempt - 1` because attempt 1 just failed; we're computing
     // the wait BEFORE attempt 2.
     let multiplier = 2u32.saturating_pow(attempt.saturating_sub(1));
-    let nanos = config.base_delay.as_nanos().saturating_mul(multiplier as u128);
+    let nanos = config
+        .base_delay
+        .as_nanos()
+        .saturating_mul(multiplier as u128);
     let delay = Duration::from_nanos(nanos.min(u64::MAX as u128) as u64);
     std::cmp::min(delay, config.max_delay)
 }
@@ -825,8 +836,7 @@ mod tests {
         // must bail after `max_attempts` calls, with an error that
         // mentions the attempt count so operators can distinguish
         // "API is down" from "one unlucky blip".
-        let (url, counter) =
-            spawn_mock_server(|_| error_body("503 Service Unavailable")).await;
+        let (url, counter) = spawn_mock_server(|_| error_body("503 Service Unavailable")).await;
         let client = test_client(url);
 
         let err = client

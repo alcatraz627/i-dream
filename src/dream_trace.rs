@@ -180,10 +180,7 @@ impl<'a> DreamTracer<'a> {
         let now = Utc::now();
         let cycle_id = Uuid::new_v4().to_string();
         let short = &cycle_id[..8];
-        let trace_rel_path = format!(
-            "dreams/traces/{}-{short}.jsonl",
-            now.format("%Y%m%d-%H%M")
-        );
+        let trace_rel_path = format!("dreams/traces/{}-{short}.jsonl", now.format("%Y%m%d-%H%M"));
         Self {
             store,
             cycle_id,
@@ -241,12 +238,7 @@ impl<'a> DreamTracer<'a> {
 
     /// Convenience for the common zero-lineage case (phase boundaries,
     /// skip notes, errors — events that don't map data in to data out).
-    pub fn note(
-        &self,
-        phase: Phase,
-        kind: EventKind,
-        details: impl Into<String>,
-    ) -> Result<()> {
+    pub fn note(&self, phase: Phase, kind: EventKind, details: impl Into<String>) -> Result<()> {
         self.emit(phase, kind, details, Vec::new(), Vec::new())
     }
 
@@ -408,9 +400,7 @@ mod tests {
                 vec![],
             )
             .unwrap();
-        tracer
-            .note(Phase::Sws, EventKind::PhaseEnd, "ok")
-            .unwrap();
+        tracer.note(Phase::Sws, EventKind::PhaseEnd, "ok").unwrap();
 
         let traces = load_recent_traces(&store, 10);
         assert_eq!(traces.len(), 1);
@@ -558,9 +548,7 @@ mod tests {
         tracer
             .note(Phase::Rem, EventKind::ApiResponse, "tokens=800 (heavy)")
             .unwrap();
-        tracer
-            .note(Phase::Sws, EventKind::PhaseEnd, "ok")
-            .unwrap();
+        tracer.note(Phase::Sws, EventKind::PhaseEnd, "ok").unwrap();
         let t = load_recent_traces(&store, 10).remove(0);
         assert_eq!(t.total_tokens(), 2000);
     }
@@ -595,9 +583,7 @@ mod tests {
                 Some("text"),
             )
             .unwrap();
-        tracer
-            .note(Phase::Sws, EventKind::PhaseEnd, "ok")
-            .unwrap();
+        tracer.note(Phase::Sws, EventKind::PhaseEnd, "ok").unwrap();
 
         let t = load_recent_traces(&store, 10).remove(0);
         assert_eq!(t.events.len(), 2);
@@ -615,6 +601,9 @@ mod tests {
     fn phase_and_event_kind_as_str_are_snake_case() {
         assert_eq!(Phase::Sws.as_str(), "sws");
         assert_eq!(EventKind::CycleStart.as_str(), "cycle_start");
-        assert_eq!(EventKind::ProcessedStateUpdated.as_str(), "processed_state_updated");
+        assert_eq!(
+            EventKind::ProcessedStateUpdated.as_str(),
+            "processed_state_updated"
+        );
     }
 }

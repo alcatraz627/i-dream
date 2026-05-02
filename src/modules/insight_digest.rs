@@ -31,7 +31,7 @@ enum Sentiment {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct DigestMeta {
-    last_run:  Option<DateTime<Utc>>,
+    last_run: Option<DateTime<Utc>>,
     /// Sentiment of the most recent digest: "positive", "neutral", or "negative".
     #[serde(default)]
     sentiment: Sentiment,
@@ -41,7 +41,7 @@ struct DigestMeta {
 #[derive(Debug, Deserialize)]
 struct DigestResponse {
     /// 2-3 sentence prose synthesis.
-    summary:   String,
+    summary: String,
     /// Overall trajectory sentiment: "positive" | "neutral" | "negative"
     sentiment: Sentiment,
 }
@@ -64,12 +64,13 @@ impl<'a> InsightDigestModule<'a> {
 
         // Enforce the 3h cooldown.
         if let Ok(meta) = self.store.read_json::<DigestMeta>(DIGEST_META_PATH)
-            && let Some(last_run) = meta.last_run {
-                let elapsed_secs = (Utc::now() - last_run).num_seconds();
-                if elapsed_secs < (COOLDOWN_HOURS * 3600.0) as i64 {
-                    return Ok(false);
-                }
+            && let Some(last_run) = meta.last_run
+        {
+            let elapsed_secs = (Utc::now() - last_run).num_seconds();
+            if elapsed_secs < (COOLDOWN_HOURS * 3600.0) as i64 {
+                return Ok(false);
             }
+        }
 
         Ok(true)
     }
@@ -101,21 +102,19 @@ impl<'a> InsightDigestModule<'a> {
         );
 
         let response = client
-            .analyze(
-                system,
-                &prompt,
-                &self.config.budget.model,
-                512,
-                0.3,
-            )
+            .analyze(system, &prompt, &self.config.budget.model, 512, 0.3)
             .await?;
 
         // Parse JSON response; fall back gracefully to treating the whole content
         // as prose with neutral sentiment if parsing fails.
         let (prose, sentiment) = {
-            let raw = response.content.trim()
-                .trim_start_matches("```json").trim_start_matches("```")
-                .trim_end_matches("```").trim();
+            let raw = response
+                .content
+                .trim()
+                .trim_start_matches("```json")
+                .trim_start_matches("```")
+                .trim_end_matches("```")
+                .trim();
             if let Ok(dr) = serde_json::from_str::<DigestResponse>(raw) {
                 (dr.summary, dr.sentiment)
             } else {
@@ -135,13 +134,13 @@ impl<'a> InsightDigestModule<'a> {
 
         self.store.write_md(DIGEST_PATH, &digest)?;
 
-        let meta = DigestMeta { last_run: Some(now), sentiment };
+        let meta = DigestMeta {
+            last_run: Some(now),
+            sentiment,
+        };
         self.store.write_json(DIGEST_META_PATH, &meta)?;
 
-        info!(
-            "Insight digest updated ({} tokens)",
-            response.tokens_used
-        );
+        info!("Insight digest updated ({} tokens)", response.tokens_used);
 
         Ok(response.tokens_used)
     }
@@ -192,7 +191,10 @@ mod tests {
             content.push_str(&format!("### Insight (conf=0.8)\n> Hypothesis {i}\n---\n"));
         }
         let result = extract_last_n_insights(&content, 3);
-        assert!(!result.contains("Hypothesis 1"), "should not include early blocks");
+        assert!(
+            !result.contains("Hypothesis 1"),
+            "should not include early blocks"
+        );
         assert!(!result.contains("Hypothesis 2"));
         assert!(!result.contains("Hypothesis 3"));
         assert!(!result.contains("Hypothesis 4"));

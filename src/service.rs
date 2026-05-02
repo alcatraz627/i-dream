@@ -80,16 +80,19 @@ fn install() -> Result<()> {
 
     // Render and write the plist.
     let plist_body = render_plist(&paths);
-    fs::write(&paths.plist_path, &plist_body).with_context(|| {
-        format!("Failed to write plist to {}", paths.plist_path.display())
-    })?;
+    fs::write(&paths.plist_path, &plist_body)
+        .with_context(|| format!("Failed to write plist to {}", paths.plist_path.display()))?;
     info!("Wrote plist to {}", paths.plist_path.display());
 
     // `launchctl bootstrap` loads the plist into the gui/$UID domain.
     // This is the modern replacement for the deprecated `launchctl load`.
     let domain = gui_domain()?;
     let output = Command::new("launchctl")
-        .args(["bootstrap", &domain, &paths.plist_path.display().to_string()])
+        .args([
+            "bootstrap",
+            &domain,
+            &paths.plist_path.display().to_string(),
+        ])
         .output()
         .context("Failed to invoke launchctl bootstrap")?;
 
@@ -135,15 +138,12 @@ fn uninstall() -> Result<()> {
             // the end state is the same.
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !stderr.contains("Could not find") && !stderr.contains("not find") {
-                eprintln!(
-                    "launchctl bootout warning: {stderr}"
-                );
+                eprintln!("launchctl bootout warning: {stderr}");
             }
         }
 
-        fs::remove_file(&paths.plist_path).with_context(|| {
-            format!("Failed to delete plist at {}", paths.plist_path.display())
-        })?;
+        fs::remove_file(&paths.plist_path)
+            .with_context(|| format!("Failed to delete plist at {}", paths.plist_path.display()))?;
         println!("Service uninstalled: {AGENT_LABEL}");
     } else {
         println!("No plist installed at {}", paths.plist_path.display());
@@ -156,9 +156,7 @@ fn uninstall() -> Result<()> {
 fn start() -> Result<()> {
     let paths = Paths::resolve()?;
     if !paths.plist_path.exists() {
-        anyhow::bail!(
-            "Service not installed. Run `i-dream service install` first."
-        );
+        anyhow::bail!("Service not installed. Run `i-dream service install` first.");
     }
     let domain = gui_domain()?;
     let output = Command::new("launchctl")
@@ -201,7 +199,11 @@ fn status() -> Result<()> {
     println!("Service label: {AGENT_LABEL}");
     println!(
         "Plist installed: {}",
-        if paths.plist_path.exists() { "yes" } else { "no" }
+        if paths.plist_path.exists() {
+            "yes"
+        } else {
+            "no"
+        }
     );
 
     let output = Command::new("launchctl")
@@ -324,7 +326,9 @@ fn latest_log_file(logs_dir: &Path) -> Result<Option<PathBuf>> {
     for entry in fs::read_dir(logs_dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(name_str) = name.to_str() else { continue };
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
         if !name_str.starts_with("i-dream.log") {
             continue;
         }
@@ -423,9 +427,7 @@ mod tests {
     fn paths_fixture() -> Paths {
         Paths {
             launch_agents_dir: PathBuf::from("/Users/test/Library/LaunchAgents"),
-            plist_path: PathBuf::from(
-                "/Users/test/Library/LaunchAgents/dev.i-dream.daemon.plist",
-            ),
+            plist_path: PathBuf::from("/Users/test/Library/LaunchAgents/dev.i-dream.daemon.plist"),
             data_dir: PathBuf::from("/Users/test/.claude/subconscious"),
             logs_dir: PathBuf::from("/Users/test/.claude/subconscious/logs"),
             binary_path: PathBuf::from("/Users/test/.cargo/bin/i-dream"),
@@ -477,11 +479,15 @@ mod tests {
     fn plist_redirects_stdout_and_stderr_into_logs_dir() {
         let plist = render_plist(&paths_fixture());
         assert!(
-            plist.contains("<string>/Users/test/.claude/subconscious/logs/launchd.stdout.log</string>"),
+            plist.contains(
+                "<string>/Users/test/.claude/subconscious/logs/launchd.stdout.log</string>"
+            ),
             "stdout must land in logs/launchd.stdout.log"
         );
         assert!(
-            plist.contains("<string>/Users/test/.claude/subconscious/logs/launchd.stderr.log</string>"),
+            plist.contains(
+                "<string>/Users/test/.claude/subconscious/logs/launchd.stderr.log</string>"
+            ),
             "stderr must land in logs/launchd.stderr.log"
         );
     }
@@ -528,10 +534,8 @@ mod tests {
 
         // Backdate the older file to ensure deterministic ordering.
         let file = fs::File::options().write(true).open(&older).unwrap();
-        file.set_modified(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
-        )
-        .unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
 
         let latest = latest_log_file(dir.path()).unwrap();
         assert_eq!(latest, Some(newer));

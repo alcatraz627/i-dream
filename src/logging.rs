@@ -28,8 +28,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 /// Keep this many days of rolled log files. Anything older gets deleted
 /// at daemon startup. Chosen to give an operator a full month of history
@@ -63,9 +63,7 @@ pub fn init(log_level: &str) -> Result<WorkerGuard> {
         // We can't use `tracing` here because the subscriber isn't
         // installed yet; emit to stderr directly so the operator at
         // least sees the problem.
-        eprintln!(
-            "i-dream: log cleanup failed (continuing anyway): {e:#}"
-        );
+        eprintln!("i-dream: log cleanup failed (continuing anyway): {e:#}");
     }
 
     // Build the file appender. `rolling::daily` takes a directory and
@@ -185,10 +183,7 @@ mod tests {
 
         cleanup_old_logs(dir.path(), 30).unwrap();
 
-        assert!(
-            !old_file.exists(),
-            "old log file should have been deleted"
-        );
+        assert!(!old_file.exists(), "old log file should have been deleted");
     }
 
     #[test]
@@ -202,10 +197,7 @@ mod tests {
 
         cleanup_old_logs(dir.path(), 30).unwrap();
 
-        assert!(
-            young_file.exists(),
-            "young log file must be preserved"
-        );
+        assert!(young_file.exists(), "young log file must be preserved");
     }
 
     #[test]

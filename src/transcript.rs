@@ -242,8 +242,7 @@ pub fn scan_projects(projects_dir: &Path) -> Result<Vec<TranscriptFile>> {
 /// because Claude Code occasionally writes partial lines during crashes
 /// and we'd rather lose one event than the whole session.
 pub fn read_transcript(path: &Path) -> Result<Vec<TranscriptEntry>> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     parse_transcript_str(&content)
 }
 
@@ -385,10 +384,7 @@ fn group_into_turns(entries: &[TranscriptEntry]) -> Vec<Turn> {
 /// One unit per non-meta string-content user turn. `isMeta` turns (local
 /// command caveats, bash wrappers, etc.) are excluded because they aren't
 /// "human input" in any meaningful sense.
-pub fn into_execution_units(
-    entries: &[TranscriptEntry],
-    session_id: &str,
-) -> Vec<ExecutionUnit> {
+pub fn into_execution_units(entries: &[TranscriptEntry], session_id: &str) -> Vec<ExecutionUnit> {
     let turns = group_into_turns(entries);
     let mut out = Vec::new();
     let total_turns = turns.len();
@@ -442,10 +438,7 @@ pub fn into_execution_units(
 /// One chain per non-meta turn. Analytical fields (`depth`, `breadth`,
 /// `fixation_detected`, `assumptions`) are left at defaults — they are
 /// populated by the introspection module's LLM analysis pass.
-pub fn into_reasoning_chains(
-    entries: &[TranscriptEntry],
-    session_id: &str,
-) -> Vec<ReasoningChain> {
+pub fn into_reasoning_chains(entries: &[TranscriptEntry], session_id: &str) -> Vec<ReasoningChain> {
     let turns = group_into_turns(entries);
     let mut out = Vec::new();
 
@@ -527,8 +520,18 @@ fn detect_correction(text: &str) -> bool {
     }
     let t = text.trim_start().to_ascii_lowercase();
     const CORRECTION_PREFIXES: &[&str] = &[
-        "no,", "no ", "stop", "don't", "dont", "wait", "actually ", "revert",
-        "undo", "that's wrong", "thats wrong", "not quite",
+        "no,",
+        "no ",
+        "stop",
+        "don't",
+        "dont",
+        "wait",
+        "actually ",
+        "revert",
+        "undo",
+        "that's wrong",
+        "thats wrong",
+        "not quite",
     ];
     CORRECTION_PREFIXES.iter().any(|p| t.starts_with(p))
 }
@@ -549,7 +552,14 @@ fn classify_reaction(
 fn extract_target(input: &serde_json::Value) -> Option<String> {
     // Heuristic: most Claude Code tools accept `file_path`, `path`,
     // `pattern`, `command`, or `url` as their "target" field.
-    for key in ["file_path", "path", "pattern", "command", "url", "notebook_path"] {
+    for key in [
+        "file_path",
+        "path",
+        "pattern",
+        "command",
+        "url",
+        "notebook_path",
+    ] {
         if let Some(s) = input.get(key).and_then(|v| v.as_str()) {
             return Some(s.to_string());
         }
@@ -570,35 +580,170 @@ fn hash_string(s: &str) -> String {
 /// if left unfiltered — they appear in every prompt but carry no topic info.
 const STOP_WORDS: &[&str] = &[
     // Session handoff boilerplate (catchup/core-dump preamble)
-    "this", "session", "being", "continued", "from", "previous", "conversation",
-    "that", "context", "with", "have", "been", "summary", "below", "covers",
-    "earlier", "portion", "above", "contains", "compacted",
+    "this",
+    "session",
+    "being",
+    "continued",
+    "from",
+    "previous",
+    "conversation",
+    "that",
+    "context",
+    "with",
+    "have",
+    "been",
+    "summary",
+    "below",
+    "covers",
+    "earlier",
+    "portion",
+    "above",
+    "contains",
+    "compacted",
     // Task system noise
-    "task", "notification", "output", "completed", "background",
+    "task",
+    "notification",
+    "output",
+    "completed",
+    "background",
     // Skill names / commands
-    "command", "message", "catchup", "coredump", "dump", "core", "skill",
-    "running", "continue", "resume", "here", "start",
+    "command",
+    "message",
+    "catchup",
+    "coredump",
+    "dump",
+    "core",
+    "skill",
+    "running",
+    "continue",
+    "resume",
+    "here",
+    "start",
     // Filler / meta
-    "sorry", "keep", "going", "will", "just", "need", "help", "okay", "done",
-    "note", "also", "make", "sure", "look", "like", "know", "want", "work",
-    "wait", "adding", "there", "following", "items", "allow", "history",
-    "final", "data", "check", "other", "alternate", "sources", "give",
-    "stop", "fuck", "minute", "filter", "please", "tests", "once", "works",
-    "tell", "option", "sounds", "good", "name",
+    "sorry",
+    "keep",
+    "going",
+    "will",
+    "just",
+    "need",
+    "help",
+    "okay",
+    "done",
+    "note",
+    "also",
+    "make",
+    "sure",
+    "look",
+    "like",
+    "know",
+    "want",
+    "work",
+    "wait",
+    "adding",
+    "there",
+    "following",
+    "items",
+    "allow",
+    "history",
+    "final",
+    "data",
+    "check",
+    "other",
+    "alternate",
+    "sources",
+    "give",
+    "stop",
+    "fuck",
+    "minute",
+    "filter",
+    "please",
+    "tests",
+    "once",
+    "works",
+    "tell",
+    "option",
+    "sounds",
+    "good",
+    "name",
     // Common English function words that pass the >3 char filter but carry
     // no topic signal. Identified from valence memory tag frequency analysis.
-    "what", "more", "still", "these", "then", "show", "another", "some",
-    "about", "would", "could", "should", "your", "their", "them", "they",
-    "when", "where", "which", "while", "each", "every", "into", "only",
-    "using", "used", "after", "before", "between", "through", "does",
-    "down", "first", "last", "next", "over", "under", "same", "such",
-    "very", "most", "even", "much", "many", "well", "back", "come",
-    "than", "those", "were", "because", "since", "until", "already",
-    "both", "point", "points", "line", "type", "list", "move",
+    "what",
+    "more",
+    "still",
+    "these",
+    "then",
+    "show",
+    "another",
+    "some",
+    "about",
+    "would",
+    "could",
+    "should",
+    "your",
+    "their",
+    "them",
+    "they",
+    "when",
+    "where",
+    "which",
+    "while",
+    "each",
+    "every",
+    "into",
+    "only",
+    "using",
+    "used",
+    "after",
+    "before",
+    "between",
+    "through",
+    "does",
+    "down",
+    "first",
+    "last",
+    "next",
+    "over",
+    "under",
+    "same",
+    "such",
+    "very",
+    "most",
+    "even",
+    "much",
+    "many",
+    "well",
+    "back",
+    "come",
+    "than",
+    "those",
+    "were",
+    "because",
+    "since",
+    "until",
+    "already",
+    "both",
+    "point",
+    "points",
+    "line",
+    "type",
+    "list",
+    "move",
     // Tool/agent infrastructure tokens
-    "args", "toolu", "tool_use", "todos", "explicit", "default",
-    "provided", "supported", "possible", "current", "state",
-    "primary", "request", "intent", "requested",
+    "args",
+    "toolu",
+    "tool_use",
+    "todos",
+    "explicit",
+    "default",
+    "provided",
+    "supported",
+    "possible",
+    "current",
+    "state",
+    "primary",
+    "request",
+    "intent",
+    "requested",
 ];
 
 fn extract_keywords(text: &str) -> Vec<String> {
@@ -703,9 +848,11 @@ mod tests {
     #[test]
     fn unknown_top_level_type_becomes_other() {
         // `progress`, `file-history-snapshot`, etc. must parse to Other, not error
-        let payload = [r#"{"type":"progress","data":{"type":"hook_progress"}}"#,
+        let payload = [
+            r#"{"type":"progress","data":{"type":"hook_progress"}}"#,
             r#"{"type":"file-history-snapshot","messageId":"abc"}"#,
-            r#"{"type":"queue-operation","op":"foo"}"#]
+            r#"{"type":"queue-operation","op":"foo"}"#,
+        ]
         .join("\n");
         let entries = parse_transcript_str(&payload).unwrap();
         assert_eq!(entries.len(), 3);
@@ -724,7 +871,11 @@ mod tests {
         ]
         .join("\n");
         let entries = parse_transcript_str(&payload).unwrap();
-        assert_eq!(entries.len(), 2, "good lines must survive a bad middle line");
+        assert_eq!(
+            entries.len(),
+            2,
+            "good lines must survive a bad middle line"
+        );
     }
 
     #[test]
@@ -789,8 +940,14 @@ mod tests {
         let u2 = &units[1];
         assert_eq!(u2.tools.len(), 1);
         assert_eq!(u2.tools[0].name, "Edit");
-        assert!(!u2.tools[0].success, "tool_result is_error=true must map to success=false");
-        assert!(u2.input.is_correction, "'no, make it red' must be detected as correction");
+        assert!(
+            !u2.tools[0].success,
+            "tool_result is_error=true must map to success=false"
+        );
+        assert!(
+            u2.input.is_correction,
+            "'no, make it red' must be detected as correction"
+        );
     }
 
     #[test]

@@ -155,9 +155,18 @@ pub struct DreamingConfig {
     /// without spamming when the dataset is too small to be reliable.
     #[serde(default)]
     pub drift_warnings: bool,
+    /// M17 daemon — write a graph snapshot after each cycle so
+    /// `snapshot-diff` always has fresh data. Snapshots are pruned to
+    /// the most recent 30 to keep the dir bounded. Cheap (single
+    /// JSON serialization). On by default — observability is more
+    /// valuable than the disk cost (~50KB per snapshot at typical sizes).
+    #[serde(default = "default_true")]
+    pub auto_snapshot_each_cycle: bool,
 }
 
-fn default_auto_intention_threshold() -> f64 { 0.85 }
+fn default_auto_intention_threshold() -> f64 {
+    0.85
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MetacogConfig {
@@ -221,8 +230,8 @@ impl Config {
         if path.exists() {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read config at {}", path.display()))?;
-            let config: Config = toml::from_str(&content)
-                .with_context(|| "Failed to parse config TOML")?;
+            let config: Config =
+                toml::from_str(&content).with_context(|| "Failed to parse config TOML")?;
             Ok(config)
         } else {
             Ok(Self::default())
@@ -281,6 +290,7 @@ impl Default for Config {
                     auto_intentions_after_cycle: false,
                     auto_intention_threshold: 0.85,
                     drift_warnings: false,
+                    auto_snapshot_each_cycle: true,
                 },
                 metacog: MetacogConfig {
                     enabled: true,
@@ -319,7 +329,7 @@ impl Default for Config {
                 user_prompt_submit: true,
             },
             ingestion: IngestionConfig::default(),
-            limits:    LimitsConfig::default(),
+            limits: LimitsConfig::default(),
         }
     }
 }
@@ -328,9 +338,10 @@ impl Default for Config {
 pub fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     if s.starts_with("~/")
-        && let Some(home) = dirs::home_dir() {
-            return home.join(&s[2..]);
-        }
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(&s[2..]);
+    }
     path.to_path_buf()
 }
 
@@ -429,11 +440,23 @@ mod tests {
 
         // Compare key fields (no PartialEq on Config, so spot-check)
         assert_eq!(parsed.idle.threshold_hours, config.idle.threshold_hours);
-        assert_eq!(parsed.budget.max_tokens_per_cycle, config.budget.max_tokens_per_cycle);
+        assert_eq!(
+            parsed.budget.max_tokens_per_cycle,
+            config.budget.max_tokens_per_cycle
+        );
         assert_eq!(parsed.budget.model, config.budget.model);
-        assert_eq!(parsed.modules.metacog.sample_rate, config.modules.metacog.sample_rate);
-        assert_eq!(parsed.modules.intuition.decay_halflife_days, config.modules.intuition.decay_halflife_days);
-        assert_eq!(parsed.modules.prospective.max_active_intentions, config.modules.prospective.max_active_intentions);
+        assert_eq!(
+            parsed.modules.metacog.sample_rate,
+            config.modules.metacog.sample_rate
+        );
+        assert_eq!(
+            parsed.modules.intuition.decay_halflife_days,
+            config.modules.intuition.decay_halflife_days
+        );
+        assert_eq!(
+            parsed.modules.prospective.max_active_intentions,
+            config.modules.prospective.max_active_intentions
+        );
     }
 
     // ── Config::load / save with tempdir ──────────────────────

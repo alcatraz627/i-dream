@@ -33,10 +33,7 @@ pub enum HookEvent {
     },
     /// A tool invocation just finished. Used for metacog sampling and
     /// activity-signal updates.
-    ToolUse {
-        tool: String,
-        ts: i64,
-    },
+    ToolUse { tool: String, ts: i64 },
     /// The session ended (Stop hook). Used for consolidation timing.
     SessionEnd { ts: i64 },
     /// A user prompt submission with sentiment analysis from the hook script.
@@ -88,7 +85,13 @@ mod tests {
         // This is byte-for-byte what session-start.sh sends
         let payload = r#"{"event":"session_start","ts":1712345678}"#;
         let parsed: HookEvent = serde_json::from_str(payload).unwrap();
-        assert_eq!(parsed, HookEvent::SessionStart { ts: 1712345678, cwd: None });
+        assert_eq!(
+            parsed,
+            HookEvent::SessionStart {
+                ts: 1712345678,
+                cwd: None
+            }
+        );
     }
 
     #[test]

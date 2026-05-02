@@ -4,9 +4,9 @@
 //! "gut feelings" when pattern-matched situations are encountered.
 
 use crate::api::ClaudeClient;
-use crate::config::{expand_tilde, Config};
-use crate::modules::metacog::ExecutionUnit;
+use crate::config::{Config, expand_tilde};
 use crate::modules::Module;
+use crate::modules::metacog::ExecutionUnit;
 use crate::store::Store;
 use crate::transcript;
 use anyhow::{Context, Result};
@@ -222,8 +222,7 @@ impl<'a> IntuitionModule<'a> {
                 entry.last_seen = outcome.date.clone();
                 entry.outcomes.push(outcome);
                 entry.occurrences += 1;
-                entry.aggregate_valence =
-                    Self::compute_valence(&entry.outcomes, halflife_days);
+                entry.aggregate_valence = Self::compute_valence(&entry.outcomes, halflife_days);
             } else {
                 let date = outcome.date.clone();
                 let entry = ValenceEntry {
@@ -238,8 +237,7 @@ impl<'a> IntuitionModule<'a> {
                     decayed_relevance: 1.0,
                 };
                 let mut entry = entry;
-                entry.aggregate_valence =
-                    Self::compute_valence(&entry.outcomes, halflife_days);
+                entry.aggregate_valence = Self::compute_valence(&entry.outcomes, halflife_days);
                 index.insert(sig, existing.len());
                 existing.push(entry);
             }
@@ -283,7 +281,10 @@ impl<'a> IntuitionModule<'a> {
             let entries = match transcript::read_transcript(&file.path) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!("skipping unreadable transcript {}: {e:#}", file.path.display());
+                    warn!(
+                        "skipping unreadable transcript {}: {e:#}",
+                        file.path.display()
+                    );
                     continue;
                 }
             };
@@ -291,9 +292,7 @@ impl<'a> IntuitionModule<'a> {
             let units = transcript::into_execution_units(&entries, &file.session_id);
             for unit in &units {
                 let date = unit.timestamp.format("%Y-%m-%d").to_string();
-                if let Some(outcome) =
-                    Self::outcome_for_unit(unit, &file.session_id, &date)
-                {
+                if let Some(outcome) = Self::outcome_for_unit(unit, &file.session_id, &date) {
                     new_outcomes.push(outcome);
                 }
             }
@@ -311,7 +310,8 @@ impl<'a> IntuitionModule<'a> {
                 processed.sessions.insert(sid.clone());
             }
             if !sessions_seen.is_empty() {
-                self.store.write_json("valence/processed.json", &processed)?;
+                self.store
+                    .write_json("valence/processed.json", &processed)?;
             }
             return Ok((sessions_scanned, 0));
         }
@@ -355,7 +355,8 @@ impl<'a> IntuitionModule<'a> {
         for sid in &sessions_seen {
             processed.sessions.insert(sid.clone());
         }
-        self.store.write_json("valence/processed.json", &processed)?;
+        self.store
+            .write_json("valence/processed.json", &processed)?;
 
         info!(
             "Intuition: collected {} outcomes from {} sessions, memory now has {} entries",
@@ -440,11 +441,12 @@ impl<'a> IntuitionModule<'a> {
                     // session ID association.
                     let fired_date = fired_ts.format("%Y-%m-%d").to_string();
                     if outcome.date == fired_date
-                        && let Some(&(p, n)) = session_scores.get(&outcome.session) {
-                            pos_total += p;
-                            neg_total += n;
-                            break; // count each session once
-                        }
+                        && let Some(&(p, n)) = session_scores.get(&outcome.session)
+                    {
+                        pos_total += p;
+                        neg_total += n;
+                        break; // count each session once
+                    }
                 }
             }
 
@@ -494,7 +496,11 @@ impl<'a> IntuitionModule<'a> {
                 let tag_overlap = entry
                     .context_tags
                     .iter()
-                    .filter(|tag| keywords.iter().any(|kw| kw.to_lowercase() == tag.to_lowercase()))
+                    .filter(|tag| {
+                        keywords
+                            .iter()
+                            .any(|kw| kw.to_lowercase() == tag.to_lowercase())
+                    })
                     .count();
 
                 // Require at least 2 tag matches for reliable matching
@@ -521,9 +527,7 @@ impl<'a> IntuitionModule<'a> {
             activation.activation *= decay_factor;
         }
         // Remove entries with very low activation
-        cache
-            .concepts
-            .retain(|_, v| v.activation > 0.05);
+        cache.concepts.retain(|_, v| v.activation > 0.05);
         cache.last_updated = Utc::now();
     }
 }
@@ -606,10 +610,7 @@ mod tests {
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let outcomes = vec![make_outcome(&today, ValenceResult::Positive, 0.8)];
         let result = IntuitionModule::compute_valence(&outcomes, 30.0);
-        assert!(
-            (result - 0.8).abs() < 0.01,
-            "Expected ~0.8, got {result}"
-        );
+        assert!((result - 0.8).abs() < 0.01, "Expected ~0.8, got {result}");
     }
 
     #[test]
@@ -617,10 +618,7 @@ mod tests {
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let outcomes = vec![make_outcome(&today, ValenceResult::Negative, 0.6)];
         let result = IntuitionModule::compute_valence(&outcomes, 30.0);
-        assert!(
-            (result + 0.6).abs() < 0.01,
-            "Expected ~-0.6, got {result}"
-        );
+        assert!((result + 0.6).abs() < 0.01, "Expected ~-0.6, got {result}");
     }
 
     #[test]
@@ -632,10 +630,7 @@ mod tests {
         ];
         let result = IntuitionModule::compute_valence(&outcomes, 30.0);
         // Two outcomes today with equal weight: (1.0*1 + 0.0*1) / 2 = 0.5
-        assert!(
-            (result - 0.5).abs() < 0.01,
-            "Expected ~0.5, got {result}"
-        );
+        assert!((result - 0.5).abs() < 0.01, "Expected ~0.5, got {result}");
     }
 
     #[test]
@@ -682,9 +677,7 @@ mod tests {
         let store = Store::new(std::env::temp_dir().join("idream-test-match")).unwrap();
         let module = IntuitionModule::new(&config, &store);
 
-        let entries = vec![
-            make_valence_entry(vec!["rust", "async", "tokio"], 5, 0.8),
-        ];
+        let entries = vec![make_valence_entry(vec!["rust", "async", "tokio"], 5, 0.8)];
         let keywords: Vec<String> = vec!["rust".into(), "async".into()];
 
         let matched = module.match_patterns(&keywords, &entries);
@@ -702,9 +695,7 @@ mod tests {
         let store = Store::new(std::env::temp_dir().join("idream-test-case")).unwrap();
         let module = IntuitionModule::new(&config, &store);
 
-        let entries = vec![
-            make_valence_entry(vec!["Rust", "ASYNC"], 5, 0.8),
-        ];
+        let entries = vec![make_valence_entry(vec!["Rust", "ASYNC"], 5, 0.8)];
         let keywords: Vec<String> = vec!["rust".into(), "async".into()];
 
         let matched = module.match_patterns(&keywords, &entries);
@@ -723,7 +714,11 @@ mod tests {
         let keywords: Vec<String> = vec!["rust".into(), "async".into()];
 
         let matched = module.match_patterns(&keywords, &entries);
-        assert_eq!(matched.len(), 0, "Should filter out entries below min_occurrences");
+        assert_eq!(
+            matched.len(),
+            0,
+            "Should filter out entries below min_occurrences"
+        );
     }
 
     #[test]
@@ -738,7 +733,11 @@ mod tests {
         let keywords: Vec<String> = vec!["rust".into(), "async".into()];
 
         let matched = module.match_patterns(&keywords, &entries);
-        assert_eq!(matched.len(), 0, "Should filter entries with |valence| ≤ 0.5");
+        assert_eq!(
+            matched.len(),
+            0,
+            "Should filter entries with |valence| ≤ 0.5"
+        );
     }
 
     // ── decay_priming: cache eviction ─────────────────────────
@@ -750,9 +749,13 @@ mod tests {
     fn decay_priming_reduces_activations() {
         let mut cache = PrimingCache {
             last_updated: Utc::now(),
-            concepts: std::collections::HashMap::from([
-                ("rust".into(), ConceptActivation { activation: 1.0, source: "test".into() }),
-            ]),
+            concepts: std::collections::HashMap::from([(
+                "rust".into(),
+                ConceptActivation {
+                    activation: 1.0,
+                    source: "test".into(),
+                },
+            )]),
         };
 
         IntuitionModule::decay_priming(&mut cache, 4.0, 4.0); // 1 halflife
@@ -768,8 +771,20 @@ mod tests {
         let mut cache = PrimingCache {
             last_updated: Utc::now(),
             concepts: std::collections::HashMap::from([
-                ("strong".into(), ConceptActivation { activation: 1.0, source: "t".into() }),
-                ("weak".into(), ConceptActivation { activation: 0.06, source: "t".into() }),
+                (
+                    "strong".into(),
+                    ConceptActivation {
+                        activation: 1.0,
+                        source: "t".into(),
+                    },
+                ),
+                (
+                    "weak".into(),
+                    ConceptActivation {
+                        activation: 0.06,
+                        source: "t".into(),
+                    },
+                ),
             ]),
         };
 
@@ -777,17 +792,27 @@ mod tests {
         IntuitionModule::decay_priming(&mut cache, 8.0, 4.0); // 2 halflives
         // weak: 0.06 * 0.25 = 0.015 → pruned (< 0.05)
         // strong: 1.0 * 0.25 = 0.25 → kept
-        assert!(!cache.concepts.contains_key("weak"), "Weak entry should be pruned");
-        assert!(cache.concepts.contains_key("strong"), "Strong entry should survive");
+        assert!(
+            !cache.concepts.contains_key("weak"),
+            "Weak entry should be pruned"
+        );
+        assert!(
+            cache.concepts.contains_key("strong"),
+            "Strong entry should survive"
+        );
     }
 
     #[test]
     fn decay_priming_zero_elapsed_no_change() {
         let mut cache = PrimingCache {
             last_updated: Utc::now(),
-            concepts: std::collections::HashMap::from([
-                ("concept".into(), ConceptActivation { activation: 0.8, source: "t".into() }),
-            ]),
+            concepts: std::collections::HashMap::from([(
+                "concept".into(),
+                ConceptActivation {
+                    activation: 0.8,
+                    source: "t".into(),
+                },
+            )]),
         };
 
         IntuitionModule::decay_priming(&mut cache, 0.0, 4.0);
@@ -835,7 +860,9 @@ mod tests {
     // memory never grows. Wrong heuristics here mean the engine
     // either learns nothing (all None) or learns noise (all outcomes).
 
-    use crate::modules::metacog::{ExecutionUnit, InputMeta, OutcomeMeta, OutputMeta, Reaction, ToolUseMeta};
+    use crate::modules::metacog::{
+        ExecutionUnit, InputMeta, OutcomeMeta, OutputMeta, Reaction, ToolUseMeta,
+    };
 
     fn make_exec_unit(
         id: &str,
@@ -898,8 +925,7 @@ mod tests {
             vec!["db", "migration"],
             vec![tool("Edit", false), tool("Bash", false)],
         );
-        let (_, outcome) =
-            IntuitionModule::outcome_for_unit(&unit, "s", "2026-04-11").unwrap();
+        let (_, outcome) = IntuitionModule::outcome_for_unit(&unit, "s", "2026-04-11").unwrap();
         assert_eq!(outcome.result, ValenceResult::Negative);
         assert!((outcome.magnitude - 0.5).abs() < f64::EPSILON);
     }
@@ -912,8 +938,7 @@ mod tests {
             vec!["test", "parse"],
             vec![tool("Read", true), tool("Edit", true), tool("Bash", true)],
         );
-        let (_, outcome) =
-            IntuitionModule::outcome_for_unit(&unit, "s", "2026-04-11").unwrap();
+        let (_, outcome) = IntuitionModule::outcome_for_unit(&unit, "s", "2026-04-11").unwrap();
         assert_eq!(outcome.result, ValenceResult::Positive);
         assert!((outcome.magnitude - 0.4).abs() < f64::EPSILON);
     }
@@ -922,12 +947,7 @@ mod tests {
     fn outcome_single_successful_tool_is_neutral() {
         // Single successful tool isn't strong enough signal — we need
         // ≥2 to call it a confident execution.
-        let unit = make_exec_unit(
-            "u-4",
-            false,
-            vec!["read", "file"],
-            vec![tool("Read", true)],
-        );
+        let unit = make_exec_unit("u-4", false, vec!["read", "file"], vec![tool("Read", true)]);
         assert!(IntuitionModule::outcome_for_unit(&unit, "s", "d").is_none());
     }
 
@@ -1040,12 +1060,7 @@ mod tests {
             id: "v-1".into(),
             pattern: "rust/async".into(),
             context_tags: vec!["rust".into(), "async".into()],
-            outcomes: vec![mk_outcome(
-                &today,
-                "s-old",
-                ValenceResult::Positive,
-                0.4,
-            )],
+            outcomes: vec![mk_outcome(&today, "s-old", ValenceResult::Positive, 0.4)],
             aggregate_valence: 0.4,
             occurrences: 1,
             first_seen: today.clone(),
@@ -1057,7 +1072,11 @@ mod tests {
             mk_outcome(&today, "s-new", ValenceResult::Positive, 0.4),
         )];
         let merged = IntuitionModule::merge_outcomes(existing, new_outcomes, 30.0);
-        assert_eq!(merged.len(), 1, "Should merge into existing entry, not duplicate");
+        assert_eq!(
+            merged.len(),
+            1,
+            "Should merge into existing entry, not duplicate"
+        );
         assert_eq!(merged[0].occurrences, 2);
         assert_eq!(merged[0].outcomes.len(), 2);
         assert_eq!(merged[0].id, "v-1", "Should preserve original id");

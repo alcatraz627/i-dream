@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::Config;
-use crate::dream_trace::{load_recent_traces, DreamTraceFile, EventKind, Phase as TracePhase};
+use crate::dream_trace::{DreamTraceFile, EventKind, Phase as TracePhase, load_recent_traces};
 use crate::events::HookEventRecord;
 use crate::modules::dreaming::DreamEntry;
 use crate::store::Store;
@@ -98,10 +98,7 @@ pub fn open_in_browser(path: &Path) -> Result<()> {
         .with_context(|| "Failed to spawn `open` to launch browser")?;
 
     if !status.success() {
-        anyhow::bail!(
-            "`open {}` returned a non-zero exit status",
-            path.display()
-        );
+        anyhow::bail!("`open {}` returned a non-zero exit status", path.display());
     }
     Ok(())
 }
@@ -246,8 +243,7 @@ pub struct InventoryGroup {
     pub files: Vec<InventoryFile>,
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct InventoryFile {
     pub name: String,
     pub size: u64,
@@ -256,7 +252,6 @@ pub struct InventoryFile {
     /// `None` means the file could not be read or is binary.
     pub content_preview: Option<String>,
 }
-
 
 impl Snapshot {
     /// Read the filesystem and assemble a snapshot.
@@ -305,24 +300,30 @@ impl Snapshot {
         // Per-file store stats + size warnings — threshold: 5 MB.
         const WARN_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
         const WATCHED: &[(&str, &str)] = &[
-            ("logs/events.jsonl",      "Hook events"),
+            ("logs/events.jsonl", "Hook events"),
             ("metacog/activity.jsonl", "Metacog activity"),
-            ("logs/signals.jsonl",     "Signals"),
-            ("dreams/journal.jsonl",   "Dream journal"),
+            ("logs/signals.jsonl", "Signals"),
+            ("dreams/journal.jsonl", "Dream journal"),
         ];
         let mut store_warnings = Vec::new();
         let mut store_file_stats: Vec<StoreFileStat> = Vec::new();
         for &(rel_path, label) in WATCHED {
-            let size  = store.file_size_bytes(rel_path).unwrap_or(0);
+            let size = store.file_size_bytes(rel_path).unwrap_or(0);
             let count = store.count_jsonl(rel_path).unwrap_or(0);
-            let over  = size >= WARN_THRESHOLD_BYTES;
+            let over = size >= WARN_THRESHOLD_BYTES;
             if over {
                 let mb = size as f64 / (1024.0 * 1024.0);
                 store_warnings.push(format!(
                     "{label} is {mb:.1} MB — run `i-dream prune` to reclaim space."
                 ));
             }
-            store_file_stats.push(StoreFileStat { label, rel_path, entries: count, size_bytes: size, over_threshold: over });
+            store_file_stats.push(StoreFileStat {
+                label,
+                rel_path,
+                entries: count,
+                size_bytes: size,
+                over_threshold: over,
+            });
         }
 
         // Optional: run cargo test and bake results into the dashboard.
@@ -366,9 +367,8 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
     use crate::modules::dreaming::{Association, ExtractedPattern};
     use serde_json::json;
 
-    let patterns: Vec<ExtractedPattern> = store
-        .read_json("dreams/patterns.json")
-        .unwrap_or_default();
+    let patterns: Vec<ExtractedPattern> =
+        store.read_json("dreams/patterns.json").unwrap_or_default();
     let associations: Vec<Association> = store
         .read_json("dreams/associations.json")
         .unwrap_or_default();
@@ -387,7 +387,9 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
     // Distinct categories (stable order) for color legend.
     let mut categories: Vec<String> = Vec::new();
     for p in &patterns {
-        if !categories.contains(&p.category) { categories.push(p.category.clone()); }
+        if !categories.contains(&p.category) {
+            categories.push(p.category.clone());
+        }
     }
     categories.sort();
 
@@ -507,7 +509,9 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
         .map(|(id, n)| json!({ "id": id, "size": n, "idx": comm_index.get(id).copied().unwrap_or(0) }))
         .collect();
     comm_summary.sort_by(|a, b| {
-        b.get("size").and_then(|x| x.as_u64()).cmp(&a.get("size").and_then(|x| x.as_u64()))
+        b.get("size")
+            .and_then(|x| x.as_u64())
+            .cmp(&a.get("size").and_then(|x| x.as_u64()))
     });
 
     let payload = json!({
@@ -534,11 +538,17 @@ fn bucket_occurrence_history_14d(history: &[String]) -> Vec<u64> {
     let start = today - Duration::days(13); // 14-day inclusive window
     let mut buckets = vec![0u64; 14];
     for ts in history {
-        let Ok(dt) = DateTime::parse_from_rfc3339(ts) else { continue };
+        let Ok(dt) = DateTime::parse_from_rfc3339(ts) else {
+            continue;
+        };
         let d = dt.with_timezone(&Utc).date_naive();
-        if d < start || d > today { continue }
+        if d < start || d > today {
+            continue;
+        }
         let idx = (d - start).num_days() as usize;
-        if idx < buckets.len() { buckets[idx] += 1; }
+        if idx < buckets.len() {
+            buckets[idx] += 1;
+        }
     }
     // Return None equivalent only if every bucket is zero.
     let _ = NaiveDate::from_ymd_opt; // silence unused import warning when dead
@@ -560,10 +570,16 @@ fn compute_activity_sparkline_30d(
         // first_seen is RFC3339 like "2026-04-11T11:57:11.798799Z".
         // Trim to the date prefix and parse.
         let date_str = p.first_seen.get(..10).unwrap_or("");
-        let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else { continue };
-        if d < start || d > today { continue }
+        let Ok(d) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
+            continue;
+        };
+        if d < start || d > today {
+            continue;
+        }
         let idx = (d - start).num_days() as usize;
-        if idx < buckets.len() { buckets[idx] += 1; }
+        if idx < buckets.len() {
+            buckets[idx] += 1;
+        }
     }
     buckets
 }
@@ -578,50 +594,70 @@ fn compute_brier_score(
     associations: &[crate::modules::dreaming::Association],
 ) -> (Option<f64>, usize) {
     let path = store.path("dreams/insight-feedback.jsonl");
-    let Ok(content) = std::fs::read_to_string(&path) else { return (None, 0); };
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return (None, 0);
+    };
     // Build a single id → confidence lookup spanning both kinds. Pattern
     // and association IDs are UUIDs so collisions are vanishingly rare.
     let mut conf_by_id: std::collections::HashMap<&str, f64> =
         std::collections::HashMap::with_capacity(patterns.len() + associations.len());
-    for p in patterns     { conf_by_id.insert(p.id.as_str(), p.confidence); }
-    for a in associations { conf_by_id.insert(a.id.as_str(), a.confidence); }
+    for p in patterns {
+        conf_by_id.insert(p.id.as_str(), p.confidence);
+    }
+    for a in associations {
+        conf_by_id.insert(a.id.as_str(), a.confidence);
+    }
 
     // Dedup by (insight_id, ts) — the file historically has triplicate
     // copies of the same feedback event written by parallel paths.
-    let mut seen: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
 
     let mut sum_sq_err = 0.0;
     let mut n = 0usize;
     for line in content.lines() {
-        if line.trim().is_empty() { continue; }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue; };
-        let id = v.get("insight_id").or_else(|| v.get("pattern_id"))
-            .and_then(|x| x.as_str()).unwrap_or("");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let id = v
+            .get("insight_id")
+            .or_else(|| v.get("pattern_id"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         let ts = v.get("ts").and_then(|x| x.as_str()).unwrap_or("");
         let key = (id.to_string(), ts.to_string());
-        if !seen.insert(key) { continue; }
+        if !seen.insert(key) {
+            continue;
+        }
 
         let outcome: Option<f64> = match v.get("rating") {
             Some(r) if r.is_string() => match r.as_str().unwrap_or("") {
-                "up"   => Some(1.0),
+                "up" => Some(1.0),
                 "down" => Some(0.0),
-                _      => None,
+                _ => None,
             },
             Some(r) if r.is_number() => match r.as_i64().unwrap_or(0) {
                 x if x > 0 => Some(1.0),
                 x if x < 0 => Some(0.0),
-                _          => None,
+                _ => None,
             },
             _ => None,
         };
         let Some(outcome) = outcome else { continue };
-        let Some(conf) = conf_by_id.get(id) else { continue };
+        let Some(conf) = conf_by_id.get(id) else {
+            continue;
+        };
         let err = conf - outcome;
         sum_sq_err += err * err;
         n += 1;
     }
-    if n == 0 { (None, 0) } else { (Some(sum_sq_err / n as f64), n) }
+    if n == 0 {
+        (None, 0)
+    } else {
+        (Some(sum_sq_err / n as f64), n)
+    }
 }
 
 /// Roll up store-wide KPIs for the summary strip. All inputs are
@@ -731,8 +767,14 @@ fn collect_module_cards(config: &Config, store: &Store) -> Vec<ModuleCard> {
     let intentions_fired = store.count_jsonl("intentions/fired.jsonl").unwrap_or(0);
 
     let last_dream = latest_mtime(store, &["dreams/journal.jsonl", "dreams/processed.json"]);
-    let last_metacog = latest_mtime(store, &["metacog/calibration.jsonl", "metacog/samples.jsonl"]);
-    let last_intuition = latest_mtime(store, &["valence/memory.jsonl", "valence/surface-log.jsonl"]);
+    let last_metacog = latest_mtime(
+        store,
+        &["metacog/calibration.jsonl", "metacog/samples.jsonl"],
+    );
+    let last_intuition = latest_mtime(
+        store,
+        &["valence/memory.jsonl", "valence/surface-log.jsonl"],
+    );
     let last_introspection = latest_mtime(store, &["introspection/patterns.json"]);
     let last_prospective = latest_mtime(
         store,
@@ -791,7 +833,10 @@ fn collect_module_cards(config: &Config, store: &Store) -> Vec<ModuleCard> {
                     "Decay halflife".into(),
                     format!("{:.1} days", m.intuition.decay_halflife_days),
                 ),
-                ("Min occurrences".into(), m.intuition.min_occurrences.to_string()),
+                (
+                    "Min occurrences".into(),
+                    m.intuition.min_occurrences.to_string(),
+                ),
             ],
             last_activity: last_intuition,
         },
@@ -803,7 +848,12 @@ fn collect_module_cards(config: &Config, store: &Store) -> Vec<ModuleCard> {
             stats: vec![
                 (
                     "Patterns file".into(),
-                    (if patterns_exist { "present" } else { "not generated" }).into(),
+                    (if patterns_exist {
+                        "present"
+                    } else {
+                        "not generated"
+                    })
+                    .into(),
                 ),
                 (
                     "Sample rate".into(),
@@ -861,9 +911,7 @@ fn on_off(b: bool) -> String {
 /// count. We read the whole file because the file is small (hook events
 /// are tiny); if this ever becomes hot we can switch to a reverse-seek.
 fn collect_recent_events(store: &Store) -> (Vec<EventSummary>, usize) {
-    let events: Vec<HookEventRecord> = store
-        .read_jsonl("logs/events.jsonl")
-        .unwrap_or_default();
+    let events: Vec<HookEventRecord> = store.read_jsonl("logs/events.jsonl").unwrap_or_default();
 
     let total = events.len();
     let recent: Vec<EventSummary> = events
@@ -875,7 +923,12 @@ fn collect_recent_events(store: &Store) -> (Vec<EventSummary>, usize) {
                 crate::events::HookEvent::SessionStart { .. } => "session_start".into(),
                 crate::events::HookEvent::ToolUse { tool, .. } => format!("tool_use({tool})"),
                 crate::events::HookEvent::SessionEnd { .. } => "session_end".into(),
-                crate::events::HookEvent::UserSignal { frustration_score, correction, positive, .. } => {
+                crate::events::HookEvent::UserSignal {
+                    frustration_score,
+                    correction,
+                    positive,
+                    ..
+                } => {
                     if positive {
                         "user_signal(positive)".into()
                     } else if correction {
@@ -947,7 +1000,12 @@ fn collect_file_inventory(data_dir: &Path) -> Vec<InventoryGroup> {
                 // Read first 8 KB for the preview dialog. Skip binary-looking
                 // files (those with null bytes in the first 512 bytes).
                 let content_preview = read_text_preview(&path, 8 * 1024);
-                files.push(InventoryFile { name, size, modified, content_preview });
+                files.push(InventoryFile {
+                    name,
+                    size,
+                    modified,
+                    content_preview,
+                });
             }
         }
         files.sort_by(|a, b| a.name.cmp(&b.name));
@@ -993,7 +1051,9 @@ fn run_cargo_tests() -> TestRunResult {
     let ran_at = Utc::now();
 
     // Find cargo — prefer PATH, fall back to ~/.cargo/bin/cargo.
-    let cargo = if which_cargo_in_path() { "cargo".to_string() } else {
+    let cargo = if which_cargo_in_path() {
+        "cargo".to_string()
+    } else {
         dirs::home_dir()
             .map(|h| h.join(".cargo/bin/cargo").to_string_lossy().into_owned())
             .unwrap_or_else(|| "cargo".into())
@@ -1013,8 +1073,12 @@ fn run_cargo_tests() -> TestRunResult {
             parse_cargo_test_output(&combined, duration_secs, ran_at)
         }
         Err(_e) => TestRunResult {
-            passed: 0, failed: 0, ignored: 0,
-            duration_secs, ran_at, ok: false,
+            passed: 0,
+            failed: 0,
+            ignored: 0,
+            duration_secs,
+            ran_at,
+            ok: false,
         },
     }
 }
@@ -1028,12 +1092,16 @@ fn which_cargo_in_path() -> bool {
 }
 
 /// Parse `cargo test` stdout/stderr to extract pass/fail/ignored counts.
-fn parse_cargo_test_output(output: &str, duration_secs: f64, ran_at: DateTime<Utc>) -> TestRunResult {
+fn parse_cargo_test_output(
+    output: &str,
+    duration_secs: f64,
+    ran_at: DateTime<Utc>,
+) -> TestRunResult {
     // cargo test emits lines like: "test result: ok. 263 passed; 0 failed; 1 ignored; ..."
-    let mut passed  = 0usize;
-    let mut failed  = 0usize;
+    let mut passed = 0usize;
+    let mut failed = 0usize;
     let mut ignored = 0usize;
-    let mut found   = false;
+    let mut found = false;
 
     for line in output.lines() {
         let t = line.trim();
@@ -1042,22 +1110,34 @@ fn parse_cargo_test_output(output: &str, duration_secs: f64, ran_at: DateTime<Ut
             // "test result: ok. 263 passed; 0 failed; 1 ignored;"
             for part in t.split(';') {
                 let p = part.trim();
-                if let Some(n) = parse_leading_num(p, " passed") { passed  += n; }
-                if let Some(n) = parse_leading_num(p, " failed") { failed  += n; }
-                if let Some(n) = parse_leading_num(p, " ignored") { ignored += n; }
+                if let Some(n) = parse_leading_num(p, " passed") {
+                    passed += n;
+                }
+                if let Some(n) = parse_leading_num(p, " failed") {
+                    failed += n;
+                }
+                if let Some(n) = parse_leading_num(p, " ignored") {
+                    ignored += n;
+                }
             }
         }
     }
 
     TestRunResult {
-        passed, failed, ignored, duration_secs, ran_at,
+        passed,
+        failed,
+        ignored,
+        duration_secs,
+        ran_at,
         ok: found && failed == 0,
     }
 }
 
 fn parse_leading_num(s: &str, suffix: &str) -> Option<usize> {
     let s = s.trim();
-    if !s.ends_with(suffix.trim()) { return None; }
+    if !s.ends_with(suffix.trim()) {
+        return None;
+    }
     let num_part = &s[..s.len() - suffix.trim().len()];
     // The number may be prefixed by other words: "263 passed" → num_part = "263"
     num_part.split_whitespace().last()?.parse().ok()
@@ -1070,11 +1150,17 @@ fn collect_config_files(data_dir: &Path) -> Vec<(String, String, String)> {
     // Ordered list: (path relative to data_dir, display title).
     // Only show files that exist; tolerate all read failures.
     let candidates = [
-        ("dreams/insights.md",    "insights.md"),
+        ("dreams/insights.md", "insights.md"),
         ("dreams/processed.json", "processed sessions (JSON)"),
-        ("metacog/calibration.jsonl", "metacog calibration (recent 20 lines)"),
-        ("valence/memory.jsonl",  "valence memory (recent 20 lines)"),
-        ("intentions/registry.jsonl", "intentions registry (recent 10 lines)"),
+        (
+            "metacog/calibration.jsonl",
+            "metacog calibration (recent 20 lines)",
+        ),
+        ("valence/memory.jsonl", "valence memory (recent 20 lines)"),
+        (
+            "intentions/registry.jsonl",
+            "intentions registry (recent 10 lines)",
+        ),
     ];
 
     let mut out = Vec::new();
@@ -1145,7 +1231,9 @@ fn parse_insight_summaries(content: &str, max: usize) -> Vec<String> {
         let trimmed = line.trim();
         if trimmed.starts_with("### Insight") {
             flush(&mut quote_lines, &mut results);
-            if results.len() >= max { break; }
+            if results.len() >= max {
+                break;
+            }
             in_insight = true;
         } else if in_insight {
             if line.starts_with("> ") {
@@ -1155,7 +1243,9 @@ fn parse_insight_summaries(content: &str, max: usize) -> Vec<String> {
             } else if !trimmed.is_empty() && !quote_lines.is_empty() {
                 // Non-blockquote content after collecting lines — end of quote block
                 flush(&mut quote_lines, &mut results);
-                if results.len() >= max { break; }
+                if results.len() >= max {
+                    break;
+                }
                 in_insight = false;
             }
         }
@@ -1170,18 +1260,34 @@ fn dream_cycle_summary(sessions: u64, patterns: u64, associations: u64, insights
     if patterns == 0 && associations == 0 && insights == 0 {
         return format!(
             "Reviewed {} — nothing new surfaced",
-            if sessions == 1 { "1 session".to_string() } else { format!("{} sessions", sessions) }
+            if sessions == 1 {
+                "1 session".to_string()
+            } else {
+                format!("{} sessions", sessions)
+            }
         );
     }
     let mut parts: Vec<String> = Vec::new();
     if patterns > 0 {
-        parts.push(format!("{} pattern{}", patterns, if patterns == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "{} pattern{}",
+            patterns,
+            if patterns == 1 { "" } else { "s" }
+        ));
     }
     if associations > 0 {
-        parts.push(format!("{} association{}", associations, if associations == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "{} association{}",
+            associations,
+            if associations == 1 { "" } else { "s" }
+        ));
     }
     if insights > 0 {
-        parts.push(format!("{} insight{}", insights, if insights == 1 { "" } else { "s" }));
+        parts.push(format!(
+            "{} insight{}",
+            insights,
+            if insights == 1 { "" } else { "s" }
+        ));
     }
     let items = match parts.len() {
         1 => parts[0].clone(),
@@ -1208,7 +1314,8 @@ fn render_dream_chart(entries: &[crate::modules::dreaming::DreamEntry]) -> Strin
     let total_w = pad_left + (bar_w + gap) * n as u32 - gap + pad_right;
 
     // Find max output value for scaling
-    let max_val = ordered.iter()
+    let max_val = ordered
+        .iter()
         .map(|e| e.patterns_extracted + e.associations_found + e.insights_promoted)
         .max()
         .unwrap_or(1)
@@ -1233,9 +1340,12 @@ fn render_dream_chart(entries: &[crate::modules::dreaming::DreamEntry]) -> Strin
         } else {
             "dc-bar"
         };
-        let title = format!("{}: {} pat · {} assoc · {} ins",
+        let title = format!(
+            "{}: {} pat · {} assoc · {} ins",
             entry.timestamp.format("%m/%d"),
-            entry.patterns_extracted, entry.associations_found, entry.insights_promoted
+            entry.patterns_extracted,
+            entry.associations_found,
+            entry.insights_promoted
         );
         // Tag each bar with its age-in-days so client-side filter can
         // toggle visibility per the selected date range.
@@ -1248,7 +1358,8 @@ fn render_dream_chart(entries: &[crate::modules::dreaming::DreamEntry]) -> Strin
         if i == 0 || i == n - 1 || (n > 4 && i % 3 == 0) {
             bars.push_str(&format!(
                 "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\" class=\"dc-tick\">{}</text>",
-                x + bar_w / 2, svg_h - 2,
+                x + bar_w / 2,
+                svg_h - 2,
                 html_escape(&entry.timestamp.format("%m/%d").to_string()),
             ));
         }
@@ -1291,8 +1402,11 @@ fn render_dream_chart(entries: &[crate::modules::dreaming::DreamEntry]) -> Strin
 }})();
 </script>
 </div>"##,
-        w = total_w, h = svg_h,
-        pl = pad_left, bl = baseline_y, tw = total_w - pad_right,
+        w = total_w,
+        h = svg_h,
+        pl = pad_left,
+        bl = baseline_y,
+        tw = total_w - pad_right,
         bars = bars,
     )
 }
@@ -1318,14 +1432,28 @@ fn render_event_chart(events: &[EventSummary]) -> String {
         };
         *counts.entry(cat).or_insert(0) += 1;
     }
-    let order = ["tool_use", "session_start", "session_end", "user_signal", "other"];
-    let colors = ["var(--accent)", "var(--ok)", "var(--err)", "var(--warn)", "var(--dim)"];
+    let order = [
+        "tool_use",
+        "session_start",
+        "session_end",
+        "user_signal",
+        "other",
+    ];
+    let colors = [
+        "var(--accent)",
+        "var(--ok)",
+        "var(--err)",
+        "var(--warn)",
+        "var(--dim)",
+    ];
     let max = counts.values().copied().max().unwrap_or(1).max(1);
 
     let mut rows = String::new();
     for (&cat, &color) in order.iter().zip(colors.iter()) {
         let count = counts.get(cat).copied().unwrap_or(0);
-        if count == 0 { continue; }
+        if count == 0 {
+            continue;
+        }
         let pct = (count * 100 / max).min(100);
         rows.push_str(&format!(
             r#"<div class="event-chart-row">
@@ -1337,18 +1465,18 @@ fn render_event_chart(events: &[EventSummary]) -> String {
         ));
     }
 
-    format!(r#"<div class="event-chart-wrap">{rows}</div>"#, rows=rows)
+    format!(r#"<div class="event-chart-wrap">{rows}</div>"#, rows = rows)
 }
 
 fn file_type_label(name: &str) -> &'static str {
     match name.rsplit('.').next().unwrap_or("") {
         "jsonl" => "JSONL",
-        "json"  => "JSON",
-        "toml"  => "TOML",
-        "md"    => "Markdown",
-        "txt"   => "Text",
-        "log"   => "Log",
-        _       => "Data",
+        "json" => "JSON",
+        "toml" => "TOML",
+        "md" => "Markdown",
+        "txt" => "Text",
+        "log" => "Log",
+        _ => "Data",
     }
 }
 
@@ -1878,11 +2006,11 @@ function localizeEventTimestamps() {{
 </body>
 </html>
 "##,
-        favicon  = FAVICON_SVG,
-        css      = DASHBOARD_CSS,
-        body     = body,
-        ts       = snap.generated_at.format("%Y-%m-%d %H:%M:%S"),
-        dir      = html_escape(&snap.data_dir.display().to_string()),
+        favicon = FAVICON_SVG,
+        css = DASHBOARD_CSS,
+        body = body,
+        ts = snap.generated_at.format("%Y-%m-%d %H:%M:%S"),
+        dir = html_escape(&snap.data_dir.display().to_string()),
     )
 }
 
@@ -1950,7 +2078,8 @@ fn render_status_card(snap: &Snapshot) -> String {
 /// module's tagline (what it does), a stat list (how it's configured),
 /// and a "last activity" line (whether it's actually doing anything).
 fn render_module_grid(snap: &Snapshot) -> String {
-    let mut out = String::from(r#"<section id="modules"><h2>Modules</h2><div class="module-grid">"#);
+    let mut out =
+        String::from(r#"<section id="modules"><h2>Modules</h2><div class="module-grid">"#);
 
     for card in &snap.modules {
         let enabled_badge = if card.enabled {
@@ -2006,12 +2135,37 @@ fn render_summary_strip(snap: &Snapshot) -> String {
     let s = &snap.summary;
     // (label, value, sub-description, icon)
     let tiles: [(&str, &str, &str, &str); 6] = [
-        ("Modules enabled",  &s.modules_enabled,       "active / total",            "⚡"),
-        ("Dream cycles",     &s.dream_cycles,           "journal entries",            "🌙"),
-        ("Dream tokens",     &s.dream_tokens_total,     "API tokens consumed",        "◈"),
-        ("Last dream",       &s.last_dream_at,          "most recent consolidation",  "🕐"),
-        ("Hook events",      &s.hook_events_total,      "session + tool signals",     "⚙"),
-        ("Store size",       &s.store_size,             "subconscious data on disk",  "📦"),
+        (
+            "Modules enabled",
+            &s.modules_enabled,
+            "active / total",
+            "⚡",
+        ),
+        ("Dream cycles", &s.dream_cycles, "journal entries", "🌙"),
+        (
+            "Dream tokens",
+            &s.dream_tokens_total,
+            "API tokens consumed",
+            "◈",
+        ),
+        (
+            "Last dream",
+            &s.last_dream_at,
+            "most recent consolidation",
+            "🕐",
+        ),
+        (
+            "Hook events",
+            &s.hook_events_total,
+            "session + tool signals",
+            "⚙",
+        ),
+        (
+            "Store size",
+            &s.store_size,
+            "subconscious data on disk",
+            "📦",
+        ),
     ];
 
     let mut out = String::from(r#"<section class="summary-section"><div class="kpi-strip">"#);
@@ -2025,10 +2179,10 @@ fn render_summary_strip(snap: &Snapshot) -> String {
     <div class="kpi-sub">{sub}</div>
   </div>
 </div>"#,
-            icon  = icon,
+            icon = icon,
             value = html_escape(value),
             label = html_escape(label),
-            sub   = html_escape(sub),
+            sub = html_escape(sub),
         ));
     }
     out.push_str("</div></section>\n");
@@ -2071,12 +2225,36 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
 "#,
         );
         for entry in &snap.dream_journal {
-            let pat_cls   = if entry.patterns_extracted  > 0 { " hi-pat"    } else { "" };
-            let assoc_cls = if entry.associations_found  > 0 { " hi-assoc"  } else { "" };
-            let ins_cls   = if entry.insights_promoted   > 0 { " hi-insight"} else { "" };
-            let pat_val   = if entry.patterns_extracted  > 0 { format!("+{}", entry.patterns_extracted)  } else { "—".into() };
-            let assoc_val = if entry.associations_found  > 0 { format!("+{}", entry.associations_found)  } else { "—".into() };
-            let ins_val   = if entry.insights_promoted   > 0 { format!("+{}", entry.insights_promoted)   } else { "—".into() };
+            let pat_cls = if entry.patterns_extracted > 0 {
+                " hi-pat"
+            } else {
+                ""
+            };
+            let assoc_cls = if entry.associations_found > 0 {
+                " hi-assoc"
+            } else {
+                ""
+            };
+            let ins_cls = if entry.insights_promoted > 0 {
+                " hi-insight"
+            } else {
+                ""
+            };
+            let pat_val = if entry.patterns_extracted > 0 {
+                format!("+{}", entry.patterns_extracted)
+            } else {
+                "—".into()
+            };
+            let assoc_val = if entry.associations_found > 0 {
+                format!("+{}", entry.associations_found)
+            } else {
+                "—".into()
+            };
+            let ins_val = if entry.insights_promoted > 0 {
+                format!("+{}", entry.insights_promoted)
+            } else {
+                "—".into()
+            };
             // Build human-readable summary sentence
             let summary = dream_cycle_summary(
                 entry.sessions_analyzed,
@@ -2095,16 +2273,16 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
   <td class="num muted">{tokens}</td>
 </tr>
 "#,
-                ts      = entry.timestamp.format("%Y-%m-%d %H:%M"),
-                sessions= entry.sessions_analyzed,
-                pat     = pat_val,
-                pc      = pat_cls,
-                assoc   = assoc_val,
-                ac      = assoc_cls,
-                ins     = ins_val,
-                ic      = ins_cls,
+                ts = entry.timestamp.format("%Y-%m-%d %H:%M"),
+                sessions = entry.sessions_analyzed,
+                pat = pat_val,
+                pc = pat_cls,
+                assoc = assoc_val,
+                ac = assoc_cls,
+                ins = ins_val,
+                ic = ins_cls,
                 summary = html_escape(&summary),
-                tokens  = format_tokens(entry.tokens_used),
+                tokens = format_tokens(entry.tokens_used),
             ));
         }
         out.push_str("</tbody></table></div>\n");
@@ -2201,10 +2379,7 @@ fn render_dream_traces_section(snap: &Snapshot) -> String {
             // plain text vs markdown).
             let payload_block = match &event.payload {
                 Some(body) if !body.is_empty() => {
-                    let kind_class = event
-                        .payload_kind
-                        .as_deref()
-                        .unwrap_or("text");
+                    let kind_class = event.payload_kind.as_deref().unwrap_or("text");
                     let size_label = format_size(body.len() as u64);
                     format!(
                         r#"<details class="trace-payload"><summary class="payload-summary">show content <span class="payload-meta">{kind} · {size}</span></summary><pre class="payload-body payload-{kind}">{body}</pre></details>"#,
@@ -2283,19 +2458,31 @@ fn event_kind_label(kind: EventKind) -> &'static str {
 
 /// Return a CSS class name based on the event label string.
 fn event_row_class(label: &str) -> &'static str {
-    if label.starts_with("session_start") { "ev-session-start" }
-    else if label.starts_with("session_end") { "ev-session-end" }
-    else if label.starts_with("tool_use") { "ev-tool" }
-    else if label.contains("positive") { "ev-positive" }
-    else if label.contains("correction") { "ev-correction" }
-    else if label.contains("frustration") { "ev-frustration" }
-    else if label.starts_with("user_signal") { "ev-signal" }
-    else { "ev-other" }
+    if label.starts_with("session_start") {
+        "ev-session-start"
+    } else if label.starts_with("session_end") {
+        "ev-session-end"
+    } else if label.starts_with("tool_use") {
+        "ev-tool"
+    } else if label.contains("positive") {
+        "ev-positive"
+    } else if label.contains("correction") {
+        "ev-correction"
+    } else if label.contains("frustration") {
+        "ev-frustration"
+    } else if label.starts_with("user_signal") {
+        "ev-signal"
+    } else {
+        "ev-other"
+    }
 }
 
 /// Extract a short human-readable detail column from the event label.
 fn event_detail(label: &str) -> String {
-    if let Some(inner) = label.strip_prefix("tool_use(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = label
+        .strip_prefix("tool_use(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         return format!("tool: <strong>{}</strong>", html_escape(inner));
     }
     if label.starts_with("session_start") {
@@ -2312,7 +2499,11 @@ fn event_detail(label: &str) -> String {
     }
     if label.contains("frustration") {
         // Extract frustration=N.N from the label
-        if let Some(score) = label.split("frustration=").nth(1).and_then(|s| s.strip_suffix(')')) {
+        if let Some(score) = label
+            .split("frustration=")
+            .nth(1)
+            .and_then(|s| s.strip_suffix(')'))
+        {
             return format!("⚠ frustration score {}", html_escape(score));
         }
         return "⚠ frustration detected".into();
@@ -2332,7 +2523,8 @@ fn event_detail(label: &str) -> String {
 fn render_patterns_graph_section(snap: &Snapshot) -> String {
     let Some(payload) = &snap.patterns_graph_json else {
         return r#"<section class="dash-section" id="patterns-graph"><h2>Patterns Graph</h2>
-<p class="muted">No patterns or associations yet — run a dream cycle.</p></section>"#.to_string();
+<p class="muted">No patterns or associations yet — run a dream cycle.</p></section>"#
+            .to_string();
     };
     // Inject the JSON via a <script type="application/json"> block so the
     // browser doesn't try to parse the inline JSON as JS.
@@ -2904,7 +3096,7 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
 "##,
         payload = payload,
         graphology_js = include_str!("../static/graphology.umd.min.js"),
-        sigma_js      = include_str!("../static/sigma.min.js"),
+        sigma_js = include_str!("../static/sigma.min.js"),
     )
 }
 
@@ -2953,12 +3145,18 @@ fn render_events_section(snap: &Snapshot) -> String {
 fn event_label_badge(label: &str) -> String {
     let cls = event_row_class(label);
     // Shorten "tool_use(Read)" to the inner tool name for the badge
-    let display = if let Some(inner) = label.strip_prefix("tool_use(").and_then(|s| s.strip_suffix(')')) {
+    let display = if let Some(inner) = label
+        .strip_prefix("tool_use(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         inner
     } else {
         label
     };
-    format!(r#"<span class="ev-badge {cls}">{}</span>"#, html_escape(display))
+    format!(
+        r#"<span class="ev-badge {cls}">{}</span>"#,
+        html_escape(display)
+    )
 }
 
 /// Floating insights widget — tabbed bottom-right panel with three views:
@@ -2984,11 +3182,11 @@ fn render_insights_widget(snap: &Snapshot) -> String {
     <span class="iw-stat iw-stat-ok"><span class="iw-stat-n">{ins}</span> insights</span>
   </div>
 </div>"#,
-            date  = entry.timestamp.format("%b %d, %Y"),
+            date = entry.timestamp.format("%b %d, %Y"),
             summary = html_escape(&summary),
-            pat   = entry.patterns_extracted,
+            pat = entry.patterns_extracted,
             assoc = entry.associations_found,
-            ins   = entry.insights_promoted,
+            ins = entry.insights_promoted,
         )
     } else {
         r#"<p class="iw-empty">No dream cycles yet.</p>"#.into()
@@ -3012,32 +3210,39 @@ fn render_insights_widget(snap: &Snapshot) -> String {
 
     // ── Tab: Store ────────────────────────────────────────────
     // Bake store counts into data attributes so JS can compute keep-N values.
-    let store_rows: String = snap.store_file_stats.iter().map(|f| {
-        let size_str = format_bytes(f.size_bytes);
-        let icon = if f.over_threshold { r#"<span class="iw-warn-icon" title="Large file">⚠</span>"# }
-                   else               { r#"<span class="iw-ok-icon">✓</span>"# };
-        let entries_fmt = format_count(f.entries);
-        format!(
-            r#"<tr class="iw-store-row" data-path="{path}" data-entries="{entries}">
+    let store_rows: String = snap
+        .store_file_stats
+        .iter()
+        .map(|f| {
+            let size_str = format_bytes(f.size_bytes);
+            let icon = if f.over_threshold {
+                r#"<span class="iw-warn-icon" title="Large file">⚠</span>"#
+            } else {
+                r#"<span class="iw-ok-icon">✓</span>"#
+            };
+            let entries_fmt = format_count(f.entries);
+            format!(
+                r#"<tr class="iw-store-row" data-path="{path}" data-entries="{entries}">
   <td class="iw-store-label">{label}</td>
   <td class="iw-store-n">{entries_fmt}</td>
   <td class="iw-store-sz">{size}</td>
   <td class="iw-store-status">{icon}</td>
 </tr>"#,
-            path    = html_escape(f.rel_path),
-            entries = f.entries,
-            label   = html_escape(f.label),
-            entries_fmt = html_escape(&entries_fmt),
-            size    = html_escape(&size_str),
-            icon    = icon,
-        )
-    }).collect();
+                path = html_escape(f.rel_path),
+                entries = f.entries,
+                label = html_escape(f.label),
+                entries_fmt = html_escape(&entries_fmt),
+                size = html_escape(&size_str),
+                icon = icon,
+            )
+        })
+        .collect();
 
     // ── Tab: Tests ────────────────────────────────────────────
     let tests_html = match &snap.test_results {
         Some(r) => {
             let (status_cls, status_icon, status_txt) = if r.ok {
-                ("iw-test-ok",   "✓", "All tests passed")
+                ("iw-test-ok", "✓", "All tests passed")
             } else {
                 ("iw-test-fail", "✗", "Tests failed")
             };
@@ -3055,21 +3260,22 @@ fn render_insights_widget(snap: &Snapshot) -> String {
   <span class="iw-test-dur">⏱ {dur:.2}s</span>
   <span class="iw-test-ran">Run at {ts}</span>
 </div>"#,
-                cls    = status_cls,
-                icon   = status_icon,
+                cls = status_cls,
+                icon = status_icon,
                 status = status_txt,
                 passed = r.passed,
                 failed = r.failed,
                 ignored = r.ignored,
-                dur    = r.duration_secs,
-                ts     = r.ran_at.format("%H:%M:%S UTC"),
+                dur = r.duration_secs,
+                ts = r.ran_at.format("%H:%M:%S UTC"),
             )
         }
         None => r#"<div class="iw-test-notrun">
   <p>Tests were not run at dashboard generation time.</p>
   <p>Regenerate with:</p>
   <code class="iw-test-cmd">i-dream dashboard --run-tests</code>
-</div>"#.into(),
+</div>"#
+            .into(),
     };
 
     format!(
@@ -3147,10 +3353,10 @@ fn render_insights_widget(snap: &Snapshot) -> String {
     </div>
   </div>
 </div>"##,
-        dream   = dream_html,
+        dream = dream_html,
         insights = insights_html,
         store_rows = store_rows,
-        tests   = tests_html,
+        tests = tests_html,
     )
 }
 
@@ -3300,7 +3506,9 @@ fn format_count(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 { out.push(','); }
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
         out.push(c);
     }
     out.chars().rev().collect()
@@ -3827,8 +4035,8 @@ function showArchTab(name, btn) {{
 }}
 </script>
 "#,
-        ascii  = html_escape(ARCHITECTURE_DIAGRAM),
-        svg    = svg_diagram,
+        ascii = html_escape(ARCHITECTURE_DIAGRAM),
+        svg = svg_diagram,
         svg_js = svg_js,
     )
 }
@@ -3876,7 +4084,7 @@ fn render_inventory_section(snap: &Snapshot) -> String {
                     let key = format!("{}::{}", group.title, file.name);
                     out.push_str(&format!(
                         "registerFileContent('{key}', '{content}');\n",
-                        key     = js_string_escape(&key),
+                        key = js_string_escape(&key),
                         content = js_string_escape(preview),
                     ));
                 }
@@ -3900,13 +4108,19 @@ fn render_inventory_section(snap: &Snapshot) -> String {
                     ),
                     None => String::new(),
                 };
-                let full_path = snap.data_dir
+                let full_path = snap
+                    .data_dir
                     .join(group.title.trim_end_matches('/'))
                     .join(&file.name)
                     .display()
                     .to_string();
                 let file_type = file_type_label(&file.name);
-                let ext_class = file.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                let ext_class = file
+                    .name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
                 let key = format!("{}::{}", group.title, file.name);
                 out.push_str(&format!(
                     "<li class=\"inv-file\" data-name=\"{name}\" data-type=\"{ftype}\" data-path=\"{path}\" data-key=\"{key}\" onclick=\"showFileDialog(this.dataset.name,this.dataset.type,this.dataset.path,this.dataset.key)\"><code class=\"inv-file-name inv-ext-{ext}\">{name}</code><span class=\"file-meta\">{mtime}<span class=\"size\">{size}</span></span></li>",
@@ -5444,7 +5658,10 @@ mod tests {
         // the CSS defines dark colors on `:root` with `body.light`
         // as the override.
         assert!(html.contains("<body>"), "body should start without a class");
-        assert!(html.contains("html.light"), "CSS must define a .light override on <html>");
+        assert!(
+            html.contains("html.light"),
+            "CSS must define a .light override on <html>"
+        );
     }
 
     #[test]
@@ -5489,8 +5706,14 @@ mod tests {
         let html = render_html(&sample_snapshot());
         // The badge strips "tool_use(Read)" → just "Read" for display.
         // Verify the tool class and the inner tool name both appear.
-        assert!(html.contains("ev-tool"), "tool_use events must carry the ev-tool CSS class");
-        assert!(html.contains(">Read<"), "tool name must appear as badge text");
+        assert!(
+            html.contains("ev-tool"),
+            "tool_use events must carry the ev-tool CSS class"
+        );
+        assert!(
+            html.contains(">Read<"),
+            "tool name must appear as badge text"
+        );
         // session_start events show the event type in the badge
         assert!(html.contains("session_start"));
         // "(2 of 142)" — the "shown of total" count
@@ -5639,7 +5862,10 @@ mod tests {
     #[test]
     fn render_html_includes_summary_strip_with_all_six_tiles() {
         let html = render_html(&sample_snapshot());
-        assert!(html.contains("kpi-strip"), "strip container class must exist");
+        assert!(
+            html.contains("kpi-strip"),
+            "strip container class must exist"
+        );
         // All six labels from Summary struct
         for label in [
             "Modules enabled",
@@ -5781,20 +6007,47 @@ mod tests {
     fn render_html_inventory_files_have_dialog_data_attributes() {
         let html = render_html(&sample_snapshot());
         // Files must be rendered as clickable items with data attributes
-        assert!(html.contains("class=\"inv-file\""), "inv-file class must be present");
-        assert!(html.contains("data-name="), "data-name attribute required for dialog");
-        assert!(html.contains("data-type="), "data-type attribute required for dialog");
-        assert!(html.contains("data-path="), "data-path attribute required for dialog");
-        assert!(html.contains("showFileDialog("), "onclick must call showFileDialog");
+        assert!(
+            html.contains("class=\"inv-file\""),
+            "inv-file class must be present"
+        );
+        assert!(
+            html.contains("data-name="),
+            "data-name attribute required for dialog"
+        );
+        assert!(
+            html.contains("data-type="),
+            "data-type attribute required for dialog"
+        );
+        assert!(
+            html.contains("data-path="),
+            "data-path attribute required for dialog"
+        );
+        assert!(
+            html.contains("showFileDialog("),
+            "onclick must call showFileDialog"
+        );
     }
 
     #[test]
     fn render_html_includes_file_dialog_overlay() {
         let html = render_html(&sample_snapshot());
-        assert!(html.contains("fd-overlay"), "file dialog overlay must be embedded");
-        assert!(html.contains("fd-box"), "file dialog box container must be present");
-        assert!(html.contains("closeFileDialog"), "close function must be present");
-        assert!(html.contains("showFileDialog"), "show function must be present");
+        assert!(
+            html.contains("fd-overlay"),
+            "file dialog overlay must be embedded"
+        );
+        assert!(
+            html.contains("fd-box"),
+            "file dialog box container must be present"
+        );
+        assert!(
+            html.contains("closeFileDialog"),
+            "close function must be present"
+        );
+        assert!(
+            html.contains("showFileDialog"),
+            "show function must be present"
+        );
     }
 
     // ── daemon stopped status is not redundant ───────────────────
@@ -5840,6 +6093,9 @@ mod tests {
             "page load must read stored theme from localStorage"
         );
         // Both read and write must use the same key
-        assert!(html.contains("idream-theme"), "localStorage key must be 'idream-theme'");
+        assert!(
+            html.contains("idream-theme"),
+            "localStorage key must be 'idream-theme'"
+        );
     }
 }

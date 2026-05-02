@@ -4,7 +4,7 @@
 //! via Unix socket communication.
 
 use crate::cli::HookAction;
-use crate::config::{expand_tilde, Config};
+use crate::config::{Config, expand_tilde};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
@@ -49,22 +49,32 @@ fn install(config: &Config) -> Result<()> {
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}));
 
-    let hooks_obj = hooks
-        .as_object_mut()
-        .context("hooks is not an object")?;
+    let hooks_obj = hooks.as_object_mut().context("hooks is not an object")?;
 
     // Add our hooks (preserving existing ones)
     if config.hooks.session_start {
-        add_hook_entry(hooks_obj, "SessionStart", &hooks_dir.join("session-start.sh"));
+        add_hook_entry(
+            hooks_obj,
+            "SessionStart",
+            &hooks_dir.join("session-start.sh"),
+        );
     }
     if config.hooks.post_tool_use {
-        add_hook_entry(hooks_obj, "PostToolUse", &hooks_dir.join("post-tool-use.sh"));
+        add_hook_entry(
+            hooks_obj,
+            "PostToolUse",
+            &hooks_dir.join("post-tool-use.sh"),
+        );
     }
     if config.hooks.stop {
         add_hook_entry(hooks_obj, "Stop", &hooks_dir.join("stop.sh"));
     }
     if config.hooks.user_prompt_submit {
-        add_hook_entry(hooks_obj, "UserPromptSubmit", &hooks_dir.join("user-prompt-submit.sh"));
+        add_hook_entry(
+            hooks_obj,
+            "UserPromptSubmit",
+            &hooks_dir.join("user-prompt-submit.sh"),
+        );
     }
 
     let content = serde_json::to_string_pretty(&settings)?;
@@ -143,7 +153,11 @@ fn status(config: &Config) -> Result<String> {
             })
             .unwrap_or(false);
 
-        let status = if installed { "installed" } else { "not installed" };
+        let status = if installed {
+            "installed"
+        } else {
+            "not installed"
+        };
         out.push_str(&format!("  {event}: {status}\n"));
     }
 
@@ -190,9 +204,10 @@ fn add_hook_entry(
                     .and_then(|c| c.as_str())
                     .map(cmd_matches)
                     .unwrap_or(false)
-            }) {
-                return true;
-            }
+            })
+        {
+            return true;
+        }
         // Bare shape (legacy bug): e.command
         e.get("command")
             .and_then(|c| c.as_str())
@@ -445,9 +460,12 @@ mod tests {
         // fix must NOT duplicate those — it must recognize them as
         // already-present and skip.
         let mut hooks = serde_json::Map::new();
-        hooks.insert("SessionStart".into(), serde_json::json!([
-            { "type": "command", "command": "bash /tmp/hooks/session-start.sh" }
-        ]));
+        hooks.insert(
+            "SessionStart".into(),
+            serde_json::json!([
+                { "type": "command", "command": "bash /tmp/hooks/session-start.sh" }
+            ]),
+        );
 
         let script = std::path::Path::new("/tmp/hooks/session-start.sh");
         add_hook_entry(&mut hooks, "SessionStart", script);
@@ -475,9 +493,12 @@ mod tests {
 
         // Simulate an existing hook from another tool, in the schema-correct
         // wrapped shape that other tools should also use.
-        hooks.insert("SessionStart".into(), serde_json::json!([
-            { "hooks": [{ "type": "command", "command": "bash /other-tool/hook.sh" }] }
-        ]));
+        hooks.insert(
+            "SessionStart".into(),
+            serde_json::json!([
+                { "hooks": [{ "type": "command", "command": "bash /other-tool/hook.sh" }] }
+            ]),
+        );
 
         let script = std::path::Path::new("/tmp/hooks/session-start.sh");
         add_hook_entry(&mut hooks, "SessionStart", script);
@@ -485,7 +506,10 @@ mod tests {
         let arr = hooks["SessionStart"].as_array().unwrap();
         assert_eq!(arr.len(), 2, "Should preserve the existing hook entry");
         assert!(
-            arr[0]["hooks"][0]["command"].as_str().unwrap().contains("other-tool"),
+            arr[0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("other-tool"),
             "Original hook should be first"
         );
     }
@@ -522,8 +546,14 @@ mod tests {
             "Script must reference the daemon socket path"
         );
         assert!(script.starts_with("#!/bin/bash"), "Must have bash shebang");
-        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
-        assert!(script.contains("session_start"), "Must send session_start event");
+        assert!(
+            script.contains("AF_UNIX"),
+            "Must use Python socket.AF_UNIX for Unix socket comms"
+        );
+        assert!(
+            script.contains("session_start"),
+            "Must send session_start event"
+        );
     }
 
     #[test]
@@ -550,7 +580,10 @@ mod tests {
         write_stop_hook(dir.path(), &config).unwrap();
 
         let script = std::fs::read_to_string(dir.path().join("stop.sh")).unwrap();
-        assert!(script.contains("session_end"), "Must send session_end event");
+        assert!(
+            script.contains("session_end"),
+            "Must send session_end event"
+        );
     }
 
     #[test]
@@ -565,9 +598,18 @@ mod tests {
         let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh")).unwrap();
         // The only `echo` allowed is inside the Python heredoc or the `touch` command.
         // There must be no bare `echo "$RESPONSE"` that prints to stdout.
-        assert!(script.contains("user_signal"), "Must send user_signal event");
-        assert!(script.contains("IDREAM_INPUT"), "Must pass prompt via env var");
-        assert!(script.contains("AF_UNIX"), "Must use Python socket.AF_UNIX for Unix socket comms");
+        assert!(
+            script.contains("user_signal"),
+            "Must send user_signal event"
+        );
+        assert!(
+            script.contains("IDREAM_INPUT"),
+            "Must pass prompt via env var"
+        );
+        assert!(
+            script.contains("AF_UNIX"),
+            "Must use Python socket.AF_UNIX for Unix socket comms"
+        );
         // Key safety check: no raw echo that would inject into user's message
         assert!(
             !script.contains("\necho \"$RESULT\""),

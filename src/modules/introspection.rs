@@ -4,7 +4,7 @@
 //! patterns, and produces weekly analysis reports.
 
 use crate::api::ClaudeClient;
-use crate::config::{expand_tilde, Config};
+use crate::config::{Config, expand_tilde};
 use crate::modules::Module;
 use crate::store::Store;
 use crate::transcript;
@@ -119,7 +119,10 @@ impl<'a> IntrospectionModule<'a> {
             let entries = match transcript::read_transcript(&file.path) {
                 Ok(e) => e,
                 Err(e) => {
-                    warn!("skipping unreadable transcript {}: {e:#}", file.path.display());
+                    warn!(
+                        "skipping unreadable transcript {}: {e:#}",
+                        file.path.display()
+                    );
                     continue;
                 }
             };
@@ -159,7 +162,8 @@ impl<'a> IntrospectionModule<'a> {
         for sid in sessions {
             state.sessions.insert(sid.clone());
         }
-        self.store.write_json("introspection/processed.json", &state)?;
+        self.store
+            .write_json("introspection/processed.json", &state)?;
         Ok(())
     }
 
@@ -220,7 +224,11 @@ mod tests {
         let config = Config::default();
         let module = IntrospectionModule::new(&config, &store);
 
-        assert_eq!(module.available_chains().unwrap(), 2, "Should count only .jsonl files");
+        assert_eq!(
+            module.available_chains().unwrap(),
+            2,
+            "Should count only .jsonl files"
+        );
     }
 
     // ── should_run: gating logic ──────────────────────────────
@@ -258,7 +266,10 @@ mod tests {
         }
 
         let module = IntrospectionModule::new(&config, &store);
-        assert!(!module.should_run().unwrap(), "Need 10 chains but only have 3");
+        assert!(
+            !module.should_run().unwrap(),
+            "Need 10 chains but only have 3"
+        );
     }
 
     #[test]
@@ -276,7 +287,10 @@ mod tests {
         }
 
         let module = IntrospectionModule::new(&config, &store);
-        assert!(module.should_run().unwrap(), "5 chains >= 3 minimum, no prior report");
+        assert!(
+            module.should_run().unwrap(),
+            "5 chains >= 3 minimum, no prior report"
+        );
     }
 
     #[test]
@@ -312,7 +326,9 @@ mod tests {
                 breadth_trend: "increasing".into(),
             },
         };
-        store.write_json("introspection/patterns.json", &patterns).unwrap();
+        store
+            .write_json("introspection/patterns.json", &patterns)
+            .unwrap();
 
         let module = IntrospectionModule::new(&config, &store);
         assert!(
@@ -412,7 +428,11 @@ impl CompactChain {
                 .iter()
                 .map(|s| {
                     if let Some(ref target) = s.target {
-                        format!("{}:{}", s.step_type, target.rsplit('/').next().unwrap_or(target))
+                        format!(
+                            "{}:{}",
+                            s.step_type,
+                            target.rsplit('/').next().unwrap_or(target)
+                        )
                     } else {
                         s.step_type.clone()
                     }
@@ -448,13 +468,17 @@ fn sample_chains_stratified(chains: &[ReasoningChain], max_chars: usize) -> Vec<
         session_chains.sort_by_key(|c| c.total_steps);
         let mut picks = Vec::new();
         if !session_chains.is_empty() {
-            picks.push(CompactChain::from_chain(session_chains[session_chains.len() - 1]));
+            picks.push(CompactChain::from_chain(
+                session_chains[session_chains.len() - 1],
+            ));
         }
         if session_chains.len() > 1 {
             picks.push(CompactChain::from_chain(session_chains[0]));
         }
         if session_chains.len() > 2 {
-            picks.push(CompactChain::from_chain(session_chains[session_chains.len() / 2]));
+            picks.push(CompactChain::from_chain(
+                session_chains[session_chains.len() / 2],
+            ));
         }
         session_picks.push(picks);
     }
@@ -559,7 +583,12 @@ impl<'a> Module for IntrospectionModule<'a> {
         if chains_dir.exists() {
             for entry in std::fs::read_dir(&chains_dir)? {
                 let entry = entry?;
-                if entry.path().extension().map(|e| e == "jsonl").unwrap_or(false) {
+                if entry
+                    .path()
+                    .extension()
+                    .map(|e| e == "jsonl")
+                    .unwrap_or(false)
+                {
                     let content = std::fs::read_to_string(entry.path())?;
                     for line in content.lines() {
                         if let Ok(chain) = serde_json::from_str::<ReasoningChain>(line) {
@@ -643,13 +672,7 @@ Output ONLY the JSON object. No markdown fences, no commentary, no explanation."
         );
 
         let response = client
-            .analyze(
-                system_prompt,
-                &prompt,
-                &self.config.budget.model,
-                4096,
-                0.2,
-            )
+            .analyze(system_prompt, &prompt, &self.config.budget.model, 4096, 0.2)
             .await?;
 
         // Best-effort parse into ReasoningPatterns. The LLM sometimes
@@ -662,16 +685,14 @@ Output ONLY the JSON object. No markdown fences, no commentary, no explanation."
                 // Inject our authoritative last_updated so the field
                 // exists even if the LLM forgot to emit it.
                 if let Some(obj) = json.as_object_mut() {
-                    obj.insert(
-                        "last_updated".into(),
-                        serde_json::to_value(Utc::now())?,
-                    );
+                    obj.insert("last_updated".into(), serde_json::to_value(Utc::now())?);
                 }
                 // Try strict parse into the typed struct.
                 match serde_json::from_value::<ReasoningPatterns>(json.clone()) {
                     Ok(patterns) => {
-                        if let Err(e) =
-                            self.store.write_json("introspection/patterns.json", &patterns)
+                        if let Err(e) = self
+                            .store
+                            .write_json("introspection/patterns.json", &patterns)
                         {
                             warn!("failed to persist introspection patterns: {e:#}");
                         }

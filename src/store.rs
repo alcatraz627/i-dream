@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -152,7 +152,11 @@ impl Store {
         }
         let file = std::fs::File::open(&path)?;
         let reader = std::io::BufReader::new(file);
-        Ok(reader.lines().filter_map(|l| l.ok()).filter(|l| !l.trim().is_empty()).count())
+        Ok(reader
+            .lines()
+            .filter_map(|l| l.ok())
+            .filter(|l| !l.trim().is_empty())
+            .count())
     }
 
     /// Prune a JSONL file to at most `keep_latest` entries, discarding the oldest.
@@ -167,10 +171,7 @@ impl Store {
 
         // Read all raw lines (preserve original JSON text to avoid re-serializing).
         let content = std::fs::read_to_string(&path)?;
-        let lines: Vec<&str> = content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
 
         let total = lines.len();
         if total <= keep_latest {
@@ -267,16 +268,20 @@ mod tests {
         store.init_dirs().unwrap();
 
         let expected = [
-            "dreams", "dreams/traces", "metacog", "metacog/samples",
-            "metacog/audits", "valence", "introspection",
-            "introspection/chains", "introspection/reports",
-            "intentions", "logs",
+            "dreams",
+            "dreams/traces",
+            "metacog",
+            "metacog/samples",
+            "metacog/audits",
+            "valence",
+            "introspection",
+            "introspection/chains",
+            "introspection/reports",
+            "intentions",
+            "logs",
         ];
         for subdir in &expected {
-            assert!(
-                store.path(subdir).exists(),
-                "Missing directory: {subdir}"
-            );
+            assert!(store.path(subdir).exists(), "Missing directory: {subdir}");
         }
     }
 
@@ -288,7 +293,10 @@ mod tests {
     #[test]
     fn store_json_roundtrip() {
         let (_dir, store) = test_store();
-        let entry = TestEntry { id: 1, name: "alpha".into() };
+        let entry = TestEntry {
+            id: 1,
+            name: "alpha".into(),
+        };
 
         store.write_json("test.json", &entry).unwrap();
         let loaded: TestEntry = store.read_json("test.json").unwrap();
@@ -299,7 +307,10 @@ mod tests {
     #[test]
     fn store_json_write_no_leftover_tmp() {
         let (_dir, store) = test_store();
-        let entry = TestEntry { id: 1, name: "alpha".into() };
+        let entry = TestEntry {
+            id: 1,
+            name: "alpha".into(),
+        };
 
         store.write_json("data.json", &entry).unwrap();
 
@@ -311,7 +322,10 @@ mod tests {
     #[test]
     fn store_json_creates_parent_dirs() {
         let (_dir, store) = test_store();
-        let entry = TestEntry { id: 1, name: "nested".into() };
+        let entry = TestEntry {
+            id: 1,
+            name: "nested".into(),
+        };
 
         store.write_json("deep/nested/data.json", &entry).unwrap();
         let loaded: TestEntry = store.read_json("deep/nested/data.json").unwrap();
@@ -337,9 +351,18 @@ mod tests {
         let (_dir, store) = test_store();
 
         let entries = vec![
-            TestEntry { id: 1, name: "first".into() },
-            TestEntry { id: 2, name: "second".into() },
-            TestEntry { id: 3, name: "third".into() },
+            TestEntry {
+                id: 1,
+                name: "first".into(),
+            },
+            TestEntry {
+                id: 2,
+                name: "second".into(),
+            },
+            TestEntry {
+                id: 3,
+                name: "third".into(),
+            },
         ];
         for entry in &entries {
             store.append_jsonl("log.jsonl", entry).unwrap();
@@ -361,13 +384,19 @@ mod tests {
         let (_dir, store) = test_store();
 
         // Write one entry, then inject a blank line manually
-        let entry = TestEntry { id: 1, name: "only".into() };
+        let entry = TestEntry {
+            id: 1,
+            name: "only".into(),
+        };
         store.append_jsonl("log.jsonl", &entry).unwrap();
 
         // Append a blank line directly
         use std::io::Write;
         let path = store.path("log.jsonl");
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(file).unwrap();
         writeln!(file, "  ").unwrap();
 
@@ -385,7 +414,10 @@ mod tests {
         let (_dir, store) = test_store();
 
         for i in 0..5 {
-            let entry = TestEntry { id: i, name: format!("entry-{i}") };
+            let entry = TestEntry {
+                id: i,
+                name: format!("entry-{i}"),
+            };
             store.append_jsonl("log.jsonl", &entry).unwrap();
         }
 
@@ -408,7 +440,15 @@ mod tests {
         let (_dir, store) = test_store();
         assert!(!store.exists("data.json"));
 
-        store.write_json("data.json", &TestEntry { id: 1, name: "x".into() }).unwrap();
+        store
+            .write_json(
+                "data.json",
+                &TestEntry {
+                    id: 1,
+                    name: "x".into(),
+                },
+            )
+            .unwrap();
         assert!(store.exists("data.json"));
     }
 
@@ -424,7 +464,9 @@ mod tests {
     #[test]
     fn store_write_md() {
         let (_dir, store) = test_store();
-        store.write_md("notes/report.md", "# Hello\n\nWorld").unwrap();
+        store
+            .write_md("notes/report.md", "# Hello\n\nWorld")
+            .unwrap();
 
         let content = std::fs::read_to_string(store.path("notes/report.md")).unwrap();
         assert_eq!(content, "# Hello\n\nWorld");
@@ -453,7 +495,15 @@ mod tests {
     fn store_prune_jsonl_removes_oldest_entries() {
         let (_dir, store) = test_store();
         for i in 0..10u32 {
-            store.append_jsonl("log.jsonl", &TestEntry { id: i, name: format!("entry-{i}") }).unwrap();
+            store
+                .append_jsonl(
+                    "log.jsonl",
+                    &TestEntry {
+                        id: i,
+                        name: format!("entry-{i}"),
+                    },
+                )
+                .unwrap();
         }
 
         let removed = store.prune_jsonl("log.jsonl", 6).unwrap();
@@ -470,7 +520,15 @@ mod tests {
     fn store_prune_jsonl_noop_when_under_limit() {
         let (_dir, store) = test_store();
         for i in 0..5u32 {
-            store.append_jsonl("log.jsonl", &TestEntry { id: i, name: format!("e{i}") }).unwrap();
+            store
+                .append_jsonl(
+                    "log.jsonl",
+                    &TestEntry {
+                        id: i,
+                        name: format!("e{i}"),
+                    },
+                )
+                .unwrap();
         }
 
         let removed = store.prune_jsonl("log.jsonl", 10).unwrap();
@@ -491,7 +549,15 @@ mod tests {
     fn store_prune_jsonl_exact_limit_noop() {
         let (_dir, store) = test_store();
         for i in 0..5u32 {
-            store.append_jsonl("log.jsonl", &TestEntry { id: i, name: format!("e{i}") }).unwrap();
+            store
+                .append_jsonl(
+                    "log.jsonl",
+                    &TestEntry {
+                        id: i,
+                        name: format!("e{i}"),
+                    },
+                )
+                .unwrap();
         }
         // Keeping exactly 5 when there are 5 → no change.
         let removed = store.prune_jsonl("log.jsonl", 5).unwrap();
@@ -505,7 +571,15 @@ mod tests {
     #[test]
     fn store_file_size_bytes_returns_nonzero_for_written_file() {
         let (_dir, store) = test_store();
-        store.append_jsonl("log.jsonl", &TestEntry { id: 1, name: "x".into() }).unwrap();
+        store
+            .append_jsonl(
+                "log.jsonl",
+                &TestEntry {
+                    id: 1,
+                    name: "x".into(),
+                },
+            )
+            .unwrap();
         let size = store.file_size_bytes("log.jsonl").unwrap();
         assert!(size > 0, "Expected non-zero size, got {size}");
     }

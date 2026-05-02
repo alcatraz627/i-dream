@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::dream_trace::{DreamTracer, EventKind, Phase as TracePhase};
 use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
+    Module,
     dreaming::DreamingModule,
     insight_digest::InsightDigestModule,
     introspection::{IntrospectionModule, ReasoningPatterns},
@@ -13,7 +14,6 @@ use crate::modules::{
     metacog::{MetacogModule, ToolActivitySample},
     prospective::{FiredRecord, Intention, Priority, ProspectiveModule, Trigger},
     user_settings::UserSettings,
-    Module,
 };
 use crate::store::Store;
 use anyhow::{Context, Result};
@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal;
-use tokio::signal::unix::{signal as unix_signal, SignalKind};
+use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tracing::{debug, error, info, warn};
 
 /// Relative path (under the data dir) of the hook-event log.
@@ -126,7 +126,9 @@ impl Daemon {
         // When use_claude_code_cli is set, shell out to `claude --print`
         // instead of the direct API (no ANTHROPIC_API_KEY needed).
         let client = if config.budget.use_claude_code_cli {
-            Some(ClaudeClient::new_subprocess(&config.budget.claude_code_cli_path))
+            Some(ClaudeClient::new_subprocess(
+                &config.budget.claude_code_cli_path,
+            ))
         } else {
             ClaudeClient::new().ok()
         };
@@ -210,8 +212,7 @@ impl Daemon {
         write_pid_file(&pid_path, pid)?;
         info!("Daemon started with PID {pid}");
 
-        let check_interval =
-            Duration::from_secs(self.config.idle.check_interval_minutes * 60);
+        let check_interval = Duration::from_secs(self.config.idle.check_interval_minutes * 60);
 
         // Bind Unix socket for hook events.
         let socket_path = self.config.data_dir().join("daemon.sock");
@@ -234,8 +235,8 @@ impl Daemon {
         // stays installed for the whole daemon lifetime — dropping
         // the `Signal` would reset the signal disposition back to
         // the default.
-        let mut sigterm = unix_signal(SignalKind::terminate())
-            .context("Failed to install SIGTERM handler")?;
+        let mut sigterm =
+            unix_signal(SignalKind::terminate()).context("Failed to install SIGTERM handler")?;
 
         let result: Result<()> = loop {
             tokio::select! {
@@ -285,9 +286,10 @@ impl Daemon {
         // foreground loop returned Ok or Err. Best-effort: if the file
         // already vanished (someone ran `i-dream stop`), that's fine.
         if let Err(e) = std::fs::remove_file(&pid_path)
-            && e.kind() != std::io::ErrorKind::NotFound {
-                debug!("Failed to remove PID file on shutdown: {e}");
-            }
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            debug!("Failed to remove PID file on shutdown: {e}");
+        }
 
         // Flush the in-memory state snapshot one last time so `status`
         // sees the final `last_activity` after a graceful SIGTERM.
@@ -313,10 +315,8 @@ impl Daemon {
     /// Cheap — early-exits on weekday/hour mismatch before any I/O. The
     /// underlying module guarantees one-fire-per-ISO-week via state.json.
     async fn check_and_run_briefing(&self) {
-        let bm = crate::modules::weekly_briefing::WeeklyBriefingModule::new(
-            &self.config,
-            &self.store,
-        );
+        let bm =
+            crate::modules::weekly_briefing::WeeklyBriefingModule::new(&self.config, &self.store);
         if !bm.should_run_now() {
             return;
         }
@@ -367,7 +367,9 @@ impl Daemon {
                 info!("Idle threshold reached, starting consolidation cycle");
                 // Abort if Claude Code session usage is over the warn threshold.
                 if self.check_usage_limit() {
-                    warn!("Usage over warn threshold — skipping automatic consolidation cycle. Trigger manually to override.");
+                    warn!(
+                        "Usage over warn threshold — skipping automatic consolidation cycle. Trigger manually to override."
+                    );
                     self.cycle_in_progress.store(false, Ordering::SeqCst);
                     return;
                 }
@@ -443,7 +445,9 @@ impl Daemon {
         };
 
         for project in projects.flatten() {
-            let Ok(sessions) = std::fs::read_dir(project.path()) else { continue };
+            let Ok(sessions) = std::fs::read_dir(project.path()) else {
+                continue;
+            };
             for session in sessions.flatten() {
                 let path = session.path();
                 if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -451,18 +455,23 @@ impl Daemon {
                 }
                 // Quick mtime check to skip files untouched in 7 days.
                 if let Ok(meta) = session.metadata()
-                    && let Ok(modified) = meta.modified() {
-                        let age = std::time::SystemTime::now()
-                            .duration_since(modified)
-                            .unwrap_or_default();
-                        if age.as_secs() > 7 * 86_400 + 3600 {
-                            continue;
-                        }
+                    && let Ok(modified) = meta.modified()
+                {
+                    let age = std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
+                    if age.as_secs() > 7 * 86_400 + 3600 {
+                        continue;
                     }
-                let Ok(content) = std::fs::read_to_string(&path) else { continue };
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
                 for line in content.lines() {
                     // Parse only assistant entries (they carry usage).
-                    let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                    let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
                     if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
                         continue;
                     }
@@ -528,17 +537,18 @@ impl Daemon {
 
     /// Run the full consolidation cycle, respecting budget and timeouts.
     async fn run_consolidation(&self) -> Result<()> {
-        let client = self
-            .client
-            .as_ref()
-            .context("API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli")?;
+        let client = self.client.as_ref().context(
+            "API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli",
+        )?;
 
         let mut budget = self.config.budget.max_tokens_per_cycle;
         let deadline = tokio::time::Instant::now()
             + Duration::from_secs(self.config.budget.max_runtime_minutes * 60);
 
-        info!("Starting consolidation (budget: {budget} tokens, deadline: {}min)",
-            self.config.budget.max_runtime_minutes);
+        info!(
+            "Starting consolidation (budget: {budget} tokens, deadline: {}min)",
+            self.config.budget.max_runtime_minutes
+        );
 
         // Phase 1: Dreaming (50% of budget)
         if self.config.modules.dreaming.enabled {
@@ -691,29 +701,60 @@ impl Daemon {
         }
 
         // D17 daemon-side weekly auto-prune (opt-in via config).
-        if self.config.modules.dreaming.auto_prune_weekly {
-            if let Err(e) = Self::weekly_auto_prune_patterns(&self.store) {
-                tracing::warn!("auto-prune (D17) failed: {e:#}");
-            }
+        if self.config.modules.dreaming.auto_prune_weekly
+            && let Err(e) = Self::weekly_auto_prune_patterns(&self.store)
+        {
+            tracing::warn!("auto-prune (D17) failed: {e:#}");
         }
 
         // D8 daemon-side — opt-in. Idempotent via Association.auto_intention_id
         // so re-running across cycles only acts on newly-eligible associations.
-        if self.config.modules.dreaming.auto_intentions_after_cycle {
-            if let Err(e) = self.cycle_auto_intentions() {
-                tracing::warn!("auto-intentions (D8) failed: {e:#}");
-            }
+        if self.config.modules.dreaming.auto_intentions_after_cycle
+            && let Err(e) = self.cycle_auto_intentions()
+        {
+            tracing::warn!("auto-intentions (D8) failed: {e:#}");
         }
 
         // D19 daemon-side — opt-in drift warnings. Just logs to tracing,
         // doesn't write any files. Surfaces in the daemon's normal log
         // stream so the user notices via existing observability.
-        if self.config.modules.dreaming.drift_warnings {
-            if let Err(e) = Self::cycle_drift_warnings(&self.store) {
-                tracing::warn!("drift check (D19) failed: {e:#}");
-            }
+        if self.config.modules.dreaming.drift_warnings
+            && let Err(e) = Self::cycle_drift_warnings(&self.store)
+        {
+            tracing::warn!("drift check (D19) failed: {e:#}");
         }
 
+        // M17 daemon-side — auto-snapshot. On by default. Lets
+        // `snapshot-diff` answer "what changed last cycle?" without
+        // any manual snapshot command. Bounded to most-recent 30.
+        if self.config.modules.dreaming.auto_snapshot_each_cycle
+            && let Err(e) = Self::cycle_auto_snapshot(&self.store)
+        {
+            tracing::warn!("auto-snapshot (M17) failed: {e:#}");
+        }
+
+        Ok(())
+    }
+
+    /// M17 daemon hook — write a snapshot, then trim to the most-recent 30.
+    /// Trimming uses filename sort order (filenames are rfc3339-ish stamps).
+    fn cycle_auto_snapshot(store: &Store) -> Result<()> {
+        const KEEP: usize = 30;
+        let _ = crate::graph_metrics::snapshot_for_diff(store)?;
+        let dir = store.path("dreams/snapshots");
+        if !dir.exists() {
+            return Ok(());
+        }
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect();
+        entries.sort();
+        if entries.len() > KEEP {
+            for old in &entries[..entries.len() - KEEP] {
+                let _ = std::fs::remove_file(old);
+            }
+        }
         Ok(())
     }
 
@@ -721,17 +762,26 @@ impl Daemon {
     /// threshold. Reuses ProspectiveModule::auto_promote_associations so the
     /// CLI and daemon paths share one implementation.
     fn cycle_auto_intentions(&self) -> Result<()> {
-        let mut associations: Vec<crate::modules::dreaming::Association> =
-            self.store.read_json("dreams/associations.json").unwrap_or_default();
-        let patterns: Vec<crate::modules::dreaming::ExtractedPattern> =
-            self.store.read_json("dreams/patterns.json").unwrap_or_default();
+        let mut associations: Vec<crate::modules::dreaming::Association> = self
+            .store
+            .read_json("dreams/associations.json")
+            .unwrap_or_default();
+        let patterns: Vec<crate::modules::dreaming::ExtractedPattern> = self
+            .store
+            .read_json("dreams/patterns.json")
+            .unwrap_or_default();
         let pm = crate::modules::prospective::ProspectiveModule::new(&self.config, &self.store);
         let threshold = self.config.modules.dreaming.auto_intention_threshold;
         let (created, _skipped) =
             pm.auto_promote_associations(&mut associations, &patterns, threshold, false)?;
         if created > 0 {
-            self.store.write_json("dreams/associations.json", &associations)?;
-            tracing::info!(created, threshold, "D8 daemon: promoted associations to intentions");
+            self.store
+                .write_json("dreams/associations.json", &associations)?;
+            tracing::info!(
+                created,
+                threshold,
+                "D8 daemon: promoted associations to intentions"
+            );
         }
         Ok(())
     }
@@ -745,31 +795,48 @@ impl Daemon {
             store.read_json("dreams/patterns.json").unwrap_or_default();
         let now = Utc::now();
         let cutoff_recent = now - Duration::days(7);
-        let cutoff_prior  = now - Duration::days(14);
-        let mut recent: std::collections::HashMap<&str, (f64, usize)> = std::collections::HashMap::new();
-        let mut prior:  std::collections::HashMap<&str, (f64, usize)> = std::collections::HashMap::new();
+        let cutoff_prior = now - Duration::days(14);
+        let mut recent: std::collections::HashMap<&str, (f64, usize)> =
+            std::collections::HashMap::new();
+        let mut prior: std::collections::HashMap<&str, (f64, usize)> =
+            std::collections::HashMap::new();
         for p in &patterns {
-            let Ok(ts) = DateTime::parse_from_rfc3339(&p.last_seen) else { continue };
+            let Ok(ts) = DateTime::parse_from_rfc3339(&p.last_seen) else {
+                continue;
+            };
             let ts = ts.with_timezone(&Utc);
-            let bucket = if ts >= cutoff_recent { Some(&mut recent) }
-                         else if ts >= cutoff_prior { Some(&mut prior) }
-                         else { None };
+            let bucket = if ts >= cutoff_recent {
+                Some(&mut recent)
+            } else if ts >= cutoff_prior {
+                Some(&mut prior)
+            } else {
+                None
+            };
             if let Some(b) = bucket {
                 let e = b.entry(p.category.as_str()).or_insert((0.0, 0));
-                e.0 += p.confidence; e.1 += 1;
+                e.0 += p.confidence;
+                e.1 += 1;
             }
         }
         for (cat, (sum_p, n_p)) in &prior {
-            if *n_p < 3 { continue }
+            if *n_p < 3 {
+                continue;
+            }
             let prior_avg = sum_p / *n_p as f64;
             let (sum_r, n_r) = recent.get(cat).copied().unwrap_or((0.0, 0));
-            if n_r < 3 { continue }
+            if n_r < 3 {
+                continue;
+            }
             let recent_avg = sum_r / n_r as f64;
             let rel_drop = (prior_avg - recent_avg) / prior_avg.max(1e-9);
             if rel_drop >= 0.10 {
                 tracing::warn!(
-                    category = cat, prior_avg, recent_avg,
-                    relative_drop = rel_drop, n_prior = n_p, n_recent = n_r,
+                    category = cat,
+                    prior_avg,
+                    recent_avg,
+                    relative_drop = rel_drop,
+                    n_prior = n_p,
+                    n_recent = n_r,
                     "D19: category-level confidence drift detected (≥10% week-over-week drop)",
                 );
             }
@@ -786,19 +853,29 @@ impl Daemon {
         use chrono::{DateTime, Datelike, Duration, Utc};
 
         #[derive(serde::Serialize, serde::Deserialize, Default)]
-        struct State { last_run_iso_week: String, last_run_ts: String, last_pruned: usize }
+        struct State {
+            last_run_iso_week: String,
+            last_run_ts: String,
+            last_pruned: usize,
+        }
 
         let now = Utc::now();
         let iso = now.iso_week();
         let this_week = format!("{}-W{:02}", iso.year(), iso.week());
-        let state: State = store.read_json("dreams/auto-prune-state.json").unwrap_or_default();
-        if state.last_run_iso_week == this_week { return Ok(()); }
+        let state: State = store
+            .read_json("dreams/auto-prune-state.json")
+            .unwrap_or_default();
+        if state.last_run_iso_week == this_week {
+            return Ok(());
+        }
 
         let cutoff = now - Duration::days(60);
         let all: Vec<crate::modules::dreaming::ExtractedPattern> =
             store.read_json("dreams/patterns.json").unwrap_or_default();
         let (to_prune, to_keep): (Vec<_>, Vec<_>) = all.into_iter().partition(|p| {
-            if p.confidence >= 0.40 { return false; }
+            if p.confidence >= 0.40 {
+                return false;
+            }
             let last_seen = DateTime::parse_from_rfc3339(&p.last_seen)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or(cutoff - Duration::days(1));
@@ -838,7 +915,9 @@ impl Daemon {
             .store
             .read_json("dreams/patterns.json")
             .unwrap_or_default();
-        if patterns.is_empty() { return; }
+        if patterns.is_empty() {
+            return;
+        }
         // Map project_id → max(last_seen) across its patterns.
         let mut latest: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
         for p in &patterns {
@@ -847,23 +926,30 @@ impl Daemon {
                     let ts_utc = ts.with_timezone(&chrono::Utc);
                     latest
                         .entry(proj.clone())
-                        .and_modify(|cur| { if ts_utc > *cur { *cur = ts_utc; } })
+                        .and_modify(|cur| {
+                            if ts_utc > *cur {
+                                *cur = ts_utc;
+                            }
+                        })
                         .or_insert(ts_utc);
                 }
             }
         }
-        let pbm = crate::modules::project_briefs::ProjectBriefsModule::new(
-            &self.config, &self.store);
+        let pbm =
+            crate::modules::project_briefs::ProjectBriefsModule::new(&self.config, &self.store);
         let mut regen = 0u32;
         for (proj, ts) in latest {
             let brief_path = self.store.path(&format!("dreams/project-briefs/{proj}.md"));
             // Regenerate if missing OR pattern activity is newer than the brief mtime.
-            let needs = !brief_path.exists() || std::fs::metadata(&brief_path)
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map(|sys| chrono::DateTime::<chrono::Utc>::from(sys) < ts)
-                .unwrap_or(true);
-            if !needs { continue; }
+            let needs = !brief_path.exists()
+                || std::fs::metadata(&brief_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|sys| chrono::DateTime::<chrono::Utc>::from(sys) < ts)
+                    .unwrap_or(true);
+            if !needs {
+                continue;
+            }
             match pbm.generate_for_project(client, &proj).await {
                 Ok((tokens, _)) => {
                     info!("D6 v2: regenerated brief for {proj} ({tokens} tokens)");
@@ -885,10 +971,9 @@ impl Daemon {
     /// trace files look structurally identical to a full-cycle trace on
     /// the dashboard.
     pub async fn run_dream(&self, phase: DreamPhase) -> Result<()> {
-        let client = self
-            .client
-            .as_ref()
-            .context("API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli")?;
+        let client = self.client.as_ref().context(
+            "API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli",
+        )?;
 
         // Check usage limits before spending API tokens. The CLI and menubar
         // both surface this as a warning rather than a hard block, but the
@@ -1131,11 +1216,21 @@ impl Daemon {
         }
 
         // Module health
-        let modules = ["dreams", "metacog", "valence", "introspection", "intentions"];
+        let modules = [
+            "dreams",
+            "metacog",
+            "valence",
+            "introspection",
+            "intentions",
+        ];
         out.push_str("\nModules:\n");
         for module in &modules {
             let dir = data_dir.join(module);
-            let status = if dir.exists() { "initialized" } else { "not initialized" };
+            let status = if dir.exists() {
+                "initialized"
+            } else {
+                "not initialized"
+            };
             out.push_str(&format!("  {module}: {status}\n"));
         }
 
@@ -1288,9 +1383,10 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // dreaming module can query sentiment trends independently of the
     // general event stream. Best-effort like the metacog activity write.
     if let HookEvent::UserSignal { .. } = &event
-        && let Err(e) = store.append_jsonl(SIGNALS_LOG, &record) {
-            warn!("Failed to write user signal to signals log: {e:#}");
-        }
+        && let Err(e) = store.append_jsonl(SIGNALS_LOG, &record)
+    {
+        warn!("Failed to write user signal to signals log: {e:#}");
+    }
 
     // D3 v2 (2026-05-01): if this user prompt is a correction and any
     // dream-spawned intention fired in the recent past, infer that the
@@ -1298,10 +1394,13 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // insight-feedback.jsonl. The next Wake cycle will apply it; per D3 v1,
     // confidence dropping below 0.2 then marks the source association
     // dismissed permanently.
-    if let HookEvent::UserSignal { correction: true, .. } = &event
-        && let Err(e) = auto_downvote_recently_fired_intentions(store) {
-            warn!("D3 v2 auto-downvote failed: {e:#}");
-        }
+    if let HookEvent::UserSignal {
+        correction: true, ..
+    } = &event
+        && let Err(e) = auto_downvote_recently_fired_intentions(store)
+    {
+        warn!("D3 v2 auto-downvote failed: {e:#}");
+    }
 
     // SessionStart is the only event that gets a non-empty response —
     // the hook script echoes whatever we write back into Claude's context.
@@ -1350,18 +1449,21 @@ fn auto_downvote_recently_fired_intentions(store: &Store) -> Result<()> {
     let fired: Vec<FiredRecord> = store
         .read_jsonl("intentions/fired.jsonl")
         .unwrap_or_default();
-    if fired.is_empty() { return Ok(()); }
+    if fired.is_empty() {
+        return Ok(());
+    }
     let cutoff = Utc::now() - chrono::Duration::minutes(WINDOW_MIN);
-    let recent: Vec<&FiredRecord> = fired
-        .iter()
-        .filter(|r| r.fired_at >= cutoff)
-        .collect();
-    if recent.is_empty() { return Ok(()); }
+    let recent: Vec<&FiredRecord> = fired.iter().filter(|r| r.fired_at >= cutoff).collect();
+    if recent.is_empty() {
+        return Ok(());
+    }
 
     let registry: Vec<Intention> = store
         .read_jsonl("intentions/registry.jsonl")
         .unwrap_or_default();
-    if registry.is_empty() { return Ok(()); }
+    if registry.is_empty() {
+        return Ok(());
+    }
 
     let intention_by_id: std::collections::HashMap<&str, &Intention> =
         registry.iter().map(|i| (i.id.as_str(), i)).collect();
@@ -1369,10 +1471,12 @@ fn auto_downvote_recently_fired_intentions(store: &Store) -> Result<()> {
     let now_ts = Utc::now().to_rfc3339();
     let mut downvoted = 0usize;
     for fired_record in &recent {
-        let Some(intent) = intention_by_id.get(fired_record.intention_id.as_str())
-            else { continue };
-        let Some(assoc_id) = intent.action.source.strip_prefix("dream-wake:")
-            else { continue };
+        let Some(intent) = intention_by_id.get(fired_record.intention_id.as_str()) else {
+            continue;
+        };
+        let Some(assoc_id) = intent.action.source.strip_prefix("dream-wake:") else {
+            continue;
+        };
         let entry = json!({
             "insight_id": assoc_id,
             "rating": "down",
@@ -1410,10 +1514,7 @@ fn auto_downvote_recently_fired_intentions(store: &Store) -> Result<()> {
 /// Returns an empty string when nothing is worth surfacing. An empty
 /// body is the correct no-op signal for the shell hook — it writes
 /// nothing into Claude's context.
-fn build_session_start_response(
-    store: &Store,
-    cwd: Option<&str>,
-) -> (String, Vec<String>, bool) {
+fn build_session_start_response(store: &Store, cwd: Option<&str>) -> (String, Vec<String>, bool) {
     let mut sections: Vec<String> = Vec::new();
     let mut surfaced_ids: Vec<String> = Vec::new();
     let mut has_introspection = false;
@@ -1424,8 +1525,7 @@ fn build_session_start_response(
         // generation needs config but read_for_cwd doesn't. Construct a
         // minimal stand-in: pass the same Store; the read path doesn't
         // touch config.
-        let id =
-            crate::modules::project_briefs::ProjectBriefsModule::encode_cwd(cwd_str);
+        let id = crate::modules::project_briefs::ProjectBriefsModule::encode_cwd(cwd_str);
         let path = store.path(&format!("dreams/project-briefs/{id}.md"));
         if let Ok(brief) = std::fs::read_to_string(&path) {
             let trimmed = brief.trim();
@@ -1511,8 +1611,8 @@ fn broadcast_intentions_section(store: &Store) -> Option<(String, Vec<String>)> 
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    if let Err(e) = std::fs::write(&tmp_path, &lines)
-        .and_then(|_| std::fs::rename(&tmp_path, &registry_path))
+    if let Err(e) =
+        std::fs::write(&tmp_path, &lines).and_then(|_| std::fs::rename(&tmp_path, &registry_path))
     {
         warn!("Failed to update intention fire counts: {e:#}");
     }
@@ -1630,7 +1730,10 @@ mod tests {
         // Verify persistence
         let records: Vec<HookEventRecord> = store.read_jsonl(EVENTS_LOG).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].event, HookEvent::SessionStart { ts: 42, cwd: None });
+        assert_eq!(
+            records[0].event,
+            HookEvent::SessionStart { ts: 42, cwd: None }
+        );
     }
 
     #[tokio::test]
@@ -1697,22 +1800,30 @@ mod tests {
 
         let records: Vec<HookEventRecord> = store.read_jsonl(EVENTS_LOG).unwrap();
         assert_eq!(records.len(), 4);
-        assert_eq!(records[0].event, HookEvent::SessionStart { ts: 100, cwd: None });
+        assert_eq!(
+            records[0].event,
+            HookEvent::SessionStart { ts: 100, cwd: None }
+        );
         assert_eq!(
             records[1].event,
-            HookEvent::ToolUse { tool: "Read".into(), ts: 101 }
+            HookEvent::ToolUse {
+                tool: "Read".into(),
+                ts: 101
+            }
         );
         assert_eq!(
             records[2].event,
-            HookEvent::ToolUse { tool: "Edit".into(), ts: 102 }
+            HookEvent::ToolUse {
+                tool: "Edit".into(),
+                ts: 102
+            }
         );
         assert_eq!(records[3].event, HookEvent::SessionEnd { ts: 103 });
 
         // Task #6: the two tool_use events should ALSO have been sampled
         // to metacog/activity.jsonl as real-time heartbeat records. The
         // session_start/session_end events must NOT appear there.
-        let activity: Vec<ToolActivitySample> =
-            store.read_jsonl(METACOG_ACTIVITY_LOG).unwrap();
+        let activity: Vec<ToolActivitySample> = store.read_jsonl(METACOG_ACTIVITY_LOG).unwrap();
         assert_eq!(
             activity.len(),
             2,
@@ -1757,13 +1868,14 @@ mod tests {
         let after = Utc::now();
         client.await.unwrap();
 
-        let samples: Vec<ToolActivitySample> =
-            store.read_jsonl(METACOG_ACTIVITY_LOG).unwrap();
+        let samples: Vec<ToolActivitySample> = store.read_jsonl(METACOG_ACTIVITY_LOG).unwrap();
         assert_eq!(samples.len(), 1, "tool_use must produce exactly one sample");
         assert_eq!(samples[0].tool, "Grep");
         assert_eq!(samples[0].hook_ts, 777);
-        assert!(samples[0].received_at >= before && samples[0].received_at <= after,
-            "received_at must be set to the daemon-side receive time");
+        assert!(
+            samples[0].received_at >= before && samples[0].received_at <= after,
+            "received_at must be set to the daemon-side receive time"
+        );
     }
 
     #[tokio::test]
@@ -1781,7 +1893,10 @@ mod tests {
         let client_path = socket_path.clone();
         let client = tokio::spawn(async move {
             let mut stream = UnixStream::connect(&client_path).await.unwrap();
-            stream.write_all(b"{\"event\":\"session_start\",\"ts\":1}\n").await.unwrap();
+            stream
+                .write_all(b"{\"event\":\"session_start\",\"ts\":1}\n")
+                .await
+                .unwrap();
             let mut buf = Vec::new();
             let _ = stream.read_to_end(&mut buf).await;
         });
@@ -1882,13 +1997,21 @@ mod tests {
             Priority::High,
             chrono::Duration::hours(-1),
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
         assert!(out.contains("# i-dream briefing"), "missing header: {out}");
-        assert!(out.contains("## Behavioral rules (1)"), "missing section: {out}");
+        assert!(
+            out.contains("## Behavioral rules (1)"),
+            "missing section: {out}"
+        );
         assert!(out.contains("[high]"), "missing priority tag: {out}");
-        assert!(out.contains("Update CHANGELOG for v0.5.0"), "missing message: {out}");
+        assert!(
+            out.contains("Update CHANGELOG for v0.5.0"),
+            "missing message: {out}"
+        );
     }
 
     #[test]
@@ -1901,7 +2024,9 @@ mod tests {
             Priority::Medium,
             chrono::Duration::hours(1),
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
         assert!(
@@ -1932,7 +2057,9 @@ mod tests {
             max_fires: 3,
             last_fired: None,
         };
-        store.append_jsonl("intentions/registry.jsonl", &event_intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &event_intention)
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
         assert!(
@@ -1947,18 +2074,24 @@ mod tests {
         // Insert in low → high → medium order; expected order in
         // output is high, medium, low.
         let ago = chrono::Duration::hours(-1);
-        store.append_jsonl(
-            "intentions/registry.jsonl",
-            &broadcast_intention("low-1", "Low thing", Priority::Low, ago),
-        ).unwrap();
-        store.append_jsonl(
-            "intentions/registry.jsonl",
-            &broadcast_intention("high-1", "High thing", Priority::High, ago),
-        ).unwrap();
-        store.append_jsonl(
-            "intentions/registry.jsonl",
-            &broadcast_intention("med-1", "Medium thing", Priority::Medium, ago),
-        ).unwrap();
+        store
+            .append_jsonl(
+                "intentions/registry.jsonl",
+                &broadcast_intention("low-1", "Low thing", Priority::Low, ago),
+            )
+            .unwrap();
+        store
+            .append_jsonl(
+                "intentions/registry.jsonl",
+                &broadcast_intention("high-1", "High thing", Priority::High, ago),
+            )
+            .unwrap();
+        store
+            .append_jsonl(
+                "intentions/registry.jsonl",
+                &broadcast_intention("med-1", "Medium thing", Priority::Medium, ago),
+            )
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
         let high_pos = out.find("High thing").expect("high missing");
@@ -1979,7 +2112,9 @@ mod tests {
             chrono::Duration::hours(-1),
         );
         expired.expires = Utc::now() - chrono::Duration::days(1);
-        store.append_jsonl("intentions/registry.jsonl", &expired).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &expired)
+            .unwrap();
 
         // Max-fired
         let mut maxed = broadcast_intention(
@@ -1990,7 +2125,9 @@ mod tests {
         );
         maxed.fire_count = 5;
         maxed.max_fires = 5;
-        store.append_jsonl("intentions/registry.jsonl", &maxed).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &maxed)
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
         assert!(
@@ -2018,12 +2155,17 @@ mod tests {
                 breadth_trend: "stable".into(),
             },
         };
-        store.write_json("introspection/patterns.json", &patterns).unwrap();
+        store
+            .write_json("introspection/patterns.json", &patterns)
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
         assert!(out.contains("## Self-awareness"), "missing section: {out}");
         assert!(out.contains("methodical search"), "missing strength: {out}");
-        assert!(out.contains("premature optimization"), "missing weakness: {out}");
+        assert!(
+            out.contains("premature optimization"),
+            "missing weakness: {out}"
+        );
         assert!(out.contains("file exists"), "missing assumption: {out}");
     }
 
@@ -2037,7 +2179,9 @@ mod tests {
             Priority::Medium,
             chrono::Duration::hours(-1),
         );
-        store.append_jsonl("intentions/registry.jsonl", &intention).unwrap();
+        store
+            .append_jsonl("intentions/registry.jsonl", &intention)
+            .unwrap();
 
         let patterns = ReasoningPatterns {
             last_updated: Utc::now(),
@@ -2055,11 +2199,19 @@ mod tests {
                 breadth_trend: "stable".into(),
             },
         };
-        store.write_json("introspection/patterns.json", &patterns).unwrap();
+        store
+            .write_json("introspection/patterns.json", &patterns)
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
-        assert!(out.contains("## Behavioral rules"), "missing behavioral rules: {out}");
-        assert!(out.contains("## Self-awareness"), "missing self-awareness: {out}");
+        assert!(
+            out.contains("## Behavioral rules"),
+            "missing behavioral rules: {out}"
+        );
+        assert!(
+            out.contains("## Self-awareness"),
+            "missing self-awareness: {out}"
+        );
         assert!(out.contains("Weekly review"));
         assert!(out.contains("incremental verification"));
     }
@@ -2068,14 +2220,18 @@ mod tests {
     fn session_start_response_returns_surfaced_intention_ids() {
         let (_dir, store) = mk_store();
         let ago = chrono::Duration::hours(-1);
-        store.append_jsonl(
-            "intentions/registry.jsonl",
-            &broadcast_intention("surf-a", "Rule A", Priority::High, ago),
-        ).unwrap();
-        store.append_jsonl(
-            "intentions/registry.jsonl",
-            &broadcast_intention("surf-b", "Rule B", Priority::Low, ago),
-        ).unwrap();
+        store
+            .append_jsonl(
+                "intentions/registry.jsonl",
+                &broadcast_intention("surf-a", "Rule A", Priority::High, ago),
+            )
+            .unwrap();
+        store
+            .append_jsonl(
+                "intentions/registry.jsonl",
+                &broadcast_intention("surf-b", "Rule B", Priority::Low, ago),
+            )
+            .unwrap();
 
         let (out, ids, has_intro) = build_session_start_response(&store, None);
         assert!(!out.is_empty());
@@ -2104,7 +2260,9 @@ mod tests {
                 breadth_trend: "stable".into(),
             },
         };
-        store.write_json("introspection/patterns.json", &patterns).unwrap();
+        store
+            .write_json("introspection/patterns.json", &patterns)
+            .unwrap();
 
         let (_out, ids, has_intro) = build_session_start_response(&store, None);
         assert!(ids.is_empty(), "no intentions → empty ids");
@@ -2131,7 +2289,9 @@ mod tests {
                 breadth_trend: "stable".into(),
             },
         };
-        store.write_json("introspection/patterns.json", &patterns).unwrap();
+        store
+            .write_json("introspection/patterns.json", &patterns)
+            .unwrap();
 
         let (out, _, _) = build_session_start_response(&store, None);
         assert!(
@@ -2332,7 +2492,11 @@ mod tests {
 
     use crate::modules::dreaming::{Association, ExtractedPattern};
 
-    fn make_pattern(id: &str, conf: f64, last_seen: chrono::DateTime<chrono::Utc>) -> ExtractedPattern {
+    fn make_pattern(
+        id: &str,
+        conf: f64,
+        last_seen: chrono::DateTime<chrono::Utc>,
+    ) -> ExtractedPattern {
         ExtractedPattern {
             id: id.into(),
             pattern: format!("test pattern {id}"),
@@ -2368,9 +2532,9 @@ mod tests {
         let recent = now - chrono::Duration::days(5);
         let dormant = now - chrono::Duration::days(90);
         let patterns = vec![
-            make_pattern("keep-recent", 0.30, recent),     // dormant rule fails → keep
+            make_pattern("keep-recent", 0.30, recent), // dormant rule fails → keep
             make_pattern("keep-confident", 0.80, dormant), // confidence rule fails → keep
-            make_pattern("prune-me",  0.20, dormant),       // both rules trigger → prune
+            make_pattern("prune-me", 0.20, dormant),   // both rules trigger → prune
         ];
         store.write_json("dreams/patterns.json", &patterns).unwrap();
 
@@ -2405,7 +2569,9 @@ mod tests {
 
         let now = chrono::Utc::now();
         let pat = make_pattern("p1", 0.95, now);
-        store.write_json("dreams/patterns.json", &vec![pat]).unwrap();
+        store
+            .write_json("dreams/patterns.json", &vec![pat])
+            .unwrap();
         let assoc = Association {
             id: "a1".into(),
             patterns_linked: vec!["p1".into()],
@@ -2417,25 +2583,31 @@ mod tests {
             dismissed: false,
             auto_intention_id: None,
         };
-        store.write_json("dreams/associations.json", &vec![assoc]).unwrap();
+        store
+            .write_json("dreams/associations.json", &vec![assoc])
+            .unwrap();
 
         let daemon = mk_daemon_with_store(store.clone());
 
         // First call promotes.
         daemon.cycle_auto_intentions().unwrap();
         let after1: Vec<Association> = store.read_json("dreams/associations.json").unwrap();
-        assert!(after1[0].auto_intention_id.is_some(),
-            "first call should set auto_intention_id");
+        assert!(
+            after1[0].auto_intention_id.is_some(),
+            "first call should set auto_intention_id"
+        );
         let intentions_count_1 = store
             .read_jsonl::<crate::modules::prospective::Intention>("intentions/registry.jsonl")
-            .unwrap_or_default().len();
+            .unwrap_or_default()
+            .len();
         assert_eq!(intentions_count_1, 1);
 
         // Second call is a no-op — auto_intention_id already set.
         daemon.cycle_auto_intentions().unwrap();
         let intentions_count_2 = store
             .read_jsonl::<crate::modules::prospective::Intention>("intentions/registry.jsonl")
-            .unwrap_or_default().len();
+            .unwrap_or_default()
+            .len();
         assert_eq!(intentions_count_2, 1, "second call must not duplicate");
     }
 }

@@ -241,8 +241,8 @@ fn config_without_file_prints_defaults() {
         .clone();
 
     let rendered = String::from_utf8(output).unwrap();
-    let parsed: toml::Value = toml::from_str(&rendered)
-        .expect("`i-dream config` output must be valid TOML");
+    let parsed: toml::Value =
+        toml::from_str(&rendered).expect("`i-dream config` output must be valid TOML");
     // Check a couple of sentinel keys from the default config.
     assert!(parsed.get("daemon").is_some(), "missing [daemon] section");
     assert!(parsed.get("budget").is_some(), "missing [budget] section");
