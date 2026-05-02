@@ -7803,6 +7803,33 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }.count
     }
 
+    /// D8 polish — count intentions auto-promoted in the last 7 days.
+    /// Detected by `action.source` starting with "D8 auto-promote" (the
+    /// label set in ProspectiveModule::auto_promote_associations) and
+    /// `created` within the past week. Lets the widget surface
+    /// "12 auto-promoted this week" so the user sees the daemon's
+    /// background work without opening the dashboard.
+    private func recentlyAutoPromotedCount() -> Int {
+        let path = subDir + "/intentions/registry.jsonl"
+        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return 0 }
+        let weekAgo = Date().addingTimeInterval(-7 * 24 * 3600)
+        return content.components(separatedBy: "\n").filter { line in
+            guard !line.isEmpty,
+                  let data   = line.data(using: .utf8),
+                  let json   = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            // action.source is the provenance label from D8.
+            guard let action = json["action"] as? [String: Any],
+                  let source = action["source"] as? String,
+                  source.hasPrefix("D8 auto-promote")
+            else { return false }
+            // Field is `created` in the on-disk schema (not `created_at`).
+            guard let created = json["created"] as? String,
+                  let createdDate = isoDate(created) else { return false }
+            return createdDate >= weekAgo
+        }.count
+    }
+
     private func updateHUDContent(_ tv: NSTextView) {
         let dot: String     = isCycling ? "◉" : cachedRunning ? "◉" : "○"
         let dotColor: NSColor = isCycling ? dreamAnimColors[animFrame % dreamAnimColors.count]
@@ -7914,7 +7941,15 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let intentCount = activeIntentionsCount()
         if intentCount > 0 {
             label("intentions  ")
-            value("\(intentCount) active\n")
+            // D8 polish — surface auto-promoted-this-week count next to
+            // active total so the user sees the daemon's background work.
+            let autoCount = recentlyAutoPromotedCount()
+            if autoCount > 0 {
+                value("\(intentCount) active  ")
+                value("(+\(autoCount) auto/wk)\n", color: .systemGreen)
+            } else {
+                value("\(intentCount) active\n")
+            }
         }
 
         // ── Line 7b: dreams today + avg tokens / cycle (filtered range) ───────
