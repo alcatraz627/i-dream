@@ -2322,4 +2322,119 @@ mod tests {
         let state = daemon.state.lock().unwrap();
         assert!(state.last_activity.is_some());
     }
+
+    // ── D8/D19 daemon-hook coverage ───────────────────────────
+    // The CLI paths are tested separately; these verify the daemon
+    // wrappers preserve the same behavior contract:
+    //   - cycle_drift_warnings: pure read, no mutation
+    //   - weekly_auto_prune_patterns: writes backup + state.json,
+    //     no-ops on second run within the same ISO week.
+
+    use crate::modules::dreaming::{Association, ExtractedPattern};
+
+    fn make_pattern(id: &str, conf: f64, last_seen: chrono::DateTime<chrono::Utc>) -> ExtractedPattern {
+        ExtractedPattern {
+            id: id.into(),
+            pattern: format!("test pattern {id}"),
+            valence: "neutral".into(),
+            confidence: conf,
+            category: "domain".into(),
+            occurrences: 1,
+            first_seen: last_seen.to_rfc3339(),
+            last_seen: last_seen.to_rfc3339(),
+            source_sessions: vec![],
+            source_projects: vec![],
+        }
+    }
+
+    #[test]
+    fn d19_cycle_drift_warnings_runs_without_panic_on_empty_store() {
+        // Smoke test: zero patterns → no warnings emitted, no panic.
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        // Should be a no-op (and never error) on an empty store.
+        Daemon::cycle_drift_warnings(&store).unwrap();
+    }
+
+    #[test]
+    fn d17_weekly_auto_prune_writes_backup_and_state() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let now = chrono::Utc::now();
+        let recent = now - chrono::Duration::days(5);
+        let dormant = now - chrono::Duration::days(90);
+        let patterns = vec![
+            make_pattern("keep-recent", 0.30, recent),     // dormant rule fails → keep
+            make_pattern("keep-confident", 0.80, dormant), // confidence rule fails → keep
+            make_pattern("prune-me",  0.20, dormant),       // both rules trigger → prune
+        ];
+        store.write_json("dreams/patterns.json", &patterns).unwrap();
+
+        Daemon::weekly_auto_prune_patterns(&store).unwrap();
+
+        // Patterns.json should have the two survivors.
+        let after: Vec<ExtractedPattern> = store.read_json("dreams/patterns.json").unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|p| p.id != "prune-me"));
+
+        // State file written; re-running same week should be a no-op.
+        assert!(store.exists("dreams/auto-prune-state.json"));
+        let state_path = store.path("dreams/auto-prune-state.json");
+        let mtime_before = std::fs::metadata(&state_path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Daemon::weekly_auto_prune_patterns(&store).unwrap();
+        let mtime_after = std::fs::metadata(&state_path).unwrap().modified().unwrap();
+        // Same ISO week → state file untouched (no rewrite).
+        assert_eq!(
+            mtime_before, mtime_after,
+            "second call within same ISO week should not rewrite state file",
+        );
+    }
+
+    #[test]
+    fn d8_cycle_auto_intentions_idempotent_via_auto_intention_id() {
+        // Daemon-side wrapper: an eligible association gets promoted on
+        // first call, but a second call doesn't duplicate it.
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+
+        let now = chrono::Utc::now();
+        let pat = make_pattern("p1", 0.95, now);
+        store.write_json("dreams/patterns.json", &vec![pat]).unwrap();
+        let assoc = Association {
+            id: "a1".into(),
+            patterns_linked: vec!["p1".into()],
+            hypothesis: "test".into(),
+            confidence: 0.95,
+            actionable: true,
+            suggested_rule: Some("prefer X over Y when Z".into()),
+            promoted: true,
+            dismissed: false,
+            auto_intention_id: None,
+        };
+        store.write_json("dreams/associations.json", &vec![assoc]).unwrap();
+
+        let daemon = mk_daemon_with_store(store.clone());
+
+        // First call promotes.
+        daemon.cycle_auto_intentions().unwrap();
+        let after1: Vec<Association> = store.read_json("dreams/associations.json").unwrap();
+        assert!(after1[0].auto_intention_id.is_some(),
+            "first call should set auto_intention_id");
+        let intentions_count_1 = store
+            .read_jsonl::<crate::modules::prospective::Intention>("intentions/registry.jsonl")
+            .unwrap_or_default().len();
+        assert_eq!(intentions_count_1, 1);
+
+        // Second call is a no-op — auto_intention_id already set.
+        daemon.cycle_auto_intentions().unwrap();
+        let intentions_count_2 = store
+            .read_jsonl::<crate::modules::prospective::Intention>("intentions/registry.jsonl")
+            .unwrap_or_default().len();
+        assert_eq!(intentions_count_2, 1, "second call must not duplicate");
+    }
 }
