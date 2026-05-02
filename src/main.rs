@@ -220,6 +220,122 @@ async fn main() -> Result<()> {
             println!("{}", toml::to_string_pretty(&config)?);
         }
 
+        Command::SnapshotDiff { from, to, shift_threshold } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+
+            #[derive(serde::Deserialize)]
+            struct Snap {
+                ts: String,
+                patterns: Vec<modules::dreaming::ExtractedPattern>,
+                associations: Vec<modules::dreaming::Association>,
+            }
+
+            // Resolve a snapshot reference to a path. Bare timestamp →
+            // dreams/snapshots/<ts>.json; full path → use as-is.
+            let resolve = |s: &str| -> std::path::PathBuf {
+                if std::path::Path::new(s).is_file() {
+                    std::path::PathBuf::from(s)
+                } else {
+                    store.path(&format!("dreams/snapshots/{}.json", s))
+                }
+            };
+
+            // If --from / --to omitted, list snapshots and pick the two
+            // most recent (by filename, which is rfc3339-ish).
+            let snaps_dir = store.path("dreams/snapshots");
+            let mut all_snaps: Vec<std::path::PathBuf> = if snaps_dir.exists() {
+                std::fs::read_dir(&snaps_dir)?
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|e| e == "json"))
+                    .collect()
+            } else { Vec::new() };
+            all_snaps.sort();
+
+            let from_path = match from {
+                Some(s) => resolve(&s),
+                None => {
+                    if all_snaps.len() < 2 {
+                        anyhow::bail!("Need ≥2 snapshots in dreams/snapshots/ (found {}). Run `i-dream graph-metrics --snapshot` to create one.", all_snaps.len());
+                    }
+                    all_snaps[all_snaps.len() - 2].clone()
+                }
+            };
+            let to_path = match to {
+                Some(s) => resolve(&s),
+                None => {
+                    if all_snaps.is_empty() {
+                        anyhow::bail!("No snapshots in dreams/snapshots/.");
+                    }
+                    all_snaps[all_snaps.len() - 1].clone()
+                }
+            };
+            if !from_path.exists() { anyhow::bail!("Snapshot not found: {}", from_path.display()); }
+            if !to_path.exists()   { anyhow::bail!("Snapshot not found: {}", to_path.display()); }
+
+            let from_snap: Snap = serde_json::from_slice(&std::fs::read(&from_path)?)?;
+            let to_snap:   Snap = serde_json::from_slice(&std::fs::read(&to_path)?)?;
+
+            // Build id→pattern lookups for both sides.
+            let from_p: std::collections::HashMap<&str, &modules::dreaming::ExtractedPattern> =
+                from_snap.patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+            let to_p: std::collections::HashMap<&str, &modules::dreaming::ExtractedPattern> =
+                to_snap.patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+            let from_a: std::collections::HashSet<&str> =
+                from_snap.associations.iter().map(|a| a.id.as_str()).collect();
+            let to_a: std::collections::HashSet<&str> =
+                to_snap.associations.iter().map(|a| a.id.as_str()).collect();
+
+            let added: Vec<_> = to_p.iter().filter(|(id, _)| !from_p.contains_key(*id)).collect();
+            let removed: Vec<_> = from_p.iter().filter(|(id, _)| !to_p.contains_key(*id)).collect();
+            let mut shifted: Vec<(&str, f64, f64)> = Vec::new();
+            for (id, p_to) in &to_p {
+                if let Some(p_from) = from_p.get(id) {
+                    let delta = p_to.confidence - p_from.confidence;
+                    if delta.abs() >= shift_threshold {
+                        shifted.push((id, p_from.confidence, p_to.confidence));
+                    }
+                }
+            }
+            shifted.sort_by(|a, b| (b.2 - b.1).abs().partial_cmp(&(a.2 - a.1).abs()).unwrap());
+
+            let added_a = to_a.difference(&from_a).count();
+            let removed_a = from_a.difference(&to_a).count();
+
+            println!("Snapshot diff");
+            println!("  from: {} ({})", from_path.file_name().unwrap_or_default().to_string_lossy(), from_snap.ts);
+            println!("  to:   {} ({})", to_path.file_name().unwrap_or_default().to_string_lossy(), to_snap.ts);
+            println!();
+            println!("Patterns: +{} added · -{} removed · {} shifted (≥{:.2} confidence delta)",
+                     added.len(), removed.len(), shifted.len(), shift_threshold);
+            println!("Associations: +{} added · -{} removed", added_a, removed_a);
+            if !added.is_empty() {
+                println!("\n+ Added patterns:");
+                for (id, p) in added.iter().take(10) {
+                    let snip = p.pattern.chars().take(72).collect::<String>();
+                    println!("    [{:.2}] {} — {} ({})", p.confidence, p.category, snip, &id[..8.min(id.len())]);
+                }
+                if added.len() > 10 { println!("    … +{} more", added.len() - 10); }
+            }
+            if !removed.is_empty() {
+                println!("\n- Removed patterns:");
+                for (id, p) in removed.iter().take(10) {
+                    let snip = p.pattern.chars().take(72).collect::<String>();
+                    println!("    [{:.2}] {} — {} ({})", p.confidence, p.category, snip, &id[..8.min(id.len())]);
+                }
+                if removed.len() > 10 { println!("    … +{} more", removed.len() - 10); }
+            }
+            if !shifted.is_empty() {
+                println!("\n~ Shifted patterns (top 10 by |Δconfidence|):");
+                for (id, c_from, c_to) in shifted.iter().take(10) {
+                    let p = to_p.get(id).copied();
+                    let cat = p.map(|p| p.category.as_str()).unwrap_or("?");
+                    let snip = p.map(|p| p.pattern.chars().take(60).collect::<String>()).unwrap_or_default();
+                    println!("    {:.2} → {:.2}  ({:+.2})  {} — {}", c_from, c_to, c_to - c_from, cat, snip);
+                }
+            }
+        }
+
         Command::Drift { threshold, json } => {
             use chrono::{DateTime, Duration, Utc};
             let config = config::Config::load(&cli.config)?;

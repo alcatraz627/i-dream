@@ -127,6 +127,26 @@ pub enum Command {
         action: WidgetAction,
     },
 
+    /// M17 — diff two patterns-graph snapshots written by
+    /// `graph-metrics --snapshot`. Reports added / removed / shifted
+    /// patterns and associations between the two timestamps. Use to
+    /// answer "what did the most recent dream cycle actually change?"
+    SnapshotDiff {
+        /// First snapshot — accepts a bare timestamp like "20260502T143000"
+        /// (matches a file in dreams/snapshots/) or a full path. If
+        /// omitted, defaults to the second-most-recent snapshot.
+        #[arg(long)]
+        from: Option<String>,
+        /// Second snapshot. If omitted, defaults to the most-recent
+        /// snapshot in dreams/snapshots/.
+        #[arg(long)]
+        to: Option<String>,
+        /// Confidence shift threshold (absolute). Patterns whose
+        /// confidence moved by less than this are not reported as shifts.
+        #[arg(long, default_value_t = 0.05)]
+        shift_threshold: f64,
+    },
+
     /// D19 — detect category-level confidence drift week-over-week.
     /// Compares average confidence per category for the last 7 days vs
     /// the prior 7 days; reports any categories where the drop exceeds
