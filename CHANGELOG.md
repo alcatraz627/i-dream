@@ -4,6 +4,36 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-02 D11 v2 + M17 + daemon test coverage + clippy/fmt sweep
+
+Follow-on to v0.4.0. Three new features (D11 v2 schema, M17 snapshot diff, M17 daemon hook), one widget polish, plus daemon-side test coverage for the cycle hooks added in 0.4.0 and a clippy/fmt sweep across the tree.
+
+### Added
+
+- **D11 v2 — Per-pattern occurrence sparkline.** Schema migration adds `ExtractedPattern.occurrence_history: Vec<String>` (`#[serde(default)]`, capped at 50 most-recent timestamps per pattern). SWS merge path appends `now()` on every bump. Dashboard renders a 96×16 inline SVG bar chart in the pattern detail panel, bucketed into 14 daily UTC buckets with today tinted green. Patterns with all-zero history (legacy or single-observation) suppress the sparkline.
+- **M17 — Snapshot diff.** New `i-dream snapshot-diff [--from <ts|path>] [--to <ts|path>] [--shift-threshold 0.05]`. Compares two graph snapshots and reports added / removed / shifted patterns + added / removed associations. Without `--from/--to` defaults to the two most-recent snapshots — answers "what changed last cycle?" with no arguments. Output sorted by `|Δconfidence|` for shifts.
+- **M17 daemon-side auto-snapshot** (`modules.dreaming.auto_snapshot_each_cycle`, **default `true`**). After every consolidation cycle the daemon writes a snapshot via `graph_metrics::snapshot_for_diff` and prunes the directory to the most recent 30. Disk cost ~50KB/snapshot × 30 = ~1.5MB ceiling. Default-on because observability has no behavioral side-effects.
+- **D8 widget polish — auto-promoted intentions count.** When the daemon's D8 hook is on, the menubar HUD now surfaces "+N auto/wk" next to the active intentions count, tinted `.systemGreen`. Detected via `action.source` provenance label set in `auto_promote_associations`. Suppresses when count is 0.
+
+### Tests
+
+3 new daemon-side tests covering D8/D17/D19 cycle hooks (`d19_cycle_drift_warnings_runs_without_panic_on_empty_store`, `d17_weekly_auto_prune_writes_backup_and_state`, `d8_cycle_auto_intentions_idempotent_via_auto_intention_id`). 286 → 289 tests pass.
+
+### Code quality
+
+- `cargo clippy --fix` swept 8 files (auto-applicable lints only)
+- `cargo fmt --all` normalized whitespace across the tree
+- 15 → 11 remaining warnings; the 11 are intentional (`dead_code` on scaffolded helpers, `type_complexity` on deep generic chains, `too_many_arguments` on a builder)
+
+### Schema migrations
+
+Both additive, both `#[serde(default)]`:
+
+- `ExtractedPattern.occurrence_history: Vec<String>` (D11 v2) — capped at 50 most-recent timestamps
+- `DreamingConfig.auto_snapshot_each_cycle: bool` (M17 daemon) — defaults to `true` via `default_true()`
+
+---
+
 ## [0.4.0] — 2026-05-02 M9/M11/M14/M15 graph polish + D8/D11/D17/D19 dreaming maturity
 
 A 10-feature batch covering both the dashboard (visual polish, exports, keyboard discoverability, right-click actions) and the dreaming pipeline (community detection, drift monitoring, auto-promotion, dormancy pruning). No breaking changes to on-disk formats — all schema additions use `#[serde(default)]` so existing data deserializes cleanly.
