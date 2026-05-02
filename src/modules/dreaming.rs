@@ -45,7 +45,20 @@ pub struct ExtractedPattern {
     pub occurrences: u64,
     pub first_seen: String,
     pub last_seen: String,
+    /// D11 v2 (2026-05-02) — per-occurrence timestamps. Each merge bump
+    /// appends now() to this list (capped at the most recent 50 entries
+    /// to keep patterns.json size bounded). Lets the dashboard render a
+    /// real per-pattern frequency sparkline instead of an interpolated
+    /// (first_seen, last_seen) line. `#[serde(default)]` so legacy
+    /// patterns without the field deserialize as an empty history.
+    #[serde(default)]
+    pub occurrence_history: Vec<String>,
 }
+
+/// D11 v2 — cap occurrence_history at 50 most-recent entries. Keeps
+/// patterns.json bounded; 50 timestamps × ~30 bytes = 1.5KB worst-case
+/// per pattern, vs unbounded growth otherwise.
+const OCCURRENCE_HISTORY_CAP: usize = 50;
 
 /// A creative association discovered during REM phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +462,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                             occurrences: 1,
                             first_seen: now.clone(),
                             last_seen: now.clone(),
+                            occurrence_history: vec![now.clone()],
                         });
                     }
                 }
@@ -485,6 +499,12 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                 // Merge: bump occurrence counter and refresh last_seen.
                 all[idx].occurrences += 1;
                 all[idx].last_seen = now_str.clone();
+                // D11 v2: append to the per-occurrence history, capped.
+                all[idx].occurrence_history.push(now_str.clone());
+                let len = all[idx].occurrence_history.len();
+                if len > OCCURRENCE_HISTORY_CAP {
+                    all[idx].occurrence_history.drain(..(len - OCCURRENCE_HISTORY_CAP));
+                }
                 // Absorb confidence if this observation is more confident.
                 if p.confidence > all[idx].confidence {
                     all[idx].confidence = p.confidence;

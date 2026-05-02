@@ -409,6 +409,11 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
         let d = *deg.get(p.id.as_str()).unwrap_or(&0);
         let community = communities.get(&p.id).and_then(|c| c.as_ref());
         let community_idx = community.and_then(|c| comm_index.get(c)).copied();
+        // D11 v2 — bucket occurrence_history into 14 daily buckets for
+        // a per-pattern sparkline. Patterns without history (legacy or
+        // single-observation) get an all-zero array; the renderer hides
+        // the sparkline entirely in that case.
+        let history_14d = bucket_occurrence_history_14d(&p.occurrence_history);
         nodes_json.push(json!({
             "id": p.id,
             "kind": "pattern",
@@ -421,6 +426,7 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
             "projects": p.source_projects,
             "community": community,
             "community_idx": community_idx,
+            "history_14d": history_14d,
         }));
     }
     for a in &associations {
@@ -517,6 +523,26 @@ fn build_patterns_graph_payload(store: &Store) -> Option<String> {
         "n_associations": associations.len(),
     });
     Some(payload.to_string())
+}
+
+/// D11 v2 — bucket per-occurrence timestamps into 14 daily buckets,
+/// returning today as the rightmost. Patterns with no history return all
+/// zeros. Used for the per-pattern hover sparkline in the dashboard.
+fn bucket_occurrence_history_14d(history: &[String]) -> Vec<u64> {
+    use chrono::{DateTime, Duration, NaiveDate, Utc};
+    let today = Utc::now().date_naive();
+    let start = today - Duration::days(13); // 14-day inclusive window
+    let mut buckets = vec![0u64; 14];
+    for ts in history {
+        let Ok(dt) = DateTime::parse_from_rfc3339(ts) else { continue };
+        let d = dt.with_timezone(&Utc).date_naive();
+        if d < start || d > today { continue }
+        let idx = (d - start).num_days() as usize;
+        if idx < buckets.len() { buckets[idx] += 1; }
+    }
+    // Return None equivalent only if every bucket is zero.
+    let _ = NaiveDate::from_ymd_opt; // silence unused import warning when dead
+    buckets
 }
 
 /// D11 — bucket pattern.first_seen timestamps into one count per UTC day,
@@ -2640,11 +2666,39 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
   function escapeHtml(s) {{
     return String(s).replace(/[&<>"']/g, (c) => ({{ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }}[c]));
   }}
+  // D11 v2 — render a 14-day per-pattern sparkline as inline SVG.
+  // Returns '' for patterns with no occurrence history (the field exists
+  // but is all zeros — legacy patterns or single-observation ones).
+  function renderPatternSparkline(arr) {{
+    if (!Array.isArray(arr) || arr.length === 0) return '';
+    var max = Math.max.apply(null, arr.concat([1]));
+    if (max === 0) return ''; // genuinely no history → suppress
+    var W = 96, H = 16, n = arr.length, bw = W / n;
+    var bars = '';
+    for (var i = 0; i < n; i++) {{
+      var v = arr[i];
+      var h = max > 0 ? (v / max) * (H - 1) : 0;
+      var color = i === n - 1 ? '#3ddc84' : '#5b8def';
+      var op = v === 0 ? 0.2 : 1;
+      bars += '<rect x="' + (i * bw + 0.2).toFixed(2) +
+              '" y="' + (H - h).toFixed(2) +
+              '" width="' + (bw - 0.4).toFixed(2) +
+              '" height="' + h.toFixed(2) +
+              '" fill="' + color +
+              '" opacity="' + op + '"></rect>';
+    }}
+    return '<svg width="' + W + '" height="' + H +
+           '" viewBox="0 0 ' + W + ' ' + H +
+           '" style="vertical-align:middle;margin-left:6px" preserveAspectRatio="none">' +
+           '<title>Last 14 days of occurrences</title>' + bars + '</svg>';
+  }}
+
   function renderDetail(d) {{
     const conf = (d.confidence != null) ? Math.round(d.confidence * 100) + '%' : '—';
     if (d.kind === 'pattern') {{
       const proj = (d.projects || []).join(', ') || '—';
-      return '<strong>Pattern</strong> &middot; ' + escapeHtml(d.category) + ' &middot; ' + conf + ' &middot; degree ' + d.degree
+      const spark = renderPatternSparkline(d.history_14d);
+      return '<strong>Pattern</strong> &middot; ' + escapeHtml(d.category) + ' &middot; ' + conf + ' &middot; degree ' + d.degree + spark
            + '<br><span class="muted">' + escapeHtml(d.label) + '</span>'
            + '<br><span class="muted">Projects: ' + escapeHtml(proj) + '</span>';
     }} else {{

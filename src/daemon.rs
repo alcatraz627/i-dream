@@ -2344,6 +2344,7 @@ mod tests {
             last_seen: last_seen.to_rfc3339(),
             source_sessions: vec![],
             source_projects: vec![],
+            occurrence_history: vec![],
         }
     }
 
