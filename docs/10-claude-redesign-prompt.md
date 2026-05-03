@@ -2,6 +2,11 @@
 
 > **Last refreshed:** 2026-05-03 (post-v0.4.1). Both prompts have been updated to reflect the 19 features shipped across v0.3.0 → v0.4.1, including M9–M17 graph-side polish and D8/D11/D17/D19 dreaming maturity. Re-read before pasting if you haven't seen the project recently.
 
+> **Active Claude Design project (Patterns Graph section, started 2026-05-03):**
+> https://claude.ai/design/p/019de36f-b838-787c-b1b8-fc95463e679f
+>
+> See the [FAQ at the end](#faq--first-clarifying-round-from-the-design-agent) for the design agent's first round of clarifying questions and the answers used to drive iteration 1.
+
 Two prompts, pick one. **Claude Design (Anthropic Labs, launched 2026-04-17)** is the right choice if you have Pro/Max/Team/Enterprise — it can point at the repo, extract a design system from existing code, and produce interactive prototypes. **Claude.ai chat** is the fallback if you don't have Design access.
 
 | Tool | Best when | Output you'll get |
@@ -440,3 +445,142 @@ Three reasons:
 3. Separating "design direction" (Claude.ai) from "implementation" (this session) keeps both crisp — design decisions don't get lost in commit logs, and implementation doesn't get diluted by design debate
 
 The output of that conversation becomes a **single implementation brief** that I can execute against deterministically.
+
+---
+
+## FAQ — first clarifying round from the design agent
+
+> Captured 2026-05-03 from the active Claude Design project [019de36f](https://claude.ai/design/p/019de36f-b838-787c-b1b8-fc95463e679f) after presenting the Patterns Graph redesign brief. The agent committed to **Option A — calm, dense, technical** (the only style direction that doesn't fight the existing terminal-adjacent / Linear-meets-htop visual DNA in the rest of the dashboard) and asked these 11 questions before cutting HTML. Answers below are the source of truth for iteration 1; if you re-open the project later, paste this section into the chat to re-anchor.
+
+### 1. Are there any visual conventions in the implementation that screenshots wouldn't surface?
+
+Three pieces of chrome adjacent to the section that aren't always visible in screenshots:
+
+- **Right-click context menu (M14)** — opens an NSMenu-style native menu over the canvas with three items: "Export as CLAUDE.md guideline…", "Export as hook scaffold…", "Copy pattern text". Default macOS chrome (no custom skin), but the *items* should match the section's tone — currently the labels read like file menu entries ("Export as…").
+- **Export button (M11)** — no modal, just triggers a Blob download of `i-dream-patterns-graph-YYYY-MM-DD.html`. Single-step, no UI surface.
+- **Saved views (M16)** — the "+ Save view" button uses native `prompt()` for the name. Also no custom UI surface yet. The dropdown is a plain `<select>` with options like `▾ Saved views (3)` then named entries then `✕ Delete: name` entries below a `──────` separator.
+
+Source for all of this lives in `src/dashboard.rs` lines ~2207–2580. Worth having that file open as a second tab while iterating.
+
+### 2. What viewport widths does this section target?
+
+- **Primary**: embedded in the dashboard window, ~960px wide.
+- **Secondary**: the standalone export (M11) opens in a fresh browser tab and can be any width.
+- **Mobile breakpoint**: `@media (max-width: 900px)` collapses the grid to single column (`.pg-grid { grid-template-columns: 1fr; }`). Above 900px, layout is `grid-template-columns: minmax(0,1fr) 280px` — canvas takes the rest, hubs sidebar fixed at 280px.
+- **Canvas height**: hard-coded 560px. Don't reflow that in the redesign — it's load-bearing for the inline wedge layout math.
+
+### 3. 30-day sparkline data shape
+
+- **Always 30 buckets**, one per day. Fixed.
+- **Today** = today's UTC day; the rightmost bar is today, leftmost is 29 days ago.
+- **Zero-days** are drawn as empty slots with `opacity: 0.25` (faded), not skipped — the rhythm needs to stay consistent so the user can read absolute days from position.
+- **Source**: bucketed from `pattern.first_seen` (NOT `last_seen`), so the sparkline measures *new pattern arrivals*, not re-observations. Real recent values: `[...,0,21,16,9,0,0,19,59,22,37]`.
+
+### 4. Saved views — what's persisted?
+
+Currently saved (per view, in localStorage key `i-dream-pg-views`):
+
+```
+{ edgeMode, actionableOnly, colorByCommunity, focusedId, savedAt }
+```
+
+NOT persisted: viewport / zoom (Sigma's camera state), saved-view ordering, sparkline timestamp. Sigma's camera defaults to "fit graph" on load, so re-opening a view starts at the natural zoom every time. If you want viewport persistence in v2, that's a separate small feature — flag it but don't block on it.
+
+The "+ Save view" button does already prompt for a name via native `prompt()`. Trim to 40 chars and dedupe by name (overwrite warning on collision is currently absent — fine to add).
+
+### 5. Per-pattern detail-panel sparkline
+
+- **14 buckets**, one per UTC day.
+- Represents **occurrences of that pattern in dream cycles** — i.e. counts how many times the pattern was bumped via the SWS merge path on a given day. Source: `ExtractedPattern.occurrence_history: Vec<String>` (capped at 50 most-recent timestamps to keep `patterns.json` bounded).
+- Today rightmost (green tint), other days blue, empty days at `opacity: 0.2`.
+- Suppressed entirely when history is all zeros (legacy patterns or single-observation ones — they have an empty `occurrence_history` until they get bumped again).
+
+Label suggestion: "Occurrences over the last 14 days". Or just the date axis.
+
+### 6. Empty-state for the detail panel — sandboxed from the rest of the dashboard?
+
+The section is **sandboxed at the data-layer level** — it gets a single inline JSON payload (`<script id="pg-data" type="application/json">…</script>`) at render time and can't reach across to other dashboard sections at runtime.
+
+But the payload is rich, and the empty-state can absolutely earn its keep from what's already there. Available without any additional plumbing:
+
+- `data.hubs[0]` — highest-degree pattern (the obvious "right now" KPI)
+- `data.communities[0]` — largest community by size (with `size`, `idx`, `id`)
+- `data.brier_score` + `data.brier_n` — current calibration
+- `data.activity_30d` — the 30-day sparkline; today's value is `[arr.length-1]`
+- `data.n_patterns` + `data.n_associations` + `data.edges.length`
+
+What is NOT in the payload (but could be added cheaply if you'd want it for the empty state):
+
+- Brier delta vs last week (would need historical Brier — not currently captured)
+- Latest community to crystallise (would need a `created_at` per community — not tracked yet)
+
+For iteration 1, work with what's in the payload. We can add a `previous_brier_score` field in iteration 2 if it earns its place visually.
+
+### 7. Brier `n=3` semantics
+
+`n` = the number of **user-rated insight feedback events** that contributed to the score.
+
+- Source: `dreams/insight-feedback.jsonl`
+- Each entry is a `{insight_id, ts, rating}` triple where rating is `up` (→ outcome 1.0) or `down` (→ outcome 0.0).
+- Joins on either `pattern.id` OR `association.id` — historically the file uses both kinds under the same `insight_id` field.
+- Dedups by `(insight_id, ts)` — the file occasionally has triplicate copies of the same event from parallel write paths.
+
+Tooltip suggestion: *"Brier calibration over N user-rated insights. Lower is better. 0.25 = uninformed prior, ≤0.10 well-calibrated."*
+
+### 8. Locked copy
+
+| String | Renamable? | Notes |
+|---|---|---|
+| `Top hubs` | Yes — "Hubs" is fine | Keep "by degree" subtitle |
+| `Color by community` | Yes — "Communities" or "Cluster colors" | The toggle should still tooltip-explain that communities come from M9 label propagation |
+| `Actionable only` | Prefer "Actionable" | The "only" is implied by the checkbox semantics |
+| `Brier` | **Locked** | Real statistical term; renaming hurts SEO + comprehension for stats-literate users |
+| `Edges` | Yes | Could become "Links" — but "Edges" is correct graph terminology for this audience |
+| `30d` (sparkline label) | Yes | Could become "Activity 30d" or just date-range axis labels |
+| `+ Save view`, `▾ Saved views`, `⤓ Export` | Yes | Icons + text both flexible |
+| `?` (overlay trigger) | **Locked** | Universal convention; the help icon could be redundant signage |
+
+### 9. Full keyboard shortcut list (currently shown in M15 overlay)
+
+```
+Global
+  ?            Toggle this overlay
+  Esc          Close dialogs / clear selection
+
+Patterns Graph
+  Click        Focus 1-hop neighborhood
+  Right-click  Export node as guideline / hook
+  Double-click Reset focus
+
+Tables
+  ↑ ↓          Move selection         (aspirational — see note)
+  Enter        Open detail view       (aspirational)
+```
+
+**Note**: the Tables shortcuts are currently aspirational — the dashboard tables don't actually have keyboard nav yet (deferred per the NSTableView refactor). Either omit them in the redesigned overlay or label them with a small "(coming soon)" marker so users don't get confused when ↑↓ doesn't work.
+
+### 10. What does "focus" do visually on the canvas?
+
+Two effects, no camera movement:
+
+1. **Node tinting**: non-neighbors recolor to `#222` (near-bg) and have their labels suppressed via Sigma's `nodeReducer`. The focused node and its 1-hop neighborhood retain their full color + labels.
+2. **Edge filtering**: when `edgeMode === 'from-selected'` (default), edges hide unless they touch `focusedId`. In `'all'` mode all edges stay visible; in `'off'` no edges ever render.
+
+**No pan, no zoom** — the camera state is untouched. So the section chrome should reflect "what's selected" via the detail panel + the hub sidebar's `.pg-hub-active` class on the selected list item, not via expecting the canvas to recenter.
+
+### 11. Iteration appetite
+
+**Yes — deliver toolbar variants for v1.** Toolbar density was the most contested decision in your own framing, and putting two variants side by side will save a back-and-forth round. Lean toward **Variant A (3-segment edge toggle + compact toggles + overflow `⋯` for export/save)** as the primary, with **Variant B (everything visible in a single linear row, denser typography)** as the alternative. We'll pick one in iteration 2.
+
+For everything else (KPI strip, hub sidebar, detail panel empty state, keyboard overlay) one direction is enough — the structure is the decision, the styling can iterate.
+
+---
+
+## After Claude Design returns iteration 1
+
+Quick checklist before pasting back into this Claude Code session for integration:
+
+1. **Save the project URL** at the top of this file is already done — do the same with any new export URLs Claude Design generates.
+2. **Diff your iterations** — Claude Design keeps a project history; before integrating, look at what changed between iterations so the commit message can describe the design direction, not just the diff.
+3. **Hand back as one HTML file** — easier to integrate. Markup goes inside the `format!()` block in `src/dashboard.rs:2207`, `<style>` near the existing `.pg-*` rules (~line 2540), JS inside the existing IIFE (~line 2300).
+4. **Mention which Variant** (A or B from FAQ #11) you picked so the implementation commit names it explicitly.
