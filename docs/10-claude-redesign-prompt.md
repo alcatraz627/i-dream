@@ -1,5 +1,7 @@
 # UI Redesign Prompts — Claude Design + Claude.ai chat
 
+> **Last refreshed:** 2026-05-03 (post-v0.4.1). Both prompts have been updated to reflect the 19 features shipped across v0.3.0 → v0.4.1, including M9–M17 graph-side polish and D8/D11/D17/D19 dreaming maturity. Re-read before pasting if you haven't seen the project recently.
+
 Two prompts, pick one. **Claude Design (Anthropic Labs, launched 2026-04-17)** is the right choice if you have Pro/Max/Team/Enterprise — it can point at the repo, extract a design system from existing code, and produce interactive prototypes. **Claude.ai chat** is the fallback if you don't have Design access.
 
 | Tool | Best when | Output you'll get |
@@ -19,7 +21,15 @@ Use the "Connect codebase" / "Add code source" option to point at `https://githu
 - `src/dashboard.rs` — the HTML dashboard's CSS variables + section structure
 
 **Step 2 — Upload current-state screenshots.**
-4–6 screenshots covering: Overview tab, Patterns tab (with wedge graph), Associations tab (with focus-mode graph), the floating HUD, the HTML dashboard top section, the sidebar zoomed.
+6-8 screenshots covering:
+- Native dashboard Overview tab
+- Native dashboard Patterns tab (wedge graph + per-pattern detail)
+- Native dashboard Associations tab (focus-mode bipartite graph)
+- The floating HUD widget (with the new "+N auto/wk" intentions line if visible)
+- HTML dashboard Patterns Graph section — full toolbar (edges / actionable / community / export / saved views / 30d sparkline) + Top-hubs sidebar with community-color dots + per-pattern detail panel showing the 14-day sparkline
+- HTML dashboard Overview / Calibration tabs (these are the *least* polished surfaces now and most need the redesign)
+- The keyboard shortcut overlay (`?`) — currently a generic modal
+- Menubar dropdown menu when widget icon is clicked (a 2025-era control-panel layout that needs the most help)
 
 **Step 3 — Paste this prompt:**
 
@@ -30,16 +40,61 @@ dashboard (AppKit / NSView / NSBezierPath rendering, single-file Swift)
 and an HTML dashboard generated from src/dashboard.rs (vanilla CSS +
 small inline JS only — no React, no build step).
 
-I've connected the codebase and uploaded screenshots of the current
-state. Two rounds of opus-agent design reviews (in /tmp/i-dream-
-dashboard-review-{A,B,A2,B2}.md inside the repo) flagged the same
-gaps: invisible selection, no filter strip, scroll-only lists at
-500+ rows, decorative graphs, no command palette, generic Tokyo
-Night palette without brand identity. The most recent fixes (commits
-v0.2.0 → v0.2.3) addressed structural bugs (force-dark, wedge layout,
-edge modes, default summary cards, stat chips, sidebar accent, brand
-mark, theme picker, always-on-top, ⌘D/⌘T/⌘S menubar shortcuts) but
-the surface still doesn't feel "designed."
+PROJECT STATE (as of v0.4.1, 2026-05-03):
+
+Since the original design brief was written, the project has shipped
+19 features across v0.3.0 → v0.4.1. The shape is now:
+
+  HTML dashboard — Patterns Graph section (the most polished surface):
+    - Sigma.js + Graphology vendored inline (works file://, no CDN)
+    - Inline wedge layout (no ForceAtlas2 dep)
+    - Toolbar: edge modes, "actionable only", "color by community"
+      toggle, ⤓ Export, ▾ Saved views (localStorage), + Save view
+    - Stats line includes Brier calibration score (D10),
+      color-graded green/yellow/orange
+    - 30-day pattern-extraction sparkline at right edge of toolbar
+    - Top-hubs sidebar with rank · community-color-dot · degree ·
+      conf% · category-tag · label
+    - Detail panel shows per-pattern 14-day occurrence sparkline
+    - Right-click on a graph node opens an export menu (CLAUDE.md
+      guideline / hook scaffold / copy text)
+    - `?` opens a keyboard shortcut overlay
+
+  Dreaming pipeline — backing the views above:
+    - D8: auto-promote high-confidence associations to intentions
+    - D11 v2: per-pattern occurrence_history (capped 50 timestamps)
+    - D17: prune dormant patterns with backup + rescue
+    - D19: weekly category-confidence drift detection
+    - D6 v2: per-project briefs auto-regenerated each cycle
+    - D4 v2: Sunday briefing notification via osascript
+    - M17: graph snapshot + diff (auto-snapshot ON by default)
+
+  Schema additions (all #[serde(default)], backwards compatible):
+    - Association.dismissed
+    - Association.auto_intention_id
+    - ExtractedPattern.source_projects
+    - ExtractedPattern.occurrence_history
+
+  Daemon hooks (most opt-in via config flags):
+    - auto_prune_weekly         (default OFF)
+    - auto_intentions_after_cycle (default OFF)
+    - drift_warnings            (default OFF)
+    - auto_snapshot_each_cycle  (default ON — observability only)
+
+WHAT'S NOW POLISHED vs WHAT STILL NEEDS WORK:
+
+Polished (don't touch the layout, but a visual style pass would lift it):
+  - HTML dashboard Patterns Graph section
+  - HTML dashboard hubs sidebar
+  - Per-pattern + 30-day sparklines
+
+Underpolished — most design value here:
+  - Native dashboard Overview tab (still a "stats trio + chart" stack)
+  - Menubar widget HUD content (the type scale + spacing rhythm
+    flagged by prior reviews still hasn't been redesigned)
+  - HTML dashboard Calibration / Intentions / Search tabs
+  - The keyboard shortcut overlay (M15) — currently a generic modal
+  - Brand mark (small dusk-violet circle + "i-dream" text)
 
 Please do the following, in this order:
 
@@ -64,8 +119,21 @@ Don't repeat the round-1/2 reviews — build forward.
 ## C. Propose the new design system
 
 The brand identity is sleep / dreams. Current accent: dusk-violet
-#8c69d9. Categorical palette: teal #22c1c3 / orange #f5a623 / purple
-#a673de / blue #5b8def / green #3ddc84.
+#8c69d9 (also used as #5b8def cornflower in some surfaces — please
+unify). Categorical palette (DO NOT renumber — these map to
+ExtractedPattern.category in the data layer):
+  approach        #22c1c3   (cyan / teal)
+  tool-use        #f5a623   (amber / orange)
+  user-preference #a673de   (lavender / purple)
+  domain          #5b8def   (cornflower / blue)
+  architecture    #3ddc84   (mint / green)
+
+Community palette (M9 — 15 colors indexed by community_idx, used
+for the "Color by community" graph toggle and hub sidebar dots).
+Keep array order stable so saved views don't shift colors:
+  #e879f9 #34d399 #fbbf24 #60a5fa #f87171
+  #a78bfa #22d3ee #fb923c #84cc16 #ec4899
+  #14b8a6 #facc15 #818cf8 #f472b6 #4ade80
 
 Constraints I need you to honor:
 - Dark surface is canonical (HUD + menubar + dashboard default)
@@ -85,16 +153,38 @@ Propose:
 
 ## D. Build interactive prototypes for each view
 
-Use Claude Design's prototype builder for these five views:
-1. Overview tab — exec summary as scannable metric cards
-2. Patterns tab — list (with filter strip + sort dropdown + selection
-   accent) + wedge graph (more depth, motion on focus)
-3. Associations tab — list + bipartite graph (better focus drill-down,
-   replace floating popover with right-edge inspector drawer)
-4. Search tab — ⌘K command palette as the primary surface, not a
-   schema directory
-5. Sidebar — better brand mark, three-row footer (actions / build hash
-   pill / freshness indicator)
+Use Claude Design's prototype builder for these seven views,
+prioritized by user-felt impact (most underdesigned first):
+
+1. **Overview tab (HIGHEST PRIORITY)** — exec summary as scannable
+   metric cards. Should make "is dreaming healthy?" answerable in
+   under 5 seconds. Today: stats trio + valence chart + token
+   usage. Needs: clearer KPI hierarchy + drift / Brier / community-
+   count / auto-promoted-this-week as first-class signals.
+2. **Menubar widget HUD content (HIGH PRIORITY)** — the always-on
+   ambient surface. Currently a tabular dump with two type sizes
+   (TITLE 14sb, BODY 12m) and tabular numerics. Reviewer flagged
+   spacing rhythm + visual hierarchy as missing. Specific live
+   data points: cycle status dot, intentions ("12 active +3 auto/wk"),
+   dreams today, avg tokens/cycle, today's bar chart, sleep score.
+3. **HTML dashboard Patterns Graph section (POLISH PASS)** — already
+   functional. Needs: toolbar density rethink (8 controls in one
+   row), KPI hierarchy in the stats line (counts vs Brier vs
+   sparkline are three different types of info), hub sidebar
+   readability (7-column grid currently reads as glyph wall),
+   detail-panel empty state, consistent spacing scale (4/8/16/24/32).
+4. **Keyboard shortcut overlay (M15)** — currently a generic modal.
+   Since `?` is the discovery affordance, the overlay should set
+   the visual tone for the whole tool.
+5. **Calibration tab** — currently shows the Brier score and a list
+   of rated insights. Needs a meaningful viz: confidence-vs-outcome
+   scatter? reliability diagram? At minimum a clear "what does
+   0.0009 mean" affordance.
+6. **Search tab** — ⌘K command palette as the primary surface, not
+   a schema directory. Search should query patterns + associations
+   + intentions + briefings simultaneously.
+7. **Sidebar** — better brand mark, three-row footer (actions /
+   build hash pill / freshness indicator).
 
 Each prototype: spatial layout, interaction notes (hover/click/keyboard),
 specific tokens used.
@@ -139,37 +229,74 @@ This is the **prompt to paste into Claude.ai (the chat interface)** alongside yo
 
 ```
 You are a senior product designer reviewing a developer-tool dashboard. The
-project is i-dream — a Rust + Swift macOS app that runs background "dream
-cycles" on a developer's Claude Code transcripts and surfaces patterns,
-associations, and insights. There's a native NSPanel dashboard and an HTML
-dashboard generated from src/dashboard.rs.
+project is i-dream (v0.4.1, 2026-05-03) — a Rust + Swift macOS app that runs
+background "dream cycles" on a developer's Claude Code transcripts and
+surfaces patterns, associations, intentions, and calibration metrics. There's
+a native NSPanel dashboard, a menubar widget HUD, and an HTML dashboard
+generated from src/dashboard.rs.
 
 I'm attaching screenshots of the current dashboard. They show:
-- Overview tab with stats trio + valence distribution + token usage chart
-- Patterns tab — list grouped by category + circular wedge graph
-- Associations tab — list + concentric-ring graph with edge focus
-- HTML report version (file:// served, dark default)
+- Native dashboard Overview tab — stats trio + valence + token usage chart
+- Native dashboard Patterns tab — list grouped by category + wedge graph
+- Native dashboard Associations tab — list + concentric-ring focus graph
+- HTML dashboard Patterns Graph section — Sigma graph + Top-hubs sidebar +
+  toolbar (edges/actionable/community/export/saved-views) + 30-day extraction
+  sparkline + per-pattern 14-day sparkline in detail panel
 - Floating HUD widget (the always-on ambient surface)
+- Menubar dropdown (when icon clicked)
 
-## My pain points (round-1 + round-2 reviewer summaries)
+## What's already been shipped (v0.3.0 → v0.4.1, 19 features)
 
-VISUAL:
-- Sidebar selection cue is invisible from peripheral vision
-- Patterns wedge graph is structurally correct but lacks polish — the wedges
-  read as flat color blocks, no depth or motion
-- Associations graph is dense; click-to-focus dissolves the hairball but the
-  resulting star pattern is plain
-- Stat chips look "placed" but not "designed" — same weight, no hierarchy
-- The brand mark (small dusk-violet circle + "i-dream" text) feels generic
-- Color palette is borrowed Tokyo Night — no signature
+Patterns Graph (HTML side) is now the most polished surface:
+- M9 community detection (label propagation), color-by-community toggle
+- M10 Top-hubs sidebar with rank/community-dot/degree/conf/category/label
+- M11 standalone graph export (~250KB single HTML)
+- M14 right-click context menu → CLAUDE.md guideline / hook scaffold export
+- M15 `?` keyboard shortcut overlay
+- M16 saved views (localStorage)
+- M17 snapshot diff
+- D10 Brier calibration score in the stats line
+- D11 30-day pattern-extraction sparkline in toolbar
+- D11 v2 per-pattern 14-day sparkline in detail panel
 
-POWER-USER FUNCTIONALITY:
-- Lists are scroll-only — no filter strip, no sort dropdown, no keyboard nav
-- 500-row patterns + 300-row associations need a query DSL
+Dreaming pipeline maturity:
+- D8 auto-promote high-confidence associations to intentions
+- D17 prune dormant patterns with backup + rescue
+- D19 weekly category-confidence drift detection
+- D6 v2 per-project briefs auto-regenerated each cycle
+- D4 v2 Sunday briefing notification
+
+## My pain points
+
+What's now POLISHED (don't undo, but a style pass would lift it):
+- HTML Patterns Graph section — functional and dense, just lacks visual
+  hierarchy in the toolbar, hub sidebar reads as glyph wall, sparklines
+  blend in instead of standing out
+- The community color dots, hub rankings, and per-pattern sparklines are
+  all there but feel "engineered" rather than "designed"
+
+What's still UNDERDESIGNED (highest design value here):
+- Native dashboard Overview tab — the executive summary still doesn't make
+  "is dreaming healthy?" answerable in 5 seconds
+- Menubar widget HUD content — type scale (14sb / 12m) + spacing rhythm
+  flagged by reviewers, still not addressed. Has live data: cycle status
+  dot, intentions count + auto-promoted-this-week, dreams today, avg
+  tokens/cycle, today's bar chart, sleep score — the data is rich but
+  the layout doesn't help the eye
+- HTML Calibration / Intentions / Search tabs — still feel like prototypes
+- M15 keyboard overlay — generic modal, dishonors the discovery affordance
+- Brand mark (dusk-violet circle + "i-dream") — generic
+- Color palette has accumulated: dusk-violet #8c69d9, cornflower #5b8def,
+  5-color category palette, 15-color community palette. Needs unification.
+
+POWER-USER FUNCTIONALITY (still gaps):
+- Native dashboard lists are scroll-only — no filter strip, no sort
+  dropdown, no keyboard nav. (Patterns Graph in HTML *does* have saved
+  views now via M16, but no filter DSL.)
+- 500+ patterns / 300+ associations need a query DSL
   (actionable:true conf:>=0.85 -tool seen:>=-7d)
-- No multi-select / bulk action / saved views
-- Detail card empty state is OK but not actionable
-- ⌘K command palette would be the right primitive
+- No multi-select / bulk action across either dashboard
+- ⌘K command palette would be the right primitive — Search tab is a stub
 - Each Overview tile/bar should be click-to-filter handoff
 
 REFERENCE APPS WHOSE LANGUAGE I LIKE:
@@ -191,10 +318,16 @@ What specifically is wrong with the current visual language. Be brutal —
 "this looks like a 2018 CLI dashboard, not a 2026 product surface."
 
 ### 2. New design language (1 page)
-- **Colors**: 5 categorical (currently teal/orange/purple/blue/green) +
-  3 semantic (status, warn, success) + 4 surface elevations + 4 text
-  weights. Give specific hex codes. Should keep the dusk/sleep brand
-  identity (deep violet `#8c69d9` is the current accent) but rebalance.
+- **Colors**: 5 categorical (KEEP these, they map to data — approach
+  #22c1c3 / tool-use #f5a623 / user-preference #a673de / domain #5b8def
+  / architecture #3ddc84) + 15 community-cluster colors (KEEP, indexed
+  by community_idx for stability — current palette starts #e879f9
+  #34d399 #fbbf24 #60a5fa #f87171 ...) + 3 semantic (status/warn/
+  success) + 4 surface elevations + 4 text weights. Should keep the
+  dusk/sleep brand identity (deep violet `#8c69d9` is the current
+  accent) but rebalance. Unify the dusk-violet `#8c69d9` and the
+  cornflower `#5b8def` that have crept in as a second "primary" —
+  pick one as the singular accent.
 - **Typography**: 5-step scale (caption 11 / body 13 / subhead 15 /
   panel-title 18 / page-title 22). Tabular numerals for all numeric
   values. Pick a system font + monospace font.
@@ -203,13 +336,26 @@ What specifically is wrong with the current visual language. Be brutal —
   400ms gentle pulse on graph node focus. No bouncy springs.
 
 ### 3. Per-view redesign mockups
-For each of these views, sketch the new layout:
-  (a) Overview tab — what does the executive summary look like?
-  (b) Patterns list + wedge graph
-  (c) Associations list + bipartite graph
-  (d) Search tab (currently a stub — what's the right pattern for a
-      developer-tool global search?)
-  (e) Sidebar + brand mark + bottom controls
+Prioritized by user-felt impact. For each view, sketch the new layout:
+  (a) **Overview tab (HIGHEST PRIORITY)** — executive summary that
+      answers "is dreaming healthy?" in 5 seconds. Should surface
+      drift / Brier / community count / auto-promoted-this-week as
+      first-class signals.
+  (b) **Menubar HUD content (HIGH PRIORITY)** — type hierarchy +
+      spacing rhythm pass on the always-on widget. Live data points:
+      cycle status dot, intentions ("12 active +3 auto/wk"), dreams
+      today, avg tokens/cycle, today's bar chart, sleep score.
+  (c) Patterns list + wedge graph (native dashboard) — also note
+      the HTML Patterns Graph section is already polished; suggest
+      a *style pass*, not a redesign, for that surface.
+  (d) Associations list + bipartite graph
+  (e) Calibration tab — needs a meaningful viz around the Brier
+      score (reliability diagram? confidence-vs-outcome scatter?).
+  (f) Search tab — currently a stub. ⌘K command palette as the
+      primitive, querying patterns + associations + intentions +
+      briefings simultaneously.
+  (g) Keyboard shortcut overlay (`?`) — currently a generic modal.
+  (h) Sidebar + brand mark + bottom controls
 
 For each: ASCII or word-mockup is fine, but include:
 - Spatial layout (what goes where)
@@ -269,21 +415,22 @@ director.
 | Tool | What to save | How to start next session |
 |---|---|---|
 | Claude Design | The project URL + an exported snapshot if available | *"I have a Claude Design project at `<url>` (snapshot at `<path>`) — implement it commit-by-commit."* |
-| Claude.ai chat | The full response text saved at `~/.claude/topics/i-dream-redesign-2026-05-01.md` | *"I have a redesign proposal from Claude.ai at `<path>` — implement it."* |
+| Claude.ai chat | The full response text saved at `~/.claude/topics/i-dream-redesign-YYYY-MM-DD.md` (use today's date) | *"I have a redesign proposal from Claude.ai at `<path>` — implement it."* |
 
-I'll read the proposal, build a focused implementation plan keyed to the existing files (`src/dashboard.rs`, `tools/menubar/i-dream-bar.swift`), and ship it commit-by-commit.
+I'll read the proposal, build a focused implementation plan keyed to the existing files (`src/dashboard.rs`, `tools/menubar/i-dream-bar.swift`, `src/widget.rs`), and ship it commit-by-commit. Reference the v0.4.1 CHANGELOG so I know which surfaces are already polished and which are first to redesign.
 
 ## What to attach to the Claude.ai chat
 
-Best results: 4-6 screenshots covering
-- Native dashboard Overview tab
-- Native dashboard Patterns tab (with the wedge graph visible)
-- Native dashboard Associations tab (with the focus-mode graph)
-- The floating HUD widget
-- The HTML dashboard top section + the new Patterns Graph
-- The current sidebar (zoomed in)
+Best results: 6-8 screenshots covering (in order of design value, most underdesigned first):
+- HTML dashboard Overview tab + Calibration tab + Intentions tab (the underpolished ones)
+- Menubar widget HUD content (always-on surface, dense data, layout hasn't been redesigned)
+- Native dashboard Overview tab — the "is dreaming healthy?" surface
+- Native dashboard Patterns tab (wedge graph + per-pattern detail) and Associations tab (focus-mode graph)
+- HTML dashboard Patterns Graph section — full toolbar + Top-hubs sidebar with community-color dots + per-pattern 14-day sparkline (this one is *already* polished; attach as a reference for the style direction to extend)
+- The keyboard shortcut overlay (`?` key in HTML dashboard) — generic modal that needs the same style direction
+- Menubar dropdown when the icon is clicked
 
-You don't have to attach all of them — even 2-3 representative shots will give Claude enough to work with.
+You don't have to attach all of them — but pair at least one underdesigned surface with at least one already-polished one (the Patterns Graph section), so Claude can extract a style direction and apply it consistently rather than designing each surface in isolation.
 
 ## Why a separate Claude.ai pass instead of running another opus sub-agent here
 
