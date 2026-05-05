@@ -60,6 +60,23 @@ pub struct ExtractedPattern {
 /// per pattern, vs unbounded growth otherwise.
 const OCCURRENCE_HISTORY_CAP: usize = 50;
 
+/// D11 v3 — one-time backfill for legacy patterns whose `occurrence_history`
+/// is empty because they were last merged before D11 v2 shipped. Seeds each
+/// such pattern with a single entry equal to `last_seen` so the dashboard
+/// sparkline has at least one data point to render. Natural SWS merges will
+/// append real timestamps going forward; this just closes the visual gap.
+/// Returns the number of patterns that were backfilled.
+pub fn backfill_occurrence_history(patterns: &mut Vec<ExtractedPattern>) -> usize {
+    let mut count = 0;
+    for p in patterns.iter_mut() {
+        if p.occurrence_history.is_empty() {
+            p.occurrence_history.push(p.last_seen.clone());
+            count += 1;
+        }
+    }
+    count
+}
+
 /// A creative association discovered during REM phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Association {
@@ -1582,5 +1599,48 @@ mod tests {
             .collect();
 
         assert!(candidates.is_empty());
+    }
+
+    // ── backfill_occurrence_history ────────────────────────────────────────
+
+    fn make_pattern(last_seen: &str, history: Vec<String>) -> ExtractedPattern {
+        ExtractedPattern {
+            id: Uuid::new_v4().to_string(),
+            pattern: "test pattern".into(),
+            valence: "positive".into(),
+            confidence: 0.8,
+            category: "approach".into(),
+            source_sessions: vec![],
+            source_projects: vec![],
+            occurrences: 1,
+            first_seen: last_seen.into(),
+            last_seen: last_seen.into(),
+            occurrence_history: history,
+        }
+    }
+
+    #[test]
+    fn backfill_skips_patterns_with_existing_history_and_fills_empty_ones() {
+        let ts_a = "2026-04-01T00:00:00Z";
+        let ts_b = "2026-04-15T00:00:00Z";
+        let ts_c = "2026-05-01T00:00:00Z";
+
+        let mut patterns = vec![
+            make_pattern(ts_a, vec!["2026-03-01T00:00:00Z".into()]), // already has history
+            make_pattern(ts_b, vec![]),                               // needs backfill
+            make_pattern(ts_c, vec![]),                               // needs backfill
+        ];
+
+        let count = backfill_occurrence_history(&mut patterns);
+
+        assert_eq!(count, 2, "should backfill exactly 2 patterns");
+        // pattern[0] untouched — still has the original single entry
+        assert_eq!(patterns[0].occurrence_history, vec!["2026-03-01T00:00:00Z"]);
+        // pattern[1] seeded with its last_seen
+        assert_eq!(patterns[1].occurrence_history.len(), 1);
+        assert_eq!(patterns[1].occurrence_history[0], ts_b);
+        // pattern[2] seeded with its last_seen
+        assert_eq!(patterns[2].occurrence_history.len(), 1);
+        assert_eq!(patterns[2].occurrence_history[0], ts_c);
     }
 }
