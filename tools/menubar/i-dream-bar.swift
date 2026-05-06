@@ -7830,6 +7830,59 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }.count
     }
 
+    /// D17 widget pill — returns the projected next-prune date, or nil when
+    /// auto_prune_weekly is off (or state file is absent). Gated cheaply on a
+    /// text-grep of config.toml so we never show the pill for opt-out users.
+    private func nextAutoPruneDate() -> Date? {
+        // Gate: only when auto_prune_weekly = true
+        let configPath = subDir + "/config.toml"
+        guard let configText = try? String(contentsOfFile: configPath, encoding: .utf8),
+              configText.contains("auto_prune_weekly = true")
+        else { return nil }
+
+        // Read state written by D17 daemon hook
+        let pruneStatePath = subDir + "/dreams/auto-prune-state.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: pruneStatePath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let isoWeek = json["last_run_iso_week"] as? String
+        else { return nil }
+
+        // Parse "YYYY-Www" (e.g. "2026-W18")
+        let parts = isoWeek.split(separator: "-")
+        guard parts.count == 2,
+              let year = Int(parts[0]),
+              String(parts[1]).hasPrefix("W"),
+              let week = Int(String(parts[1]).dropFirst())
+        else { return nil }
+
+        // Monday of that ISO week, then +6 = Sunday of that week, +7 = next prune Sunday
+        var cal = Calendar(identifier: .iso8601)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        var comps = DateComponents()
+        comps.weekOfYear    = week
+        comps.yearForWeekOfYear = year
+        comps.weekday       = 2  // Monday (Gregorian weekday 2, first day of ISO week)
+        guard let monday = cal.date(from: comps) else { return nil }
+        return cal.date(byAdding: .day, value: 13, to: monday) // +6 Sunday + 7 next week
+    }
+
+    /// Human-readable relative label for a future date (used by the prune pill).
+    private func fmtPruneDateRelative(_ date: Date) -> String {
+        let cal  = Calendar.current
+        let days = cal.dateComponents([.day],
+                       from: cal.startOfDay(for: Date()),
+                       to:   cal.startOfDay(for: date)).day ?? 0
+        switch days {
+        case ..<1:   return "today"
+        case 1:      return "tomorrow"
+        case 2...6:  return "in \(days) days"
+        default:
+            let fmt = DateFormatter()
+            fmt.dateFormat = "MMM d"
+            return fmt.string(from: date)
+        }
+    }
+
     private func updateHUDContent(_ tv: NSTextView) {
         let dot: String     = isCycling ? "◉" : cachedRunning ? "◉" : "○"
         let dotColor: NSColor = isCycling ? dreamAnimColors[animFrame % dreamAnimColors.count]
@@ -7950,6 +8003,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 value("\(intentCount) active\n")
             }
+        }
+
+        // ── Line 7a: next auto-prune date pill (D17, opt-in only) ────────────
+        if let pruneDate = nextAutoPruneDate() {
+            label("next prune  ")
+            value("\(fmtPruneDateRelative(pruneDate))\n", color: .systemBlue, mono: false)
         }
 
         // ── Line 7b: dreams today + avg tokens / cycle (filtered range) ───────
