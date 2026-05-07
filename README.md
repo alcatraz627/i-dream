@@ -7,6 +7,7 @@
 <details>
 <summary><strong>📑 Table of contents</strong></summary>
 
+- [What's new in v0.4.x](#whats-new-in-v04x)
 - [Top highlight insights — and how they got there](#top-highlight-insights--and-how-they-got-there)
 - [How it works](#how-it-works)
 - [Consolidation pipeline](#consolidation-pipeline)
@@ -169,6 +170,54 @@ Claude Code sessions → ~/.claude/projects/<project>/<sid>.jsonl
 
 ---
 
+## What's new in v0.4.x
+
+19 features shipped across v0.3.0 → v0.4.1, grouped by theme.
+
+### Patterns Graph polish
+
+| ID | Feature | Summary |
+|----|---------|---------|
+| M9 | Community detection | Label propagation over the bipartite pattern↔association graph; "Color by community" checkbox re-tints nodes by cluster |
+| M10 | Top hubs sidebar | Lists the 10 highest-degree patterns in the HTML dashboard; click to focus 1-hop neighborhood |
+| M11 | Standalone graph export | "⤓ Export" downloads the full interactive graph as a single self-contained ~250KB HTML file |
+| M14 | Pattern context menu | Right-click a node → export as CLAUDE.md guideline / hook scaffold / copy text; writes to `~/.i-dream/exports/` |
+| M15 | Keyboard shortcut overlay | Press `?` in the dashboard for a modal listing all hotkeys |
+| M16 | Saved views | Dashboard tab settings persist across window close/reopen |
+| M17 | Snapshot diff | `i-dream snapshot-diff` compares two graph snapshots; no arguments = "what changed last cycle?" |
+
+### Dreaming pipeline maturity
+
+| ID | Feature | Summary |
+|----|---------|---------|
+| D4 v2 | Briefing notification | Widget fires a system notification when a new Sunday briefing lands |
+| D6 v2 | Auto-refresh project briefs | Daemon regenerates per-project briefs after each cycle whenever patterns are newer than the brief |
+| D8 | Auto-promote associations → intentions | `i-dream auto-intentions` promotes high-confidence associations to Context-triggered intentions |
+| D10 | Brier calibration score | Computed from user-rated patterns/associations; displayed in the graph stats line |
+| D11 | Pattern-extraction sparkline | 30-day bar chart in the graph toolbar shows dreaming productivity over time |
+| D11 v2 | Per-pattern occurrence sparkline | `ExtractedPattern.occurrence_history` (Vec\<String\>, capped 50) drives a 14-day SVG sparkline per pattern |
+| D17 | Pattern pruning with rescue | `i-dream prune-patterns` removes dormant low-confidence patterns; backups always written; `--restore` is idempotent |
+| D17 daemon | Weekly auto-prune hook | `modules.dreaming.auto_prune_weekly` runs conservative prune at most once per ISO week |
+| D19 | Confidence drift detection | `i-dream drift` flags categories with ≥10% week-over-week confidence drop |
+
+### Daemon hooks (new `[modules.dreaming]` flags)
+
+| Flag | Default | What it gates |
+|------|---------|--------------|
+| `auto_prune_weekly` | `false` | D17: prune dormant patterns once per ISO week after each cycle |
+| `auto_intentions_after_cycle` | `false` | D8: auto-promote high-confidence associations after each cycle |
+| `drift_warnings` | `false` | D19: emit a `warn` log line each cycle for categories with ≥10% drift |
+| `auto_snapshot_each_cycle` | `true` | M17: write a graph snapshot after each cycle (directory pruned to 30) |
+
+### New schema fields (all additive, all `#[serde(default)]`)
+
+| Field | Type | Feature |
+|-------|------|---------|
+| `Association.auto_intention_id` | `Option<String>` | D8 — set when auto-promoted; prevents duplicate promotion |
+| `ExtractedPattern.occurrence_history` | `Vec<String>` | D11 v2 — ISO timestamps capped at 50; feeds the per-pattern sparkline |
+
+---
+
 ## How it works
 
 i-dream models five aspects of human subconsciousness as background processes:
@@ -278,10 +327,40 @@ Commands:
   hooks status       Check hook installation status
   config             Print current config as TOML
 
+  # v0.4.x additions
+  auto-intentions    Promote high-confidence associations to Context-triggered intentions (D8)
+  prune-patterns     Remove dormant low-confidence patterns, always backing up first (D17)
+  drift              Detect category-level confidence drop week-over-week (D19)
+  snapshot-diff      Diff two patterns-graph snapshots; no args = last two cycles (M17)
+
 Options:
   -c, --config <path>   Config file (default: ~/.claude/subconscious/config.toml)
   --log-level <level>   debug | info | warn | error
 ```
+
+**Representative invocations for the v0.4.x commands:**
+
+```bash
+# Promote associations with ≥85% confidence to intentions (dry-run first)
+i-dream auto-intentions --dry-run
+i-dream auto-intentions --min-confidence 0.85
+
+# Prune patterns dormant >60 days with confidence <0.4 (dry-run first)
+i-dream prune-patterns --dry-run
+i-dream prune-patterns
+# Restore from backup if something looks wrong
+i-dream prune-patterns --restore 20260502-1310
+
+# Check for category confidence regressions since last week
+i-dream drift
+i-dream drift --threshold 0.10 --json
+
+# See what the most recent dream cycle changed
+i-dream snapshot-diff
+i-dream snapshot-diff --from 20260501T120000 --to 20260502T143000
+```
+
+Full command reference: [`USAGE.md`](USAGE.md)
 
 ## macOS menu-bar widget
 
@@ -398,6 +477,17 @@ trigger_on_correction = true # Always capture corrections
 [modules.intuition]
 decay_halflife_days = 30.0   # Exponential decay for valence memory
 min_occurrences = 3          # Minimum data points before surfacing
+```
+
+**Daemon hook flags** (all under `[modules.dreaming]`, added in v0.4.x):
+
+```toml
+[modules.dreaming]
+auto_prune_weekly = false          # D17: prune dormant patterns once per ISO week
+auto_intentions_after_cycle = false # D8: auto-promote associations after each cycle
+auto_intention_threshold = 0.85    # D8: confidence floor for daemon-side auto-promotion
+drift_warnings = false             # D19: warn in daemon log when category drift ≥10%
+auto_snapshot_each_cycle = true    # M17: write graph snapshot after each cycle (keeps 30)
 ```
 
 **Full reference:** [`docs/12-config-reference.md`](docs/12-config-reference.md) walks every section + every default + when to override. Copyable starting point with all sections at [`config.toml.example`](config.toml.example).
@@ -543,7 +633,7 @@ i-dream/
 ├── .env.example                 The 2 env vars (everything else: config.toml)
 ├── CHANGELOG.md                 Versioned change history (Keep-a-Changelog)
 ├── CONTRIBUTING.md              Local dev loop + conventional commits
-└── Cargo.toml                   Dependencies, release profile (LTO), v0.2.4
+└── Cargo.toml                   Dependencies, release profile (LTO), v0.4.1
 ```
 
 ## Research foundations
