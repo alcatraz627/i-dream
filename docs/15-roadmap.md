@@ -44,7 +44,7 @@
 
 | Stage | Effort | User capability when shipped |
 |-------|--------|------------------------------|
-| 1 — L1 cadence plumbing | ~3h | Widget bar → "Change Frequency" lists every registered domain with its own cadence selector (atone 1h, dreams 6h, etc.). |
+| 1 — L1 cadence plumbing | ⏳ partial (2026-05-16) | Widget bar → "Dream Domains (N) →" lists every registered domain with its cadence. **Shipped:** `i-dream domain list [--json]` CLI + widget submenu populated from it. **Deferred:** per-domain cadence override write-back, FSEvents reload, `_all_` reset. |
 | 2 — L2 daily digest (deterministic) | ~4h | Every day at 03:00, `~/.claude/i-dream/daily/YYYY-MM-DD.md` lands with all 7 sections (placeholders where empty). `i-dream digest` prints today's. |
 | 3 — L2 cross-domain dream pass | ~3h | Daily file's "Top signals" + "Cross-domain associations" sections get LLM enrichment. |
 | 4 — readers (widget Today + `i-dream board` TUI) | ~4h | Glance at today's digest in menu bar; deep-dive in 4-pane terminal dashboard (Today / Week / Sources / GCC fitness). |
@@ -385,3 +385,4 @@ After every status transition, also update:
 | 2026-05-15 | BUILD doc drafted at `docs/16-consolidation-build.md`. 4 operational decisions (catch-up / open-threads / rejection fingerprint / apply-time confirm) resolved as design choices in §3.7–3.10. Status #2 + #3 → `spec-complete`. ~26h estimated total across 7 stages. Stage 1 (L1 cadence plumbing, ~3h) ready to start. |
 | 2026-05-15 | Item #1 Stage 1 COMPLETE. Subtasks 1.1 (trait+9 types in `src/modules/mod.rs`), 1.2 (NativeAdapter, 2 tests), 1.3 (`src/modules/registry.rs` w/ 5 tests), 1.4 (daemon enumerates registry per cycle, observation-only). 296 tests pass, 0 regressions. Architectural seam noted in docs/14 §3.3: only 5 of 8 native modules implement `Module` trait — decision needed before Stage 2. |
 | 2026-05-15 | Architectural-seam audit → resolution: **A-with-carve-out**. `insight_digest` converted to `impl Module` (signatures already matched). `weekly_briefing` got `impl Module` adapter (delegates to `should_run_now`, flattens Option-tuple return). `project_briefs` stays out as per-project-regeneration shape needing a future companion trait. Registry now covers 7 of 8 native modules. 296 tests still pass. |
+| 2026-05-16 | B Stage 1 partial shipped: `i-dream domain list [--json]` CLI subcommand + widget bar "Dream Domains (N) →" submenu (`src/cli.rs`, `src/domain.rs` new, `src/main.rs`, `tools/menubar/i-dream-bar.swift`). Widget enumerates registered domains by shelling out to the CLI on menu open — stateless about the domain set; Stage 2 of A picks up automatically. Deferred from B Stage 1: cadence override write-back, FSEvents reload, `_all_` reset. |
