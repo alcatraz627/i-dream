@@ -127,6 +127,15 @@ pub enum Command {
         action: WidgetAction,
     },
 
+    /// Inspect registered dream-domains (native modules + external plugins).
+    /// First user-visible surface of the docs/14 plugin system — Stage 1 ships
+    /// `list` only; further subcommands (info, enable, install, …) land with
+    /// Stage 2+.
+    Domain {
+        #[command(subcommand)]
+        action: DomainAction,
+    },
+
     /// M17 — diff two patterns-graph snapshots written by
     /// `graph-metrics --snapshot`. Reports added / removed / shifted
     /// patterns and associations between the two timestamps. Use to
@@ -284,4 +293,16 @@ pub enum WidgetAction {
     Install,
     /// Remove the LaunchAgent registration
     Uninstall,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum DomainAction {
+    /// List every registered dream-domain — native compiled modules
+    /// + (Stage 2+) external plugin manifests. With `--json`, prints a
+    /// machine-readable array for tools (e.g. the widget menu).
+    List {
+        /// Emit JSON for downstream consumers.
+        #[arg(long)]
+        json: bool,
+    },
 }

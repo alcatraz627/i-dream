@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod daemon;
 mod dashboard;
+mod domain;
 mod dream_trace;
 mod events;
 mod graph_metrics;
@@ -137,6 +138,11 @@ async fn main() -> Result<()> {
 
         Command::Widget { action } => {
             widget::manage(action)?;
+        }
+
+        Command::Domain { action } => {
+            let config = config::Config::load(&cli.config)?;
+            domain::handle(action, &config)?;
         }
 
         Command::Dashboard { no_open, run_tests } => {

@@ -5692,6 +5692,56 @@ enum CrashReporter {
     }
 }
 
+// ─── Domain registry bridge ───────────────────────────────────────────────────
+// Bridges to the Rust CLI `i-dream domain list --json` (docs/14 plugin system,
+// Stage 1). Used by the menu's Dream Domains submenu to enumerate every
+// registered DreamDomain without baking the list into Swift.
+
+private struct DomainEntry: Codable {
+    let name: String
+    let kind: String
+    let description: String
+    let cadence: String
+}
+
+/// Resolve the `i-dream` binary by probing common install paths. Falls back
+/// to plain `i-dream` (which then relies on PATH).
+private func resolveIDreamBinary() -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let candidates = [
+        "\(home)/.cargo/bin/i-dream",
+        "\(home)/.local/bin/i-dream",
+        "/usr/local/bin/i-dream",
+        "/opt/homebrew/bin/i-dream",
+    ]
+    for c in candidates where FileManager.default.isExecutableFile(atPath: c) {
+        return c
+    }
+    return "i-dream"
+}
+
+/// Invoke `i-dream domain list --json` and parse the result. Returns nil if
+/// the CLI is missing, exits non-zero, or emits malformed JSON. Treat nil
+/// as "couldn't load" — the menu shows a placeholder.
+private func loadRegisteredDomains() -> [DomainEntry]? {
+    let task = Process()
+    task.launchPath = resolveIDreamBinary()
+    task.arguments = ["domain", "list", "--json"]
+    let stdout = Pipe()
+    let stderr = Pipe()
+    task.standardOutput = stdout
+    task.standardError = stderr
+    do {
+        try task.run()
+    } catch {
+        return nil
+    }
+    task.waitUntilExit()
+    guard task.terminationStatus == 0 else { return nil }
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    return try? JSONDecoder().decode([DomainEntry].self, from: data)
+}
+
 // ─── App delegate ─────────────────────────────────────────────────────────────
 
 final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -6163,6 +6213,41 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setIcon(freqParent, "clock")
         menu.addItem(freqParent)
         menu.setSubmenu(freqMenu, for: freqParent)
+
+        // ─ Dream Domains ──────────────────────────────────────────────────────
+        // First user-visible surface of the docs/14 plugin system (Stage 1).
+        // Lists every registered DreamDomain by shelling out to the Rust
+        // CLI `i-dream domain list --json`. Read-only today; per-domain
+        // cadence-setting actions land with the rest of B Stage 1.
+        let registered = loadRegisteredDomains()
+        let domainsMenu = NSMenu()
+        if let domains = registered, !domains.isEmpty {
+            for d in domains {
+                let item = NSMenuItem()
+                let pad = String(repeating: " ", count: max(0, 18 - d.name.count))
+                item.attributedTitle = NSAttributedString(
+                    string: "  \(d.name)\(pad) \(d.cadence)",
+                    attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                        .foregroundColor: NSColor.labelColor,
+                    ])
+                item.toolTip = "\(d.kind) — \(d.description)"
+                domainsMenu.addItem(item)
+            }
+        } else {
+            let err = NSMenuItem(
+                title: "  (could not load — is the i-dream binary on PATH?)",
+                action: nil, keyEquivalent: "")
+            err.isEnabled = false
+            domainsMenu.addItem(err)
+        }
+        let domainCount = registered?.count ?? 0
+        let domainsParent = NSMenuItem(
+            title: "  Dream Domains (\(domainCount)) →",
+            action: nil, keyEquivalent: "")
+        setIcon(domainsParent, "circle.grid.3x3.fill")
+        menu.addItem(domainsParent)
+        menu.setSubmenu(domainsMenu, for: domainsParent)
 
         // ─ Knowledge Base ─────────────────────────────────────────────────────
         menu.addItem(.separator())
