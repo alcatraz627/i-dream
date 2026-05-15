@@ -12,7 +12,30 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE="$SCRIPT_DIR/i-dream-bar.swift"
-OUTPUT="$SCRIPT_DIR/i-dream-bar"
+# The widget is shipped as an .app bundle so macOS (Login Items, Activity
+# Monitor, Notification Center) can find its Info.plist + AppIcon.icns and
+# render a proper identity instead of the generic gear-cog background icon.
+#
+# Build → in-tree at $APP_BUNDLE so the source tree contains the artifact.
+# Install → copied to $DEPLOY_BUNDLE under ~/Applications/, which is a
+# Spotlight-indexed, LaunchServices-blessed location. The LaunchAgent points
+# at the deployed bundle. Source-tree paths under ~/Code/ are usually Spotlight-
+# excluded, and macOS's icon resolver silently falls back to a generic icon
+# (page/terminal/gear) when it can't find the bundle via Spotlight — even when
+# the .icns is correctly registered with LaunchServices.
+APP_BUNDLE="$SCRIPT_DIR/i-dream-bar.app"
+BUILD_OUTPUT="$APP_BUNDLE/Contents/MacOS/i-dream-bar"
+DEPLOY_DIR="$HOME/Applications"
+DEPLOY_BUNDLE="$DEPLOY_DIR/i-dream-bar.app"
+DEPLOY_OUTPUT="$DEPLOY_BUNDLE/Contents/MacOS/i-dream-bar"
+# OUTPUT is the path the LaunchAgent and runtime checks should use — the
+# canonical deployed location.
+OUTPUT="$DEPLOY_OUTPUT"
+LEGACY_OUTPUT="$SCRIPT_DIR/i-dream-bar"     # pre-bundle bare binary, cleaned up
+ICON_DIR="$SCRIPT_DIR/icon"
+ICON_SRC="$ICON_DIR/make-icon.swift"
+ICON_ICNS="$ICON_DIR/AppIcon.icns"
+BUNDLE_ID="dev.i-dream.menubar"
 LABEL="dev.i-dream.menubar"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DEBUG_LOG="/tmp/i-dream-bar.log"
@@ -64,6 +87,9 @@ case "$MODE" in
     launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null && echo "  ✓ Unregistered" || echo "  (was not registered)"
     [[ -f "$PLIST" ]] && { rm -f "$PLIST"; echo "  ✓ Removed $PLIST"; }
     pkill -x "i-dream-bar" 2>/dev/null && echo "  ✓ Killed running instance" || echo "  (no instance running)"
+    [[ -d "$APP_BUNDLE" ]] && { rm -rf "$APP_BUNDLE"; echo "  ✓ Removed $APP_BUNDLE"; }
+    [[ -d "$DEPLOY_BUNDLE" ]] && { rm -rf "$DEPLOY_BUNDLE"; echo "  ✓ Removed deployed $DEPLOY_BUNDLE"; }
+    [[ -f "$LEGACY_OUTPUT" ]] && { rm -f "$LEGACY_OUTPUT"; echo "  ✓ Removed legacy $LEGACY_OUTPUT"; }
     exit 0
     ;;
 esac
@@ -109,32 +135,129 @@ echo "    static let builtAt    = \"$BUILD_TS\"" >> "$BUILD_INFO_SWIFT"
 echo "}" >> "$BUILD_INFO_SWIFT"
 echo "  ✓ build-info.swift (commit: $COMMIT, src: $SRC_HASH)"
 
+# ── Icon (regenerate only when stale) ─────────────────────────────────────────
+# Running `swift make-icon.swift` is ~3s, so we cache the .icns and only
+# rebuild when its source script is newer (or the .icns is missing).
+
+if [[ ! -f "$ICON_ICNS" || "$ICON_SRC" -nt "$ICON_ICNS" ]]; then
+    echo "▶ Generating AppIcon.icns..."
+    /usr/bin/swift "$ICON_SRC" >/dev/null
+    echo "  ✓ $ICON_ICNS"
+else
+    echo "▶ Icon cached ($ICON_ICNS)"
+fi
+
+# ── Build .app bundle scaffold ────────────────────────────────────────────────
+# macOS pulls process identity (name, icon, bundle id) from Contents/Info.plist
+# and Contents/Resources/AppIcon.icns. Without these, Login Items and Activity
+# Monitor render the default gear icon.
+
+echo "▶ Preparing .app bundle..."
+rm -rf "$APP_BUNDLE"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+cp "$ICON_ICNS" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+
+# LSUIElement=true → menu-bar agent (no Dock icon, no Cmd-Tab entry).
+# NSHighResolutionCapable=true → use @2x icon variants on Retina displays.
+# CFBundleIconFile (legacy) + CFBundleIconName (modern hint) — providing both
+# improves the chance that BackgroundTaskManagement and Notification Center
+# resolve the icon on Sonoma/Sequoia.
+cat > "$APP_BUNDLE/Contents/Info.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>i-dream</string>
+    <key>CFBundleDisplayName</key>
+    <string>i-dream</string>
+    <key>CFBundleExecutable</key>
+    <string>i-dream-bar</string>
+    <key>CFBundleIdentifier</key>
+    <string>$BUNDLE_ID</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.4.1</string>
+    <key>CFBundleVersion</key>
+    <string>$COMMIT</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>i-dream — subconsciousness layer for Claude Code</string>
+</dict>
+</plist>
+EOF
+echo "  ✓ Info.plist + Resources/AppIcon.icns"
+
 echo "▶ Compiling..."
-rm -f "$OUTPUT"
 # Concatenate build-info.swift + main source into a temp file.
 # We cannot compile two .swift files together when the main file uses top-level
 # expressions as an entry point (Swift requires those in a single-file build).
 MERGED=$(mktemp /tmp/i-dream-bar-merged-XXXXXX.swift)
 cat "$BUILD_INFO_SWIFT" "$SOURCE" > "$MERGED"
-/usr/bin/swiftc -O "$MERGED" -o "$OUTPUT" 2>&1
+/usr/bin/swiftc -O "$MERGED" -o "$BUILD_OUTPUT" 2>&1
 rm -f "$MERGED"
-echo "  ✓ Built: $OUTPUT"
+echo "  ✓ Built: $BUILD_OUTPUT"
+
+# Clean up the pre-bundle bare binary if it's lying around from older builds.
+if [[ -f "$LEGACY_OUTPUT" && ! -L "$LEGACY_OUTPUT" ]]; then
+    rm -f "$LEGACY_OUTPUT"
+    echo "  ✓ Removed legacy bare binary at $LEGACY_OUTPUT"
+fi
 
 # Record build metadata for staleness checks (bash tools/menubar/build.sh --status)
 printf "commit=%s\nsrc_hash=%s\nbuilt_at=%s\n" "$COMMIT" "$SRC_HASH" "$BUILD_TS" > "$SCRIPT_DIR/.build-info"
 
-# Ad-hoc sign the binary — launchctl bootstrap gui/$UID requires a code
-# signature on macOS Ventura+. --sign - adds a self-signed (no cert) sig
-# that satisfies the kernel's requirement without needing a Developer ID.
-echo "▶ Signing (ad-hoc)..."
-/usr/bin/codesign --sign - --force "$OUTPUT" 2>&1 && echo "  ✓ Signed" || echo "  ⚠ Signing failed — launchctl install may not work"
+# Ad-hoc sign the WHOLE BUNDLE (not just the inner binary). launchctl bootstrap
+# gui/$UID requires a code signature on macOS Ventura+; signing the bundle
+# also seals the Info.plist + icon so Gatekeeper trusts the identity.
+echo "▶ Signing (ad-hoc) build bundle..."
+/usr/bin/codesign --sign - --force --deep "$APP_BUNDLE" 2>&1 && echo "  ✓ Signed bundle" || echo "  ⚠ Signing failed"
+
+# ── Deploy to ~/Applications/ for OS visibility ───────────────────────────────
+# macOS's icon resolver (Login Items, Notification Center, Activity Monitor)
+# requires the bundle to be in a Spotlight-indexed, LaunchServices-blessed
+# location. ~/Applications/ is the canonical user-app dir; the source tree
+# under ~/Code/ is typically Spotlight-excluded, which is why an in-tree
+# bundle silently falls back to a generic icon (page / terminal / gear).
+echo "▶ Deploying to $DEPLOY_BUNDLE..."
+mkdir -p "$DEPLOY_DIR"
+rm -rf "$DEPLOY_BUNDLE"
+/bin/cp -R "$APP_BUNDLE" "$DEPLOY_BUNDLE"
+# Re-sign in place so the seal hash matches the deployed path's contents
+# (codesign hashes are content-addressed, but re-signing also refreshes the
+# extended attributes that LaunchServices keys on).
+/usr/bin/codesign --sign - --force --deep "$DEPLOY_BUNDLE" 2>&1 >/dev/null && echo "  ✓ Deployed + signed" || echo "  ⚠ Deploy sign failed"
+
+# Touch both bundles so LaunchServices picks up the (possibly new) Info.plist
+# and icon next time it indexes — avoids a stale icon cache after rebuilds.
+/usr/bin/touch "$APP_BUNDLE" "$DEPLOY_BUNDLE"
+
+# Tell LaunchServices about the new bundle, then force-rescan to populate the
+# icon and identity in BTM / Spotlight metadata.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
+"$LSREGISTER" -f -R -trusted "$DEPLOY_BUNDLE" >/dev/null 2>&1 || true
 
 # ── Install or launch ─────────────────────────────────────────────────────────
 
-if [[ "$MODE" == "--install" ]]; then
-    # Remove stale launchd registration (ignore error if not registered)
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+# ── Always (re)write the LaunchAgent plist before bootstrapping ──────────────
+# The executable path is inside the .app bundle now, and historical plists
+# may still point at the pre-bundle bare binary. Rewriting unconditionally
+# keeps launchd in sync with whatever this build produced.
 
+write_plist() {
     mkdir -p "$(dirname "$PLIST")"
     cat > "$PLIST" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -163,6 +286,12 @@ if [[ "$MODE" == "--install" ]]; then
 </dict>
 </plist>
 EOF
+}
+
+if [[ "$MODE" == "--install" ]]; then
+    # Remove stale launchd registration (ignore error if not registered)
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    write_plist
 
     # Bootstrap: launchd will start the widget immediately (RunAtLoad=true)
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -176,9 +305,12 @@ EOF
 else
     echo "▶ Launching..."
     if [[ "$LAUNCHD_WAS_REGISTERED" == "true" ]]; then
-        # LaunchAgent was installed — restore it so launchd owns the lifecycle.
+        # Refresh the plist so it always reflects the current OUTPUT path —
+        # otherwise a path move (e.g. bare-binary → .app bundle) leaves
+        # launchd pointing at a deleted file and the process never starts.
+        write_plist
         launchctl bootstrap "gui/$(id -u)" "$PLIST"
-        echo "  ✓ Re-registered LaunchAgent: $LABEL"
+        echo "  ✓ Re-registered LaunchAgent: $LABEL (plist refreshed)"
         echo "  ✓ launchd will manage the widget (auto-restart on crash)"
     else
         # No LaunchAgent — launch directly in background (avoids Terminal window from 'open').

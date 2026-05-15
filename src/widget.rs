@@ -21,7 +21,7 @@
 
 use crate::cli::WidgetAction;
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BINARY_NAME: &str = "i-dream-bar";
@@ -235,16 +235,20 @@ fn current_pid() -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// Resolve the project root by walking up from the running executable until
-/// we find a `tools/menubar/build.sh`. Falls back to `CARGO_MANIFEST_DIR`
-/// (only available in `cargo run`).
+/// Resolve the project root by trying, in order: executable walk-up (works for
+/// `cargo run` / in-tree `target/` builds), the compile-time `CARGO_MANIFEST_DIR`
+/// baked in via the `env!` macro (works for `cargo install --path .` installs),
+/// and finally a walk-up from the current working directory (works when the
+/// binary was relocated but is invoked from inside a checkout).
 fn project_root() -> Result<PathBuf> {
-    // 1. Walk up from the executable.
+    let has_build_sh = |d: &Path| d.join("tools/menubar/build.sh").exists();
+
+    // 1. Walk up from the executable (in-tree builds).
     if let Ok(exe) = std::env::current_exe() {
         let mut dir = exe.parent().map(|p| p.to_path_buf());
         for _ in 0..8 {
             if let Some(d) = dir {
-                if d.join("tools/menubar/build.sh").exists() {
+                if has_build_sh(&d) {
                     return Ok(d);
                 }
                 dir = d.parent().map(|p| p.to_path_buf());
@@ -253,11 +257,34 @@ fn project_root() -> Result<PathBuf> {
             }
         }
     }
-    // 2. Compile-time fallback (cargo run / dev builds).
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        return Ok(PathBuf::from(manifest));
+
+    // 2. Compile-time baked-in manifest dir (cargo install --path .).
+    //    `env!` runs at compile time, unlike `std::env::var` which reads the
+    //    runtime environment and finds nothing once installed.
+    let baked = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if has_build_sh(&baked) {
+        return Ok(baked);
     }
-    bail!("Could not locate project root (tools/menubar/build.sh not found up from executable)");
+
+    // 3. Walk up from CWD (relocated binary invoked from a checkout).
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir: Option<PathBuf> = Some(cwd);
+        for _ in 0..8 {
+            if let Some(d) = dir {
+                if has_build_sh(&d) {
+                    return Ok(d);
+                }
+                dir = d.parent().map(|p| p.to_path_buf());
+            } else {
+                break;
+            }
+        }
+    }
+
+    bail!(
+        "Could not locate project root (tools/menubar/build.sh not found up from executable, CARGO_MANIFEST_DIR={}, or CWD)",
+        env!("CARGO_MANIFEST_DIR")
+    );
 }
 
 fn build_sh_path() -> Result<PathBuf> {
@@ -265,7 +292,21 @@ fn build_sh_path() -> Result<PathBuf> {
 }
 
 fn widget_binary() -> Result<PathBuf> {
-    Ok(project_root()?.join("tools/menubar").join(BINARY_NAME))
+    // Prefer the deployed bundle in ~/Applications/ — that's the location
+    // macOS Spotlight/LaunchServices indexes, so the icon shows correctly in
+    // Login Items and Notification Center. Fall back to the in-tree build
+    // output if the deploy step hasn't run yet (developer/first-build case).
+    if let Some(home) = std::env::var_os("HOME") {
+        let deployed = PathBuf::from(home)
+            .join("Applications/i-dream-bar.app/Contents/MacOS")
+            .join(BINARY_NAME);
+        if deployed.exists() {
+            return Ok(deployed);
+        }
+    }
+    Ok(project_root()?
+        .join("tools/menubar/i-dream-bar.app/Contents/MacOS")
+        .join(BINARY_NAME))
 }
 
 fn source_path() -> Result<PathBuf> {
