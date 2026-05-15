@@ -24,6 +24,55 @@
 
 ---
 
+## Capability map — what shipping each stage enables
+
+> Categorical view organized by user-facing outcome. Maintained alongside the
+> stage tables in each item's section below. Use this when prioritizing.
+
+### A — Plugin substrate (item #1) · ~22h remaining
+
+| Stage | Effort | User capability when shipped |
+|-------|--------|------------------------------|
+| 1 — trait + registry | ✅ done | (internal plumbing only; no user-visible change yet) |
+| 2 — external manifest loading | ~4h | Drop `plugin.toml` under `~/.claude/i-dream/domains/`, i-dream registers it. `i-dream domain list` shows native + external together. |
+| 3 — `DreamPass` orchestrator | ~5h | i-dream's LLM dream cycle runs across all registered domains; finds cross-domain associations. Zero LLM cost on idle days. |
+| 4 — atone migration | ~3h | Atone becomes canonical first plugin. LLM finds patterns in your mistakes the deterministic consolidator can't ("you push bad code after 14:00 — 5 incidents support it"). |
+| 5 — affirm + cross-domain | ~4h | Affirm system shipped + dreamed-over. Insights link mistake-slugs ↔ affirmation-slugs ("this mistake is the inverse of this affirmation; you avoid the mistake when you remember the affirmation"). |
+| 6 — docs + dogfood | ~3h | A 3rd domain (PR-review patterns, API-spend, …) is buildable from `docs/15-plugin-author-guide.md` alone. |
+
+### B — Consolidation pipeline (items #2 + #3) · ~26h remaining
+
+| Stage | Effort | User capability when shipped |
+|-------|--------|------------------------------|
+| 1 — L1 cadence plumbing | ~3h | Widget bar → "Change Frequency" lists every registered domain with its own cadence selector (atone 1h, dreams 6h, etc.). |
+| 2 — L2 daily digest (deterministic) | ~4h | Every day at 03:00, `~/.claude/i-dream/daily/YYYY-MM-DD.md` lands with all 7 sections (placeholders where empty). `i-dream digest` prints today's. |
+| 3 — L2 cross-domain dream pass | ~3h | Daily file's "Top signals" + "Cross-domain associations" sections get LLM enrichment. |
+| 4 — readers (widget Today + `i-dream board` TUI) | ~4h | Glance at today's digest in menu bar; deep-dive in 4-pane terminal dashboard (Today / Week / Sources / GCC fitness). |
+| 5 — L3 weekly audit | ~5h | Sunday 09:00 or on-demand: coordinator dispatches tailored sub-agents (atone-analyst, gcc-fitness-scorer, graduation-curator, challenger, …); produces GCC-edit proposals. |
+| 6 — approval flow + apply | ~4h | Interactively `[a]pprove / [r]eject / [s]kip / [d]eep-dive` proposals. Approved → claude renders wording → applies the Edit. Rejected stay rejected 4 weeks (fingerprint-based). |
+| 7 — operational glue | ~3h | Catch-up after laptop closed 3+ days. Threads auto-close on target-file edit or 14d decay. `i-dream thread {list,resolve,reopen}`. |
+
+### C — Session integration (item #4) · spec-pending
+
+| Stage | Effort | User capability when shipped |
+|-------|--------|------------------------------|
+| spec | conversation | TBD — invocation surface (slash command / CLI / widget), schema, lifecycle, transcript-link stability. |
+| build | (after spec) | From any Claude Code session: pin a structured insight with file paths + transcript link + framing. Tomorrow's daily digest section 3 references it. Dream pass treats pins as high-priority input. |
+
+### Implementation order recommendation
+
+1. **B Stage 1** — load all the domains in the widget menu (user's current ask).
+2. **A Stage 2** — external manifest loading. Unblocks A Stages 3+.
+3. **B Stages 2 + 3** — daily file existing every day, then with LLM enrichment.
+4. **A Stages 3 + 4** — DreamPass + atone migration.
+5. **B Stage 4** — readers (depends on B Stages 2 + 3 having content).
+6. **C spec conversation** — once daily-digest section 3 has a real consumer to drive pin shape.
+7. **C build → B Stages 5 + 6 → A Stages 5 + 6 → B Stage 7**.
+
+Total remaining: ~50h across all 4 roadmap items.
+
+---
+
 ## 1. Dreaming-plugin system
 
 **Status:** `spec-complete` — design landed `2026-05-15` at
