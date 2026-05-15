@@ -11,12 +11,17 @@ pub mod intuition;
 pub mod metacog;
 pub mod project_briefs;
 pub mod prospective;
+pub mod registry;
 pub mod user_settings;
 pub mod weekly_briefing;
 
 use crate::api::ClaudeClient;
 use crate::config::Config;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::path::PathBuf;
 
 /// Strip ASCII control characters (0x00–0x1F) from a string except for
 /// the three whitespace controls JSON allows (\t, \n, \r). Models very
@@ -141,6 +146,375 @@ pub fn inspect(config: &Config, module_name: &str) -> Result<String> {
     }
 }
 
+// ── Dream-domain plugin contract ─────────────────────────────────────────────
+//
+// The DreamDomain trait is the registration surface for subconscious domains.
+// Native compiled modules (this directory's submodules) and external
+// filesystem-described plugins (e.g. ~/.claude/atone/) both implement it.
+// Full design + manifest schema: docs/14-dreaming-plugins.md.
+
+/// Position within a domain's append-only event stream. Each domain advances
+/// its own cursor after a successful consolidation or dream pass.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Cursor {
+    pub last_event_id: Option<String>,
+    pub last_ts: Option<DateTime<Utc>>,
+}
+
+/// A single event read from a domain's stream. The payload is raw JSON — each
+/// domain's schema is its own concern; the registry only relies on `id` and
+/// `ts` (resolved via the manifest's id_field / ts_field declarations).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainEvent {
+    pub id: String,
+    pub ts: DateTime<Utc>,
+    pub raw: Value,
+}
+
+/// What a domain returns after running its consolidation step. Used for
+/// logging and for the daily digest's per-domain summary section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConsolidationReport {
+    pub domain: String,
+    pub events_processed: usize,
+    pub derived_files_written: Vec<PathBuf>,
+    pub runtime_ms: u64,
+    pub note: Option<String>,
+}
+
+/// One entry in the shared trigger lookup. Domains contribute these; the
+/// union is consumed by hinter fan-out for first-turn + periodic injection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerEntry {
+    pub id: String,
+    pub from_slug: String,
+    pub from_source: String,
+    pub weight: TriggerWeight,
+    pub instruction: String,
+    #[serde(default)]
+    pub match_keywords: Vec<String>,
+    #[serde(default)]
+    pub match_tool_signatures: Vec<String>,
+    #[serde(default)]
+    pub deep_link: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TriggerWeight {
+    Low,
+    Medium,
+    High,
+}
+
+/// One line of TLDR feed contributed by a domain. The top-N across domains
+/// (weighted) becomes the first-turn session injection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TldrLine {
+    pub source_domain: String,
+    pub slug: String,
+    pub text: String,
+    pub score: f64,
+}
+
+/// Context handed to a domain's `render_dream_prompt` so the prompt can
+/// include hints about other domains' recent activity and prior signals.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DreamContext {
+    pub recent_other_domain_summaries: Vec<(String, String)>,
+    pub prior_top_signals: Vec<String>,
+}
+
+/// Parsed LLM output for a single domain's dream pass. JSON schema in
+/// docs/14-dreaming-plugins.md §3.6.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DreamOutput {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    pub domain: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub insights: Vec<Insight>,
+}
+
+/// One insight produced by a dream pass. The five variants are the v1
+/// taxonomy — extensible, but stable enough that adapter scripts can match
+/// against them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Insight {
+    Pattern {
+        name: String,
+        evidence_event_ids: Vec<String>,
+        confidence: f64,
+        instruction: String,
+        #[serde(default)]
+        trigger_keywords: Vec<String>,
+        #[serde(default)]
+        tool_signatures: Vec<String>,
+    },
+    Association {
+        from_slug: String,
+        to_slug: String,
+        confidence: f64,
+        #[serde(default)]
+        instruction: Option<String>,
+    },
+    GraduationCandidate {
+        slug: String,
+        rationale: String,
+        #[serde(default)]
+        target: Option<String>,
+    },
+    DecayCandidate {
+        slug: String,
+        rationale: String,
+        action: String,
+    },
+    Summary {
+        text: String,
+    },
+}
+
+/// Manifest describing an external domain plugin. Loaded from
+/// `<root>/.i-dream-domain.toml` or `~/.claude/i-dream/domains/<name>.toml`.
+/// Full schema in docs/14-dreaming-plugins.md §3.2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainManifest {
+    pub domain: DomainHeader,
+    pub event_stream: EventStreamSpec,
+    pub consolidation: ConsolidationSpec,
+    #[serde(default)]
+    pub dream: DreamSpec,
+    #[serde(default)]
+    pub hinter: HinterSpec,
+    #[serde(default)]
+    pub snapshot: SnapshotSpec,
+    #[serde(default)]
+    pub permissions: PermissionsSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainHeader {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventStreamSpec {
+    pub path: PathBuf,
+    pub format: String,
+    pub id_field: String,
+    pub ts_field: String,
+    #[serde(default)]
+    pub schema_hint: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidationSpec {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub script: Option<PathBuf>,
+    pub cadence: String,
+    #[serde(default)]
+    pub read_only_mode_flag: Option<String>,
+    #[serde(default = "default_timeout")]
+    pub timeout: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DreamSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub cadence: Option<String>,
+    #[serde(default)]
+    pub budget_tokens: Option<u64>,
+    #[serde(default)]
+    pub prompt_path: Option<PathBuf>,
+    #[serde(default)]
+    pub insights_path: Option<PathBuf>,
+    #[serde(default)]
+    pub cursor_path: Option<PathBuf>,
+    #[serde(default)]
+    pub adapter: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HinterSpec {
+    #[serde(default)]
+    pub tldr_path: Option<PathBuf>,
+    #[serde(default)]
+    pub triggers_path: Option<PathBuf>,
+    #[serde(default = "default_one")]
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SnapshotSpec {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub src_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub retention: Option<String>,
+    #[serde(default)]
+    pub defer_to_domain: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PermissionsSpec {
+    #[serde(default)]
+    pub network: bool,
+    #[serde(default)]
+    pub disk: Option<String>,
+    #[serde(default)]
+    pub subprocess: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_one() -> f64 {
+    1.0
+}
+fn default_timeout() -> String {
+    "60s".to_string()
+}
+
+/// Implemented by every registered subconscious domain — native modules via
+/// `NativeAdapter`, external plugins via `ExternalDomain`. The trait is sync;
+/// the dreaming orchestrator handles LLM calls and is responsible for the
+/// async surface.
+pub trait DreamDomain: Send + Sync {
+    fn name(&self) -> &str;
+    fn manifest(&self) -> &DomainManifest;
+    fn current_cursor(&self) -> Result<Cursor>;
+    fn delta(&self, cursor: &Cursor) -> Result<Vec<DomainEvent>>;
+    fn advance_cursor(&self, new: Cursor) -> Result<()>;
+    fn consolidate(&self) -> Result<ConsolidationReport>;
+    fn render_dream_prompt(
+        &self,
+        delta: &[DomainEvent],
+        context: &DreamContext,
+    ) -> Result<Option<String>>;
+    fn consume_dream(&self, output: &DreamOutput) -> Result<()>;
+    fn contribute_triggers(&self) -> Result<Vec<TriggerEntry>>;
+    fn contribute_tldr(&self) -> Result<Vec<TldrLine>>;
+}
+
+/// Wraps a native compiled `Module` to expose it as a `DreamDomain`. The
+/// adapter is enumeration-and-identity only — native modules' real work
+/// continues to be driven by the daemon's existing `Module::run` loop. If
+/// `consolidate()` here also invoked Module::run, native modules would
+/// double-run on every registry tick.
+///
+/// Native modules opt out of the cross-domain LLM dream pass
+/// (`render_dream_prompt` returns `Ok(None)`) because they already run
+/// their own LLM cycles internally.
+pub struct NativeAdapter<M: Module> {
+    name: String,
+    manifest: DomainManifest,
+    module: M,
+}
+
+impl<M: Module> NativeAdapter<M> {
+    pub fn new(name: impl Into<String>, module: M) -> Self {
+        let name = name.into();
+        let manifest = Self::synth_manifest(&name);
+        Self {
+            name,
+            manifest,
+            module,
+        }
+    }
+
+    pub fn inner(&self) -> &M {
+        &self.module
+    }
+
+    fn synth_manifest(name: &str) -> DomainManifest {
+        let root = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"))
+            .join(".claude/i-dream/native")
+            .join(name);
+        DomainManifest {
+            domain: DomainHeader {
+                name: name.to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                description: format!("Native compiled module: {name}"),
+                root: root.clone(),
+            },
+            event_stream: EventStreamSpec {
+                path: root.join("events.jsonl"),
+                format: "native".to_string(),
+                id_field: "id".to_string(),
+                ts_field: "ts".to_string(),
+                schema_hint: None,
+            },
+            consolidation: ConsolidationSpec {
+                enabled: true,
+                kind: "native".to_string(),
+                script: None,
+                cadence: "manifest".to_string(),
+                read_only_mode_flag: None,
+                timeout: default_timeout(),
+            },
+            dream: DreamSpec::default(),
+            hinter: HinterSpec::default(),
+            snapshot: SnapshotSpec::default(),
+            permissions: PermissionsSpec::default(),
+        }
+    }
+}
+
+impl<M: Module + Send + Sync> DreamDomain for NativeAdapter<M> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn manifest(&self) -> &DomainManifest {
+        &self.manifest
+    }
+    fn current_cursor(&self) -> Result<Cursor> {
+        Ok(Cursor::default())
+    }
+    fn delta(&self, _cursor: &Cursor) -> Result<Vec<DomainEvent>> {
+        Ok(vec![])
+    }
+    fn advance_cursor(&self, _new: Cursor) -> Result<()> {
+        Ok(())
+    }
+    fn consolidate(&self) -> Result<ConsolidationReport> {
+        Ok(ConsolidationReport {
+            domain: self.name.clone(),
+            ..Default::default()
+        })
+    }
+    fn render_dream_prompt(
+        &self,
+        _delta: &[DomainEvent],
+        _context: &DreamContext,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+    fn consume_dream(&self, _output: &DreamOutput) -> Result<()> {
+        Ok(())
+    }
+    fn contribute_triggers(&self) -> Result<Vec<TriggerEntry>> {
+        Ok(vec![])
+    }
+    fn contribute_tldr(&self) -> Result<Vec<TldrLine>> {
+        Ok(vec![])
+    }
+}
+
 #[cfg(test)]
 mod sanitize_tests {
     use super::sanitize_json_control_chars;
@@ -153,5 +527,70 @@ mod sanitize_tests {
     fn strips_bell_and_escape() {
         let s = "a\u{0007}b\u{001b}c";
         assert_eq!(sanitize_json_control_chars(s), "abc");
+    }
+}
+
+#[cfg(test)]
+mod dream_domain_dispatch_tests {
+    use super::*;
+    use crate::api::ClaudeClient;
+
+    /// Minimal stub implementing Module so we can instantiate
+    /// NativeAdapter without dragging in a real native module's deps.
+    struct StubModule;
+
+    impl Module for StubModule {
+        fn should_run(&self) -> Result<bool> {
+            Ok(false)
+        }
+        fn run(
+            &self,
+            _client: &ClaudeClient,
+            _budget_tokens: u64,
+        ) -> impl std::future::Future<Output = Result<u64>> + Send {
+            async { Ok(0) }
+        }
+    }
+
+    #[test]
+    fn native_adapter_dispatches_all_trait_methods() {
+        let adapter = NativeAdapter::new("test-stub", StubModule);
+
+        // identity
+        assert_eq!(adapter.name(), "test-stub");
+        assert_eq!(adapter.manifest().domain.name, "test-stub");
+        assert_eq!(adapter.manifest().consolidation.kind, "native");
+
+        // every trait method returns Ok with the documented stub shape
+        let cursor = adapter.current_cursor().unwrap();
+        assert!(cursor.last_event_id.is_none());
+
+        let delta = adapter.delta(&cursor).unwrap();
+        assert!(delta.is_empty());
+
+        adapter.advance_cursor(Cursor::default()).unwrap();
+
+        let report = adapter.consolidate().unwrap();
+        assert_eq!(report.domain, "test-stub");
+        assert_eq!(report.events_processed, 0);
+
+        let prompt = adapter
+            .render_dream_prompt(&[], &DreamContext::default())
+            .unwrap();
+        assert!(
+            prompt.is_none(),
+            "native modules opt out of cross-domain dream pass"
+        );
+
+        adapter.consume_dream(&DreamOutput::default()).unwrap();
+        assert!(adapter.contribute_triggers().unwrap().is_empty());
+        assert!(adapter.contribute_tldr().unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_adapter_works_through_trait_object() {
+        let adapter: Box<dyn DreamDomain> = Box::new(NativeAdapter::new("dyn-stub", StubModule));
+        assert_eq!(adapter.name(), "dyn-stub");
+        assert_eq!(adapter.manifest().domain.name, "dyn-stub");
     }
 }

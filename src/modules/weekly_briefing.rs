@@ -25,6 +25,7 @@
 
 use crate::api::ClaudeClient;
 use crate::config::Config;
+use crate::modules::Module;
 use crate::modules::dreaming::{Association, ExtractedPattern};
 use crate::store::Store;
 
@@ -280,6 +281,25 @@ Tone: concise, direct, no preamble, no headers besides the five above. Do not in
                 .unwrap_or_default()
         } else {
             BriefingState::default()
+        }
+    }
+}
+
+/// `Module` trait impl — adapts the briefing's bespoke shape to the
+/// per-cycle module contract. `should_run` delegates to the cheaper
+/// `should_run_now` (which is also what `Daemon::check_and_run_briefing`
+/// uses). `run` calls the inherent `run` (2-arg, no budget) and flattens
+/// the `Option<(u64, PathBuf)>` to plain tokens — `None` (skip-this-week)
+/// reports as 0 tokens.
+impl<'a> Module for WeeklyBriefingModule<'a> {
+    fn should_run(&self) -> Result<bool> {
+        Ok(self.should_run_now())
+    }
+
+    async fn run(&self, client: &ClaudeClient, _budget_tokens: u64) -> Result<u64> {
+        match WeeklyBriefingModule::run(self, client).await? {
+            Some((tokens, _path)) => Ok(tokens),
+            None => Ok(0),
         }
     }
 }

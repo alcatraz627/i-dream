@@ -13,6 +13,7 @@ use crate::modules::{
     intuition::IntuitionModule,
     metacog::{MetacogModule, ToolActivitySample},
     prospective::{FiredRecord, Intention, Priority, ProspectiveModule, Trigger},
+    registry::DomainRegistry,
     user_settings::UserSettings,
 };
 use crate::store::Store;
@@ -540,6 +541,23 @@ impl Daemon {
         let client = self.client.as_ref().context(
             "API client unavailable — set ANTHROPIC_API_KEY or enable budget.use_claude_code_cli",
         )?;
+
+        // Enumerate the subconscious-domain registry. Today the registry is
+        // observation-only — native modules still flow through the
+        // module-specific phases below. Stage 2+ of docs/14-dreaming-plugins.md
+        // will move dispatch into the registry; building it here on every
+        // cycle catches construction failures early and surfaces the
+        // registered domain set in logs.
+        let registry = DomainRegistry::boot(&self.config, &self.store);
+        debug!(
+            "Domain registry: {} native domains [{}]",
+            registry.len(),
+            registry
+                .iter()
+                .map(|d| d.name())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
         let mut budget = self.config.budget.max_tokens_per_cycle;
         let deadline = tokio::time::Instant::now()

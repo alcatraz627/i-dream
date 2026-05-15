@@ -6,6 +6,7 @@
 
 use crate::api::ClaudeClient;
 use crate::config::Config;
+use crate::modules::Module;
 use crate::store::Store;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -55,8 +56,10 @@ impl<'a> InsightDigestModule<'a> {
     pub fn new(config: &'a Config, store: &'a Store) -> Self {
         Self { config, store }
     }
+}
 
-    pub fn should_run(&self) -> Result<bool> {
+impl<'a> Module for InsightDigestModule<'a> {
+    fn should_run(&self) -> Result<bool> {
         // Require the insights file to have actual content first.
         if !self.store.exists(INSIGHTS_PATH) {
             return Ok(false);
@@ -75,7 +78,7 @@ impl<'a> InsightDigestModule<'a> {
         Ok(true)
     }
 
-    pub async fn run(&self, client: &ClaudeClient, _budget_tokens: u64) -> Result<u64> {
+    async fn run(&self, client: &ClaudeClient, _budget_tokens: u64) -> Result<u64> {
         let insights_path = self.store.path(INSIGHTS_PATH);
         let insights_raw = std::fs::read_to_string(&insights_path)?;
 
