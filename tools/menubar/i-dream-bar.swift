@@ -5720,6 +5720,67 @@ private func resolveIDreamBinary() -> String {
     return "i-dream"
 }
 
+// ── Today digest counts ──────────────────────────────────────────────────────
+// Parses ~/.claude/i-dream/daily/latest.md (the L2 daily digest) into
+// per-section item counts for the widget Today submenu. Stateless re-read
+// per menu open; if the file is missing, returns nil so the menu can
+// render an actionable placeholder.
+
+private struct TodayDigestCounts {
+    let date: String
+    /// Sections in declaration order, paired with item counts.
+    let itemized: [(String, Int)]
+}
+
+private func loadTodayDigestCounts() -> TodayDigestCounts? {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let path = "\(home)/.claude/i-dream/daily/latest.md"
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+        return nil
+    }
+    // Extract date from H1: "# 2026-05-16 — i-dream daily"
+    let firstLine = content.split(separator: "\n").first.map(String.init) ?? ""
+    let date = firstLine
+        .replacingOccurrences(of: "# ", with: "")
+        .components(separatedBy: " —")
+        .first ?? "?"
+
+    // Walk sections — every "## " starts a new section; count `- ` bullets
+    // until the next "## " or "---" or EOF. A section whose body is only
+    // `_(italic placeholder)_` counts as 0.
+    var counts: [(String, Int)] = []
+    var currentSection: String? = nil
+    var currentBullets = 0
+    var currentHasOnlyPlaceholder = true
+
+    func flush() {
+        if let s = currentSection {
+            counts.append((s, currentHasOnlyPlaceholder ? 0 : currentBullets))
+        }
+    }
+
+    for line in content.split(separator: "\n", omittingEmptySubsequences: false) {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("## ") {
+            flush()
+            currentSection = String(t.dropFirst(3))
+            currentBullets = 0
+            currentHasOnlyPlaceholder = true
+        } else if t == "---" {
+            flush()
+            currentSection = nil
+        } else if t.hasPrefix("- ") {
+            currentBullets += 1
+            currentHasOnlyPlaceholder = false
+        } else if !t.isEmpty && !t.hasPrefix("_(") && !t.hasPrefix("### ") {
+            // Real content (not italic placeholder, not subsection heading)
+            currentHasOnlyPlaceholder = false
+        }
+    }
+    flush()
+    return TodayDigestCounts(date: date, itemized: counts)
+}
+
 /// Invoke `i-dream domain list --json` and parse the result. Returns nil if
 /// the CLI is missing, exits non-zero, or emits malformed JSON. Treat nil
 /// as "couldn't load" — the menu shows a placeholder.
@@ -6248,6 +6309,47 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setIcon(domainsParent, "circle.grid.3x3.fill")
         menu.addItem(domainsParent)
         menu.setSubmenu(domainsMenu, for: domainsParent)
+
+        // ─ Today (B Stage 4 — daily digest reader) ───────────────────────────
+        // Reads ~/.claude/i-dream/daily/latest.md, parses the 7 fixed sections,
+        // shows item counts inline + an "Open full digest" action. Stateless;
+        // re-read on every menu open. The digest file is written by
+        // `i-dream digest` (manual) or the daily cron (B Stage 7).
+        let todayCounts = loadTodayDigestCounts()
+        let todayMenu = NSMenu()
+        if let counts = todayCounts {
+            for (section, count) in counts.itemized {
+                let item = NSMenuItem()
+                let pad = String(repeating: " ", count: max(0, 26 - section.count))
+                item.attributedTitle = NSAttributedString(
+                    string: "  \(section)\(pad) \(count)",
+                    attributes: [
+                        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
+                        .foregroundColor: count > 0 ? NSColor.labelColor : NSColor.tertiaryLabelColor,
+                    ])
+                todayMenu.addItem(item)
+            }
+            todayMenu.addItem(.separator())
+            let open = NSMenuItem(title: "  Open full digest", action: #selector(openTodaysDigest), keyEquivalent: "")
+            open.target = self
+            todayMenu.addItem(open)
+            let regen = NSMenuItem(title: "  Regenerate (run `i-dream digest`)", action: #selector(regenerateTodaysDigest), keyEquivalent: "")
+            regen.target = self
+            todayMenu.addItem(regen)
+        } else {
+            let err = NSMenuItem(
+                title: "  (no digest yet — run `i-dream digest`)",
+                action: nil, keyEquivalent: "")
+            err.isEnabled = false
+            todayMenu.addItem(err)
+        }
+        let todayDateStr = todayCounts?.date ?? "no digest"
+        let todayParent = NSMenuItem(
+            title: "  Today (\(todayDateStr)) →",
+            action: nil, keyEquivalent: "")
+        setIcon(todayParent, "calendar")
+        menu.addItem(todayParent)
+        menu.setSubmenu(todayMenu, for: todayParent)
 
         // ─ Knowledge Base ─────────────────────────────────────────────────────
         menu.addItem(.separator())
@@ -8855,6 +8957,28 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openLogs() {
         openInTerminal("tail -f '\(bestLogPath())'")
+    }
+
+    @objc private func openTodaysDigest() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = "\(home)/.claude/i-dream/daily/latest.md"
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+
+    @objc private func regenerateTodaysDigest() {
+        // Shell out to `i-dream digest` (writes the file; we then open it).
+        let task = Process()
+        task.launchPath = resolveIDreamBinary()
+        task.arguments = ["digest"]
+        task.standardOutput = Pipe()
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return
+        }
+        openTodaysDigest()
     }
 
     @objc private func openLogsInVSCode() {
