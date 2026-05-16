@@ -167,7 +167,15 @@ pub fn render_markdown(bundle: &DayBundle) -> String {
     out.push_str(&format!("# {} — i-dream daily\n\n", bundle.date));
 
     out.push_str("## Top signals\n\n");
-    out.push_str("_(awaiting Stage 3 — cross-domain LLM dream pass)_\n\n");
+    let tldr_lines = read_tldr_union();
+    if tldr_lines.is_empty() {
+        out.push_str("_(no signals yet — run `i-dream dream-pass` to populate)_\n\n");
+    } else {
+        for line in &tldr_lines {
+            out.push_str(&format!("{line}\n"));
+        }
+        out.push('\n');
+    }
 
     out.push_str("## Per-domain summary\n\n");
     if bundle.per_domain.is_empty() {
@@ -193,7 +201,15 @@ pub fn render_markdown(bundle: &DayBundle) -> String {
     out.push_str("_(none — see roadmap item #4)_\n\n");
 
     out.push_str("## Cross-domain associations\n\n");
-    out.push_str("_(awaiting Stage 3 — cross-domain LLM dream pass)_\n\n");
+    let associations = read_cross_associations(bundle.date);
+    if associations.is_empty() {
+        out.push_str("_(none today — run `i-dream dream-pass` to populate)_\n\n");
+    } else {
+        for assoc in &associations {
+            out.push_str(&format!("- {assoc}\n"));
+        }
+        out.push('\n');
+    }
 
     out.push_str("## Open threads (carried over)\n\n");
     out.push_str("_(no open threads)_\n\n");
@@ -254,6 +270,70 @@ pub fn write_daily(date: NaiveDate, config: &Config, store: &Store) -> Result<Pa
 fn daily_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME unset")?;
     Ok(PathBuf::from(home).join(".claude/i-dream/daily"))
+}
+
+/// Read `~/.claude/i-dream/derived/tldr.union.txt` produced by the last
+/// `i-dream dream-pass`. Returns empty Vec if the file doesn't exist —
+/// digest then falls back to a placeholder. Each line is rendered verbatim.
+fn read_tldr_union() -> Vec<String> {
+    let Ok(home) = std::env::var("HOME") else {
+        return vec![];
+    };
+    let path = PathBuf::from(home).join(".claude/i-dream/derived/tldr.union.txt");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return vec![];
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(5)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Read cross-domain associations produced by the last DreamPass that ran
+/// today (matched by file mtime). Returns one-liner strings ready to render
+/// as digest bullets. Empty when the file is absent or stale.
+fn read_cross_associations(date: NaiveDate) -> Vec<String> {
+    let Ok(home) = std::env::var("HOME") else {
+        return vec![];
+    };
+    let path = PathBuf::from(home).join(".claude/i-dream/derived/associations.cross.jsonl");
+    let meta = match fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return vec![],
+    };
+    let modified = match meta.modified() {
+        Ok(m) => m,
+        Err(_) => return vec![],
+    };
+    if !was_modified_on(modified, date) {
+        return vec![];
+    }
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            let from_d = v.get("from_domain")?.as_str()?;
+            let from_s = v.get("from_slug")?.as_str()?;
+            let to_d = v.get("to_domain")?.as_str()?;
+            let to_s = v.get("to_slug")?.as_str()?;
+            let conf = v.get("confidence").and_then(|c| c.as_f64()).unwrap_or(0.0);
+            let instruction = v
+                .get("instruction")
+                .and_then(|s| s.as_str())
+                .unwrap_or("(no instruction)");
+            Some(format!(
+                "**{from_s}** ({from_d}) ↔ **{to_s}** ({to_d}) — {instruction} _(conf {conf:.2})_"
+            ))
+        })
+        .take(5)
+        .collect()
 }
 
 fn update_latest_symlink(daily_dir: &Path, target: &Path) -> Result<()> {
