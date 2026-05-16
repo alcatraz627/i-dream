@@ -29,24 +29,24 @@
 > Categorical view organized by user-facing outcome. Maintained alongside the
 > stage tables in each item's section below. Use this when prioritizing.
 
-### A — Plugin substrate (item #1) · ~22h remaining
+### A — Plugin substrate (item #1) · ~4h remaining (just A Stage 5)
 
-| Stage | Effort | User capability when shipped |
+| Stage | Effort | Status / User capability |
 |-------|--------|------------------------------|
-| 1 — trait + registry | ✅ done | (internal plumbing only; no user-visible change yet) |
-| 2 — external manifest loading | ~4h | Drop `plugin.toml` under `~/.claude/i-dream/domains/`, i-dream registers it. `i-dream domain list` shows native + external together. |
-| 3 — `DreamPass` orchestrator | ~5h | i-dream's LLM dream cycle runs across all registered domains; finds cross-domain associations. Zero LLM cost on idle days. |
-| 4 — atone migration | ~3h | Atone becomes canonical first plugin. LLM finds patterns in your mistakes the deterministic consolidator can't ("you push bad code after 14:00 — 5 incidents support it"). |
-| 5 — affirm + cross-domain | ~4h | Affirm system shipped + dreamed-over. Insights link mistake-slugs ↔ affirmation-slugs ("this mistake is the inverse of this affirmation; you avoid the mistake when you remember the affirmation"). |
-| 6 — docs + dogfood | ~3h | A 3rd domain (PR-review patterns, API-spend, …) is buildable from `docs/15-plugin-author-guide.md` alone. |
+| 1 — trait + registry | ✅ done | (internal plumbing) |
+| 2 — external manifest loading | ✅ done (2026-05-16) | Drop `.i-dream-domain.toml` at a known sibling, or `*.toml` under `~/.claude/i-dream/domains/`, i-dream registers it. Shown via `i-dream domain list` (native + external together). |
+| 3 — `DreamPass` orchestrator | ✅ done (2026-05-16) | `i-dream dream-pass` runs LLM pass over every domain with delta (zero LLM cost when idle); writes per-domain insights.jsonl + cross-domain associations + union TLDR + union triggers. |
+| 4 — atone migration | ✅ done (2026-05-16) | Atone now lists as `external · every-2-days`. Manifest + dream/prompt.md live in atone's own git repo (`~/.claude/atone/`). Running `i-dream dream-pass` would do an LLM pass over your mistakes today. |
+| 5 — affirm + cross-domain | ⏳ pending (~4h) | Affirm system shipped + dreamed-over (sibling of atone per atone/BUILD §3.11). Cross-domain pass already wired (A Stage 3), so when 2nd domain ships, associations between mistake-slugs ↔ affirmation-slugs surface automatically. |
+| 6 — docs + dogfood | ✅ done (2026-05-16) | `docs/17-plugin-author-guide.md` covers manifest, prompt template, adapter pattern, common gotchas. Atone is the canonical worked example. |
 
 ### B — Consolidation pipeline (items #2 + #3) · ~26h remaining
 
 | Stage | Effort | User capability when shipped |
 |-------|--------|------------------------------|
-| 1 — L1 cadence plumbing | ⏳ partial (2026-05-16) | Widget bar → "Dream Domains (N) →" lists every registered domain with its cadence. **Shipped:** `i-dream domain list [--json]` CLI + widget submenu populated from it. **Deferred:** per-domain cadence override write-back, FSEvents reload, `_all_` reset. |
-| 2 — L2 daily digest (deterministic) | ✅ done (2026-05-16) | `i-dream digest [--day YYYY-MM-DD]` renders `~/.claude/i-dream/daily/<day>.md` with all 7 sections (placeholders where empty) + symlinks `latest.md`. Sources section indexes today's files under `~/.claude/{topics,assets/reports,subconscious/dreams}/`. Idempotent. Cron-driven invocation lands with Stage 7. |
-| 3 — L2 cross-domain dream pass | ~3h | Daily file's "Top signals" + "Cross-domain associations" sections get LLM enrichment. |
+| 1 — L1 cadence plumbing | ⏳ partial (2026-05-16) | **Shipped:** `i-dream domain list [--json]` CLI + widget submenu + `i-dream domain enable/disable` + `~/.claude/i-dream/_runtime.json`. **Still deferred:** per-domain cadence override (speculative without scheduler; awaits Stage 7). |
+| 2 — L2 daily digest (deterministic) | ✅ done (2026-05-16) | `i-dream digest [--day YYYY-MM-DD]` renders `~/.claude/i-dream/daily/<day>.md` with all 7 sections + symlinks `latest.md`. Sources indexes today's files under `~/.claude/{topics,assets/reports,subconscious/dreams}/`. Idempotent. |
+| 3 — L2 cross-domain dream pass | ✅ done (2026-05-16) | Digest's "Top signals" + "Cross-domain associations" sections read `tldr.union.txt` + `associations.cross.jsonl` written by `i-dream dream-pass`. Placeholders are actionable ("run `i-dream dream-pass`"). |
 | 4 — readers (widget Today + `i-dream board` TUI) | ~4h | Glance at today's digest in menu bar; deep-dive in 4-pane terminal dashboard (Today / Week / Sources / GCC fitness). |
 | 5 — L3 weekly audit | ~5h | Sunday 09:00 or on-demand: coordinator dispatches tailored sub-agents (atone-analyst, gcc-fitness-scorer, graduation-curator, challenger, …); produces GCC-edit proposals. |
 | 6 — approval flow + apply | ~4h | Interactively `[a]pprove / [r]eject / [s]kip / [d]eep-dive` proposals. Approved → claude renders wording → applies the Edit. Rejected stay rejected 4 weeks (fingerprint-based). |
@@ -388,3 +388,4 @@ After every status transition, also update:
 | 2026-05-16 | B Stage 1 partial shipped: `i-dream domain list [--json]` CLI subcommand + widget bar "Dream Domains (N) →" submenu (`src/cli.rs`, `src/domain.rs` new, `src/main.rs`, `tools/menubar/i-dream-bar.swift`). Widget enumerates registered domains by shelling out to the CLI on menu open — stateless about the domain set; Stage 2 of A picks up automatically. Deferred from B Stage 1: cadence override write-back, FSEvents reload, `_all_` reset. |
 | 2026-05-16 | Deferred B Stage 1 parts SKIPPED per atone-refresh `speculative-abstractions-without-a-load-bearing-caller` flag — no `DomainScheduler` exists yet to consume the cadence overrides. Will revisit after A Stage 2 lands. |
 | 2026-05-16 | B Stage 2 DONE: deterministic L2 daily digest. New `src/consolidation/{mod,l2_digest}.rs` + `Command::Digest { day }` CLI. Writes `~/.claude/i-dream/daily/YYYY-MM-DD.md` with all 7 fixed sections + `latest.md` symlink. Source scanner walks `~/.claude/{topics,assets/reports,subconscious/dreams}/`. Idempotent (bit-identical re-runs). 8 new tests; 304 total passing. Sections 1+4 carry `awaiting Stage 3` placeholder until the LLM dream pass lands. |
+| 2026-05-16 | **Five-stage burst** ([f7bb391 → 45e7564](https://github.com/alcatraz627/i-dream/compare/1f1b9ff...45e7564)): A Stage 2 (external manifest loading + ExternalDomain), A Stage 3 (DreamPass orchestrator with cross-domain join), A Stage 4 (atone migration files in atone's own repo), B Stage 1 deferred enable/disable + `_runtime.json` (idream_runtime.rs new), B Stage 3 (digest reads dream-pass artifacts), A Stage 6 (`docs/17-plugin-author-guide.md`). 314 tests passing (was 296), 0 regressions. 8 domains in registry (7 native + atone external). Remaining: A Stage 5 (affirm system), B Stages 4-7 (readers + audit + apply + cron), C (spec-pending). |
