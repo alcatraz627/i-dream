@@ -2,6 +2,7 @@ mod api;
 mod cli;
 mod config;
 mod consolidation;
+mod cron;
 mod daemon;
 mod dashboard;
 mod domain;
@@ -160,6 +161,10 @@ async fn main() -> Result<()> {
             let content = std::fs::read_to_string(&path)?;
             print!("{content}");
             eprintln!("\n[digest written: {}]", path.display());
+        }
+
+        Command::Cron { action } => {
+            cron::handle(action)?;
         }
 
         Command::DreamPass { budget } => {

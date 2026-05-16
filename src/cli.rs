@@ -158,6 +158,14 @@ pub enum Command {
         budget: u32,
     },
 
+    /// Manage scheduled jobs (launchd plists). Currently ships only the
+    /// daily-digest cron (03:00 local). Weekly audit cron lands with
+    /// `i-dream audit` (B Stage 5+6 of docs/16-consolidation-build.md).
+    Cron {
+        #[command(subcommand)]
+        action: CronAction,
+    },
+
     /// M17 — diff two patterns-graph snapshots written by
     /// `graph-metrics --snapshot`. Reports added / removed / shifted
     /// patterns and associations between the two timestamps. Use to
@@ -315,6 +323,16 @@ pub enum WidgetAction {
     Install,
     /// Remove the LaunchAgent registration
     Uninstall,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum CronAction {
+    /// Write + load the daily-digest launchd plist (03:00 daily).
+    Install,
+    /// Bootout + remove the plist.
+    Uninstall,
+    /// Show whether the plist is loaded, its last exit, etc.
+    Status,
 }
 
 #[derive(clap::Subcommand, Debug)]
