@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod config;
+mod consolidation;
 mod daemon;
 mod dashboard;
 mod domain;
@@ -15,7 +16,7 @@ mod store;
 mod transcript;
 mod widget;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Command};
 use tracing::{info, warn};
@@ -143,6 +144,21 @@ async fn main() -> Result<()> {
         Command::Domain { action } => {
             let config = config::Config::load(&cli.config)?;
             domain::handle(action, &config)?;
+        }
+
+        Command::Digest { day } => {
+            use chrono::{Local, NaiveDate};
+            let date = match day {
+                Some(s) => NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+                    .with_context(|| format!("--day '{s}' is not YYYY-MM-DD"))?,
+                None => Local::now().naive_local().date(),
+            };
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir())?;
+            let path = consolidation::l2_digest::write_daily(date, &config, &store)?;
+            let content = std::fs::read_to_string(&path)?;
+            print!("{content}");
+            eprintln!("\n[digest written: {}]", path.display());
         }
 
         Command::Dashboard { no_open, run_tests } => {

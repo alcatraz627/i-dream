@@ -136,6 +136,16 @@ pub enum Command {
         action: DomainAction,
     },
 
+    /// Render and print the L2 daily digest for `--day YYYY-MM-DD` (default
+    /// today). Writes `~/.claude/i-dream/daily/<day>.md` + updates the
+    /// `latest.md` symlink when day == today. Idempotent. First user-visible
+    /// surface of the consolidation pipeline (docs/16, Stage 2 deterministic).
+    Digest {
+        /// Day to render in YYYY-MM-DD form. Defaults to today's local date.
+        #[arg(long)]
+        day: Option<String>,
+    },
+
     /// M17 — diff two patterns-graph snapshots written by
     /// `graph-metrics --snapshot`. Reports added / removed / shifted
     /// patterns and associations between the two timestamps. Use to
