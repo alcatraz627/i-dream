@@ -320,8 +320,8 @@ pub enum WidgetAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum DomainAction {
     /// List every registered dream-domain — native compiled modules
-    /// + external plugin manifests. With `--json`, prints a
-    /// machine-readable array for tools (e.g. the widget menu).
+    ///   plus external plugin manifests. With `--json`, prints a
+    ///   machine-readable array for tools (e.g. the widget menu).
     List {
         /// Emit JSON for downstream consumers.
         #[arg(long)]

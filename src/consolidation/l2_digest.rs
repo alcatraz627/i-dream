@@ -130,7 +130,7 @@ fn scan_one_off_sources(date: NaiveDate) -> Result<Vec<SourceLink>> {
         }
     }
     // Stable order: newest first
-    sources.sort_by(|a, b| b.modified.cmp(&a.modified));
+    sources.sort_by_key(|s| std::cmp::Reverse(s.modified));
     Ok(sources)
 }
 
@@ -146,13 +146,13 @@ fn extract_title(path: &Path) -> Option<String> {
         return path.file_name().and_then(|s| s.to_str()).map(String::from);
     }
     // For markdown files, read first H1.
-    if path.extension().and_then(|e| e.to_str()) == Some("md") {
-        if let Ok(content) = fs::read_to_string(path) {
-            for line in content.lines().take(40) {
-                let t = line.trim();
-                if let Some(rest) = t.strip_prefix("# ") {
-                    return Some(rest.trim().to_string());
-                }
+    if path.extension().and_then(|e| e.to_str()) == Some("md")
+        && let Ok(content) = fs::read_to_string(path)
+    {
+        for line in content.lines().take(40) {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("# ") {
+                return Some(rest.trim().to_string());
             }
         }
     }

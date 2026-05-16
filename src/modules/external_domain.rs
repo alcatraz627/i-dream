@@ -124,10 +124,10 @@ impl DreamDomain for ExternalDomain {
 
             if past_cursor {
                 out.push(DomainEvent { id, ts, raw });
-            } else if let Some(last) = &cursor.last_event_id {
-                if &id == last {
-                    past_cursor = true;
-                }
+            } else if let Some(last) = &cursor.last_event_id
+                && &id == last
+            {
+                past_cursor = true;
             }
         }
         Ok(out)
@@ -294,10 +294,10 @@ impl DreamDomain for ExternalDomain {
 /// `[domain].root`. The latter is handled by the manifest loader, not here.
 fn expand_path(p: &Path) -> PathBuf {
     let s = p.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(stripped);
-        }
+    if let Some(stripped) = s.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(stripped);
     }
     p.to_path_buf()
 }

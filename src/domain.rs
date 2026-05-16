@@ -95,8 +95,8 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
             return Ok(());
         }
         println!(
-            "{:<18} {:<10} {:<10} {}",
-            "NAME", "KIND", "CADENCE", "DESCRIPTION"
+            "{:<18} {:<10} {:<10} DESCRIPTION",
+            "NAME", "KIND", "CADENCE"
         );
         for e in &entries {
             println!(
