@@ -6,11 +6,20 @@
 
 use crate::config::Config;
 use crate::modules::{
-    DreamDomain, NativeAdapter, dreaming::DreamingModule, insight_digest::InsightDigestModule,
-    introspection::IntrospectionModule, intuition::IntuitionModule, metacog::MetacogModule,
-    prospective::ProspectiveModule, weekly_briefing::WeeklyBriefingModule,
+    DreamDomain, NativeAdapter,
+    dreaming::DreamingModule,
+    external_domain::{ExternalDomain, load_manifest},
+    insight_digest::InsightDigestModule,
+    introspection::IntrospectionModule,
+    intuition::IntuitionModule,
+    metacog::MetacogModule,
+    prospective::ProspectiveModule,
+    weekly_briefing::WeeklyBriefingModule,
 };
 use crate::store::Store;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use tracing::warn;
 
 /// The native subconscious modules registered via `Module` trait. Ordering
 /// is the daemon's tick-evaluation order — change deliberately. One holdout
@@ -39,7 +48,7 @@ impl<'a> DomainRegistry<'a> {
     /// Construct a registry holding `NativeAdapter`-wrapped instances of
     /// every native module. External plugin discovery lands in Stage 2.
     pub fn boot(config: &'a Config, store: &'a Store) -> Self {
-        let domains: Vec<Box<dyn DreamDomain + 'a>> = vec![
+        let mut domains: Vec<Box<dyn DreamDomain + 'a>> = vec![
             Box::new(NativeAdapter::new(
                 "dreaming",
                 DreamingModule::new(config, store),
@@ -69,6 +78,31 @@ impl<'a> DomainRegistry<'a> {
                 WeeklyBriefingModule::new(config, store),
             )),
         ];
+
+        // Append external plugins discovered from manifests. Name conflicts
+        // with native modules are resolved native-wins (warned, external
+        // skipped).
+        let mut taken: HashSet<String> = domains.iter().map(|d| d.name().to_string()).collect();
+        for m in discover_external_manifests() {
+            let name = m.domain.name.clone();
+            if taken.contains(&name) {
+                warn!(
+                    "External manifest collides with native module '{}'; native wins.",
+                    name
+                );
+                continue;
+            }
+            match ExternalDomain::from_manifest(m) {
+                Ok(ed) => {
+                    taken.insert(name);
+                    domains.push(Box::new(ed));
+                }
+                Err(e) => {
+                    warn!("Failed to load external domain '{name}': {e:#}");
+                }
+            }
+        }
+
         Self { domains }
     }
 
@@ -92,6 +126,66 @@ impl<'a> DomainRegistry<'a> {
     pub fn is_empty(&self) -> bool {
         self.domains.is_empty()
     }
+}
+
+/// Discover external plugin manifests from the canonical centralized dir
+/// (`~/.claude/i-dream/domains/*.toml`) plus well-known sibling roots that
+/// may carry an inline `.i-dream-domain.toml`. Order of returned manifests
+/// determines registration order; centralized first, then siblings.
+fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
+    let mut out = vec![];
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return out,
+    };
+
+    // 1) Centralized: ~/.claude/i-dream/domains/*.toml
+    let central_dir = PathBuf::from(&home).join(".claude/i-dream/domains");
+    if let Ok(entries) = std::fs::read_dir(&central_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            match load_manifest(&p) {
+                Ok(m) => {
+                    if seen.insert(m.domain.name.clone()) {
+                        out.push(m);
+                    }
+                }
+                Err(e) => warn!("Skipping malformed manifest {}: {e:#}", p.display()),
+            }
+        }
+    }
+
+    // 2) Sibling inline manifests at well-known roots.
+    let sibling_roots = [
+        PathBuf::from(&home).join(".claude/atone"),
+        PathBuf::from(&home).join(".claude/affirm"),
+    ];
+    for root in &sibling_roots {
+        let p = root.join(".i-dream-domain.toml");
+        if !p.exists() {
+            continue;
+        }
+        match load_manifest(&p) {
+            Ok(m) => {
+                if seen.insert(m.domain.name.clone()) {
+                    out.push(m);
+                } else {
+                    warn!(
+                        "Inline manifest at {} duplicates centralized; centralized wins.",
+                        p.display()
+                    );
+                }
+            }
+            Err(e) => warn!("Skipping malformed inline manifest {}: {e:#}", p.display()),
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]

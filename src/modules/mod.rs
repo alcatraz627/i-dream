@@ -5,6 +5,7 @@
 //! and prospective memory.
 
 pub mod dreaming;
+pub mod external_domain;
 pub mod insight_digest;
 pub mod introspection;
 pub mod intuition;
