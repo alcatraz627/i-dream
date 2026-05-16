@@ -81,10 +81,17 @@ impl<'a> DomainRegistry<'a> {
 
         // Append external plugins discovered from manifests. Name conflicts
         // with native modules are resolved native-wins (warned, external
-        // skipped).
+        // skipped). Domains explicitly disabled in ~/.claude/i-dream/_runtime.json
+        // are filtered out — applies to externals only (natives respect
+        // their own config.modules.<name>.enabled).
+        let runtime = crate::idream_runtime::IDreamRuntime::load();
         let mut taken: HashSet<String> = domains.iter().map(|d| d.name().to_string()).collect();
         for m in discover_external_manifests() {
             let name = m.domain.name.clone();
+            if !runtime.is_enabled(&name) {
+                tracing::debug!("External domain '{name}' disabled in _runtime.json — skipping");
+                continue;
+            }
             if taken.contains(&name) {
                 warn!(
                     "External manifest collides with native module '{}'; native wins.",

@@ -320,11 +320,18 @@ pub enum WidgetAction {
 #[derive(clap::Subcommand, Debug)]
 pub enum DomainAction {
     /// List every registered dream-domain — native compiled modules
-    /// + (Stage 2+) external plugin manifests. With `--json`, prints a
+    /// + external plugin manifests. With `--json`, prints a
     /// machine-readable array for tools (e.g. the widget menu).
     List {
         /// Emit JSON for downstream consumers.
         #[arg(long)]
         json: bool,
     },
+    /// Enable a previously-disabled external domain. No-op for natives
+    /// (their enable lives in `config.modules.<name>.enabled`).
+    Enable { name: String },
+    /// Disable an external domain — it stops appearing in the registry,
+    /// the widget submenu, and `i-dream dream-pass`. Persists across runs
+    /// via `~/.claude/i-dream/_runtime.json`.
+    Disable { name: String },
 }

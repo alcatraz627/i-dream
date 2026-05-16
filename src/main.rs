@@ -9,6 +9,7 @@ mod dream_trace;
 mod events;
 mod graph_metrics;
 mod hooks;
+mod idream_runtime;
 mod logging;
 mod modules;
 mod service;
