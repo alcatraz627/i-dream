@@ -161,6 +161,21 @@ async fn main() -> Result<()> {
             eprintln!("\n[digest written: {}]", path.display());
         }
 
+        Command::DreamPass { budget } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir())?;
+            let client = api::ClaudeClient::for_config(&config)?;
+            let registry = modules::registry::DomainRegistry::boot(&config, &store);
+            let report = consolidation::dream_pass::run_dream_pass(
+                &registry,
+                &client,
+                &config.budget.model,
+                budget,
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+
         Command::Dashboard { no_open, run_tests } => {
             // If the menubar widget is running, signal it to open the native panel.
             if !no_open {

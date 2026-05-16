@@ -6,4 +6,5 @@
 //! that need LLM input (Top signals, Cross-domain associations) carry a
 //! placeholder until then.
 
+pub mod dream_pass;
 pub mod l2_digest;

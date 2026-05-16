@@ -146,6 +146,18 @@ pub enum Command {
         day: Option<String>,
     },
 
+    /// Run an LLM dream pass over every registered domain with fresh delta
+    /// (docs/14 §3.5). Zero LLM cost when all domains are idle. Outputs
+    /// land at each domain's insights.jsonl + rebuilds union views at
+    /// ~/.claude/i-dream/derived/{triggers.union.json, tldr.union.txt}.
+    /// When ≥2 domains emit output, a cross-domain join pass writes to
+    /// associations.cross.jsonl.
+    DreamPass {
+        /// Max tokens per domain (default: 4000).
+        #[arg(long, default_value_t = 4000)]
+        budget: u32,
+    },
+
     /// M17 — diff two patterns-graph snapshots written by
     /// `graph-metrics --snapshot`. Reports added / removed / shifted
     /// patterns and associations between the two timestamps. Use to
