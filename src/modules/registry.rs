@@ -171,6 +171,9 @@ fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
     let sibling_roots = [
         PathBuf::from(&home).join(".claude/atone"),
         PathBuf::from(&home).join(".claude/affirm"),
+        PathBuf::from(&home).join(".claude/memory-domain"),
+        PathBuf::from(&home).join(".claude/sessions-domain"),
+        PathBuf::from(&home).join(".claude/pinned"),
     ];
     for root in &sibling_roots {
         let p = root.join(".i-dream-domain.toml");

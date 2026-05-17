@@ -21,7 +21,7 @@
 | 2 | Three-layer consolidation cadence | `spec-complete` | claude (Stage 1 impl) | [`16-consolidation-build.md`](./16-consolidation-build.md) |
 | 3 | Consolidated info surfaces (replace one-off reports) | `spec-complete` (folded into #2) | claude (Stage 1 impl alongside #2) | [`16-consolidation-build.md`](./16-consolidation-build.md) |
 | 4 | Session-pinned insights for next dream cycle | `spec-complete` | claude (Stage 1 impl, ~2h) | [`18-pinned-insights-build.md`](./18-pinned-insights-build.md) |
-| 5 | Memory + session-log dream-domains (cross-domain input gap) | `spec-pending` (light) | claude (write adapters, ~2h each) | — |
+| 5 | Memory + session-log dream-domains (cross-domain input gap) | ✅ done (2026-05-17) | — | — (adapters live in user repo) |
 
 ---
 
@@ -63,12 +63,15 @@
 | 3 — skill | ~1h | `/pin-for-dream <text>` auto-captures session context + invokes the CLI. |
 | 4 — digest + dream integration | ~1h | Daily digest section 3 populates from active.md. DreamPass over pinned emits insights with confidence floor 0.4. |
 
-### D — Cross-domain input gap (new — surfaced 2026-05-17) · ~4h
+### D — Cross-domain input gap · ✅ done 2026-05-17
 
-| Stage | Effort | User capability when shipped |
+| Stage | Effort | What shipped |
 |-------|--------|------------------------------|
-| memory domain | ~2h | Memory entries (`~/.claude/projects/.../memory/*.md`) register as a read-only `memory` domain. DreamPass reads them; daily digest's cross-domain associations include memory↔atone/affirm links. |
-| sessions domain | ~2h | Session transcripts (`~/.claude/projects/<project>/*.jsonl`) register as a read-only `sessions` domain. DreamPass synthesizes one-event-per-session; associations link recurring patterns across sessions. |
+| memory domain | ✅ done | `~/.claude/memory-domain/` plugin with extract-events.sh + manifest + dream prompt. Synthesizes 1 event per memory .md file across all projects. First-run capped at 30 events; only emits when source mtime advances. |
+| sessions domain | ✅ done | `~/.claude/sessions-domain/` plugin with extract-events.sh + manifest + dream prompt. Synthesizes 1 event per session jsonl with summary metadata (message counts, first user msg preview, time span). Same 30-event first-run cap. |
+
+Registry now boots **11 domains** (7 native + 4 external: atone, affirm,
+memory, sessions). When pinned plugin ships (C build) = 12.
 
 ### Implementation order recommendation
 
