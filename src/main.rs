@@ -13,6 +13,7 @@ mod hooks;
 mod idream_runtime;
 mod logging;
 mod modules;
+mod pin;
 mod service;
 mod store;
 mod transcript;
@@ -165,6 +166,10 @@ async fn main() -> Result<()> {
 
         Command::Cron { action } => {
             cron::handle(action)?;
+        }
+
+        Command::Pin { action } => {
+            pin::handle(action)?;
         }
 
         Command::DreamPass { budget } => {

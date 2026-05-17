@@ -166,6 +166,15 @@ pub enum Command {
         action: CronAction,
     },
 
+    /// Pin a session insight for the next dream cycle. Writes a structured
+    /// event to ~/.claude/pinned/events.jsonl. The `/pin-for-dream` skill
+    /// shells out here in `--from-json` mode after gathering context.
+    /// Full spec: docs/18-pinned-insights-build.md.
+    Pin {
+        #[command(subcommand)]
+        action: PinAction,
+    },
+
     /// M17 — diff two patterns-graph snapshots written by
     /// `graph-metrics --snapshot`. Reports added / removed / shifted
     /// patterns and associations between the two timestamps. Use to
@@ -323,6 +332,54 @@ pub enum WidgetAction {
     Install,
     /// Remove the LaunchAgent registration
     Uninstall,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum PinAction {
+    /// Add a new pinned insight. Required: text (or --from-json).
+    Add {
+        /// Brief description of the insight (omit when using --from-json).
+        text: Option<String>,
+        /// Session id (auto-set by skill from $CLAUDE_SESSION_ID).
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Path to the originating session transcript.
+        #[arg(long)]
+        transcript: Option<String>,
+        /// Working directory at pin time.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Files referenced — "path" or "path:lineA-lineB". Repeat for multiple.
+        #[arg(long = "file")]
+        files: Vec<String>,
+        /// One of: investigate (default) | monitor | graduate | note.
+        #[arg(long)]
+        framing: Option<String>,
+        /// Tool-signature hints for the dream pass — e.g. "Edit:*.rs".
+        #[arg(long = "tool-signature")]
+        tool_signatures: Vec<String>,
+        /// Dream cycles before auto-archive (default 2).
+        #[arg(long, default_value_t = 2)]
+        decay_cycles: u32,
+        /// Read full PinEvent JSON from stdin (skill mode).
+        #[arg(long = "from-json")]
+        from_json: bool,
+    },
+    /// List active pins. With --include-archived, also shows archived count.
+    List {
+        #[arg(long)]
+        include_archived: bool,
+    },
+    /// Print one pin's full JSON.
+    Show { id: String },
+    /// Mark a pin for archival on next consolidate.sh run.
+    Resolve { id: String },
+    /// List archived pins (decayed past 2 cycles).
+    Archived {
+        /// Only show archives from this date forward (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]

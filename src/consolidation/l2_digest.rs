@@ -198,7 +198,16 @@ pub fn render_markdown(bundle: &DayBundle) -> String {
     }
 
     out.push_str("## Pinned from sessions\n\n");
-    out.push_str("_(none — see roadmap item #4)_\n\n");
+    let pinned_md = read_pinned_active();
+    if pinned_md.trim().is_empty() {
+        out.push_str("_(no active pins — use `/pin-for-dream` or `i-dream pin add`)_\n\n");
+    } else {
+        out.push_str(&pinned_md);
+        if !pinned_md.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
 
     out.push_str("## Cross-domain associations\n\n");
     let associations = read_cross_associations(bundle.date);
@@ -270,6 +279,16 @@ pub fn write_daily(date: NaiveDate, config: &Config, store: &Store) -> Result<Pa
 fn daily_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME").context("HOME unset")?;
     Ok(PathBuf::from(home).join(".claude/i-dream/daily"))
+}
+
+/// Read `~/.claude/pinned/derived/active.md` — pre-rendered by the pinned
+/// domain's consolidate.sh. Empty when no active pins exist (or no plugin).
+fn read_pinned_active() -> String {
+    let Ok(home) = std::env::var("HOME") else {
+        return String::new();
+    };
+    let path = PathBuf::from(home).join(".claude/pinned/derived/active.md");
+    fs::read_to_string(&path).unwrap_or_default()
 }
 
 /// Read `~/.claude/i-dream/derived/tldr.union.txt` produced by the last
