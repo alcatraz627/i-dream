@@ -20,7 +20,8 @@
 | 1 | Dreaming-plugin system | `stage-1-done, stages-2-6-pending` | claude (Stage 2 — needs architectural-seam decision first) | [`14-dreaming-plugins.md`](./14-dreaming-plugins.md) |
 | 2 | Three-layer consolidation cadence | `spec-complete` | claude (Stage 1 impl) | [`16-consolidation-build.md`](./16-consolidation-build.md) |
 | 3 | Consolidated info surfaces (replace one-off reports) | `spec-complete` (folded into #2) | claude (Stage 1 impl alongside #2) | [`16-consolidation-build.md`](./16-consolidation-build.md) |
-| 4 | Session-pinned insights for next dream cycle | `spec-pending` | **user** (spec discussion) | — |
+| 4 | Session-pinned insights for next dream cycle | `spec-complete` | claude (Stage 1 impl, ~2h) | [`18-pinned-insights-build.md`](./18-pinned-insights-build.md) |
+| 5 | Memory + session-log dream-domains (cross-domain input gap) | `spec-pending` (light) | claude (write adapters, ~2h each) | — |
 
 ---
 
@@ -52,12 +53,22 @@
 | 6 — approval flow + apply | ~4h | Interactively `[a]pprove / [r]eject / [s]kip / [d]eep-dive` proposals. Approved → claude renders wording → applies the Edit. Rejected stay rejected 4 weeks (fingerprint-based). |
 | 7 — operational glue | ~3h | Catch-up after laptop closed 3+ days. Threads auto-close on target-file edit or 14d decay. `i-dream thread {list,resolve,reopen}`. |
 
-### C — Session integration (item #4) · spec-pending
+### C — Session integration (item #4) · ~7h remaining
 
 | Stage | Effort | User capability when shipped |
 |-------|--------|------------------------------|
-| spec | conversation | TBD — invocation surface (slash command / CLI / widget), schema, lifecycle, transcript-link stability. |
-| build | (after spec) | From any Claude Code session: pin a structured insight with file paths + transcript link + framing. Tomorrow's daily digest section 3 references it. Dream pass treats pins as high-priority input. |
+| spec | ✅ done (2026-05-17) | BUILD doc at [`18-pinned-insights-build.md`](./18-pinned-insights-build.md). Locked: skill + CLI invocation (both write through CLI), new `pinned` domain plugin at `~/.claude/pinned/`, auto-decay after 2 dream cycles. |
+| 1 — plugin scaffold | ~2h | `pinned` registers as 10th domain. consolidate.sh runs decay daily. |
+| 2 — CLI surface | ~3h | `i-dream pin {add,list,show,resolve,archived}` works end-to-end. |
+| 3 — skill | ~1h | `/pin-for-dream <text>` auto-captures session context + invokes the CLI. |
+| 4 — digest + dream integration | ~1h | Daily digest section 3 populates from active.md. DreamPass over pinned emits insights with confidence floor 0.4. |
+
+### D — Cross-domain input gap (new — surfaced 2026-05-17) · ~4h
+
+| Stage | Effort | User capability when shipped |
+|-------|--------|------------------------------|
+| memory domain | ~2h | Memory entries (`~/.claude/projects/.../memory/*.md`) register as a read-only `memory` domain. DreamPass reads them; daily digest's cross-domain associations include memory↔atone/affirm links. |
+| sessions domain | ~2h | Session transcripts (`~/.claude/projects/<project>/*.jsonl`) register as a read-only `sessions` domain. DreamPass synthesizes one-event-per-session; associations link recurring patterns across sessions. |
 
 ### Implementation order recommendation
 
@@ -389,3 +400,5 @@ After every status transition, also update:
 | 2026-05-16 | Deferred B Stage 1 parts SKIPPED per atone-refresh `speculative-abstractions-without-a-load-bearing-caller` flag — no `DomainScheduler` exists yet to consume the cadence overrides. Will revisit after A Stage 2 lands. |
 | 2026-05-16 | B Stage 2 DONE: deterministic L2 daily digest. New `src/consolidation/{mod,l2_digest}.rs` + `Command::Digest { day }` CLI. Writes `~/.claude/i-dream/daily/YYYY-MM-DD.md` with all 7 fixed sections + `latest.md` symlink. Source scanner walks `~/.claude/{topics,assets/reports,subconscious/dreams}/`. Idempotent (bit-identical re-runs). 8 new tests; 304 total passing. Sections 1+4 carry `awaiting Stage 3` placeholder until the LLM dream pass lands. |
 | 2026-05-16 | **Five-stage burst** ([f7bb391 → 45e7564](https://github.com/alcatraz627/i-dream/compare/1f1b9ff...45e7564)): A Stage 2 (external manifest loading + ExternalDomain), A Stage 3 (DreamPass orchestrator with cross-domain join), A Stage 4 (atone migration files in atone's own repo), B Stage 1 deferred enable/disable + `_runtime.json` (idream_runtime.rs new), B Stage 3 (digest reads dream-pass artifacts), A Stage 6 (`docs/17-plugin-author-guide.md`). 314 tests passing (was 296), 0 regressions. 8 domains in registry (7 native + atone external). Remaining: A Stage 5 (affirm system), B Stages 4-7 (readers + audit + apply + cron), C (spec-pending). |
+| 2026-05-16 | **Continuation burst**: A Stage 5 (affirm scaffolded: manifest + dream prompt → 9 domains), B Stage 4 widget Today panel (skipped TUI half), B Stage 7 light (daily-digest launchd plist via `i-dream cron`). Clippy/fmt sweep on session's code. 314 tests stable. |
+| 2026-05-17 | C spec-complete → BUILD doc at `docs/18-pinned-insights-build.md` (10th domain `pinned`, skill + CLI, auto-decay 2 cycles, weight 1.5). Roadmap item D added: memory + session-log dream-domains (~4h, fixes cross-domain input gap). CHANGELOG entry for v0.4.2. Cargo bumped 0.4.1 → 0.4.2. Confirmed dials for unbuilt B Stage 5: aggressive (confidence floor 0.5, max 6 proposals per sub-agent). Confirmed B Stage 6 UI: terminal prompt loop. |

@@ -4,6 +4,167 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-05-17 Dream-domain plugin substrate + consolidation pipeline (partial)
+
+Two new orthogonal systems land on top of the v0.4.1 daemon, plus four design
+docs, one BUILD doc still to implement, and one RCA. 15 commits.
+296 → 314 tests pass.
+
+### Added — Plugin substrate (docs/14)
+
+External dream-domain plugins can now register with i-dream via a TOML
+manifest at `~/.claude/i-dream/domains/*.toml` (centralized) or a sibling
+`.i-dream-domain.toml` at well-known roots. **9 registered domains** today:
+7 native + 2 external (`atone` mistake-tracking and `affirm` affirmation-
+tracking; both already had their own data + skills, this session integrates
+them).
+
+- **`DreamDomain` trait + 9 supporting types** in `src/modules/mod.rs` —
+  the contract every domain implements. Object-safe (works through
+  `Box<dyn DreamDomain>`). Sync; the dream-pass orchestrator handles the
+  async LLM surface.
+- **`NativeAdapter<M: Module>`** wraps existing native modules without
+  changing their behavior — enumeration-only; native modules still drive
+  their work through the daemon's existing phase handlers.
+- **`DomainRegistry::boot()`** in `src/modules/registry.rs` — builds per
+  daemon tick from native modules + external manifests; cheap.
+- **`ExternalDomain`** in `src/modules/external_domain.rs` — implements
+  the trait by tailing the manifest's jsonl event stream + shelling out
+  to the consolidate script + reading dream/prompt template.
+- **`DreamPass` orchestrator** in `src/consolidation/dream_pass.rs` —
+  iterates registered domains with fresh delta, runs per-domain LLM pass,
+  parses structured output, hands back to domain's `consume_dream`,
+  advances cursor. **Zero LLM cost when all domains are idle.** When ≥2
+  domains emit output, a cross-domain join pass writes
+  `associations.cross.jsonl`.
+
+### Added — Consolidation pipeline (docs/16)
+
+A three-layer pipeline that climbs from per-domain (L1) → daily roll-up
+(L2) → weekly user-collaborated audit (L3). This release ships L1 +
+deterministic L2 + LLM-enriched L2 + widget Today panel + daily cron. L3
+(audit + sub-agents + approval flow) is spec'd in docs/16 with build
+pending.
+
+- **`i-dream digest [--day YYYY-MM-DD]`** — writes
+  `~/.claude/i-dream/daily/<day>.md` with all 7 fixed sections + symlinks
+  `latest.md`. Idempotent (bit-identical re-runs). Source scanner indexes
+  one-off reports from `~/.claude/topics/`, `~/.claude/assets/reports/`,
+  `~/.claude/subconscious/dreams/` — surfaces the "too many one-off
+  reports" problem in one canonical view.
+- Sections 1 ("Top signals") + 4 ("Cross-domain associations") populate
+  from the DreamPass outputs (`tldr.union.txt` +
+  `associations.cross.jsonl`). When no DreamPass has run, actionable
+  placeholder.
+- **`i-dream cron {install,uninstall,status}`** — manages the daily-digest
+  launchd plist (03:00 local). Idempotent install via launchctl bootout +
+  bootstrap on gui/$UID (no sudo). Weekly audit plist deferred to L3
+  build.
+
+### Added — Plugin author surface
+
+- **`i-dream domain {list,enable,disable}`** CLI. `list [--json]`
+  enumerates all registered domains. `enable`/`disable` persist
+  per-domain on/off in `~/.claude/i-dream/_runtime.json` and filter the
+  registry at boot — externals only (natives respect their own
+  `config.modules.<name>.enabled`).
+- **`i-dream dream-pass [--budget N]`** — manual invocation of the dream
+  orchestrator. Prints a structured DreamPassReport (per-domain status,
+  tokens used, cross-domain triggered, etc.). Default 4000/domain.
+- **Widget bar "Dream Domains (N) →" submenu** — populated by shelling
+  out to `i-dream domain list --json` on every menu open. Stateless; new
+  plugins appear automatically.
+- **Widget bar "Today (date) →" submenu** — reads
+  `~/.claude/i-dream/daily/latest.md`, shows per-section item counts +
+  "Open full digest" + "Regenerate" actions.
+- **`docs/17-plugin-author-guide.md`** — how-to for writing a new
+  dream-domain plugin from zero. 7-section walkthrough with worked
+  example (atone), TOML + JSON snippets, common-gotchas table.
+
+### Added — atone + affirm i-dream integration
+
+Both systems existed before this release (mistake / affirmation tracking
+under `~/.claude/atone/` + `~/.claude/affirm/`). This release adds:
+
+- `~/.claude/atone/.i-dream-domain.toml` + `~/.claude/atone/dream/prompt.md`
+- `~/.claude/affirm/.i-dream-domain.toml` + `~/.claude/affirm/dream/prompt.md`
+
+Both appear in `i-dream domain list` and participate in DreamPass. Manifest
+files live in each system's own git repo; not committed to this one.
+
+### Added — Widget bundle + install RCA
+
+Pre-existing context that landed this session:
+
+- Wrapped the menubar widget in a proper `.app` bundle at
+  `~/Applications/i-dream-bar.app` with `Info.plist` + `AppIcon.icns`
+  (crescent-moon brand). Build pipeline at `tools/menubar/build.sh`
+  deploys after compile.
+- Fixed CLI `project_root` resolution (was reading `CARGO_MANIFEST_DIR`
+  at runtime; now uses `env!()` macro at compile-time + CWD walk-up
+  fallback).
+- Full RCA at `docs/rcas/20260515-widget-install-failures.md` —
+  four-cause analysis + postscript on the BTM icon-cache puzzle that
+  even an aggressive purge didn't resolve (5 things-to-try documented
+  for the next dev who picks this up).
+
+### Design docs landed (BUILD doc shape — atone/BUILD.md template)
+
+- `docs/13-widget-plugins.md` — UI plugins (secondary axis, orthogonal
+  to dream-domain plugins).
+- `docs/14-dreaming-plugins.md` — dream-domain plugin substrate
+  (primary axis).
+- `docs/15-roadmap.md` — source of truth for active roadmap, with
+  per-stage capability map.
+- `docs/16-consolidation-build.md` — three-layer consolidation pipeline
+  BUILD doc. 7 stages, 26h total. Stages 1-3 + 4 (widget side only) + 7
+  (light) shipped this release; Stages 5-6 (L3 audit + approval flow)
+  + 4 TUI deferred pending.
+- `docs/18-pinned-insights-build.md` — session-pinned insights BUILD
+  doc (spec-complete; build pending). Will land as a 10th domain
+  (`pinned`) with `/pin-for-dream` skill + `i-dream pin` CLI; 7h total.
+
+### Tests
+
+8 new in `consolidation::l2_digest` (render schema, source scanner, title
+extraction). 5 new in `modules::external_domain` (manifest parse, delta
+with/without cursor, duration parsing). 2 new in
+`consolidation::dream_pass` (insight slug extraction, context
+propagation). 3 new in `idream_runtime` (default-on, explicit-false,
+round-trip). 296 → 314 tests pass; 0 regressions.
+
+### Code quality
+
+- 4 new clippy nits fixed; remaining warnings are pre-existing in
+  untouched files (api.rs, dashboard.rs, dream_trace.rs, dreaming.rs,
+  store.rs).
+- `cargo fmt --all` clean.
+- New code follows existing module-org patterns; no breaking schema
+  changes to any existing module.
+
+### Architectural seam noted
+
+Of the 8 modules in `src/modules/`, originally only 5 implemented the
+`Module` trait. Audit + resolution this session (commit `6deffce`):
+`insight_digest` + `weekly_briefing` converted to `impl Module` (with a
+thin adapter for the latter's bespoke signature). `project_briefs` stays
+deliberately out — its per-project-regeneration loop doesn't fit the
+per-cycle `Module::run` contract. Documented as a future
+`PerProjectDomain` companion-trait candidate.
+
+### Known gaps to address next release
+
+- **Memory entries** (`~/.claude/projects/.../memory/*.md`) and **session
+  transcripts** (`~/.claude/projects/<project>/*.jsonl`) are NOT yet
+  registered as dream-domains, so they're invisible to DreamPass. Two
+  read-only adapter scripts can fix this (~2h each).
+- **L3 weekly audit** (B Stage 5+6 of docs/16) is the highest-leverage
+  unshipped surface — interactive sub-agent dispatch + GCC-edit
+  approval flow.
+- **`i-dream board` TUI** (B Stage 4 deferred half) — 4-pane terminal
+  dashboard over the daily digest.
+- **Pinned insights** (docs/18) — spec-complete, 7h build pending.
+
 ## [0.4.1] — 2026-05-02 D11 v2 + M17 + daemon test coverage + clippy/fmt sweep
 
 Follow-on to v0.4.0. Three new features (D11 v2 schema, M17 snapshot diff, M17 daemon hook), one widget polish, plus daemon-side test coverage for the cycle hooks added in 0.4.0 and a clippy/fmt sweep across the tree.
