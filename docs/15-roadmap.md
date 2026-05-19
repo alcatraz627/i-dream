@@ -17,11 +17,13 @@
 
 | # | Item | Status | Owner of next step | Design doc |
 |---|------|--------|--------------------|------------|
-| 1 | Dreaming-plugin system | `stage-1-done, stages-2-6-pending` | claude (Stage 2 — needs architectural-seam decision first) | [`14-dreaming-plugins.md`](./14-dreaming-plugins.md) |
-| 2 | Three-layer consolidation cadence | `spec-complete` | claude (Stage 1 impl) | [`16-consolidation-build.md`](./16-consolidation-build.md) |
-| 3 | Consolidated info surfaces (replace one-off reports) | `spec-complete` (folded into #2) | claude (Stage 1 impl alongside #2) | [`16-consolidation-build.md`](./16-consolidation-build.md) |
-| 4 | Session-pinned insights for next dream cycle | `spec-complete` | claude (Stage 1 impl, ~2h) | [`18-pinned-insights-build.md`](./18-pinned-insights-build.md) |
+| 1 | Dreaming-plugin system | ✅ done | — | [`14-dreaming-plugins.md`](./14-dreaming-plugins.md) |
+| 2 | Three-layer consolidation cadence | ✅ done | — | [`16-consolidation-build.md`](./16-consolidation-build.md) |
+| 3 | Consolidated info surfaces | ✅ done (folded into #2) | — | [`16-consolidation-build.md`](./16-consolidation-build.md) |
+| 4 | Session-pinned insights for next dream cycle | ✅ done | — | [`18-pinned-insights-build.md`](./18-pinned-insights-build.md) |
 | 5 | Memory + session-log dream-domains (cross-domain input gap) | ✅ done (2026-05-17) | — | — (adapters live in user repo) |
+
+**All 5 roadmap items shipped as of 2026-05-19.** See per-stage status below for what was deferred-but-not-blocking (literal multi-Agent audit dispatch is V2; widget Today TUI is V2).
 
 ---
 
@@ -49,8 +51,8 @@
 | 2 — L2 daily digest (deterministic) | ✅ done (2026-05-16) | `i-dream digest [--day YYYY-MM-DD]` renders `~/.claude/i-dream/daily/<day>.md` with all 7 sections + symlinks `latest.md`. Sources indexes today's files under `~/.claude/{topics,assets/reports,subconscious/dreams}/`. Idempotent. |
 | 3 — L2 cross-domain dream pass | ✅ done (2026-05-16) | Digest's "Top signals" + "Cross-domain associations" sections read `tldr.union.txt` + `associations.cross.jsonl` written by `i-dream dream-pass`. Placeholders are actionable ("run `i-dream dream-pass`"). |
 | 4 — readers (widget Today + `i-dream board` TUI) | ~4h | Glance at today's digest in menu bar; deep-dive in 4-pane terminal dashboard (Today / Week / Sources / GCC fitness). |
-| 5 — L3 weekly audit | ~5h | Sunday 09:00 or on-demand: coordinator dispatches tailored sub-agents (atone-analyst, gcc-fitness-scorer, graduation-curator, challenger, …); produces GCC-edit proposals. |
-| 6 — approval flow + apply | ~4h | Interactively `[a]pprove / [r]eject / [s]kip / [d]eep-dive` proposals. Approved → claude renders wording → applies the Edit. Rejected stay rejected 4 weeks (fingerprint-based). |
+| 5 — L3 weekly audit | ✅ done (2026-05-19) | `i-dream audit run [--dry-run] [--week-days N]` reads last 7 daily digests + per-domain TLDRs + 28-day rejection memory. Single LLM call structured as 7 sub-agent voices (atone-analyst / affirm-analyst / dreams-analyst / gcc-fitness-scorer / graduation-curator / abandoned-threads / challenger). Aggressive dials: confidence floor 0.5, max 6/lens, max 30 total. (Literal multi-Agent dispatch is V2.) |
+| 6 — approval flow + apply | ✅ done (2026-05-19) | Interactive `[a]pprove / [r]eject / [s]kip` per proposal. Reject prompts for reason → fingerprint persisted in `_rejections.jsonl` (4-week TTL). Approve → second LLM call renders concrete `{old_text, new_text}` edit → preview → `[y]es / [c]ancel` → atomic write. Per-audit log lands at `~/.claude/i-dream/audits/YYYY-MM-DD.md`. |
 | 7 — operational glue | ~3h | Catch-up after laptop closed 3+ days. Threads auto-close on target-file edit or 14d decay. `i-dream thread {list,resolve,reopen}`. |
 
 ### C — Session integration (item #4) · ~7h remaining

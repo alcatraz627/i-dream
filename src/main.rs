@@ -1,4 +1,5 @@
 mod api;
+mod audit;
 mod cli;
 mod config;
 mod consolidation;
@@ -170,6 +171,11 @@ async fn main() -> Result<()> {
 
         Command::Pin { action } => {
             pin::handle(action)?;
+        }
+
+        Command::Audit { action } => {
+            let config = config::Config::load(&cli.config)?;
+            audit::handle(action, &config).await?;
         }
 
         Command::DreamPass { budget } => {

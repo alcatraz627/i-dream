@@ -175,6 +175,18 @@ pub enum Command {
         action: PinAction,
     },
 
+    /// Run the L3 weekly audit — coordinator + multi-lens proposals +
+    /// interactive approval + apply-time render. Reads last N days of
+    /// daily digests + per-domain TLDRs + rejection memory; produces
+    /// proposals for GCC edits; you approve / reject / skip each;
+    /// approved proposals get rendered to concrete edits + applied
+    /// after confirm. Aggressive dials (confidence floor 0.5, max
+    /// 6/lens, max 30 total). Full spec: docs/16 §3.6 + §3.10.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
+
     /// M17 — diff two patterns-graph snapshots written by
     /// `graph-metrics --snapshot`. Reports added / removed / shifted
     /// patterns and associations between the two timestamps. Use to
@@ -332,6 +344,22 @@ pub enum WidgetAction {
     Install,
     /// Remove the LaunchAgent registration
     Uninstall,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum AuditAction {
+    /// Run the audit. Interactive: prompts for each proposal. Without
+    /// --dry-run, makes real LLM calls (proposals + per-edit render).
+    Run {
+        /// Skip the LLM call; print the gathered inputs and stop.
+        #[arg(long)]
+        dry_run: bool,
+        /// Days of daily-digest history to read (default 7).
+        #[arg(long, default_value_t = 7)]
+        week_days: u32,
+    },
+    /// List past audit log files + rejection count.
+    Status,
 }
 
 #[derive(clap::Subcommand, Debug)]
