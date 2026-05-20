@@ -68,6 +68,50 @@ pub fn parse_json_codeblock(content: &str) -> Option<String> {
     if trimmed.starts_with('[') || trimmed.starts_with('{') {
         return Some(sanitize_json_control_chars(trimmed));
     }
+    // Final fallback: the model prefixed prose then emitted JSON (e.g.
+    // "I have all the context. Generating now.\n\n{...}"). Find the first
+    // `{` or `[` and take a balanced span from there to the matching close.
+    if let Some(span) = extract_balanced_json(trimmed) {
+        return Some(sanitize_json_control_chars(span));
+    }
+    None
+}
+
+/// Find the first top-level JSON value (`{...}` or `[...]`) embedded in a
+/// larger string and return the balanced span. Tracks string literals +
+/// escapes so braces inside strings don't throw off the depth count.
+/// Returns None if no balanced value is found.
+fn extract_balanced_json(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    let start = bytes.iter().position(|&b| b == b'{' || b == b'[')?;
+    let open = bytes[start];
+    let close = if open == b'{' { b'}' } else { b']' };
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            x if x == open => depth += 1,
+            x if x == close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
     None
 }
 
@@ -230,8 +274,15 @@ pub struct DreamContext {
 /// docs/14-dreaming-plugins.md §3.6.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DreamOutput {
-    #[serde(rename = "schemaVersion")]
+    // Models inconsistently emit `1` (int) or `"1"` (string) for the
+    // schema version. Accept either via a tolerant deserializer.
+    #[serde(
+        rename = "schemaVersion",
+        default,
+        deserialize_with = "de_flexible_u32"
+    )]
     pub schema_version: u32,
+    #[serde(default)]
     pub domain: String,
     #[serde(default)]
     pub summary: Option<String>,
@@ -239,16 +290,41 @@ pub struct DreamOutput {
     pub insights: Vec<Insight>,
 }
 
+/// Deserialize a u32 from either a JSON number or a JSON string. LLM output
+/// is inconsistent about quoting numeric fields; this tolerates both rather
+/// than failing the whole DreamOutput parse on a quoted "1".
+fn de_flexible_u32<'de, D>(d: D) -> std::result::Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Value::deserialize(d)?;
+    match v {
+        Value::Number(n) => Ok(n.as_u64().unwrap_or(1) as u32),
+        Value::String(s) => Ok(s.trim().parse().unwrap_or(1)),
+        _ => Ok(1),
+    }
+}
+
 /// One insight produced by a dream pass. The five variants are the v1
 /// taxonomy — extensible, but stable enough that adapter scripts can match
 /// against them.
+///
+/// Every field is `#[serde(default)]` so a single malformed insight (LLM
+/// omitted a field) degrades to empty values rather than failing the entire
+/// `Vec<Insight>` parse and losing the whole domain's dream output. An
+/// unknown `type` falls through to `Unknown` rather than erroring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Insight {
     Pattern {
+        #[serde(default)]
         name: String,
+        #[serde(default)]
         evidence_event_ids: Vec<String>,
+        #[serde(default)]
         confidence: f64,
+        #[serde(default)]
         instruction: String,
         #[serde(default)]
         trigger_keywords: Vec<String>,
@@ -256,26 +332,39 @@ pub enum Insight {
         tool_signatures: Vec<String>,
     },
     Association {
+        #[serde(default)]
         from_slug: String,
+        #[serde(default)]
         to_slug: String,
+        #[serde(default)]
         confidence: f64,
         #[serde(default)]
         instruction: Option<String>,
     },
     GraduationCandidate {
+        #[serde(default)]
         slug: String,
+        #[serde(default)]
         rationale: String,
         #[serde(default)]
         target: Option<String>,
     },
     DecayCandidate {
+        #[serde(default)]
         slug: String,
+        #[serde(default)]
         rationale: String,
+        #[serde(default)]
         action: String,
     },
     Summary {
+        #[serde(default)]
         text: String,
     },
+    /// Catch-all for insight types the LLM invents that aren't in the v1
+    /// taxonomy. Keeps one bad insight from failing the whole parse.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Manifest describing an external domain plugin. Loaded from
@@ -528,6 +617,81 @@ mod sanitize_tests {
     fn strips_bell_and_escape() {
         let s = "a\u{0007}b\u{001b}c";
         assert_eq!(sanitize_json_control_chars(s), "abc");
+    }
+}
+
+#[cfg(test)]
+mod dream_output_robustness_tests {
+    //! Regression tests for the 3 parser failures the first real dream-pass
+    //! surfaced (2026-05-21): string schemaVersion, partial Association
+    //! (missing from_slug), and JSON after a prose preamble.
+    use super::{DreamOutput, Insight, parse_json_codeblock};
+
+    #[test]
+    fn schema_version_accepts_string() {
+        // affirm failure: {"schemaVersion": "1", ...}
+        let json = r#"{"schemaVersion":"1","domain":"affirm","insights":[]}"#;
+        let out: DreamOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(out.schema_version, 1);
+        assert_eq!(out.domain, "affirm");
+    }
+
+    #[test]
+    fn schema_version_accepts_int() {
+        let json = r#"{"schemaVersion":1,"domain":"x","insights":[]}"#;
+        let out: DreamOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(out.schema_version, 1);
+    }
+
+    #[test]
+    fn partial_association_missing_from_slug_parses() {
+        // sessions failure: an association lacking from_slug shouldn't fail
+        // the whole insights array.
+        let json = r#"{"schemaVersion":1,"domain":"sessions","insights":[
+            {"type":"association","to_slug":"y","confidence":0.7}
+        ]}"#;
+        let out: DreamOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(out.insights.len(), 1);
+        match &out.insights[0] {
+            Insight::Association {
+                from_slug, to_slug, ..
+            } => {
+                assert_eq!(from_slug, ""); // defaulted
+                assert_eq!(to_slug, "y");
+            }
+            _ => panic!("expected Association"),
+        }
+    }
+
+    #[test]
+    fn unknown_insight_type_falls_through() {
+        let json = r#"{"schemaVersion":1,"domain":"x","insights":[
+            {"type":"some_future_type","field":"value"},
+            {"type":"summary","text":"kept"}
+        ]}"#;
+        let out: DreamOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(out.insights.len(), 2);
+        assert!(matches!(out.insights[0], Insight::Unknown));
+        assert!(matches!(out.insights[1], Insight::Summary { .. }));
+    }
+
+    #[test]
+    fn extracts_json_after_prose_preamble() {
+        // pinned failure: model emitted prose then JSON.
+        let content = "I have all the context needed. Generating the DreamOutput v1 JSON now.\n\n{\"schemaVersion\":1,\"domain\":\"pinned\",\"summary\":\"ok\",\"insights\":[]}";
+        let extracted = parse_json_codeblock(content).expect("should extract embedded JSON");
+        let out: DreamOutput = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(out.domain, "pinned");
+        assert_eq!(out.summary.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn balanced_extraction_ignores_braces_in_strings() {
+        // A brace inside a string value must not throw off depth counting.
+        let content = "prefix {\"k\":\"a } b\",\"insights\":[]} suffix";
+        let extracted = parse_json_codeblock(content).expect("should extract");
+        let v: serde_json::Value = serde_json::from_str(&extracted).unwrap();
+        assert_eq!(v.get("k").unwrap().as_str().unwrap(), "a } b");
     }
 }
 

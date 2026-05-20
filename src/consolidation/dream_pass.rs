@@ -300,6 +300,7 @@ fn insight_slug(insight: &crate::modules::Insight) -> Option<String> {
         I::GraduationCandidate { slug, .. } => Some(slug.clone()),
         I::DecayCandidate { slug, .. } => Some(slug.clone()),
         I::Summary { .. } => None,
+        I::Unknown => None,
     }
 }
 

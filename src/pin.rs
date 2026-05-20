@@ -121,7 +121,7 @@ fn add(
     decay_cycles: u32,
     from_json: bool,
 ) -> Result<()> {
-    let mut event = if from_json {
+    let event = if from_json {
         // Read full PinEvent from stdin (skill mode).
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;

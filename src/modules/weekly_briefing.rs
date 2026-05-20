@@ -209,31 +209,47 @@ impl<'a> WeeklyBriefingModule<'a> {
             prompt.push('\n');
         }
 
-        let system_prompt = r#"You are writing a Sunday Morning Briefing for a developer who uses Claude Code as a primary coding partner. The data below is one week of your subconscious system's observations of their work.
+        // Cross-domain signal from the dream-domain plugin system (atone,
+        // affirm, memory, sessions, pinned + the cross-domain dream pass).
+        // Empty until `i-dream dream-pass` has run; harmless if absent.
+        let external = gather_external_signal();
+        if !external.trim().is_empty() {
+            prompt.push_str("Cross-domain signal (from dream-pass over all registered domains):\n");
+            prompt.push_str(&external);
+            prompt.push('\n');
+        }
 
-Output a markdown brief with EXACTLY these five sections, in this order, no preamble:
+        let system_prompt = r#"You are writing a Sunday Morning Briefing for a developer who uses Claude Code as a primary coding partner. The data below is one week of your subconscious system's observations of their work — drawn from native dream patterns AND from registered dream-domains (atone=mistakes, affirm=good calls, memory=saved context, sessions=transcript summaries, pinned=user-flagged insights) plus any cross-domain associations the dream pass surfaced.
+
+Output a markdown brief with these sections, in this order, no preamble. Lead with the cross-domain section when there IS cross-domain signal — those associations are the highest-value findings.
 
 ## What you worked on
-2-3 sentences naming the projects + the apparent themes of the week.
+2-4 sentences naming the projects + the apparent themes of the week.
 
 ## What improved
-2-3 specific behaviors or workflows that moved in a positive direction (cite a positive pattern or promoted insight).
+The behaviors/workflows that moved positively. Cite specific positive patterns, promoted insights, or affirm-domain entries. 1 short paragraph; bullet 2-4 if there are several.
 
 ## Recurring frustration
-The single most common friction this week. One paragraph. Be specific — name the behavior, not the project.
+The most common friction this week. Be specific — name the behavior, not the project. Pull from negative patterns + atone-domain entries. 1 paragraph.
+
+## Cross-domain patterns
+Associations the dream pass found spanning domains (e.g. a mistake-slug that correlates with a session shape, or an affirmation that's the inverse of a recurring mistake). One bullet per association with the takeaway. If no cross-domain signal in the input, write "No cross-domain associations yet — run `i-dream dream-pass` more regularly." and move on.
+
+## Worth examining
+Pinned insights still active + graduation candidates (patterns mature enough to become rules). 2-4 bullets. If none, "Nothing flagged for examination."
 
 ## One idea
-A concrete, actionable suggestion the developer could try this week. Pick the highest-leverage one. ≤3 sentences.
+A concrete, actionable suggestion to try this week. Highest-leverage one. ≤3 sentences.
 
 ## One question
-A question the developer might benefit from sitting with. The kind a thoughtful colleague would ask, not advice. One sentence.
+A question worth sitting with — the kind a thoughtful colleague asks, not advice. One sentence.
 
-Tone: concise, direct, no preamble, no headers besides the five above. Do not invent specifics not present in the input — if a section has no support, say "Not enough signal this week" and move on.
+Tone: concise, direct, no preamble. Do not invent specifics not present in the input — if a section has no support, say so briefly and move on. Depth should track the signal: rich weeks get fuller sections, quiet weeks stay short.
 "#;
 
         // ── Call API ──────────────────────────────────────────────────────
         let response = client
-            .analyze(system_prompt, &prompt, &self.config.budget.model, 2048, 0.5)
+            .analyze(system_prompt, &prompt, &self.config.budget.model, 4000, 0.5)
             .await
             .context("weekly_briefing API call")?;
 
@@ -302,6 +318,77 @@ impl<'a> Module for WeeklyBriefingModule<'a> {
             None => Ok(0),
         }
     }
+}
+
+/// Gather a prompt-ready block of cross-domain signal from the dream-domain
+/// plugin system. Reads the union TLDR + cross-domain associations + a count
+/// of recent per-domain insights. Returns "" when nothing has been produced
+/// yet (i.e. `i-dream dream-pass` hasn't run) — the caller omits the section.
+fn gather_external_signal() -> String {
+    let home = match std::env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return String::new(),
+    };
+    let base = std::path::PathBuf::from(&home);
+    let mut out = String::new();
+
+    // Union TLDR — top items across all domains.
+    let tldr = base.join(".claude/i-dream/derived/tldr.union.txt");
+    if let Ok(content) = std::fs::read_to_string(&tldr) {
+        let trimmed = content.trim();
+        if !trimmed.is_empty() {
+            out.push_str("  Top across domains:\n");
+            for line in trimmed.lines().take(8) {
+                out.push_str(&format!("    {line}\n"));
+            }
+        }
+    }
+
+    // Cross-domain associations — the highest-value output.
+    let assoc = base.join(".claude/i-dream/derived/associations.cross.jsonl");
+    if let Ok(content) = std::fs::read_to_string(&assoc) {
+        let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        if !lines.is_empty() {
+            out.push_str("  Cross-domain associations:\n");
+            for line in lines.iter().rev().take(8) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    let from = v.get("from_slug").and_then(|s| s.as_str()).unwrap_or("?");
+                    let fromd = v.get("from_domain").and_then(|s| s.as_str()).unwrap_or("?");
+                    let to = v.get("to_slug").and_then(|s| s.as_str()).unwrap_or("?");
+                    let tod = v.get("to_domain").and_then(|s| s.as_str()).unwrap_or("?");
+                    let instr = v.get("instruction").and_then(|s| s.as_str()).unwrap_or("");
+                    out.push_str(&format!("    {from}({fromd}) ↔ {to}({tod}): {instr}\n"));
+                }
+            }
+        }
+    }
+
+    // Per-domain insight counts (signal density per domain this period).
+    let domains = [
+        ("atone", ".claude/atone"),
+        ("affirm", ".claude/affirm"),
+        ("memory", ".claude/memory-domain"),
+        ("sessions", ".claude/sessions-domain"),
+        ("pinned", ".claude/pinned"),
+    ];
+    let mut counts = vec![];
+    for (name, root) in domains {
+        let insights = base.join(root).join("dream/insights.jsonl");
+        let n = std::fs::read_to_string(&insights)
+            .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+        if n > 0 {
+            counts.push(format!("{name}={n}"));
+        }
+    }
+    if !counts.is_empty() {
+        out.push_str(&format!(
+            "  Dream insights this period: {}\n",
+            counts.join(", ")
+        ));
+    }
+
+    out
 }
 
 /// Format a chrono Local time as ISO week, e.g. "2026-W18".

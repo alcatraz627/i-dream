@@ -460,23 +460,28 @@ fn substitute_placeholders(m: &mut DomainManifest) -> Result<()> {
 mod tests {
     use super::*;
     use std::env;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // Each call gets a process-unique subdir so parallel tests never share
+    // a path or race a global cleanup. (The earlier shared-dir + cleanup()
+    // pattern raced: one test's cleanup wiped another's fixtures mid-run.)
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     fn write_temp(name: &str, content: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("idream-ext-{}", std::process::id()));
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = env::temp_dir().join(format!("idream-ext-{}-{seq}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         fs::write(&path, content).unwrap();
         path
     }
 
-    fn cleanup() {
-        let dir = env::temp_dir().join(format!("idream-ext-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-    }
-
     #[test]
     fn parses_minimal_manifest_with_placeholder_substitution() {
-        cleanup();
         let manifest_toml = r#"
 [domain]
 name = "test-domain"
@@ -506,7 +511,6 @@ cadence = "daily"
             m.consolidation.script.as_ref().unwrap().to_string_lossy(),
             "/tmp/idream-test-root/consolidate.sh"
         );
-        cleanup();
     }
 
     #[test]
@@ -521,7 +525,6 @@ cadence = "daily"
 
     #[test]
     fn delta_returns_everything_when_cursor_empty() {
-        cleanup();
         let events = r#"{"id":"a","ts":"2026-05-16T10:00:00Z","slug":"x"}
 {"id":"b","ts":"2026-05-16T10:01:00Z","slug":"y"}
 {"id":"c","ts":"2026-05-16T10:02:00Z","slug":"z"}
@@ -535,12 +538,10 @@ cadence = "daily"
         assert_eq!(delta.len(), 3);
         assert_eq!(delta[0].id, "a");
         assert_eq!(delta[2].id, "c");
-        cleanup();
     }
 
     #[test]
     fn delta_returns_only_events_past_cursor() {
-        cleanup();
         let events = r#"{"id":"a","ts":"2026-05-16T10:00:00Z"}
 {"id":"b","ts":"2026-05-16T10:01:00Z"}
 {"id":"c","ts":"2026-05-16T10:02:00Z"}
@@ -558,7 +559,6 @@ cadence = "daily"
         assert_eq!(delta.len(), 2);
         assert_eq!(delta[0].id, "b");
         assert_eq!(delta[1].id, "c");
-        cleanup();
     }
 
     #[test]
