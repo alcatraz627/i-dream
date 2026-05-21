@@ -700,11 +700,10 @@ fn fingerprint(target: &str, intent: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Expand `~/` in an LLM-proposed target path via the shared
+/// `config::expand_tilde` (single source of truth for tilde expansion).
 fn expand_path(p: &str) -> PathBuf {
-    if let Some(stripped) = p.strip_prefix("~/") {
-        return home().join(stripped);
-    }
-    PathBuf::from(p)
+    crate::config::expand_tilde(Path::new(p))
 }
 
 fn home() -> PathBuf {

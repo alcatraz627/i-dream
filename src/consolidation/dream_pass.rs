@@ -314,8 +314,14 @@ fn write_cross_associations(associations: &[serde_json::Value]) -> Result<()> {
         .create(true)
         .append(true)
         .open(&path)?;
+    // Write each association as a single write_all (line + newline in one
+    // buffer). Under O_APPEND a single write goes to EOF atomically, so a
+    // concurrent daemon + manual `i-dream dream-pass` can't interleave
+    // partial lines — which a multi-syscall writeln! could.
     for assoc in associations {
-        writeln!(f, "{}", serde_json::to_string(assoc)?)?;
+        let mut line = serde_json::to_string(assoc)?;
+        line.push('\n');
+        f.write_all(line.as_bytes())?;
     }
     Ok(())
 }

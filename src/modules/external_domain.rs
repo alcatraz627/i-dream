@@ -90,8 +90,12 @@ impl DreamDomain for ExternalDomain {
         let id_field = &self.manifest.event_stream.id_field;
         let ts_field = &self.manifest.event_stream.ts_field;
 
-        let mut out = vec![];
-        let mut past_cursor = cursor.last_event_id.is_none(); // empty cursor = include everything
+        // Parse the whole stream first, then position against the cursor.
+        // (Single-pass scanning for the cursor id silently dropped EVERY
+        // newer event when the id was no longer in the file — rotation,
+        // compaction, or a rewritten line. Collecting + positioning lets us
+        // fall back to ts, then to replay-all, instead of returning empty.)
+        let mut all: Vec<DomainEvent> = vec![];
         for (lineno, line) in content.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() {
@@ -121,16 +125,37 @@ impl DreamDomain for ExternalDomain {
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|d| d.with_timezone(&Utc))
                 .unwrap_or_else(Utc::now);
+            all.push(DomainEvent { id, ts, raw });
+        }
 
-            if past_cursor {
-                out.push(DomainEvent { id, ts, raw });
-            } else if let Some(last) = &cursor.last_event_id
-                && &id == last
-            {
-                past_cursor = true;
+        match &cursor.last_event_id {
+            // Fresh cursor — everything is delta.
+            None => Ok(all),
+            Some(last_id) => {
+                if let Some(pos) = all.iter().position(|e| &e.id == last_id) {
+                    Ok(all.split_off(pos + 1))
+                } else if let Some(last_ts) = cursor.last_ts {
+                    // Cursor id gone from the stream — position by timestamp
+                    // so we don't silently drop everything after a rotation.
+                    tracing::warn!(
+                        "External domain '{}': cursor id '{}' not found; falling back to last_ts",
+                        self.name(),
+                        last_id
+                    );
+                    Ok(all.into_iter().filter(|e| e.ts > last_ts).collect())
+                } else {
+                    // No surviving positioning info — replay all rather than
+                    // drop newer events. A re-dreamed duplicate is recoverable;
+                    // a silently-lost event is not.
+                    tracing::warn!(
+                        "External domain '{}': cursor id '{}' not found and no last_ts; replaying all events",
+                        self.name(),
+                        last_id
+                    );
+                    Ok(all)
+                }
             }
         }
-        Ok(out)
     }
 
     fn advance_cursor(&self, new: Cursor) -> Result<()> {
@@ -213,29 +238,48 @@ impl DreamDomain for ExternalDomain {
     }
 
     fn consume_dream(&self, output: &DreamOutput) -> Result<()> {
-        // Always append to insights.jsonl (preserves append-only invariant
-        // domains generally want for their derived/ outputs).
+        // The insights append is the consume contract: if it fails we return
+        // Err so the orchestrator does NOT advance the cursor and the pass
+        // retries cleanly. Written as one write_all (not writeln!) so the
+        // line lands atomically under O_APPEND even with concurrent writers.
         if let Some(p) = &self.manifest.dream.insights_path {
             let path = expand_path(p);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).ok();
             }
-            let line = serde_json::to_string(output)?;
+            let mut line = serde_json::to_string(output)?;
+            line.push('\n');
             use std::io::Write;
             let mut f = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
                 .with_context(|| format!("Cannot append to {}", path.display()))?;
-            writeln!(f, "{line}")?;
+            f.write_all(line.as_bytes())
+                .with_context(|| format!("Cannot append to {}", path.display()))?;
         }
-        // Optionally invoke adapter script.
+        // The adapter is a best-effort side-channel. A failure here must NOT
+        // propagate — if it did, the orchestrator wouldn't advance the cursor,
+        // and the next pass would re-append the (already-recorded) insight AND
+        // re-run the adapter. Log and swallow so consume stays idempotent:
+        // the insight is recorded exactly once regardless of adapter outcome.
         if let Some(adapter) = &self.manifest.dream.adapter {
             let adapter_path = expand_path(adapter);
             if adapter_path.exists() {
-                let json = serde_json::to_string(output)?;
-                run_with_stdin(&adapter_path, &json, Duration::from_secs(30))
-                    .with_context(|| format!("Adapter {} failed", adapter_path.display()))?;
+                match serde_json::to_string(output) {
+                    Ok(json) => {
+                        if let Err(e) =
+                            run_with_stdin(&adapter_path, &json, Duration::from_secs(30))
+                        {
+                            tracing::warn!(
+                                "External domain '{}' adapter {} failed (insight already recorded; not retried): {e:#}",
+                                self.name(),
+                                adapter_path.display()
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!("Cannot serialize dream output for adapter: {e:#}"),
+                }
             }
         }
         Ok(())
@@ -292,14 +336,12 @@ impl DreamDomain for ExternalDomain {
 
 /// Resolve `~` and `{root}` placeholders relative to the manifest's
 /// `[domain].root`. The latter is handled by the manifest loader, not here.
+/// Expand `~/` against the user's home dir. Delegates to the shared
+/// `config::expand_tilde` (single source of truth — there used to be three
+/// divergent tilde-expansion impls; this is one of them collapsed). `{root}`
+/// substitution is separate and lives in `substitute_placeholders`.
 fn expand_path(p: &Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix("~/")
-        && let Ok(home) = std::env::var("HOME")
-    {
-        return PathBuf::from(home).join(stripped);
-    }
-    p.to_path_buf()
+    crate::config::expand_tilde(p)
 }
 
 /// Parse a duration string like "60s", "5m", "1h" into a `Duration`.
@@ -326,6 +368,13 @@ fn parse_duration(s: &str) -> Option<Duration> {
 
 /// Spawn a child process with a wall-clock timeout. Returns stdout on success;
 /// SIGTERMs the child + returns an Err on timeout or non-zero exit.
+///
+/// stdout/stderr are drained on dedicated threads. Draining only after the
+/// process exits would deadlock: a child that writes more than the OS pipe
+/// buffer (~64KB) blocks on `write()` waiting for a reader, never exits, and
+/// the wait loop then SIGTERMs it at the timeout — a chatty script looking
+/// like a hang. The reader threads keep the pipes flowing so the child can
+/// always make progress.
 fn run_with_timeout(program: &Path, args: &[&str], timeout: Duration) -> Result<String> {
     let mut child = Command::new(program)
         .args(args)
@@ -334,28 +383,30 @@ fn run_with_timeout(program: &Path, args: &[&str], timeout: Duration) -> Result<
         .spawn()
         .with_context(|| format!("Cannot spawn {}", program.display()))?;
 
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_handle = std::thread::spawn(move || drain_pipe(stdout));
+    let err_handle = std::thread::spawn(move || drain_pipe(stderr));
+
     let start = std::time::Instant::now();
     loop {
         match child.try_wait()? {
             Some(status) => {
-                let mut out = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    use std::io::Read;
-                    stdout.read_to_string(&mut out).ok();
-                }
+                let out = out_handle.join().unwrap_or_default();
                 if !status.success() {
-                    let mut err = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        use std::io::Read;
-                        stderr.read_to_string(&mut err).ok();
-                    }
+                    let err = err_handle.join().unwrap_or_default();
                     bail!("Script exited {}: {}", status, err.trim());
                 }
+                // Join stderr too so the thread doesn't outlive the call.
+                let _ = err_handle.join();
                 return Ok(out);
             }
             None => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
+                    // Killing closes the pipes, so the reader threads finish.
+                    let _ = out_handle.join();
+                    let _ = err_handle.join();
                     bail!("Script exceeded timeout of {:?}", timeout);
                 }
                 std::thread::sleep(Duration::from_millis(50));
@@ -364,17 +415,33 @@ fn run_with_timeout(program: &Path, args: &[&str], timeout: Duration) -> Result<
     }
 }
 
+/// Read a child pipe to EOF into a String on a dedicated thread. EOF arrives
+/// when the child closes the pipe (exit) or is killed.
+fn drain_pipe<R: std::io::Read>(reader: Option<R>) -> String {
+    let mut s = String::new();
+    if let Some(mut r) = reader {
+        let _ = r.read_to_string(&mut s);
+    }
+    s
+}
+
 /// Spawn a child process with the given stdin payload + wall-clock timeout.
 /// Used for invoking domain adapter.sh after a dream pass.
 fn run_with_stdin(program: &Path, stdin_payload: &str, timeout: Duration) -> Result<()> {
+    // Both stdout and stderr are discarded — the adapter's exit status is the
+    // only signal we act on. Discarding (not piping) avoids the pipe-buffer
+    // deadlock that would otherwise hit a chatty adapter (see run_with_timeout).
     let mut child = Command::new(program)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("Cannot spawn {}", program.display()))?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
+        // Best-effort: an adapter that reads only the prefix it needs and
+        // closes stdin early produces a broken-pipe here, which is benign —
+        // the exit status below is what determines success.
         stdin.write_all(stdin_payload.as_bytes()).ok();
     }
     let start = std::time::Instant::now();
@@ -567,6 +634,52 @@ cadence = "daily"
         m.event_stream.path = PathBuf::from("/nonexistent/path/events.jsonl");
         let domain = ExternalDomain::from_manifest(m).unwrap();
         assert!(domain.delta(&Cursor::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delta_cursor_id_gone_falls_back_to_last_ts() {
+        // Cursor id no longer in the stream (rotation/compaction). Must NOT
+        // return empty — fall back to last_ts and return events after it.
+        let events = r#"{"id":"b","ts":"2026-05-16T10:01:00Z"}
+{"id":"c","ts":"2026-05-16T10:02:00Z"}
+{"id":"d","ts":"2026-05-16T10:03:00Z"}
+"#;
+        let events_path = write_temp("events-rotated.jsonl", events);
+        let mut m = sample_manifest();
+        m.event_stream.path = events_path;
+        let domain = ExternalDomain::from_manifest(m).unwrap();
+        let cursor = Cursor {
+            last_event_id: Some("a".into()), // gone from stream
+            last_ts: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-05-16T10:01:30Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+        };
+        let delta = domain.delta(&cursor).unwrap();
+        // Only c + d are after 10:01:30.
+        assert_eq!(delta.len(), 2);
+        assert_eq!(delta[0].id, "c");
+        assert_eq!(delta[1].id, "d");
+    }
+
+    #[test]
+    fn delta_cursor_id_gone_no_ts_replays_all() {
+        // Worst case: id gone AND no last_ts. Must replay all rather than
+        // silently drop newer events.
+        let events = r#"{"id":"b","ts":"2026-05-16T10:01:00Z"}
+{"id":"c","ts":"2026-05-16T10:02:00Z"}
+"#;
+        let events_path = write_temp("events-noid.jsonl", events);
+        let mut m = sample_manifest();
+        m.event_stream.path = events_path;
+        let domain = ExternalDomain::from_manifest(m).unwrap();
+        let cursor = Cursor {
+            last_event_id: Some("gone".into()),
+            last_ts: None,
+        };
+        let delta = domain.delta(&cursor).unwrap();
+        assert_eq!(delta.len(), 2); // replay all, not empty
     }
 
     fn sample_manifest() -> DomainManifest {

@@ -28,8 +28,7 @@ use std::path::PathBuf;
 /// the three whitespace controls JSON allows (\t, \n, \r). Models very
 /// occasionally emit raw control bytes (``, ``, etc.) inside
 /// JSON string values which then crash `serde_json::from_str` with
-/// `control character ... while parsing a string`. Backlog from
-/// _20260422-dream-hard-8a (D23).
+/// `control character ... while parsing a string`.
 fn sanitize_json_control_chars(s: &str) -> String {
     s.chars()
         .filter(|c| {
@@ -70,8 +69,16 @@ pub fn parse_json_codeblock(content: &str) -> Option<String> {
     }
     // Final fallback: the model prefixed prose then emitted JSON (e.g.
     // "I have all the context. Generating now.\n\n{...}"). Find the first
-    // `{` or `[` and take a balanced span from there to the matching close.
-    if let Some(span) = extract_balanced_json(trimmed) {
+    // balanced span, but accept it ONLY if (a) it's an object — the shape
+    // every preamble case we've seen produces — and (b) it actually parses
+    // as JSON. Both guards matter: without (b), prose with a stray `{foo}`
+    // returns garbage; without (a), prose like "array[0]" extracts `[0]`
+    // (valid JSON, wrong shape). Callers that emit bare arrays do so cleanly
+    // (caught by the starts_with('[') branch above), not after prose.
+    if let Some(span) = extract_balanced_json(trimmed)
+        && span.starts_with('{')
+        && serde_json::from_str::<Value>(span).is_ok()
+    {
         return Some(sanitize_json_control_chars(span));
     }
     None
@@ -692,6 +699,24 @@ mod dream_output_robustness_tests {
         let extracted = parse_json_codeblock(content).expect("should extract");
         let v: serde_json::Value = serde_json::from_str(&extracted).unwrap();
         assert_eq!(v.get("k").unwrap().as_str().unwrap(), "a } b");
+    }
+
+    #[test]
+    fn prose_with_non_json_brace_still_returns_none() {
+        // Blast-radius guard: prose that merely CONTAINS a brace but no real
+        // JSON must return None (as it did before the balanced-extraction
+        // fallback), so callers like audit/introspection/metacog/dreaming
+        // keep getting a clean None rather than a garbage span.
+        assert!(parse_json_codeblock("Use {curly} braces in your config file.").is_none());
+        assert!(parse_json_codeblock("Consider the array[0] index syntax.").is_none());
+        assert!(parse_json_codeblock("No JSON here at all, just prose.").is_none());
+    }
+
+    #[test]
+    fn prose_then_real_json_still_extracts() {
+        // The fix must still work: real JSON after a preamble extracts.
+        let c = "Done thinking. {\"schemaVersion\":1,\"domain\":\"x\",\"insights\":[]}";
+        assert!(parse_json_codeblock(c).is_some());
     }
 }
 

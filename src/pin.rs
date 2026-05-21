@@ -218,12 +218,12 @@ fn list(include_archived: bool) -> Result<()> {
     // Show newest first.
     let mut sorted = events;
     sorted.sort_by(|a, b| b.ts.cmp(&a.ts));
-    println!("{:<28} {:<12} {}", "ID", "FRAMING", "TEXT");
+    println!("{:<28} {:<12} TEXT", "ID", "FRAMING");
     for e in &sorted {
         let truncated = e.text.replace('\n', " ");
         let truncated = if truncated.chars().count() > 60 {
             let mut s: String = truncated.chars().take(57).collect();
-            s.push_str("…");
+            s.push('…');
             s
         } else {
             truncated
@@ -305,7 +305,7 @@ fn archived(since: Option<String>) -> Result<()> {
                 let preview = ev.text.replace('\n', " ");
                 let preview = if preview.chars().count() > 70 {
                     let mut s: String = preview.chars().take(67).collect();
-                    s.push_str("…");
+                    s.push('…');
                     s
                 } else {
                     preview
@@ -384,15 +384,14 @@ fn mint_id(text: &str, ts: &str) -> String {
 
 fn parse_file_arg(s: &str) -> Option<PinFile> {
     // Accepts "path" or "path:lineA-lineB"
-    if let Some((path, range)) = s.rsplit_once(':') {
-        if let Some((a, b)) = range.split_once('-')
-            && let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>())
-        {
-            return Some(PinFile {
-                path: path.to_string(),
-                line_range: Some([a, b]),
-            });
-        }
+    if let Some((path, range)) = s.rsplit_once(':')
+        && let Some((a, b)) = range.split_once('-')
+        && let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>())
+    {
+        return Some(PinFile {
+            path: path.to_string(),
+            line_range: Some([a, b]),
+        });
     }
     Some(PinFile {
         path: s.to_string(),
@@ -409,12 +408,9 @@ fn lock_file(f: &fs::File) -> Result<()> {
     if rc != 0 {
         bail!("flock failed: errno {}", std::io::Error::last_os_error());
     }
-    // Re-seek to end after acquiring lock — other writers may have appended
-    // since open. Use unsafe File::from_raw_fd-style mutability via libc lseek
-    // to avoid needing &mut File at the call site.
-    unsafe {
-        libc::lseek(fd, 0, libc::SEEK_END);
-    }
+    // No manual seek needed: the file is opened with O_APPEND (`.append(true)`),
+    // so every write() is positioned at EOF by the kernel regardless of what
+    // other writers appended while we waited for the lock.
     Ok(())
 }
 
