@@ -106,6 +106,7 @@ cursor_path   = "{root}/dream/cursor.json"       # i-dream writes here
 prompt_fields = ["slug", "..."]       # SEE §4 — what the LLM sees per event
 prompt_field_max_chars = 300          # per-field truncation
 severity_field = "severity"           # SEE §4 — your importance tag, if any
+severity_order = ["S1","S2","S3"]     # SEE §4 — your scale low→high; omit for S1/S2/S3 default
 adapter       = "{root}/dream/adapter.sh"  # SEE §5 — the return channel
 
 [hinter]
@@ -131,9 +132,14 @@ through four knobs. This is the part that's subjective per system — design it
 deliberately.
 
 ### Importance — "how much should this surface?"
-- **`severity_field`**: name the event field carrying an ordered tag (S1/S2/S3,
-  low/med/high). i-dream looks up each insight's max severity (via its evidence
-  events) and weights cross-domain association confidence by it.
+- **`severity_field`**: name the event field carrying an ordered tag. i-dream
+  looks up each insight's max severity (via its evidence events) and weights
+  cross-domain association confidence by it.
+- **`severity_order`**: your severity vocabulary, lowest → highest — e.g.
+  `["low","med","high"]`. Rank = position in this list, so **you own your scale**
+  instead of being forced onto atone's S1/S2/S3. Omit it and ranking defaults to
+  `S1`/`S2`/`S3`. Set `severity_field` to the field, `severity_order` to its
+  values.
 - **`[hinter].weight`**: a multiplier (default 1.0) on your TLDR lines when they
   compete for the top-N union slots shown in the digest/SessionStart. Raise it
   if your signals should outrank others.

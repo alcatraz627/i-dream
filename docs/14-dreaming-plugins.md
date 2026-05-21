@@ -299,10 +299,12 @@ adapter       = "{root}/dream/adapter.sh"  # optional; invoked post-dream
 # id + ts and cannot ground patterns in event content. Order = render order.
 prompt_fields = ["slug", "severity", "issue", "cause", "fix"]
 prompt_field_max_chars = 300          # optional; per-field truncation (default 300)
-# Field carrying an ordered severity tag (e.g. S1/S2/S3). When set, the
-# cross-domain join looks up each insight's max severity (via its evidence
-# event ids) and weights association confidence by it.
+# Field carrying an ordered severity tag. When set, the cross-domain join looks
+# up each insight's max severity (via its evidence event ids) and weights
+# association confidence by it. `severity_order` declares the scale low→high so
+# each domain owns its vocabulary; omit it for the S1/S2/S3 default.
 severity_field = "severity"           # optional
+severity_order = ["S1", "S2", "S3"]   # optional; e.g. ["low","med","high"]
 
 [hinter]
 tldr_path     = "{root}/derived/_tldr.txt"

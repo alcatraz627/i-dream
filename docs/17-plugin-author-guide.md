@@ -110,6 +110,7 @@ prompt_fields = ["slug", "..."]      # event fields the LLM sees per delta event
                                      # WITHOUT these it sees only id + ts (no content)
 prompt_field_max_chars = 300         # optional; per-field truncation
 severity_field = "severity"          # optional; your importance tag → weights cross-domain join
+severity_order = ["low","med","high"] # optional; your scale low→high (omit for S1/S2/S3 default)
 # adapter      = "{root}/dream/adapter.sh"   # uncomment when authored
 
 [hinter]

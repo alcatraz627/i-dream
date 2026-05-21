@@ -460,6 +460,12 @@ pub struct DreamSpec {
     /// association's confidence by how serious the linked patterns are.
     #[serde(default)]
     pub severity_field: Option<String>,
+    /// Severity vocabulary, lowest → highest (e.g. `["low","med","high"]`).
+    /// Lets each domain own its own scale instead of being forced onto atone's
+    /// S1/S2/S3. Rank = position in this list. When empty, ranking falls back
+    /// to the S1/S2/S3 default so atone keeps working unchanged.
+    #[serde(default)]
+    pub severity_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -135,6 +135,7 @@ pub async fn run_dream_pass(
                 &out,
                 &delta,
                 domain.manifest().dream.severity_field.as_deref(),
+                &domain.manifest().dream.severity_order,
             );
             severity_maps.push((domain.name().to_string(), sev));
             all_outputs.push((domain.name().to_string(), out));
@@ -343,6 +344,7 @@ fn build_severity_map(
     out: &DreamOutput,
     delta: &[DomainEvent],
     severity_field: Option<&str>,
+    severity_order: &[String],
 ) -> SeverityMap {
     let mut map = SeverityMap::new();
     let Some(field) = severity_field else {
@@ -365,7 +367,7 @@ fn build_severity_map(
             let max = evidence_event_ids
                 .iter()
                 .filter_map(|id| by_id.get(id.as_str()).copied())
-                .max_by_key(|s| severity_rank(s));
+                .max_by_key(|s| severity_rank(s, severity_order));
             if let Some(sev) = max {
                 map.insert(name.clone(), sev.to_string());
             } else if !evidence_event_ids.is_empty() {
@@ -382,16 +384,25 @@ fn build_severity_map(
     map
 }
 
-/// Order a severity tag for comparison. Unknown tags rank lowest so a typo
-/// never outranks a real S-level. Kept tolerant rather than enum-typed because
-/// each domain owns its own severity vocabulary; atone happens to use S1–S3.
-fn severity_rank(s: &str) -> u8 {
-    match s.trim().to_ascii_uppercase().as_str() {
-        "S3" => 3,
-        "S2" => 2,
-        "S1" => 1,
-        _ => 0,
+/// Order a severity tag for comparison. When the domain declares a
+/// `severity_order`, rank is the tag's 1-based position in it (so each domain
+/// owns its own scale). When the list is empty, fall back to atone's S1/S2/S3.
+/// Unknown tags rank 0 so a typo never outranks a real level.
+fn severity_rank(s: &str, order: &[String]) -> usize {
+    let s = s.trim();
+    if order.is_empty() {
+        return match s.to_ascii_uppercase().as_str() {
+            "S3" => 3,
+            "S2" => 2,
+            "S1" => 1,
+            _ => 0,
+        };
     }
+    order
+        .iter()
+        .position(|o| o.eq_ignore_ascii_case(s))
+        .map(|i| i + 1)
+        .unwrap_or(0)
 }
 
 fn write_cross_associations(associations: &[serde_json::Value]) -> Result<()> {
@@ -500,11 +511,22 @@ mod tests {
     }
 
     #[test]
-    fn severity_rank_orders_s_levels() {
-        assert!(severity_rank("S3") > severity_rank("S2"));
-        assert!(severity_rank("S2") > severity_rank("S1"));
-        assert_eq!(severity_rank("s3"), 3); // case-insensitive
-        assert_eq!(severity_rank("garbage"), 0); // unknown ranks lowest
+    fn severity_rank_default_s_levels() {
+        // Empty order → atone's S1/S2/S3 default.
+        assert!(severity_rank("S3", &[]) > severity_rank("S2", &[]));
+        assert!(severity_rank("S2", &[]) > severity_rank("S1", &[]));
+        assert_eq!(severity_rank("s3", &[]), 3); // case-insensitive
+        assert_eq!(severity_rank("garbage", &[]), 0); // unknown ranks lowest
+    }
+
+    #[test]
+    fn severity_rank_uses_declared_order() {
+        // A domain with its own vocabulary (claude-audit: low<med<high).
+        let order: Vec<String> = ["low", "med", "high"].iter().map(|s| s.to_string()).collect();
+        assert!(severity_rank("high", &order) > severity_rank("med", &order));
+        assert!(severity_rank("med", &order) > severity_rank("low", &order));
+        assert_eq!(severity_rank("HIGH", &order), 3); // case-insensitive
+        assert_eq!(severity_rank("S3", &order), 0); // not in this domain's vocab
     }
 
     #[test]
@@ -524,7 +546,7 @@ mod tests {
             }],
         };
         let delta = vec![event("e1", "S1"), event("e2", "S3"), event("e3", "S2")];
-        let map = build_severity_map(&out, &delta, Some("severity"));
+        let map = build_severity_map(&out, &delta, Some("severity"), &[]);
         assert_eq!(map.get("assume-before-verify").map(String::as_str), Some("S3"));
     }
 
@@ -546,7 +568,7 @@ mod tests {
         };
         let delta = vec![event("e1", "S3")];
         // Domain didn't declare a severity_field → no severity attached.
-        assert!(build_severity_map(&out, &delta, None).is_empty());
+        assert!(build_severity_map(&out, &delta, None, &[]).is_empty());
     }
 
     #[test]
@@ -564,7 +586,7 @@ mod tests {
             }],
         };
         // Associations have no evidence_event_ids — nothing to tie to severity.
-        assert!(build_severity_map(&out, &[], Some("severity")).is_empty());
+        assert!(build_severity_map(&out, &[], Some("severity"), &[]).is_empty());
     }
 
     #[test]
