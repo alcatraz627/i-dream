@@ -372,8 +372,9 @@ fn render_field_value(val: &Value, max_chars: usize) -> Option<String> {
     if s.is_empty() {
         return None;
     }
-    // Collapse interior newlines so one multi-line field can't break the
-    // one-line-per-field layout the prompt relies on.
+    // Collapse runs of whitespace (incl. newlines) to single spaces so a
+    // multi-line field can't break the one-line-per-field layout the prompt
+    // relies on.
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() > max_chars {
         let truncated: String = flat.chars().take(max_chars).collect();
@@ -627,6 +628,38 @@ cadence = "daily"
             m.consolidation.script.as_ref().unwrap().to_string_lossy(),
             "/tmp/idream-test-root/consolidate.sh"
         );
+    }
+
+    #[test]
+    fn manifest_parses_prompt_fields_and_severity_field() {
+        let toml = r#"
+[domain]
+name = "d"
+version = "1.0"
+description = "x"
+root = "/tmp/idr-fields"
+
+[event_stream]
+path = "{root}/events.jsonl"
+format = "jsonl"
+id_field = "id"
+ts_field = "ts"
+
+[consolidation]
+type = "external_script"
+cadence = "daily"
+
+[dream]
+enabled = true
+prompt_fields = ["slug", "severity", "issue"]
+prompt_field_max_chars = 120
+severity_field = "severity"
+"#;
+        let p = write_temp("with-fields.toml", toml);
+        let m = load_manifest(&p).expect("manifest with new dream knobs should parse");
+        assert_eq!(m.dream.prompt_fields, vec!["slug", "severity", "issue"]);
+        assert_eq!(m.dream.prompt_field_max_chars, Some(120));
+        assert_eq!(m.dream.severity_field.as_deref(), Some("severity"));
     }
 
     #[test]

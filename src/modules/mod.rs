@@ -448,9 +448,10 @@ pub struct DreamSpec {
     /// slug/severity/issue) and the renderer includes them, truncated.
     #[serde(default)]
     pub prompt_fields: Vec<String>,
-    /// Per-field character cap in the rendered prompt. Bounds token spend when
-    /// a field (e.g. a long `cause`) would otherwise dominate the budget.
-    /// Defaults to 300 when unset.
+    /// Caps each field value to this many characters in the rendered prompt,
+    /// bounding token spend when a long field (e.g. `cause`) would otherwise
+    /// dominate the budget. A truncation ellipsis may add one char beyond the
+    /// cap. Defaults to 300 when unset.
     #[serde(default)]
     pub prompt_field_max_chars: Option<usize>,
     /// Event field carrying an ordered severity tag (e.g. atone's "severity"

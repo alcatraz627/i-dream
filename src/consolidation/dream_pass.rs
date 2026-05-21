@@ -295,15 +295,16 @@ async fn run_cross_domain(
             .collect::<Vec<_>>(),
     )?;
 
-    let system = "You are i-dream's cross-domain dream pass. Given per-domain dream \
-                  outputs, find non-obvious associations across domains. Output a JSON \
-                  array of objects with shape: \
+    let system = "You are i-dream's cross-domain dream pass. The input lists each \
+                  domain with a summary and an `insights` array of {slug, severity} \
+                  objects (severity may be null). Find non-obvious associations across \
+                  domains. Output a JSON array of objects with shape: \
                   {\"from_domain\": str, \"from_slug\": str, \"to_domain\": str, \
                   \"to_slug\": str, \"confidence\": 0-1, \"instruction\": str}. \
-                  An insight may carry a severity tag (S3 most serious, S1 least); \
-                  weight an association's confidence UP when the linked slugs are \
-                  high-severity, since acting on a serious-mistake correlation matters \
-                  more. Drop confidence < 0.6. Max 5 associations.";
+                  Severity is S3 (most serious) … S1 (least); weight an association's \
+                  confidence UP when the linked slugs are high-severity, since acting \
+                  on a serious-mistake correlation matters more. Drop confidence < 0.6. \
+                  Max 5 associations.";
     let prompt = format!("Per-domain outputs:\n\n{payload}\n\nReturn JSON array.");
 
     let response = client
@@ -367,6 +368,14 @@ fn build_severity_map(
                 .max_by_key(|s| severity_rank(s));
             if let Some(sev) = max {
                 map.insert(name.clone(), sev.to_string());
+            } else if !evidence_event_ids.is_empty() {
+                // The insight cited evidence ids, but none matched a tagged
+                // delta event — so severity silently won't weight this slug.
+                // Usually means the model abbreviated/invented an id; log it
+                // so a degraded cross-domain weighting is diagnosable.
+                tracing::debug!(
+                    "severity unmapped for insight '{name}': evidence ids {evidence_event_ids:?} matched no delta event with field '{field}'"
+                );
             }
         }
     }

@@ -198,8 +198,8 @@ async fn main() -> Result<()> {
             // `i-dream contract` and the installed CONTRACT.md can never drift.
             const CONTRACT: &str = include_str!("../docs/20-ingestion-contract.md");
             if install {
-                let home = std::env::var("HOME").context("HOME unset")?;
-                let dir = std::path::PathBuf::from(&home).join(".claude/i-dream");
+                let home = dirs::home_dir().context("could not resolve home dir")?;
+                let dir = home.join(".claude/i-dream");
                 std::fs::create_dir_all(&dir)?;
                 let path = dir.join("CONTRACT.md");
                 std::fs::write(&path, CONTRACT)?;
