@@ -4,6 +4,10 @@
 > **Audience:** anyone writing a new dream-domain plugin for i-dream.
 > **Reference:** full design at [`14-dreaming-plugins.md`](./14-dreaming-plugins.md). This
 > doc is the *how-to* — read the design once for context, then live here.
+> **Integrating from another system?** Read the agent-facing
+> [`20-ingestion-contract.md`](./20-ingestion-contract.md) (or run
+> `i-dream contract`) — it's the self-serve contract + handshake. This guide is
+> the hands-on companion.
 
 A dream-domain plugin is a directory + a TOML manifest. i-dream discovers it,
 includes it in the registry, runs your consolidate script on cadence, and
@@ -102,6 +106,10 @@ budget_tokens = 4000
 prompt_path   = "{root}/dream/prompt.md"
 insights_path = "{root}/dream/insights.jsonl"
 cursor_path   = "{root}/dream/cursor.json"
+prompt_fields = ["slug", "..."]      # event fields the LLM sees per delta event;
+                                     # WITHOUT these it sees only id + ts (no content)
+prompt_field_max_chars = 300         # optional; per-field truncation
+severity_field = "severity"          # optional; your importance tag → weights cross-domain join
 # adapter      = "{root}/dream/adapter.sh"   # uncomment when authored
 
 [hinter]
@@ -291,12 +299,18 @@ adapter = "{root}/dream/adapter.sh"
 
 ## 6. Examples in the wild
 
-- **atone** (`~/.claude/atone/`) — mistake tracking. The canonical first
-  plugin. Manifest at `.i-dream-domain.toml`; prompt at `dream/prompt.md`;
-  consolidate script at `~/.claude/scripts/atone-consolidate.sh`. Read these
-  three files to see a working end-to-end.
-- (future) **affirm** (`~/.claude/affirm/`) — affirmed-behavior tracking,
-  sibling of atone (planned, see A Stage 5).
+Five domains are registered today; read any of their manifests for a pattern:
+
+- **atone** (`~/.claude/atone/`) — mistake tracking. The canonical reference.
+  Manifest at `.i-dream-domain.toml`; prompt at `dream/prompt.md`; consolidate
+  at `~/.claude/scripts/atone-consolidate.sh`; uses `prompt_fields` +
+  `severity_field`. Read these to see a complete grounded-prompt end-to-end.
+- **affirm** (`~/.claude/affirm/`) — affirmed-behavior tracking, sibling of atone.
+- **memory** (`~/.claude/memory-domain/`) / **sessions**
+  (`~/.claude/sessions-domain/`) — *synthesized* domains: an `extract-events.sh`
+  derives events from `.md` files / transcripts. The template if your system has
+  artifacts but no event log.
+- **pinned** (`~/.claude/pinned/`) — user-pinned insights that decay after 2 cycles.
 
 ---
 

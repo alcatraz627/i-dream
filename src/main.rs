@@ -193,6 +193,22 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
 
+        Command::Contract { install } => {
+            // Single source: the contract doc is embedded at compile time, so
+            // `i-dream contract` and the installed CONTRACT.md can never drift.
+            const CONTRACT: &str = include_str!("../docs/20-ingestion-contract.md");
+            if install {
+                let home = std::env::var("HOME").context("HOME unset")?;
+                let dir = std::path::PathBuf::from(&home).join(".claude/i-dream");
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join("CONTRACT.md");
+                std::fs::write(&path, CONTRACT)?;
+                eprintln!("[contract installed: {}]", path.display());
+            } else {
+                print!("{CONTRACT}");
+            }
+        }
+
         Command::Dashboard { no_open, run_tests } => {
             // If the menubar widget is running, signal it to open the native panel.
             if !no_open {

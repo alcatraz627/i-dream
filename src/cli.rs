@@ -158,6 +158,17 @@ pub enum Command {
         budget: u32,
     },
 
+    /// Print the i-dream ingestion contract — how a local system integrates
+    /// its events into the dreaming layer (event schema, manifest, semantics
+    /// knobs, return channel, the integration handshake). Point another
+    /// system's agent here. `--install` materializes it at
+    /// ~/.claude/i-dream/CONTRACT.md so agents on this machine can find it.
+    Contract {
+        /// Write the contract to ~/.claude/i-dream/CONTRACT.md instead of stdout.
+        #[arg(long)]
+        install: bool,
+    },
+
     /// Manage scheduled jobs (launchd plists). Currently ships only the
     /// daily-digest cron (03:00 local). Weekly audit cron lands with
     /// `i-dream audit` (B Stage 5+6 of docs/16-consolidation-build.md).
