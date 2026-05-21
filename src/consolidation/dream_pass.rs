@@ -302,10 +302,11 @@ async fn run_cross_domain(
                   domains. Output a JSON array of objects with shape: \
                   {\"from_domain\": str, \"from_slug\": str, \"to_domain\": str, \
                   \"to_slug\": str, \"confidence\": 0-1, \"instruction\": str}. \
-                  Severity is S3 (most serious) … S1 (least); weight an association's \
-                  confidence UP when the linked slugs are high-severity, since acting \
-                  on a serious-mistake correlation matters more. Drop confidence < 0.6. \
-                  Max 5 associations.";
+                  Severity (when present) is in each domain's own scale — e.g. S1-S3 \
+                  or low/med/high — where the higher value is more serious. Weight an \
+                  association's confidence UP when the linked slugs are high-severity, \
+                  since acting on a serious-mistake correlation matters more. Drop \
+                  confidence < 0.6. Max 5 associations.";
     let prompt = format!("Per-domain outputs:\n\n{payload}\n\nReturn JSON array.");
 
     let response = client

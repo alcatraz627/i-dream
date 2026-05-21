@@ -653,13 +653,15 @@ cadence = "daily"
 enabled = true
 prompt_fields = ["slug", "severity", "issue"]
 prompt_field_max_chars = 120
-severity_field = "severity"
+severity_field = "impact"
+severity_order = ["low", "med", "high"]
 "#;
         let p = write_temp("with-fields.toml", toml);
         let m = load_manifest(&p).expect("manifest with new dream knobs should parse");
         assert_eq!(m.dream.prompt_fields, vec!["slug", "severity", "issue"]);
         assert_eq!(m.dream.prompt_field_max_chars, Some(120));
-        assert_eq!(m.dream.severity_field.as_deref(), Some("severity"));
+        assert_eq!(m.dream.severity_field.as_deref(), Some("impact"));
+        assert_eq!(m.dream.severity_order, vec!["low", "med", "high"]);
     }
 
     #[test]

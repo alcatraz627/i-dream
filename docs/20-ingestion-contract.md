@@ -106,7 +106,7 @@ cursor_path   = "{root}/dream/cursor.json"       # i-dream writes here
 prompt_fields = ["slug", "..."]       # SEE §4 — what the LLM sees per event
 prompt_field_max_chars = 300          # per-field truncation
 severity_field = "severity"           # SEE §4 — your importance tag, if any
-severity_order = ["S1","S2","S3"]     # SEE §4 — your scale low→high; omit for S1/S2/S3 default
+severity_order = ["low","med","high"] # SEE §4 — your scale low→high; omit for S1/S2/S3 default
 adapter       = "{root}/dream/adapter.sh"  # SEE §5 — the return channel
 
 [hinter]

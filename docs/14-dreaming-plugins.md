@@ -304,7 +304,8 @@ prompt_field_max_chars = 300          # optional; per-field truncation (default 
 # association confidence by it. `severity_order` declares the scale low→high so
 # each domain owns its vocabulary; omit it for the S1/S2/S3 default.
 severity_field = "severity"           # optional
-severity_order = ["S1", "S2", "S3"]   # optional; e.g. ["low","med","high"]
+severity_order = ["S1", "S2", "S3"]   # optional; this IS the default — set only for a
+                                      # custom scale, e.g. ["low","med","high"]
 
 [hinter]
 tldr_path     = "{root}/derived/_tldr.txt"
