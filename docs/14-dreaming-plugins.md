@@ -294,6 +294,15 @@ prompt_path   = "{root}/dream/prompt.md"
 insights_path = "{root}/dream/insights.jsonl"
 cursor_path   = "{root}/dream/cursor.json"
 adapter       = "{root}/dream/adapter.sh"  # optional; invoked post-dream
+# Event payload fields surfaced per delta event in the dream prompt, rendered
+# under each event's `- {id} ({ts})` header. Without these the model sees only
+# id + ts and cannot ground patterns in event content. Order = render order.
+prompt_fields = ["slug", "severity", "issue", "cause", "fix"]
+prompt_field_max_chars = 300          # optional; per-field truncation (default 300)
+# Field carrying an ordered severity tag (e.g. S1/S2/S3). When set, the
+# cross-domain join looks up each insight's max severity (via its evidence
+# event ids) and weights association confidence by it.
+severity_field = "severity"           # optional
 
 [hinter]
 tldr_path     = "{root}/derived/_tldr.txt"

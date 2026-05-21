@@ -4,6 +4,32 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+### Added — Grounded external dream prompts + severity-aware cross-domain join
+
+- **`[dream].prompt_fields`** (manifest) — external domains now declare which
+  event payload fields the dream prompt should surface per delta event (atone:
+  `slug`/`severity`/`issue`/`cause`/`fix`). Previously the prompt carried only
+  event id + timestamp, so the LLM was asked to find patterns in content it
+  never received; insights were plausible but ungrounded. Fields render under
+  each event header, truncated by `prompt_field_max_chars` (default 300).
+- **`[dream].severity_field`** (manifest) + cross-domain severity weighting —
+  the cross-domain join now looks up each insight's max severity (via its
+  `evidence_event_ids` → delta) and instructs the model to weight an
+  association's confidence by how serious the linked patterns are. This is the
+  one per-pass confidence surfaced in the daily digest.
+- Atone dream prompt now instructs the model to weight confidence + insight
+  selection by severity × recurrence (meaningful only now that severity reaches
+  the prompt).
+
+### Notes
+
+- A deterministic per-domain confidence floor was considered and **dropped as
+  inert**: nothing downstream reads per-domain insight confidence (consumers
+  only line-count), so flooring it would have no effect.
+- Verified live: a dream pass over a 4-event atone delta produced insights
+  citing real delta event ids + slugs, replacing the prior run's synthetic
+  evidence. 9 new tests; 351 pass.
+
 ## [0.4.2] — 2026-05-17 Dream-domain plugin substrate + consolidation pipeline (partial)
 
 Two new orthogonal systems land on top of the v0.4.1 daemon, plus four design
