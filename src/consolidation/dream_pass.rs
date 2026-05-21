@@ -17,14 +17,21 @@
 use crate::api::ClaudeClient;
 use crate::modules::registry::DomainRegistry;
 use crate::modules::{
-    DreamContext, DreamDomain, DreamOutput, TldrLine, TriggerEntry, parse_json_codeblock,
+    DomainEvent, DreamContext, DreamDomain, DreamOutput, Insight, TldrLine, TriggerEntry,
+    parse_json_codeblock,
 };
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{info, warn};
+
+/// Per-domain map of insight slug → highest severity tag among the insight's
+/// evidence events. Carried into the cross-domain join so it can weight an
+/// association by how serious the linked patterns are.
+type SeverityMap = HashMap<String, String>;
 
 const DEFAULT_PER_DOMAIN_BUDGET: u32 = 4000;
 const DEFAULT_CROSS_BUDGET: u32 = 2000;
@@ -98,6 +105,7 @@ pub async fn run_dream_pass(
 
     // Per-domain pass. Each domain that opts in gets its own LLM call.
     let mut all_outputs: Vec<(String, DreamOutput)> = vec![];
+    let mut severity_maps: Vec<(String, SeverityMap)> = vec![];
     for (domain, delta) in work {
         let result = run_one_domain(
             domain,
@@ -121,6 +129,14 @@ pub async fn run_dream_pass(
         report.total_tokens += tokens;
         if let Some(out) = output {
             report.domains_with_output += 1;
+            // Map each insight to its events' severity before `out` moves into
+            // all_outputs, so the cross-domain join can weight by it.
+            let sev = build_severity_map(
+                &out,
+                &delta,
+                domain.manifest().dream.severity_field.as_deref(),
+            );
+            severity_maps.push((domain.name().to_string(), sev));
             all_outputs.push((domain.name().to_string(), out));
         }
         report.per_domain.push(DomainPassResult {
@@ -135,7 +151,7 @@ pub async fn run_dream_pass(
     // Cross-domain pass — only when 2+ domains produced output.
     if all_outputs.len() >= 2 {
         report.cross_domain_ran = true;
-        match run_cross_domain(&all_outputs, client, model).await {
+        match run_cross_domain(&all_outputs, &severity_maps, client, model).await {
             Ok((associations, toks)) => {
                 report.total_tokens += toks;
                 if let Err(e) = write_cross_associations(&associations) {
@@ -246,6 +262,7 @@ fn build_context_for(_my_name: &str, prior: &[(String, DreamOutput)]) -> DreamCo
 
 async fn run_cross_domain(
     outputs: &[(String, DreamOutput)],
+    severity_maps: &[(String, SeverityMap)],
     client: &ClaudeClient,
     model: &str,
 ) -> Result<(Vec<serde_json::Value>, u64)> {
@@ -253,15 +270,26 @@ async fn run_cross_domain(
         &outputs
             .iter()
             .map(|(name, out)| {
+                let sev = severity_maps
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, m)| m);
+                let insights: Vec<serde_json::Value> = out
+                    .insights
+                    .iter()
+                    .filter_map(|ins| {
+                        let slug = insight_slug(ins)?;
+                        // Attach severity only when the domain declared a
+                        // severity_field and this slug had a tagged event.
+                        let severity = sev.and_then(|m| m.get(&slug)).cloned();
+                        Some(serde_json::json!({ "slug": slug, "severity": severity }))
+                    })
+                    .collect();
                 serde_json::json!({
                     "domain": name,
                     "summary": out.summary,
                     "insight_count": out.insights.len(),
-                    "insight_slugs": out
-                        .insights
-                        .iter()
-                        .filter_map(insight_slug)
-                        .collect::<Vec<_>>(),
+                    "insights": insights,
                 })
             })
             .collect::<Vec<_>>(),
@@ -272,7 +300,10 @@ async fn run_cross_domain(
                   array of objects with shape: \
                   {\"from_domain\": str, \"from_slug\": str, \"to_domain\": str, \
                   \"to_slug\": str, \"confidence\": 0-1, \"instruction\": str}. \
-                  Drop confidence < 0.6. Max 5 associations.";
+                  An insight may carry a severity tag (S3 most serious, S1 least); \
+                  weight an association's confidence UP when the linked slugs are \
+                  high-severity, since acting on a serious-mistake correlation matters \
+                  more. Drop confidence < 0.6. Max 5 associations.";
     let prompt = format!("Per-domain outputs:\n\n{payload}\n\nReturn JSON array.");
 
     let response = client
@@ -292,15 +323,65 @@ async fn run_cross_domain(
     Ok((associations, response.tokens_used))
 }
 
-fn insight_slug(insight: &crate::modules::Insight) -> Option<String> {
-    use crate::modules::Insight as I;
+fn insight_slug(insight: &Insight) -> Option<String> {
     match insight {
-        I::Pattern { name, .. } => Some(name.clone()),
-        I::Association { from_slug, .. } => Some(from_slug.clone()),
-        I::GraduationCandidate { slug, .. } => Some(slug.clone()),
-        I::DecayCandidate { slug, .. } => Some(slug.clone()),
-        I::Summary { .. } => None,
-        I::Unknown => None,
+        Insight::Pattern { name, .. } => Some(name.clone()),
+        Insight::Association { from_slug, .. } => Some(from_slug.clone()),
+        Insight::GraduationCandidate { slug, .. } => Some(slug.clone()),
+        Insight::DecayCandidate { slug, .. } => Some(slug.clone()),
+        Insight::Summary { .. } => None,
+        Insight::Unknown => None,
+    }
+}
+
+/// Build an insight-slug → max-severity map for one domain's output. Only
+/// `Pattern` insights carry `evidence_event_ids`, so only they can be tied
+/// back to a severity; the rest are skipped. Empty when the domain declares
+/// no `severity_field` or no evidence event carries the tag.
+fn build_severity_map(
+    out: &DreamOutput,
+    delta: &[DomainEvent],
+    severity_field: Option<&str>,
+) -> SeverityMap {
+    let mut map = SeverityMap::new();
+    let Some(field) = severity_field else {
+        return map;
+    };
+    let by_id: HashMap<&str, &str> = delta
+        .iter()
+        .filter_map(|e| {
+            let sev = e.raw.get(field).and_then(|v| v.as_str())?;
+            Some((e.id.as_str(), sev))
+        })
+        .collect();
+    for insight in &out.insights {
+        if let Insight::Pattern {
+            name,
+            evidence_event_ids,
+            ..
+        } = insight
+        {
+            let max = evidence_event_ids
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()).copied())
+                .max_by_key(|s| severity_rank(s));
+            if let Some(sev) = max {
+                map.insert(name.clone(), sev.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Order a severity tag for comparison. Unknown tags rank lowest so a typo
+/// never outranks a real S-level. Kept tolerant rather than enum-typed because
+/// each domain owns its own severity vocabulary; atone happens to use S1–S3.
+fn severity_rank(s: &str) -> u8 {
+    match s.trim().to_ascii_uppercase().as_str() {
+        "S3" => 3,
+        "S2" => 2,
+        "S1" => 1,
+        _ => 0,
     }
 }
 
@@ -399,6 +480,82 @@ mod tests {
             text: "just text".into(),
         };
         assert_eq!(insight_slug(&s), None);
+    }
+
+    fn event(id: &str, severity: &str) -> DomainEvent {
+        DomainEvent {
+            id: id.to_string(),
+            ts: chrono::Utc::now(),
+            raw: serde_json::json!({ "id": id, "severity": severity }),
+        }
+    }
+
+    #[test]
+    fn severity_rank_orders_s_levels() {
+        assert!(severity_rank("S3") > severity_rank("S2"));
+        assert!(severity_rank("S2") > severity_rank("S1"));
+        assert_eq!(severity_rank("s3"), 3); // case-insensitive
+        assert_eq!(severity_rank("garbage"), 0); // unknown ranks lowest
+    }
+
+    #[test]
+    fn build_severity_map_takes_max_over_evidence() {
+        use crate::modules::Insight as I;
+        let out = DreamOutput {
+            schema_version: 1,
+            domain: "atone".into(),
+            summary: None,
+            insights: vec![I::Pattern {
+                name: "assume-before-verify".into(),
+                evidence_event_ids: vec!["e1".into(), "e2".into(), "e3".into()],
+                confidence: 0.7,
+                instruction: "x".into(),
+                trigger_keywords: vec![],
+                tool_signatures: vec![],
+            }],
+        };
+        let delta = vec![event("e1", "S1"), event("e2", "S3"), event("e3", "S2")];
+        let map = build_severity_map(&out, &delta, Some("severity"));
+        assert_eq!(map.get("assume-before-verify").map(String::as_str), Some("S3"));
+    }
+
+    #[test]
+    fn build_severity_map_empty_without_severity_field() {
+        use crate::modules::Insight as I;
+        let out = DreamOutput {
+            schema_version: 1,
+            domain: "x".into(),
+            summary: None,
+            insights: vec![I::Pattern {
+                name: "p".into(),
+                evidence_event_ids: vec!["e1".into()],
+                confidence: 0.7,
+                instruction: "x".into(),
+                trigger_keywords: vec![],
+                tool_signatures: vec![],
+            }],
+        };
+        let delta = vec![event("e1", "S3")];
+        // Domain didn't declare a severity_field → no severity attached.
+        assert!(build_severity_map(&out, &delta, None).is_empty());
+    }
+
+    #[test]
+    fn build_severity_map_skips_non_pattern_insights() {
+        use crate::modules::Insight as I;
+        let out = DreamOutput {
+            schema_version: 1,
+            domain: "atone".into(),
+            summary: None,
+            insights: vec![I::Association {
+                from_slug: "a".into(),
+                to_slug: "b".into(),
+                confidence: 0.8,
+                instruction: None,
+            }],
+        };
+        // Associations have no evidence_event_ids — nothing to tie to severity.
+        assert!(build_severity_map(&out, &[], Some("severity")).is_empty());
     }
 
     #[test]

@@ -219,15 +219,20 @@ impl DreamDomain for ExternalDomain {
         }
         let template = fs::read_to_string(&path)
             .with_context(|| format!("Cannot read dream prompt {}", path.display()))?;
-        // Minimal template substitution. Full implementation lands with
-        // dream_pass orchestrator (A Stage 3).
+        // Render each delta event as a header line plus the manifest-declared
+        // payload fields. Without prompt_fields the model only sees opaque
+        // ids + timestamps and is asked to find patterns in content it never
+        // receives — so a domain lists the keys that actually describe its
+        // events (atone: slug/severity/issue/cause/fix).
+        let fields = &self.manifest.dream.prompt_fields;
+        let max_chars = self.manifest.dream.prompt_field_max_chars.unwrap_or(300);
         let delta_summary = format!(
             "{} new events since cursor:\n{}",
             delta.len(),
             delta
                 .iter()
                 .take(20)
-                .map(|e| format!("- {} ({})", e.id, e.ts.format("%Y-%m-%dT%H:%M:%SZ")))
+                .map(|e| render_event(e, fields, max_chars))
                 .collect::<Vec<_>>()
                 .join("\n")
         );
@@ -333,6 +338,50 @@ impl DreamDomain for ExternalDomain {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Render one delta event for the dream prompt: a `- {id} ({ts})` header line,
+/// then one indented line per declared field that the event actually carries.
+/// Absent or empty fields are skipped so the prompt stays clean. With no
+/// declared fields the output is the legacy id+ts-only line.
+fn render_event(e: &DomainEvent, fields: &[String], max_chars: usize) -> String {
+    let header = format!("- {} ({})", e.id, e.ts.format("%Y-%m-%dT%H:%M:%SZ"));
+    if fields.is_empty() {
+        return header;
+    }
+    let mut out = header;
+    for field in fields {
+        if let Some(val) = e.raw.get(field)
+            && let Some(rendered) = render_field_value(val, max_chars)
+        {
+            out.push_str(&format!("\n  {field}: {rendered}"));
+        }
+    }
+    out
+}
+
+/// Stringify a single JSON field value for the prompt, truncated to `max_chars`.
+/// Strings render bare; other scalars/containers render as compact JSON.
+/// Returns None for null or an empty string so the caller can skip the line.
+fn render_field_value(val: &Value, max_chars: usize) -> Option<String> {
+    let s = match val {
+        Value::Null => return None,
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Collapse interior newlines so one multi-line field can't break the
+    // one-line-per-field layout the prompt relies on.
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max_chars {
+        let truncated: String = flat.chars().take(max_chars).collect();
+        Some(format!("{truncated}…"))
+    } else {
+        Some(flat)
+    }
+}
 
 /// Resolve `~` and `{root}` placeholders relative to the manifest's
 /// `[domain].root`. The latter is handled by the manifest loader, not here.
@@ -680,6 +729,78 @@ cadence = "daily"
         };
         let delta = domain.delta(&cursor).unwrap();
         assert_eq!(delta.len(), 2); // replay all, not empty
+    }
+
+    fn ev(raw_json: &str) -> DomainEvent {
+        let raw: Value = serde_json::from_str(raw_json).unwrap();
+        DomainEvent {
+            id: raw
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("x")
+                .to_string(),
+            ts: chrono::DateTime::parse_from_rfc3339("2026-05-21T00:12:33Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            raw,
+        }
+    }
+
+    #[test]
+    fn render_event_no_fields_is_id_ts_only() {
+        let e = ev(r#"{"id":"mist-1","severity":"S3","slug":"foo"}"#);
+        let line = render_event(&e, &[], 300);
+        assert_eq!(line, "- mist-1 (2026-05-21T00:12:33Z)");
+        assert!(!line.contains("severity"));
+    }
+
+    #[test]
+    fn render_event_includes_declared_fields_in_order() {
+        let e = ev(r#"{"id":"mist-1","slug":"grep-scope","severity":"S3","issue":"narrow grep"}"#);
+        let fields = vec!["slug".to_string(), "severity".to_string(), "issue".to_string()];
+        let line = render_event(&e, &fields, 300);
+        let expected = "- mist-1 (2026-05-21T00:12:33Z)\n  slug: grep-scope\n  severity: S3\n  issue: narrow grep";
+        assert_eq!(line, expected);
+    }
+
+    #[test]
+    fn render_event_skips_absent_and_empty_fields() {
+        // `cause` absent, `fix` empty string — both skipped, no blank lines.
+        let e = ev(r#"{"id":"m","slug":"s","fix":"  "}"#);
+        let fields = vec![
+            "slug".to_string(),
+            "cause".to_string(),
+            "fix".to_string(),
+        ];
+        let line = render_event(&e, &fields, 300);
+        assert_eq!(line, "- m (2026-05-21T00:12:33Z)\n  slug: s");
+    }
+
+    #[test]
+    fn render_field_value_truncates_and_flattens() {
+        // Multi-line value collapses to one line; long value truncates with ….
+        let v = Value::String("line one\n   line two   with   spaces".to_string());
+        assert_eq!(
+            render_field_value(&v, 300).unwrap(),
+            "line one line two with spaces"
+        );
+        let long = Value::String("a".repeat(500));
+        let out = render_field_value(&long, 50).unwrap();
+        assert_eq!(out.chars().count(), 51); // 50 + the … marker
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn render_field_value_handles_non_strings_and_null() {
+        assert_eq!(render_field_value(&Value::Null, 300), None);
+        assert_eq!(
+            render_field_value(&serde_json::json!(["a", "b"]), 300).unwrap(),
+            r#"["a","b"]"#
+        );
+        assert_eq!(
+            render_field_value(&serde_json::json!(3), 300).unwrap(),
+            "3"
+        );
     }
 
     fn sample_manifest() -> DomainManifest {

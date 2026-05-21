@@ -441,6 +441,24 @@ pub struct DreamSpec {
     pub cursor_path: Option<PathBuf>,
     #[serde(default)]
     pub adapter: Option<PathBuf>,
+    /// Event fields the dream prompt should surface per delta event. Without
+    /// these the prompt carries only event id + timestamp, so the model is
+    /// asked to find patterns in content it never sees. A domain lists the
+    /// payload keys that actually describe its events (e.g. atone exposes
+    /// slug/severity/issue) and the renderer includes them, truncated.
+    #[serde(default)]
+    pub prompt_fields: Vec<String>,
+    /// Per-field character cap in the rendered prompt. Bounds token spend when
+    /// a field (e.g. a long `cause`) would otherwise dominate the budget.
+    /// Defaults to 300 when unset.
+    #[serde(default)]
+    pub prompt_field_max_chars: Option<usize>,
+    /// Event field carrying an ordered severity tag (e.g. atone's "severity"
+    /// = S1/S2/S3). When set, the dream pass looks it up per insight (via the
+    /// insight's evidence event ids) so the cross-domain join can weight an
+    /// association's confidence by how serious the linked patterns are.
+    #[serde(default)]
+    pub severity_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
