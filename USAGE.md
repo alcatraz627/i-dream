@@ -257,6 +257,38 @@ i-dream prune                             # Trim oldest entries to keep limits
 i-dream prune --dry-run                   # Preview without changes
 ```
 
+### Commands shipped in v0.4+ — dream-domain plugins + consolidation
+
+```bash
+# Dream-domain plugins
+i-dream domain list                       # Registered domains (native + external)
+i-dream dream-pass                        # LLM pass over every domain with fresh delta
+i-dream contract                          # Print the ingestion contract
+i-dream contract --install                # Write ~/.claude/i-dream/CONTRACT.md
+
+# Consolidation pipeline
+i-dream digest                            # Render today's L2 daily digest
+i-dream board                             # One-screen 2×2 snapshot (Today/Week/Sources/fitness)
+i-dream audit run                         # L3 weekly audit (interactive approve/apply)
+i-dream audit run --non-interactive       # Stage proposals to the log (for cron)
+
+# Open-thread lifecycle (carried in the daily digest)
+i-dream thread add "loose end" --target-file path/to/file.rs
+i-dream thread list                       # Open threads (auto-decay after 14d)
+i-dream thread resolve <id>               # or: reopen <id>
+
+# Session-pinned insights
+i-dream pin add ...                       # (or via the /pin-for-dream skill)
+
+# Schedule the whole chain (launchd): dream-pass 02:45 → digest 03:00 → audit Sun 02:30
+i-dream cron install
+i-dream cron status                       # Per-job loaded state + last exit
+i-dream cron uninstall
+```
+
+Run `i-dream <command> --help` for authoritative per-command flags — `--help`
+is always current; this guide highlights the common paths.
+
 ## Step 8 — Session injection (optional but recommended)
 
 To inject dream insights into every new Claude session, add a `SessionStart` hook script:

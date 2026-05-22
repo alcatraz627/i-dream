@@ -183,6 +183,25 @@ i-dream models five aspects of human subconsciousness as background processes:
 
 After 4+ hours of inactivity the daemon runs a consolidation cycle — calling Claude (via your local CLI subscription or the Anthropic API directly) to analyze accumulated session data within a configurable token budget.
 
+### Dream-domain plugins + the ingestion contract
+
+Beyond the five built-in modules, i-dream exposes a **dream-domain plugin
+system**: any local system can register an append-only event stream plus a TOML
+manifest and have its signals dreamed over — correlated within itself and across
+other domains. Registered domains today include **atone** (mistake tracking),
+**affirm** (affirmed behaviors), **memory**, **sessions**, **pinned** insights,
+and **claude-audit** (hook-usage feedback).
+
+A system integrates with **no code changes** to i-dream: drop a manifest in
+`~/.claude/i-dream/domains/`, declare four semantics knobs (importance /
+categorization / what-the-LLM-sees / how-it-processes), and optionally wire a
+return channel so insights flow back. The full self-serve contract lives in
+[`docs/20-ingestion-contract.md`](docs/20-ingestion-contract.md) — or run
+`i-dream contract`. `i-dream dream-pass` then runs an LLM pass over each domain's
+fresh events (zero cost when idle) plus a cross-domain join — e.g. surfacing a
+hook the agent keeps bypassing correlating with the very mistake it was meant to
+prevent.
+
 ## Consolidation pipeline
 
 ```
@@ -223,6 +242,23 @@ Idle 4+ hours
 ```
 
 Each phase has a hard timeout. Budget cascades — if dreaming uses less than 50%, the remainder rolls forward.
+
+### Three layers, self-sustaining
+
+Across domains, consolidation runs in three layers (full design:
+[`docs/16-consolidation-build.md`](docs/16-consolidation-build.md)):
+
+- **L1 — per-domain dream pass** (`i-dream dream-pass`): grounds patterns in
+  each domain's fresh events; cross-domain join links slugs across domains.
+- **L2 — daily digest** (`i-dream digest`): a 7-section markdown roll-up (top
+  signals, per-domain, pinned, cross-domain associations, open threads,
+  sources, audit queue). Glance at it via `i-dream board`.
+- **L3 — weekly audit** (`i-dream audit run`): multi-lens proposals for edits to
+  your global Claude config, with interactive approve/reject/apply.
+
+`i-dream cron install` schedules the whole chain so it self-sustains:
+**dream-pass 02:45 → digest 03:00 → weekly audit Sun 02:30** (the audit runs
+`--non-interactive`, staging proposals you review and apply later).
 
 ## Quickstart
 
@@ -267,21 +303,45 @@ i-dream status
 ```
 i-dream <command>
 
-Commands:
-  start              Start the daemon (-d to daemonize)
-  stop               Stop the running daemon
-  status             Show daemon status and module health
-  dream [phase]      Manually trigger a cycle (sws|rem|wake|all)
-  inspect <module>   Inspect state (dreaming|metacog|intuition|introspection|prospective)
-  hooks install      Install hooks into Claude Code settings.json
-  hooks uninstall    Remove i-dream hooks
-  hooks status       Check hook installation status
-  config             Print current config as TOML
+Daemon
+  start / stop / status     Run + inspect the background daemon
+  service                   Manage the daemon as a launchd service (macOS)
+  dream [phase]             Manually trigger a native cycle (sws|rem|wake|all)
+  inspect <module>          Inspect a native module's state
 
-Options:
+Dream-domain plugins (docs/14 + docs/20)
+  domain list               List registered domains (native + external)
+  dream-pass                LLM dream pass over every domain with fresh delta;
+                            per-domain insights + cross-domain associations
+  contract [--install]      Print the ingestion contract; --install writes
+                            ~/.claude/i-dream/CONTRACT.md (point other agents here)
+
+Consolidation pipeline (docs/16)
+  digest [--day YMD]        Render the L2 daily digest (→ daily/<day>.md)
+  board                     One-screen 2×2 snapshot (Today/Week/Sources/fitness)
+  thread {add,list,resolve,reopen}   Open investigation threads (auto-decay 14d)
+  audit run [--non-interactive]      L3 weekly audit → GCC-edit proposals
+  cron {install,uninstall,status}    Schedule dream-pass + digest + weekly audit
+  briefing                  Weekly briefing from the past 7 days
+
+Capture + analysis
+  pin                       Pin a session insight for the next dream cycle
+  graph-metrics             Patterns-graph centrality / hubs
+  brief-projects            Per-project SessionStart briefs
+  snapshot-diff / drift / auto-intentions / prune[-patterns]
+
+Integration
+  hooks {install,uninstall,status}   Claude Code hook wiring
+  widget                    Manage the menu-bar widget (i-dream-bar)
+  dashboard                 Generate an HTML dashboard snapshot
+  config                    Print current config as TOML
+
+Options
   -c, --config <path>   Config file (default: ~/.claude/subconscious/config.toml)
   --log-level <level>   debug | info | warn | error
 ```
+
+Run `i-dream <command> --help` for full per-command detail.
 
 ## macOS menu-bar widget
 
@@ -483,7 +543,12 @@ cargo test -- --nocapture
 └──────────────────┴───────────────────┴───────────────────────────────┘
 ```
 
-Validates: decay math, sampling determinism, trigger matching, atomic writes, serde round-trips, retry classification, dream trace event emission.
+**350+ tests** pass as of v0.4.2 (the category table above is illustrative of
+the original core, not an exhaustive count). Coverage spans decay math, sampling
+determinism, trigger matching, atomic writes, serde round-trips, retry
+classification, dream-trace emission, plus the plugin substrate (manifest parse,
+prompt-field rendering, severity ranking, cross-domain join) and the
+consolidation pipeline (digest, cron plists, thread auto-close, board rendering).
 
 ## Project structure
 
@@ -505,9 +570,21 @@ i-dream/
 │   ├── graph_metrics.rs     Shared Pattern↔Association metrics (degree, hubs, snapshots)
 │   ├── transcript.rs        Claude Code transcript parsing + keyword extraction
 │   ├── widget.rs            CLI subcommands for managing the menubar widget
+│   ├── domain.rs            `i-dream domain` — list/enable/disable registered domains
+│   ├── idream_runtime.rs    Runtime enable/disable state (~/.claude/i-dream/_runtime.json)
+│   ├── audit.rs             L3 weekly audit (proposals + approval + apply)
+│   ├── pin.rs               `i-dream pin` — session-pinned insights
+│   ├── thread.rs            `i-dream thread` — open-thread lifecycle (auto-decay)
+│   ├── board.rs             `i-dream board` — static 2×2 dashboard
+│   ├── cron.rs              launchd job registry (dream-pass + digest + audit)
+│   ├── consolidation/
+│   │   ├── dream_pass.rs    Cross-domain dream-pass orchestrator (L1)
+│   │   └── l2_digest.rs     Deterministic daily digest (L2)
 │   └── modules/
-│       ├── mod.rs           Module trait + parse_json_codeblock + sanitization (D23)
-│       ├── dreaming.rs      SWS compression → REM association → Wake verify (D1+D2+D7+D3v1)
+│       ├── mod.rs           Module + DreamDomain traits, DreamOutput, NativeAdapter
+│       ├── registry.rs      Domain registry + manifest discovery
+│       ├── external_domain.rs  External plugin (manifest-driven event stream)
+│       ├── dreaming.rs      SWS compression → REM association → Wake verify
 │       ├── metacog.rs       Execution unit sampling + calibration analysis
 │       ├── intuition.rs     Valence memory + priming cache + time-decay
 │       ├── introspection.rs Reasoning chain analysis (weekly)
@@ -533,6 +610,15 @@ i-dream/
 │   ├── 10-claude-redesign-prompt.md
 │   ├── 11-shared-widget-utils.md
 │   ├── 12-config-reference.md
+│   ├── 13-widget-plugins.md
+│   ├── 14-dreaming-plugins.md      Dream-domain plugin design + manifest schema
+│   ├── 15-roadmap.md               Roadmap + current state (source of truth)
+│   ├── 16-consolidation-build.md   3-layer consolidation pipeline
+│   ├── 17-plugin-author-guide.md   How-to for writing a plugin
+│   ├── 18-pinned-insights-build.md
+│   ├── 19-quick-primer.md
+│   ├── 20-ingestion-contract.md    Self-serve contract for external systems
+│   ├── rcas/                       Incident RCAs
 │   ├── banner.svg
 │   └── v2-dashboard-plan.md
 ├── .github/
@@ -543,7 +629,7 @@ i-dream/
 ├── .env.example                 The 2 env vars (everything else: config.toml)
 ├── CHANGELOG.md                 Versioned change history (Keep-a-Changelog)
 ├── CONTRIBUTING.md              Local dev loop + conventional commits
-└── Cargo.toml                   Dependencies, release profile (LTO), v0.2.4
+└── Cargo.toml                   Dependencies, release profile (LTO), v0.4.2
 ```
 
 ## Research foundations
@@ -575,6 +661,13 @@ Full research notes: [docs/01-research-human-subconsciousness.md](docs/01-resear
 | [10 — UI redesign prompts](docs/10-claude-redesign-prompt.md) | Two prompts (Claude Design + Claude.ai chat) for a polished UI redesign |
 | [11 — Shared widget utils](docs/11-shared-widget-utils.md) | Six reusable macOS-widget patterns + lookup-path convention |
 | [12 — Config reference](docs/12-config-reference.md) | Full walkthrough of every `config.toml` section |
+| [14 — Dreaming plugins](docs/14-dreaming-plugins.md) | Dream-domain plugin design + manifest schema |
+| [15 — Roadmap](docs/15-roadmap.md) | Roadmap + current state (source of truth) |
+| [16 — Consolidation pipeline](docs/16-consolidation-build.md) | L1/L2/L3 build spec |
+| [17 — Plugin author guide](docs/17-plugin-author-guide.md) | Step-by-step how-to for a new plugin |
+| [18 — Pinned insights](docs/18-pinned-insights-build.md) | The `pinned` domain |
+| [19 — Quick primer](docs/19-quick-primer.md) | How to use the consolidation layer |
+| [20 — Ingestion contract](docs/20-ingestion-contract.md) | Self-serve contract for external systems (`i-dream contract`) |
 | [USAGE.md](USAGE.md) | Full CLI command reference |
 | [CHANGELOG.md](CHANGELOG.md) | Versioned change history |
 | [.env.example](.env.example) | The 2 env vars (everything else is in config.toml) |
