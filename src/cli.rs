@@ -169,9 +169,9 @@ pub enum Command {
         install: bool,
     },
 
-    /// Manage scheduled jobs (launchd plists). Currently ships only the
-    /// daily-digest cron (03:00 local). Weekly audit cron lands with
-    /// `i-dream audit` (B Stage 5+6 of docs/16-consolidation-build.md).
+    /// Manage scheduled jobs (launchd plists): dream-pass (02:45 daily, feeds
+    /// the digest), daily digest (03:00), and the weekly audit (Sun 02:30,
+    /// non-interactive — stages proposals to review).
     Cron {
         #[command(subcommand)]
         action: CronAction,
@@ -462,11 +462,12 @@ pub enum ThreadAction {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum CronAction {
-    /// Write + load the daily-digest launchd plist (03:00 daily).
+    /// Write + load all scheduled-job plists: dream-pass (02:45 daily), daily
+    /// digest (03:00), weekly audit (Sun 02:30). Idempotent.
     Install,
-    /// Bootout + remove the plist.
+    /// Bootout + remove all scheduled-job plists.
     Uninstall,
-    /// Show whether the plist is loaded, its last exit, etc.
+    /// Show each job's plist + whether it's loaded + last exit status.
     Status,
 }
 

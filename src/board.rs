@@ -44,9 +44,18 @@ fn today_lines(latest: &str) -> Vec<String> {
     let signals = section(latest, "Top signals");
     out.extend(signals.into_iter().take(3));
     out.push("▸ Per-domain".to_string());
-    // The per-domain section uses ### subsection headings per domain.
+    // Only the Per-domain section's ### subsections are domains. Scoping to it
+    // matters because other sections (e.g. pinned content injected verbatim)
+    // can carry their own ### headings that aren't domains.
+    let mut in_per_domain = false;
     for line in latest.lines() {
-        if let Some(name) = line.strip_prefix("### ") {
+        if let Some(h) = line.strip_prefix("## ") {
+            in_per_domain = h.trim_start().starts_with("Per-domain");
+            continue;
+        }
+        if in_per_domain
+            && let Some(name) = line.strip_prefix("### ")
+        {
             out.push(format!("  · {name}"));
         }
     }

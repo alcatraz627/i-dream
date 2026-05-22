@@ -161,7 +161,7 @@ fn status_all() -> Result<()> {
 fn render_plist(job: &CronJob, binary: &std::path::Path, logs_dir: &std::path::Path) -> String {
     let args_xml = std::iter::once(binary.display().to_string())
         .chain(job.args.iter().map(|a| a.to_string()))
-        .map(|a| format!("        <string>{a}</string>"))
+        .map(|a| format!("        <string>{}</string>", xml_escape(&a)))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -202,9 +202,17 @@ fn render_plist(job: &CronJob, binary: &std::path::Path, logs_dir: &std::path::P
 </plist>
 "#,
         label = job.label,
-        out = logs_dir.join(format!("{}.out.log", job.label)).display(),
-        err = logs_dir.join(format!("{}.err.log", job.label)).display(),
+        out = xml_escape(&logs_dir.join(format!("{}.out.log", job.label)).display().to_string()),
+        err = xml_escape(&logs_dir.join(format!("{}.err.log", job.label)).display().to_string()),
     )
+}
+
+/// Escape the XML metacharacters that would otherwise break the plist if a
+/// path or argument contained them (e.g. an install path with `&`).
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Resolve the `i-dream` binary to an absolute path for the plist Program

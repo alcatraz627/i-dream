@@ -48,7 +48,17 @@ fn load() -> Result<Vec<Thread>> {
         return Ok(vec![]);
     }
     let content = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&content).unwrap_or_default())
+    if content.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    // Bail loudly on a corrupt store rather than defaulting to empty: a silent
+    // `[]` here would be written back by the next `save()`, wiping every thread.
+    serde_json::from_str(&content).with_context(|| {
+        format!(
+            "threads store is corrupt: {} — fix or remove it (refusing to overwrite)",
+            path.display()
+        )
+    })
 }
 
 fn save(threads: &[Thread]) -> Result<()> {
@@ -96,13 +106,13 @@ fn resolve_in_place(t: &mut Thread, now: DateTime<Utc>, reason: &str) {
     t.resolution = Some(reason.to_string());
 }
 
-/// Open threads after applying auto-close. Persists if auto-close changed
-/// anything. Used by both the CLI and the daily digest.
+/// Open threads after applying auto-close in memory. Read-only — does NOT
+/// persist, so the daily digest (run by a cron) can call it without racing a
+/// concurrent `thread` CLI write. Auto-close is recomputed each call and gets
+/// persisted whenever a CLI command (`list`/`resolve`/…) next writes.
 pub fn open_threads() -> Result<Vec<Thread>> {
     let mut threads = load()?;
-    if apply_auto_close(&mut threads, Utc::now()) > 0 {
-        save(&threads)?;
-    }
+    apply_auto_close(&mut threads, Utc::now());
     Ok(threads.into_iter().filter(|t| t.status == "open").collect())
 }
 
