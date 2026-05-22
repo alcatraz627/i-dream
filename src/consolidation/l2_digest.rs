@@ -221,7 +221,16 @@ pub fn render_markdown(bundle: &DayBundle) -> String {
     }
 
     out.push_str("## Open threads (carried over)\n\n");
-    out.push_str("_(no open threads)_\n\n");
+    match crate::thread::open_threads() {
+        Ok(threads) if !threads.is_empty() => {
+            for t in &threads {
+                let age = (chrono::Utc::now() - t.opened).num_days();
+                out.push_str(&format!("- `{}` ({age}d) — {}\n", t.id, t.text));
+            }
+            out.push('\n');
+        }
+        _ => out.push_str("_(no open threads)_\n\n"),
+    }
 
     out.push_str("## Sources\n\n");
     if bundle.sources.is_empty() {

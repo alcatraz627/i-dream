@@ -186,6 +186,14 @@ pub enum Command {
         action: PinAction,
     },
 
+    /// Track open investigation threads that carry across days in the daily
+    /// digest. A thread auto-resolves when its target file is edited or after
+    /// 14 days; resolve/reopen manage it explicitly.
+    Thread {
+        #[command(subcommand)]
+        action: ThreadAction,
+    },
+
     /// Run the L3 weekly audit — coordinator + multi-lens proposals +
     /// interactive approval + apply-time render. Reads last N days of
     /// daily digests + per-domain TLDRs + rejection memory; produces
@@ -424,6 +432,27 @@ pub enum PinAction {
         #[arg(long)]
         since: Option<String>,
     },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ThreadAction {
+    /// Open a new thread (a loose end to keep visible in the daily digest).
+    Add {
+        /// The loose end, one line.
+        text: String,
+        /// Optional file whose edit (after now) auto-resolves the thread.
+        #[arg(long)]
+        target_file: Option<String>,
+    },
+    /// List open threads (add --all to include resolved).
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Resolve a thread by id.
+    Resolve { id: String },
+    /// Reopen a resolved thread by id.
+    Reopen { id: String },
 }
 
 #[derive(clap::Subcommand, Debug)]

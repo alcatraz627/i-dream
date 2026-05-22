@@ -17,6 +17,7 @@ mod modules;
 mod pin;
 mod service;
 mod store;
+mod thread;
 mod transcript;
 mod widget;
 
@@ -171,6 +172,10 @@ async fn main() -> Result<()> {
 
         Command::Pin { action } => {
             pin::handle(action)?;
+        }
+
+        Command::Thread { action } => {
+            thread::handle(action)?;
         }
 
         Command::Audit { action } => {
