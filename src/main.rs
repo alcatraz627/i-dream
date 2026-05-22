@@ -1,5 +1,6 @@
 mod api;
 mod audit;
+mod board;
 mod cli;
 mod config;
 mod consolidation;
@@ -176,6 +177,10 @@ async fn main() -> Result<()> {
 
         Command::Thread { action } => {
             thread::handle(action)?;
+        }
+
+        Command::Board => {
+            board::render()?;
         }
 
         Command::Audit { action } => {

@@ -194,6 +194,11 @@ pub enum Command {
         action: ThreadAction,
     },
 
+    /// Render a one-screen snapshot of the dreaming layer — Today / Week /
+    /// Sources / GCC-fitness in a 2×2 grid. Static; re-run to refresh. Reads
+    /// the daily digest + audit artifacts (no LLM work of its own).
+    Board,
+
     /// Run the L3 weekly audit — coordinator + multi-lens proposals +
     /// interactive approval + apply-time render. Reads last N days of
     /// daily digests + per-domain TLDRs + rejection memory; produces
