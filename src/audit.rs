@@ -65,12 +65,16 @@ struct Rejection {
 
 pub async fn handle(action: AuditAction, config: &Config) -> Result<()> {
     match action {
-        AuditAction::Run { dry_run, week_days } => run(config, dry_run, week_days).await,
+        AuditAction::Run {
+            dry_run,
+            week_days,
+            non_interactive,
+        } => run(config, dry_run, week_days, non_interactive).await,
         AuditAction::Status => status(),
     }
 }
 
-async fn run(config: &Config, dry_run: bool, week_days: u32) -> Result<()> {
+async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bool) -> Result<()> {
     let client = ClaudeClient::for_config(config)?;
     let inputs = gather_inputs(week_days as i64)?;
 
@@ -116,6 +120,21 @@ async fn run(config: &Config, dry_run: bool, week_days: u32) -> Result<()> {
     if filtered.is_empty() {
         println!("\n  (no proposals to review this week)");
         write_audit_log(&inputs.audit_date, &filtered, &[], &[])?;
+        return Ok(());
+    }
+
+    // Non-interactive (the weekly cron): stage proposals to the audit log and
+    // exit without prompting or applying. The user reviews the log, then runs
+    // `i-dream audit run` interactively to approve/apply.
+    if non_interactive {
+        write_audit_log(&inputs.audit_date, &filtered, &[], &[])?;
+        let log = audit_dir()?.join(format!("{}.md", inputs.audit_date));
+        println!(
+            "\n  {} proposal(s) staged (non-interactive); nothing applied.",
+            filtered.len()
+        );
+        println!("  Review: {}", log.display());
+        println!("  Apply:  i-dream audit run   (interactive)");
         return Ok(());
     }
 

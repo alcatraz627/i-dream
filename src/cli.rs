@@ -368,6 +368,11 @@ pub enum AuditAction {
         /// Days of daily-digest history to read (default 7).
         #[arg(long, default_value_t = 7)]
         week_days: u32,
+        /// Generate proposals and stage them to the audit log without
+        /// prompting, then exit. For the weekly cron — you review the log and
+        /// run `i-dream audit run` interactively to approve/apply.
+        #[arg(long)]
+        non_interactive: bool,
     },
     /// List past audit log files + rejection count.
     Status,
