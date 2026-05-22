@@ -1,6 +1,6 @@
 # i-dream — roadmap & open todos
 
-> **Updated:** 2026-05-22
+> **Updated:** 2026-05-23
 > **Status convention:** each item carries an explicit status block.
 > `spec-pending` = needs design conversation with the user before any
 > implementation. `spec-complete` = design doc exists; implementation can
@@ -31,25 +31,30 @@ or owned by another system).
 
 ---
 
-## Current state (2026-05-22)
+## Current state (2026-05-23)
 
-**Done & shipped:** all 6 roadmap items. The dreaming layer ingests atone,
-affirm, memory, sessions, pinned (12 registered domains), runs grounded
-per-domain + cross-domain dream passes, surfaces via daily digest / SessionStart
-/ widget, and now exposes a formal **ingestion contract** (`i-dream contract`)
-so external systems integrate without code changes.
+**Done & shipped:** all 6 roadmap items + the V2 batch. The dreaming layer
+ingests atone, affirm, memory, sessions, pinned, **claude-audit** (now 12+
+registered domains), runs grounded per-domain + cross-domain dream passes,
+surfaces via daily digest / SessionStart / widget / **`i-dream board`**, exposes
+a formal **ingestion contract** (`i-dream contract`), and self-sustains via
+**scheduled crons** (dream-pass 02:45 → digest 03:00 → weekly audit Sun 02:30).
 
-**What's left — none of it blocking, none of it on the critical path:**
+**V2 shipped 2026-05-23:** scheduled dream-pass cron · weekly-audit cron
+(`audit run --non-interactive` stages proposals) · `i-dream thread
+{add,list,resolve,reopen}` (B Stage 7) · `i-dream board` static 2×2 dashboard
+(B Stage 4 half). **claude-audit went live** — its agent built the hook-feedback
+system + activated it; validated: grounded insights + the first live
+cross-domain severity-weighted join (hook-friction ↔ atone mistake slugs).
+
+**What's left — all optional, none on the critical path:**
 
 | Item | Owner | Notes |
 |------|-------|-------|
-| claude-audit go-live | claude-audit's agent | System designed, not built. Manifest+prompt staged at `~/.claude/i-dream/integration-requests/claude-audit-staged/`. i-dream validates with a dream-pass once real events flow. |
-| `i-dream board` TUI (B Stage 4 half) | i-dream | V2 — 4-pane terminal dashboard. Widget Today panel already ships. |
-| `i-dream thread {list,resolve,reopen}` (B Stage 7) | i-dream | V2 — open-thread lifecycle. Daily-digest plist already ships. |
-| Weekly-audit cron + literal multi-Agent audit dispatch | i-dream | V2 — audit runs today as a single richer prompt; cron not scheduled. |
+| Literal multi-Agent audit dispatch | i-dream | V2 — audit runs today as one richer prompt structured as 7 voices; literal fan-out is the refinement. |
 | Union top-N severity weighting | i-dream | Optional — high-severity TLDR lines can be crowded out of the digest top-5 by equal-weight domains. |
-| Cross-domain severity weighting — live exercise | i-dream | Unit-tested; first real run awaits ≥2 domains with delta in one pass. |
-| Operational | user | `i-dream cron install`; schedule weekly dream-pass + extract scripts. |
+| Fully-interactive `board` TUI | i-dream | Optional — current board is a static snapshot; ratatui scroll/nav is the upgrade (deferred: needs interactive testing). |
+| claude-audit `heeded` enrichment | claude-audit | Its extractor isn't populating the telemetry join yet (`heeded: null`), so the fire-but-ignored signal is dormant. |
 
 ---
 
@@ -435,4 +440,5 @@ After every status transition, also update:
 | 2026-05-17 | C spec-complete → BUILD doc at `docs/18-pinned-insights-build.md` (10th domain `pinned`, skill + CLI, auto-decay 2 cycles, weight 1.5). Roadmap item D added: memory + session-log dream-domains (~4h, fixes cross-domain input gap). CHANGELOG entry for v0.4.2. Cargo bumped 0.4.1 → 0.4.2. Confirmed dials for unbuilt B Stage 5: aggressive (confidence floor 0.5, max 6 proposals per sub-agent). Confirmed B Stage 6 UI: terminal prompt loop. |
 | ~2026-05-19/21 | v0.4.1 line: D8/D11 widget polish (auto-promoted intentions in HUD), M17 daemon-side auto-snapshot, clippy/fmt sweep, daemon test coverage. See CHANGELOG. |
 | 2026-05-21 | **Grounded external dream prompts.** Found the external-domain dream prompt only sent event id+ts — the LLM was asked to find patterns in content it never received (insights plausible but ungrounded). Added manifest `prompt_fields` (atone exposes slug/severity/issue/cause/fix) + per-field truncation. Verified live: a 4-event atone delta produced insights citing real event ids, replacing synthetic-evidence output. Also: severity→confidence calibration (prompt-side weighting + cross-domain severity threading); dropped a deterministic per-domain confidence floor as inert (no consumer reads it). TLDR de-dup investigated → already single-sourced, no change. Pushed. |
+| 2026-05-23 | **V2 batch** (4 features, all reviewed + fixed): scheduled dream-pass cron + weekly-audit cron (cron.rs generalized to a JOBS registry; `audit run --non-interactive` stages proposals); `i-dream thread {add,list,resolve,reopen}` (B Stage 7, digest "Open threads" now live); `i-dream board` static 2×2 dashboard (B Stage 4 half). **claude-audit went live** — its agent built + activated the hook-feedback system since the 05-22 staging; the board surfaced it, validation passed (grounded insights + first live cross-domain severity-weighted join: hook slugs ↔ atone mistake slugs). 350 tests. |
 | 2026-05-22 | **Item #6: ingestion contract.** `docs/20-ingestion-contract.md` + `i-dream contract [--install]` (embedded via include_str!, single source → `~/.claude/i-dream/CONTRACT.md`). Generalized severity ranking via manifest `severity_order` so domains own their scale (atone S1/S2/S3 default unchanged) — surfaced by dogfooding the contract. **First cross-system handoff:** claude-audit (hook-usage feedback) filled the integration request; key finding = its data isn't built yet, so staged-not-live per contract §8. Manifest+prompt+ACTIVATION staged. Two focused skeptical-reviews, all findings fixed (incl. a cross-domain prompt legend that stayed atone-specific after the rank generalization). 340 tests. Pushed. |
