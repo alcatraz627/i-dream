@@ -128,13 +128,16 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
     // `i-dream audit run` interactively to approve/apply.
     if non_interactive {
         write_audit_log(&inputs.audit_date, &filtered, &[], &[])?;
+        // Flag that proposals await review so `i-dream review --if-pending`
+        // (the Monday LaunchAgent) surfaces them; cleared when review opens.
+        crate::review::mark_pending(&inputs.audit_date.to_string())?;
         let log = audit_dir()?.join(format!("{}.md", inputs.audit_date));
         println!(
             "\n  {} proposal(s) staged (non-interactive); nothing applied.",
             filtered.len()
         );
         println!("  Review: {}", log.display());
-        println!("  Apply:  i-dream audit run   (interactive)");
+        println!("  Opens automatically Monday 09:00, or now:  i-dream review");
         return Ok(());
     }
 

@@ -50,6 +50,16 @@ const JOBS: &[CronJob] = &[
         },
         desc: "weekly audit — stages proposals to review (Sun 02:30)",
     },
+    CronJob {
+        label: "com.alcatraz.i-dream-review",
+        args: &["review", "--if-pending"],
+        schedule: Schedule::Weekly {
+            weekday: 1,
+            hour: 9,
+            minute: 0,
+        },
+        desc: "weekly review — opens staged proposals if pending (Mon 09:00)",
+    },
 ];
 
 pub fn handle(action: CronAction) -> Result<()> {

@@ -205,6 +205,19 @@ pub enum Command {
     /// audit it" half of closing the dream→behavior loop.
     Reflect,
 
+    /// Open the weekly review — a Ghostty + claude session seeded with the
+    /// staged audit proposals for you to approve/apply. Auto-opens Monday 09:00
+    /// when proposals are pending (via the cron review job); run it by hand any
+    /// time. `--add-calendar` adds a recurring Calendar.app event.
+    Review {
+        /// Only open if the audit staged proposals (used by the LaunchAgent).
+        #[arg(long)]
+        if_pending: bool,
+        /// Add a recurring weekly Calendar.app event instead of opening.
+        #[arg(long)]
+        add_calendar: bool,
+    },
+
     /// Run the L3 weekly audit — coordinator + multi-lens proposals +
     /// interactive approval + apply-time render. Reads last N days of
     /// daily digests + per-domain TLDRs + rejection memory; produces

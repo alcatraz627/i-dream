@@ -17,6 +17,7 @@ mod logging;
 mod modules;
 mod pin;
 mod reflect;
+mod review;
 mod service;
 mod store;
 mod thread;
@@ -186,6 +187,13 @@ async fn main() -> Result<()> {
 
         Command::Reflect => {
             reflect::render()?;
+        }
+
+        Command::Review {
+            if_pending,
+            add_calendar,
+        } => {
+            review::handle(if_pending, add_calendar)?;
         }
 
         Command::Audit { action } => {
