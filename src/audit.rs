@@ -276,6 +276,10 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
 
     write_audit_log(&inputs.audit_date, &filtered, &approved, &applied)?;
 
+    // An interactive run completing IS the review — clear the pending flag so
+    // the Monday LaunchAgent stops re-surfacing these (set by --non-interactive).
+    let _ = crate::review::clear_pending();
+
     println!("\n─── audit complete ──────────────────────────────────────────────");
     println!("  Surfaced:  {}", filtered.len());
     println!("  Approved:  {}", approved.len());

@@ -9,7 +9,7 @@
 //! hand any time. `--add-calendar` drops a recurring event in Calendar.app.
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, Duration, Local, Timelike};
+use chrono::{Datelike, Duration, Local, Timelike, Utc};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -34,6 +34,16 @@ pub fn mark_pending(audit_date: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear the pending flag — called when an interactive `audit run` completes,
+/// i.e. the staged proposals were actually reviewed, not merely shown.
+pub fn clear_pending() -> Result<()> {
+    let p = flag_path()?;
+    if p.exists() {
+        std::fs::remove_file(&p)?;
+    }
+    Ok(())
+}
+
 pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
     if add_calendar {
         return install_calendar_event();
@@ -48,33 +58,41 @@ pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Absolute path only — a tilde inside the single-quoted `cd` below would
+    // NOT expand and would silently fail the launch (leaving an empty window).
+    // Fall back to $HOME if the repo isn't where we expect, so claude still
+    // opens somewhere valid.
     let repo = home()?.join("Code/Claude/i-dream");
-    let repo = if repo.exists() {
-        repo.display().to_string()
-    } else {
-        "~/Code/Claude/i-dream".to_string()
-    };
+    let cd_target = if repo.exists() { repo } else { home()? };
+    let cd_target = cd_target.display().to_string();
+
+    let staged = std::fs::read_to_string(&flag)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     // Quote-safe: single-quoted, and neither value contains a single quote.
+    // Backticks stay literal inside single quotes (no command substitution).
     let prompt = "Run the i-dream weekly review. Read the most recent staged audit \
                   under ~/.claude/i-dream/audits/ and the output of `i-dream reflect`, \
                   then walk me through each proposal (including any hook graduate / \
                   de-escalate suggestions) and apply the ones I approve via \
                   `i-dream audit run`. Start by summarizing what is pending.";
-    let inner = format!("cd '{repo}' && claude '{prompt}'");
+    let inner = format!("cd '{cd_target}' && claude '{prompt}'");
 
     Command::new(GHOSTTY)
         .args(["-e", "bash", "-lc", &inner])
         .spawn()
         .with_context(|| format!("Cannot launch Ghostty ({GHOSTTY})"))?;
 
-    // Clear the flag — surfacing it counts as acknowledged, so the Monday
-    // LaunchAgent won't reopen it after you've started a review.
-    if pending {
-        let _ = std::fs::remove_file(&flag);
+    // Intentionally do NOT clear the flag here: opening a window is not the same
+    // as reviewing. The flag clears when an interactive `audit run` completes
+    // (the real review), so the Monday LaunchAgent keeps re-surfacing pending
+    // proposals until they're actually handled — and a failed launch never
+    // silently consumes them.
+    match staged {
+        Some(d) => println!("✓ opened the weekly review (proposals staged {}).", d.trim()),
+        None => println!("✓ opened the weekly review in a new Ghostty window."),
     }
-
-    println!("✓ opened the weekly review in a new Ghostty window.");
     println!("  Manual re-open any time:  i-dream review");
     Ok(())
 }
@@ -94,7 +112,9 @@ fn install_calendar_event() -> Result<()> {
         .and_then(|d| d.with_second(0))
         .context("could not build start time")?;
     let dt = start.format("%Y%m%dT%H%M%S").to_string();
-    let stamp = Local::now().format("%Y%m%dT%H%M%S").to_string();
+    // DTSTAMP is the creation instant in UTC (RFC 5545); DTSTART stays floating
+    // local so the 09:00 holds wherever the laptop is.
+    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
 
     let ics = format!(
         "BEGIN:VCALENDAR\r\n\
