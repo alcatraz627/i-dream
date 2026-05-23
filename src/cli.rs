@@ -199,6 +199,12 @@ pub enum Command {
     /// the daily digest + audit artifacts (no LLM work of its own).
     Board,
 
+    /// Audit whether i-dream's guidance is landing: for each recurring mistake
+    /// pattern it surfaces every session, show the recurrence trend from the
+    /// atone log (declining / persisting / worsening / dormant). The "I can
+    /// audit it" half of closing the dream→behavior loop.
+    Reflect,
+
     /// Run the L3 weekly audit — coordinator + multi-lens proposals +
     /// interactive approval + apply-time render. Reads last N days of
     /// daily digests + per-domain TLDRs + rejection memory; produces

@@ -16,6 +16,7 @@ mod idream_runtime;
 mod logging;
 mod modules;
 mod pin;
+mod reflect;
 mod service;
 mod store;
 mod thread;
@@ -181,6 +182,10 @@ async fn main() -> Result<()> {
 
         Command::Board => {
             board::render()?;
+        }
+
+        Command::Reflect => {
+            reflect::render()?;
         }
 
         Command::Audit { action } => {
