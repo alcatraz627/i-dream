@@ -12,7 +12,7 @@
 //! needs a stronger intervention (a hook, a rule) than a context reminder.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -110,9 +110,11 @@ pub fn render() -> Result<()> {
             .then(b.1.total.cmp(&a.1.total))
     });
 
+    // `now` (UTC) drives the trend math against UTC event timestamps; the
+    // header shows the local calendar date the user actually sees.
     println!(
         "  i-dream reflect — is the guidance landing?  ({})",
-        now.format("%Y-%m-%d")
+        Local::now().format("%Y-%m-%d")
     );
     println!();
     if stats.is_empty() {
