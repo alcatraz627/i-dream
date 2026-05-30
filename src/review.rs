@@ -13,7 +13,7 @@ use chrono::{Datelike, Duration, Local, Timelike, Utc};
 use std::path::PathBuf;
 use std::process::Command;
 
-const GHOSTTY: &str = "/Applications/Ghostty.app/Contents/MacOS/ghostty";
+const GHOSTTY_APP: &str = "/Applications/Ghostty.app";
 
 fn home() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var("HOME").context("HOME unset")?))
@@ -79,10 +79,21 @@ pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
                   `i-dream audit run`. Start by summarizing what is pending.";
     let inner = format!("cd '{cd_target}' && claude '{prompt}'");
 
-    Command::new(GHOSTTY)
-        .args(["-e", "bash", "-lc", &inner])
+    // Launch a *fresh* Ghostty instance, not a window off the running one.
+    //
+    // `ghostty -e <cmd>` (binary-direct) hands the command to the already-running
+    // single instance, which then opens a window inheriting that instance's tab
+    // group — so the review window comes up with the prior window's (empty) tabs
+    // plus one tab running the review. This is single-instance tab inheritance —
+    // NOT macOS saved-state restoration (none exists) and NOT
+    // AppleWindowTabbingMode=always. `open -n` forces a new application process,
+    // which starts with a clean single-tab window and ignores the running
+    // instance's tab group. argv is passed element-by-element (no shell), so the
+    // single-quoted `inner` needs no extra escaping here.
+    Command::new("open")
+        .args(["-n", "-a", GHOSTTY_APP, "--args", "-e", "bash", "-lc", &inner])
         .spawn()
-        .with_context(|| format!("Cannot launch Ghostty ({GHOSTTY})"))?;
+        .with_context(|| format!("Cannot launch Ghostty ({GHOSTTY_APP})"))?;
 
     // Intentionally do NOT clear the flag here: opening a window is not the same
     // as reviewing. The flag clears when an interactive `audit run` completes
