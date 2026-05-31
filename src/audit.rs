@@ -30,6 +30,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 const AUDIT_BUDGET_TOKENS: u32 = 8000;
+/// How many times to re-sample the proposal LLM call when the response fails
+/// to parse as JSON. Malformed output is stochastic at temp 0.4, so a retry
+/// usually clears it.
+const AUDIT_PARSE_ATTEMPTS: u32 = 3;
 const RENDER_BUDGET_TOKENS: u32 = 3000;
 const REJECTION_TTL_DAYS: i64 = 28;
 const PROPOSAL_CONFIDENCE_FLOOR: f64 = 0.5;
@@ -38,9 +42,16 @@ const MAX_PROPOSALS_TOTAL: usize = 30;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Proposal {
+    // Descriptive fields: tolerate an LLM-emitted null by coercing to "".
+    // A blank lens name or rationale still leaves a usable proposal.
+    #[serde(default, deserialize_with = "null_to_empty")]
     sub_agent: String,
+    // Load-bearing fields: a null here makes the proposal unfingerprintable
+    // and unappliable, so we leave them strict — a null drops just this one
+    // proposal during the resilient parse, rather than producing a junk edit.
     target_file: String,
     intent: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
     rationale: String,
     #[serde(default)]
     draft_diff: Option<String>,
@@ -52,6 +63,16 @@ struct Proposal {
 
 fn default_confidence() -> f64 {
     0.7
+}
+
+/// Treat an explicit JSON `null` (or a missing key) as an empty string.
+/// The audit model occasionally emits `null` for a descriptive field; we'd
+/// rather keep the proposal with that field blank than reject it.
+fn null_to_empty<'de, D>(de: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(de)?.unwrap_or_default())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -529,15 +550,72 @@ Parseable JSON array only. No markdown fences. No preamble."#,
         },
     );
 
-    let response = client
-        .analyze(system, &prompt, model, AUDIT_BUDGET_TOKENS, 0.4)
-        .await
-        .context("audit LLM call failed")?;
+    // The model occasionally emits syntactically broken JSON (an unescaped
+    // quote inside a draft, a truncated tail). That's stochastic at temp 0.4,
+    // so a fresh sample usually parses. Retry a few times; on every failure
+    // dump the raw response so a persistent break is diagnosable rather than
+    // silent.
+    let mut last_err = None;
+    for attempt in 1..=AUDIT_PARSE_ATTEMPTS {
+        let response = client
+            .analyze(system, &prompt, model, AUDIT_BUDGET_TOKENS, 0.4)
+            .await
+            .context("audit LLM call failed")?;
 
-    let json_str =
-        parse_json_codeblock(&response.content).context("audit response had no parseable JSON")?;
-    let proposals: Vec<Proposal> = serde_json::from_str(&json_str)
-        .context("audit response failed to parse as Vec<Proposal>")?;
+        let parsed = parse_json_codeblock(&response.content)
+            .context("audit response had no parseable JSON")
+            .and_then(|json_str| parse_proposals(&json_str));
+
+        match parsed {
+            Ok(proposals) => return Ok(proposals),
+            Err(e) => {
+                dump_raw_response(&response.content, attempt);
+                eprintln!(
+                    "  ⚠ proposal parse failed (attempt {attempt}/{AUDIT_PARSE_ATTEMPTS}): {e}"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("audit produced no parseable proposals")))
+}
+
+/// Write a failed audit response to disk so a persistent parse break can be
+/// inspected. Best-effort — a dump failure must not mask the real parse error.
+fn dump_raw_response(content: &str, attempt: u32) {
+    if let Ok(dir) = audit_dir() {
+        let path = dir.join(format!("_failed-response-attempt{attempt}.txt"));
+        let _ = fs::write(&path, content);
+        eprintln!("    raw response written to {}", path.display());
+    }
+}
+
+/// Deserialize the LLM's proposal array resiliently.
+///
+/// A single malformed proposal — most often a `null` the model put in a
+/// load-bearing field — must not discard the whole week's audit. We parse the
+/// array element by element and skip the ones that don't deserialize, so a bad
+/// proposal costs one proposal rather than the entire batch.
+fn parse_proposals(json_str: &str) -> Result<Vec<Proposal>> {
+    let raw: Vec<serde_json::Value> = serde_json::from_str(json_str)
+        .context("audit response was not a JSON array of proposals")?;
+    let total = raw.len();
+    let proposals: Vec<Proposal> = raw
+        .into_iter()
+        .filter_map(|v| match serde_json::from_value::<Proposal>(v) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("  ⚠ skipping malformed proposal: {e}");
+                None
+            }
+        })
+        .collect();
+    if proposals.len() < total {
+        eprintln!(
+            "  ⚠ {} of {total} proposals were malformed and skipped",
+            total - proposals.len()
+        );
+    }
     Ok(proposals)
 }
 
@@ -745,6 +823,37 @@ fn audit_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_proposals_coerces_null_descriptive_fields() {
+        // sub_agent + rationale are null — descriptive, so the proposal is kept
+        // with those fields blank rather than dropped.
+        let json = r#"[
+            {"sub_agent": null, "target_file": "~/.claude/rules/x.md",
+             "intent": "do a thing", "rationale": null, "confidence": 0.8}
+        ]"#;
+        let got = parse_proposals(json).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].sub_agent, "");
+        assert_eq!(got[0].rationale, "");
+        assert_eq!(got[0].target_file, "~/.claude/rules/x.md");
+    }
+
+    #[test]
+    fn parse_proposals_drops_only_the_malformed_one() {
+        // The middle proposal has a null in a load-bearing field (target_file);
+        // it must be dropped while the two valid proposals survive — this is the
+        // exact failure that crashed the 2026-05-31 audit cron.
+        let json = r#"[
+            {"sub_agent": "a", "target_file": "f1", "intent": "i1", "rationale": "r1", "confidence": 0.7},
+            {"sub_agent": "b", "target_file": null, "intent": "i2", "rationale": "r2", "confidence": 0.7},
+            {"sub_agent": "c", "target_file": "f3", "intent": "i3", "rationale": "r3", "confidence": 0.7}
+        ]"#;
+        let got = parse_proposals(json).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].target_file, "f1");
+        assert_eq!(got[1].target_file, "f3");
+    }
 
     #[test]
     fn fingerprint_normalizes_whitespace_and_case() {
