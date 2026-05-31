@@ -1917,14 +1917,6 @@ private func fmtLoadGauge(_ score: Double) -> String {
     return String(repeating: "●", count: filled) + String(repeating: "○", count: 5 - filled)
 }
 
-private func recentPatterns(limit: Int = 3) -> [Pattern] {
-    let path = subDir + "/dreams/patterns.json"
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-          let arr  = try? JSONDecoder().decode([Pattern].self, from: data)
-    else { return [] }
-    return Array(arr.suffix(limit))
-}
-
 private func allPatterns() -> [Pattern] {
     let path = subDir + "/dreams/patterns.json"
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -5858,12 +5850,12 @@ private final class DataStore {
             s.running        = isDaemonRunning()
             s.state          = readState()
             s.board          = readBoard()
-            s.patterns       = recentPatterns(limit: 5)
             s.journal        = recentJournal(limit: 20)
             s.storeFiles     = readStoreFiles()
             s.digest         = readInsightDigest()
             s.frequencyHours = readDreamFrequency()
-            let all          = allPatterns()
+            let all          = allPatterns()           // read+decode patterns.json once
+            s.patterns       = Array(all.suffix(5))    // recent 5 (was a redundant 2nd read)
             s.patternCount   = all.count
             s.highConfCount  = all.filter { $0.confidence >= 0.8 }.count
             s.domains        = loadRegisteredDomains()
