@@ -215,30 +215,34 @@ pub fn render_json() -> Result<()> {
     Ok(())
 }
 
-/// The trend as a bare word (no glyph) for JSON consumers. Mirrors
-/// [`trend_label`] so the two never diverge.
-fn trend_word(s: &SlugStat, now: DateTime<Utc>) -> &'static str {
-    match trend_label(s.last7, s.prior7, now - s.last) {
-        "✓ dormant" => "dormant",
-        "↑ worsening" => "worsening",
-        "→ persisting" => "persisting",
-        _ => "landing",
+/// The single source of truth for the trend, as a bare word. Both the glyphed
+/// table label and the JSON derive from this, so adding a variant updates both
+/// at once — they can't drift apart.
+fn trend_kind(last7: usize, prior7: usize, since_last: Duration) -> &'static str {
+    if since_last > Duration::days(14) {
+        "dormant"
+    } else if last7 == 0 || last7 < prior7 {
+        "landing"
+    } else if last7 > prior7 {
+        "worsening"
+    } else {
+        "persisting"
     }
+}
+
+/// Bare trend word for JSON consumers (the widget).
+fn trend_word(s: &SlugStat, now: DateTime<Utc>) -> &'static str {
+    trend_kind(s.last7, s.prior7, now - s.last)
 }
 
 /// Trend from recurrence: dormant if nothing in 14 days; otherwise compare the
 /// last 7 days against the prior 7.
 fn trend_label(last7: usize, prior7: usize, since_last: Duration) -> &'static str {
-    if since_last > Duration::days(14) {
-        "✓ dormant"
-    } else if last7 == 0 {
-        "↓ landing"
-    } else if last7 < prior7 {
-        "↓ landing"
-    } else if last7 > prior7 {
-        "↑ worsening"
-    } else {
-        "→ persisting"
+    match trend_kind(last7, prior7, since_last) {
+        "dormant" => "✓ dormant",
+        "worsening" => "↑ worsening",
+        "persisting" => "→ persisting",
+        _ => "↓ landing",
     }
 }
 

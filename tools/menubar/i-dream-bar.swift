@@ -2009,12 +2009,6 @@ private func writeDreamFrequency(_ hours: Double) {
 
 /// Return the Date when the next dream cycle will fire (activity + threshold).
 /// Returns nil if no activity file exists.
-private func nextDreamDate(thresholdHours: Double) -> Date? {
-    let attrs = try? FileManager.default.attributesOfItem(atPath: activityFile)
-    guard let mod = attrs?[.modificationDate] as? Date else { return nil }
-    return mod.addingTimeInterval(thresholdHours * 3600)
-}
-
 /// Format a countdown to a future date: "in 2h 15m", "in 45m", "now".
 private func fmtCountdown(_ target: Date) -> String {
     let secs = target.timeIntervalSinceNow
@@ -5746,9 +5740,11 @@ private func loadRegisteredDomains() -> [DomainEntry]? {
     } catch {
         return nil
     }
+    // Drain stdout before waiting — avoids a pipe-buffer deadlock if output ever
+    // exceeds ~64KB (see readReflect).
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
     task.waitUntilExit()
     guard task.terminationStatus == 0 else { return nil }
-    let data = stdout.fileHandleForReading.readDataToEndOfFile()
     return try? JSONDecoder().decode([DomainEntry].self, from: data)
 }
 
@@ -5788,9 +5784,12 @@ private func readReflect() -> ReflectData? {
     task.standardOutput = stdout
     task.standardError  = stderr
     do { try task.run() } catch { return nil }
+    // Drain stdout BEFORE waiting: if output ever exceeds the ~64KB pipe buffer
+    // the child blocks on write while we'd block on exit — a deadlock that would
+    // wedge the DataStore reload. readDataToEndOfFile returns at child EOF.
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
     task.waitUntilExit()
     guard task.terminationStatus == 0 else { return nil }
-    let data = stdout.fileHandleForReading.readDataToEndOfFile()
     return try? JSONDecoder().decode(ReflectData.self, from: data)
 }
 
@@ -5821,6 +5820,10 @@ private struct DataSnapshot {
     var frequencyHours: Double?
     var patternCount    = 0
     var highConfCount   = 0
+    var signals         = 0              // user-signal count (was a sync read on menu-open)
+    var todayCounts:    TodayDigestCounts?  // today's digest (was a sync read on menu-open)
+    var lastActivity:   Date?            // activity-file mtime (drives "Last active" + next-dream)
+    var digestSentiment = "neutral"      // colours the digest line (was a sync read on menu-open)
     var domains:        [DomainEntry]?   // was the blocking call inside the menu path
     var reflect:        ReflectData?     // outcome: is the guidance landing?
     var reviewPending:  String?          // non-nil → a weekly review is staged
@@ -5836,9 +5839,14 @@ private final class DataStore {
     private var loading = false
 
     /// Gather everything off-main, then publish the snapshot and run `then` on
-    /// the main thread. A reload already in flight wins — concurrent calls
-    /// (30s timer overlapping a manual refresh) coalesce rather than pile up.
-    /// Call from the main thread.
+    /// the main thread. MUST be called from the main thread — `loading` is
+    /// touched only here, so single-threaded access keeps it race-free.
+    ///
+    /// If a reload is already in flight this coalesces rather than piling up: no
+    /// second load starts, and `then` runs immediately against the *current*
+    /// snapshot (not after the in-flight load). Callers keeping the snapshot warm
+    /// pass no `then`; refresh's `then` re-reads cached fields and tolerates the
+    /// rare ≤30s-stale value the next tick corrects.
     func reload(then: (() -> Void)? = nil) {
         if loading {
             then?()
@@ -5858,6 +5866,10 @@ private final class DataStore {
             s.patterns       = Array(all.suffix(5))    // recent 5 (was a redundant 2nd read)
             s.patternCount   = all.count
             s.highConfCount  = all.filter { $0.confidence >= 0.8 }.count
+            s.signals        = signalsCount()
+            s.todayCounts    = loadTodayDigestCounts()
+            s.lastActivity   = lastActivityDate()
+            s.digestSentiment = readDigestSentiment()
             s.domains        = loadRegisteredDomains()
             s.reflect        = readReflect()
             s.reviewPending  = readReviewPending()
@@ -6310,8 +6322,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             addRow(menu, "Tokens used", fmtNum(s.totalTokensUsed), valueColor: .systemBlue)
             addRow(menu, "Last run",    fmtDateWithAge(s.lastConsolidation))
-            // last_activity in state.json is always null — read file mtime instead
-            let lastAct = lastActivityDate()
+            // last_activity in state.json is always null — use the activity-file
+            // mtime from the snapshot instead.
+            let lastAct = DataStore.shared.snapshot.lastActivity
             let lastActStr: String = lastAct.map { d in
                 let d2 = Date().timeIntervalSince(d)
                 let ago: String
@@ -6324,7 +6337,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return "\(fmtDateDirect(d))  (\(ago))"
             } ?? "—"
             addRow(menu, "Last active", lastActStr)
-            let sigs = signalsCount()
+            let sigs = DataStore.shared.snapshot.signals
             if sigs > 0 {
                 addRow(menu, "User signals", "\(sigs)", valueColor: .systemPurple)
             }
@@ -6344,7 +6357,9 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             freqLabel = String(format: "%.1fh", effectiveHz)
         }
-        let nextDream = nextDreamDate(thresholdHours: effectiveHz)
+        // Next dream = last activity + the frequency threshold (same activity-file
+        // mtime the snapshot already holds — no extra stat on the menu path).
+        let nextDream = DataStore.shared.snapshot.lastActivity?.addingTimeInterval(effectiveHz * 3600)
         let nextStr   = nextDream.map { fmtCountdown($0) } ?? "—"
         addRow(menu, "  Frequency", freqLabel, valueColor: .systemBlue)
         addRow(menu, "  Next dream", nextStr)
@@ -6414,11 +6429,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.setSubmenu(domainsMenu, for: domainsParent)
 
         // ─ Today ───────────────────────────
-        // Reads ~/.claude/i-dream/daily/latest.md, parses the 7 fixed sections,
-        // shows item counts inline + an "Open full digest" action. Stateless;
-        // re-read on every menu open. The digest file is written by
-        // `i-dream digest` (manual) or the daily cron.
-        let todayCounts = loadTodayDigestCounts()
+        // Today's digest counts (~/.claude/i-dream/daily/latest.md, 7 fixed
+        // sections) + an "Open full digest" action. Read off-main by DataStore;
+        // the file is written by `i-dream digest` (manual) or the daily cron.
+        let todayCounts = DataStore.shared.snapshot.todayCounts
         let todayMenu = NSMenu()
         if let counts = todayCounts {
             for (section, count) in counts.itemized {
@@ -6483,7 +6497,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Insight digest — "Recent Dreams Inference": prose synthesis of last 5 dream insights.
             // Sentiment is read from dreams/digest-meta.json { "sentiment": "positive"|"neutral"|"negative" }
             if let digest = cachedDigest {
-                let sentiment = readDigestSentiment()
+                let sentiment = DataStore.shared.snapshot.digestSentiment
                 let sentimentColor: NSColor = sentiment == "positive" ? .systemGreen
                                            : sentiment == "negative" ? .systemOrange
                                            : .labelColor
