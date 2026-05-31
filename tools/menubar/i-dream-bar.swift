@@ -6311,13 +6311,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // Cognitive load gauge — inline with status
-        if !cachedJournal.isEmpty {
-            let load      = cognitiveLoadScore(journal: cachedJournal)
-            let gauge     = fmtLoadGauge(load)
-            let loadColor: NSColor = load > 0.75 ? .systemOrange : load > 0.4 ? .systemBlue : .secondaryLabelColor
-            addRow(menu, "  Cognitive load", gauge, valueColor: loadColor)
-        }
         // ─ Daemon controls ────────────────────────────────────────────────────
         if running {
             let s = add(menu, "Stop Daemon", #selector(stopDaemon), key: "s")
@@ -6353,10 +6346,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let usageColor: NSColor = usage.overWarnThreshold ? .systemOrange : .systemGreen
                 addRow(menu, "Usage", usageStr, valueColor: usageColor)
             }
-            // Sparkline of token usage over last 20 cycles
-            let spark = fmtSparkline(cachedJournal.map { $0.tokensUsed })
-            let tokLabel = spark.isEmpty ? fmtNum(s.totalTokensUsed) : "\(fmtNum(s.totalTokensUsed))  \(spark)"
-            addRow(menu, "Tokens used", tokLabel, valueColor: .systemBlue)
+            addRow(menu, "Tokens used", fmtNum(s.totalTokensUsed), valueColor: .systemBlue)
             addRow(menu, "Last run",    fmtDateWithAge(s.lastConsolidation))
             // last_activity in state.json is always null — read file mtime instead
             let lastAct = lastActivityDate()
