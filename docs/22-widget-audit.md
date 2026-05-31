@@ -1,8 +1,21 @@
 # Widget audit + rebuild plan (macOS menu-bar / dashboard)
 
-> **Status:** audited 2026-05-25, **plan ready, not started.** Pick-up doc — any
-> Claude (or this session post-compaction) can resume from here.
+> **Status:** audited 2026-05-25, **re-verified 2026-05-31 (new machine) — still
+> 0% done, all claims hold.** Plan ready, not started. Pick-up doc — any Claude
+> (or this session post-compaction) can resume from here.
 > **Raw reports** (if present locally, not committed): `.claude/output/20260525-widget-audit/{ux,fault-tolerance,architecture-perf,SYNTHESIS}.md`.
+>
+> **Re-verification (2026-05-31):** Swift source byte-identical to the audit
+> commit (9,554 lines, clean). Every claim re-checked against current code:
+> reflect/review still 0 functional calls (only comments/help text);
+> `loadRegisteredDomains` blocking `waitUntilExit` at `:5800` called from
+> `populateMenuItems:6283`; vanity gauges present (`cognitiveLoadScore:1947`,
+> `fmtSparkline:1934`, valence `:1007`). Binary-path bug confirmed in detail —
+> the hardcoded `iDream` (`:23`) drives **6 daemon-control sites**
+> (`:8821 :8835 :8852 :8861 :8894 :8910`), none via `resolveIDreamBinary:5709`;
+> latent on this machine only because i-dream sits at `~/.cargo/bin`. NOTE: the
+> empty `board` Sources pane is a separate **Rust `board.rs`** bug, NOT this
+> Swift widget — do not conflate.
 
 ## Why this exists (context for a fresh reader)
 
