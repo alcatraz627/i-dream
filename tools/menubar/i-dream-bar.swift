@@ -6053,22 +6053,28 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         usr1Src.resume()
     }
 
-    // Called by AppKit right before the menu is shown — always up-to-date.
+    // Called by AppKit right before the menu is shown. Paints immediately from
+    // the latest snapshot — NO synchronous disk reads or subprocesses on the
+    // main thread (that synchronous block, plus the blocking domain-list call in
+    // populateMenuItems, was the slow-dropdown + menu-open-freeze cause). The 30s
+    // timer keeps the snapshot fresh; we also kick a background reload here so
+    // the *next* open reflects very recent changes.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        cachedRunning          = isDaemonRunning()
-        cachedState            = readState()
-        cachedBoard            = readBoard()
-        cachedPatterns         = recentPatterns(limit: 5)
-        cachedJournal          = recentJournal(limit: 20)
-        cachedStoreFiles       = readStoreFiles()
-        cachedDigest           = readInsightDigest()
-        cachedFrequencyHours   = readDreamFrequency()
-        let allPats            = allPatterns()
-        cachedPatternCount     = allPats.count
-        cachedHighConfCount    = allPats.filter { $0.confidence >= 0.8 }.count
+        let s = DataStore.shared.snapshot
+        cachedRunning          = s.running
+        cachedState            = s.state
+        cachedBoard            = s.board
+        cachedPatterns         = s.patterns
+        cachedJournal          = s.journal
+        cachedStoreFiles       = s.storeFiles
+        cachedDigest           = s.digest
+        cachedFrequencyHours   = s.frequencyHours
+        cachedPatternCount     = s.patternCount
+        cachedHighConfCount    = s.highConfCount
         updateButton()
         menu.removeAllItems()
         populateMenuItems(menu)
+        DataStore.shared.reload()
     }
 
     @objc func refresh() {
@@ -6397,11 +6403,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.setSubmenu(freqMenu, for: freqParent)
 
         // ─ Dream Domains ──────────────────────────────────────────────────────
-        // First user-visible surface of the docs/14 plugin system (Stage 1).
-        // Lists every registered DreamDomain by shelling out to the Rust
-        // CLI `i-dream domain list --json`. Read-only today; per-domain
-        // cadence-setting actions land with the rest of B Stage 1.
-        let registered = loadRegisteredDomains()
+        // Every registered DreamDomain (the docs/14 plugin system), read from the
+        // snapshot — DataStore ran `i-dream domain list --json` off-main, so this
+        // no longer blocks the menu open. Read-only listing.
+        let registered = DataStore.shared.snapshot.domains
         let domainsMenu = NSMenu()
         if let domains = registered, !domains.isEmpty {
             for d in domains {
