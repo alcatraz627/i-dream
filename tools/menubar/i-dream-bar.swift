@@ -6664,23 +6664,8 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             _ = pinItem
         }
 
-        let replay = add(menu, "Dream Replay…", #selector(showDreamReplay))
-        setIcon(replay, "play.circle.fill")
-        // Disable if no traces exist
-        let traceFiles = (try? FileManager.default.contentsOfDirectory(atPath: tracesDir))?.filter { $0.hasSuffix(".jsonl") } ?? []
-        replay.isEnabled = !traceFiles.isEmpty
-
         let dash = add(menu, "Open Dashboard", #selector(openDashboard), key: "d")
         setIcon(dash, "chart.bar.doc.horizontal.fill")
-
-        let howTo = add(menu, "Show How-To…", #selector(showHowTo))
-        setIcon(howTo, "questionmark.circle.fill")
-
-        let glossary = add(menu, "Terminology Glossary…", #selector(showTerminologyGlossary))
-        setIcon(glossary, "text.book.closed.fill")
-
-        let gh = add(menu, "View on GitHub", #selector(openGitHub))
-        setIcon(gh, "arrow.up.right.square")
 
         let cfg = add(menu, "Edit Config in VS Code", #selector(openConfigInVSCode))
         setIcon(cfg, "gearshape.fill")
@@ -6705,30 +6690,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // ─ Change Icon submenu ────────────────────────────────────────────────
-        let iconMenu = NSMenu()
-        let current  = currentIconSymbol()
-        for choice in iconChoices {
-            let i = NSMenuItem(title: choice.label, action: #selector(changeIcon(_:)),
-                               keyEquivalent: "")
-            i.target            = self
-            i.representedObject = choice.symbol
-            i.state             = (choice.symbol == current) ? .on : .off
-            if let img = NSImage(systemSymbolName: choice.symbol,
-                                 accessibilityDescription: nil) {
-                img.isTemplate = true; i.image = img
-            }
-            iconMenu.addItem(i)
-        }
-        let iconParent = NSMenuItem(title: "Change Icon", action: nil, keyEquivalent: "")
-        setIcon(iconParent, "paintbrush.pointed.fill")
-        menu.addItem(iconParent); menu.setSubmenu(iconMenu, for: iconParent)
-
-        menu.addItem(.separator())
-
-        let r = add(menu, "Refresh", #selector(refresh))
-        setIcon(r, "arrow.clockwise")
-        r.keyEquivalent = "r"
         let q = NSMenuItem(title: "Quit",
                            action: #selector(NSApplication.terminate(_:)),
                            keyEquivalent: "q")
