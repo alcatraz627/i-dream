@@ -203,7 +203,12 @@ pub enum Command {
     /// pattern it surfaces every session, show the recurrence trend from the
     /// atone log (declining / persisting / worsening / dormant). The "I can
     /// audit it" half of closing the dream→behavior loop.
-    Reflect,
+    Reflect {
+        /// Emit machine-readable JSON (summary counts + per-pattern rows)
+        /// instead of the table. Consumed by the menu-bar widget.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Open the weekly review — a Ghostty + claude session seeded with the
     /// staged audit proposals for you to approve/apply. Auto-opens Monday 09:00

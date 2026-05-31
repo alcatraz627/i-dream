@@ -29,10 +29,11 @@ struct SlugStat {
     warned: usize,
 }
 
-pub fn render() -> Result<()> {
-    let home = PathBuf::from(std::env::var("HOME").context("HOME unset")?);
-    let now = Utc::now();
-
+/// Gather recurring (total ≥ 2) mistake patterns, sorted by severity then count,
+/// each joined with how often SessionStart flagged it. Shared by the table and
+/// the `--json` view so the trend logic stays single-sourced. Returns the stats
+/// plus the injection-log path (for the table's empty-log hint).
+fn collect_sorted_stats(home: &PathBuf, now: DateTime<Utc>) -> (Vec<(String, SlugStat)>, PathBuf) {
     let mut by_slug: HashMap<String, SlugStat> = HashMap::new();
     let events = home.join(".claude/atone/events.jsonl");
     if let Ok(content) = fs::read_to_string(&events) {
@@ -102,13 +103,20 @@ pub fn render() -> Result<()> {
     }
 
     // Recurring patterns only — the ones i-dream actually surfaces.
-    let mut stats: Vec<(&String, &SlugStat)> =
-        by_slug.iter().filter(|(_, s)| s.total >= 2).collect();
+    let mut stats: Vec<(String, SlugStat)> =
+        by_slug.into_iter().filter(|(_, s)| s.total >= 2).collect();
     stats.sort_by(|a, b| {
         sev_rank(&b.1.max_sev)
             .cmp(&sev_rank(&a.1.max_sev))
             .then(b.1.total.cmp(&a.1.total))
     });
+    (stats, inj)
+}
+
+pub fn render() -> Result<()> {
+    let home = PathBuf::from(std::env::var("HOME").context("HOME unset")?);
+    let now = Utc::now();
+    let (stats, inj) = collect_sorted_stats(&home, now);
 
     // `now` (UTC) drives the trend math against UTC event timestamps; the
     // header shows the local calendar date the user actually sees.
@@ -160,6 +168,62 @@ pub fn render() -> Result<()> {
     println!("  Persisting/worsening S3 patterns are candidates to graduate from a");
     println!("  context reminder to a hard guard — `i-dream audit run`.");
     Ok(())
+}
+
+/// Machine-readable reflect — consumed by the menu-bar widget so the trend logic
+/// lives only here, never re-derived from the raw logs. Emits aggregate
+/// landing/worsening/persisting/dormant counts plus the per-pattern rows.
+pub fn render_json() -> Result<()> {
+    let home = PathBuf::from(std::env::var("HOME").context("HOME unset")?);
+    let now = Utc::now();
+    let (stats, _inj) = collect_sorted_stats(&home, now);
+
+    let (mut landing, mut worsening, mut persisting, mut dormant) = (0, 0, 0, 0);
+    let patterns: Vec<Value> = stats
+        .iter()
+        .map(|(slug, s)| {
+            let trend = trend_word(s, now);
+            match trend {
+                "landing" => landing += 1,
+                "worsening" => worsening += 1,
+                "persisting" => persisting += 1,
+                _ => dormant += 1,
+            }
+            serde_json::json!({
+                "slug": slug,
+                "severity": s.max_sev,
+                "total": s.total,
+                "last7": s.last7,
+                "warned": s.warned,
+                "trend": trend,
+            })
+        })
+        .collect();
+
+    let out = serde_json::json!({
+        "date": Local::now().format("%Y-%m-%d").to_string(),
+        "summary": {
+            "total": stats.len(),
+            "landing": landing,
+            "worsening": worsening,
+            "persisting": persisting,
+            "dormant": dormant,
+        },
+        "patterns": patterns,
+    });
+    println!("{}", serde_json::to_string(&out)?);
+    Ok(())
+}
+
+/// The trend as a bare word (no glyph) for JSON consumers. Mirrors
+/// [`trend_label`] so the two never diverge.
+fn trend_word(s: &SlugStat, now: DateTime<Utc>) -> &'static str {
+    match trend_label(s.last7, s.prior7, now - s.last) {
+        "✓ dormant" => "dormant",
+        "↑ worsening" => "worsening",
+        "→ persisting" => "persisting",
+        _ => "landing",
+    }
 }
 
 /// Trend from recurrence: dormant if nothing in 14 days; otherwise compare the

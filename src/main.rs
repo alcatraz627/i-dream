@@ -185,8 +185,12 @@ async fn main() -> Result<()> {
             board::render()?;
         }
 
-        Command::Reflect => {
-            reflect::render()?;
+        Command::Reflect { json } => {
+            if json {
+                reflect::render_json()?;
+            } else {
+                reflect::render()?;
+            }
         }
 
         Command::Review {
