@@ -8,7 +8,7 @@
 
 import AppKit
 import Foundation
-// D4 v2 note: we deliberately do NOT import UserNotifications. The
+// we deliberately do NOT import UserNotifications. The
 // widget runs as an ad-hoc-signed loose binary (no .app bundle), and
 // `+[UNUserNotificationCenter currentNotificationCenter]` crashes for
 // unbundled processes. Falling back to `osascript display notification`
@@ -25,7 +25,7 @@ private let debugLog  = "/tmp/i-dream-bar.log"
 private let tracesDir   = subDir + "/dreams/traces"
 private let activityFile = subDir + "/.last-activity"
 
-// D4 v2 — UN notification dedup
+// UN notification dedup
 private let lastSeenBriefingKey = "dev.i-dream.lastSeenBriefingWeek"
 private let signalsFile  = subDir + "/logs/signals.jsonl"
 
@@ -228,7 +228,7 @@ private struct Association: Codable {
     let suggestedRule: String?
     let patternsLinked: [String]?
     /// Both fields default-false so legacy associations.json (pre-D3 v1) decodes.
-    /// Decoded for the default-summary card and for future T-A12 multi-select
+    /// Decoded for the default-summary card and for future multi-select
     /// dismiss/promote write path.
     let promoted:      Bool?
     let dismissed:     Bool?
@@ -460,7 +460,7 @@ final class PatternGraphView: NSView {
         let name:       String
         let midAngle:   CGFloat  // radians, graph coordinate space
         let ringR:      CGFloat  // outer radius (kept for layout/draw compat)
-        // T-S5 (2026-05-01): wedge layout — start/end angles bound the
+        // wedge layout — start/end angles bound the
         // wedge so we can fill the pie slice instead of just placing the
         // label, and so the wedge becomes a click target for "solo".
         let startAngle: CGFloat
@@ -491,7 +491,7 @@ final class PatternGraphView: NSView {
     var highlightedId: String? = nil { didSet { needsDisplay = true } }
     /// Called when the user clicks a node, passing the pattern's id (or nil on deselect).
     var onNodeSelected: ((String?) -> Void)? = nil
-    /// M14 — invoked on right-click over a pattern node. The owner (BarDelegate)
+    /// invoked on right-click over a pattern node. The owner (BarDelegate)
     /// builds + pops the NSMenu so file-write actions ("Append to CLAUDE.md",
     /// "Generate hook") live where they can reach the daemon's data dir.
     /// First arg is the hit Pattern; second is the screen point to anchor the
@@ -527,7 +527,7 @@ final class PatternGraphView: NSView {
     private func buildLayout(_ patterns: [Pattern]) {
         let cx = bounds.midX
         let cy = bounds.midY
-        // T-S5 (2026-05-01): wedge layout. Each category gets a pie wedge,
+        // wedge layout. Each category gets a pie wedge,
         // nodes inside the wedge are positioned (angular jitter, radius
         // proportional to confidence). High-confidence patterns sit near
         // the outer rim where the eye lands first; low-confidence sit
@@ -696,7 +696,7 @@ final class PatternGraphView: NSView {
         }
     }
 
-    /// M14 — right-click hits a node, dispatches to onNodeContextMenu.
+    /// right-click hits a node, dispatches to onNodeContextMenu.
     /// Hit-test uses the same coord transform + radius rule as left-click,
     /// so right-click feels identical. screenPt is in screen coords ready
     /// for NSMenu.popUp(positioning:at:in:).
@@ -773,8 +773,8 @@ final class PatternGraphView: NSView {
         ctx.scaleBy(x: zoomScale, y: zoomScale)
         ctx.translateBy(x: -cx, y: -cy)
 
-        // ── Wedge fills (T-S5) ───────────────────────────────────────────────
-        // Replace the round-1 thin guide circle with five colored pie wedges,
+        // ── Wedge fills ───────────────────────────────────────────────
+        // Replace the thin guide circle with five colored pie wedges,
         // each tinted in its category color at low alpha + stroked at the
         // outer arc with full color. The 5-category structure becomes
         // visually unmissable even before any node is rendered.
@@ -1087,18 +1087,18 @@ final class AssociationGraphView: NSView {
     /// Search filter: indices of nodes matching a search query.
     var searchMatchedIndices: Set<Int> = [] { didSet { needsDisplay = true } }
 
-    /// T-S4 (2026-05-01): how many edges to draw at all. Default is
+    /// how many edges to draw at all. Default is
     /// `.fromSelected` — the ball-of-yarn-on-load goes away instantly,
-    /// edges only appear once the user picks a node. Both opus round-2
-    /// reviewers flagged this as the single biggest "the graph stops
+    /// edges only appear once the user picks a node. Reviewers
+    /// flagged this as the single biggest "the graph stops
     /// being useless" change.
     enum EdgeMode { case off, fromSelected, all }
     var edgeMode: EdgeMode = .fromSelected { didSet { needsDisplay = true } }
-    /// T-S4: dim non-actionable nodes when true. Round-1 + round-2 both
-    /// asked for this (B#? / B2-6 "Show: actionable only" toggle).
+    /// dim non-actionable nodes when true. Reviewers
+    /// asked for this ("Show: actionable only" toggle).
     var actionableOnly: Bool = false { didSet { needsDisplay = true } }
-    /// A2-S3: cap focus-mode edges at top-N by weight to avoid
-    /// hairball-on-click. 12 is the round-2 recommendation.
+    /// cap focus-mode edges at top-N by weight to avoid
+    /// hairball-on-click. 12 is the recommendation.
     private let focusEdgeCap: Int = 12
 
     /// Set search filter by matching node hypothesis text against query words.
@@ -1344,10 +1344,10 @@ final class AssociationGraphView: NSView {
         let hasFocus = fIdx != nil
 
         // ── Edges ─────────────────────────────────────────────────────────────
-        // T-S4 (2026-05-01): edges respect `edgeMode`. Default `.fromSelected`
+        // edges respect `edgeMode`. Default `.fromSelected`
         // dissolves the ball-of-yarn until a node is picked. `.off` hides them
         // entirely; `.all` restores the full hairball for users who want it.
-        // A2-S3: focus-mode edges capped at top-12 by weight to avoid
+        // focus-mode edges capped at top-12 by weight to avoid
         // hairball-on-click for high-degree nodes (60+ neighbors).
         if let fi = fIdx, edgeMode != .off {
             let maxWeight = edges.map { $0.weight }.max() ?? 1
@@ -1424,7 +1424,7 @@ final class AssociationGraphView: NSView {
                 ctx.strokePath()
             }
         } else if edgeMode == .all && fIdx == nil {
-            // T-S4: explicit "all" mode without focus — draw the full set
+            // explicit "all" mode without focus — draw the full set
             // (this is the legacy ball-of-yarn for users who want to see it).
             let maxWeight = edges.map { $0.weight }.max() ?? 1
             for edge in edges {
@@ -1449,7 +1449,7 @@ final class AssociationGraphView: NSView {
             let isFocused  = idx == fIdx
             let isLinked   = linked.contains(idx)
             let isSearchMatch = isSearchActive && searchMatchedIndices.contains(idx)
-            // T-S4 actionable-only mode: dim every non-actionable node so the
+            // actionable-only mode: dim every non-actionable node so the
             // 12-30 truly actionable hypotheses pop visually.
             let actionableDim = actionableOnly && !a.actionable
             let dimmed     = (hasFocus && !isFocused && !isLinked)
@@ -2175,7 +2175,7 @@ final class NavSidebarButton: NSButton {
     ]
 
     /// 2px leading accent bar layer — visible only on selection.
-    /// T-S6 (2026-05-01): three redundant cues per the dashboard review —
+    /// three redundant cues per the dashboard review —
     /// accent bar (this), bg tint, semibold title. Selection becomes
     /// scannable from peripheral vision.
     private var accentBar: CALayer?
@@ -2254,7 +2254,7 @@ final class NavSidebarButton: NSButton {
         let weight: NSFont.Weight = isSelectedTab ? .semibold : .regular
         let color: NSColor = isSelectedTab
             ? .labelColor
-            : .secondaryLabelColor   // T-S6: dim unselected for visible hierarchy
+            : .secondaryLabelColor   // dim unselected for visible hierarchy
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: weight),
             .foregroundColor: color,
@@ -2290,7 +2290,7 @@ final class DashboardWindowController: NSObject {
     /// observers (didSet on whichever container holds it).
     struct SelectionModel: Equatable {
         var primary: String? = nil       // single-select current row id
-        var multi:   Set<String> = []    // multi-select set (for T-A12)
+        var multi:   Set<String> = []    // multi-select set
         var sortKey: SortKey = .confidenceDesc
         var filter:  FilterModel = .init()
         // Convenience: was anything selected?
@@ -2304,8 +2304,8 @@ final class DashboardWindowController: NSObject {
         case categoryAsc    = "Category"
         case occurrencesDesc = "Occurrences"
     }
-    /// FilterModel mirrors the round-2 reviewer B's recommended filter
-    /// strip schema — every chip the eventual T-S2 filter strip will drive.
+    /// FilterModel mirrors a reviewer's recommended filter
+    /// strip schema — every chip the eventual filter strip will drive.
     /// Empty defaults = "show everything." Filter eval is in-memory predicate
     /// matching against the loaded patterns/associations arrays.
     struct FilterModel: Equatable {
@@ -2315,7 +2315,7 @@ final class DashboardWindowController: NSObject {
         var valence:        Set<String> = [] // "positive"/"negative"/"neutral"
         var minLinked:      Int = 0          // associations only
         var sinceDays:      Int? = nil       // nil = all-time, else last N days
-        var hideDismissed:  Bool = true      // T-S4 default behavior
+        var hideDismissed:  Bool = true      // default behavior
         var freeText:       String = ""      // fuzzy match against text body
         var isActive: Bool {
             actionableOnly || minConfidence > 0 || !category.isEmpty
@@ -2519,9 +2519,9 @@ final class DashboardWindowController: NSObject {
         sidebar.blendingMode = .behindWindow
         sidebar.state = .active
 
-        // T-A2 (2026-05-01): brand mark + title — 10×10 dusk-violet glyph
+        // brand mark + title — 10×10 dusk-violet glyph
         // with a soft glow precedes a 15pt label-color title. Replaces the
-        // 12pt tertiary-color stock label that the round-2 review flagged
+        // 12pt tertiary-color stock label that the dashboard review flagged
         // as "the app has no face." Aligns with the project identity
         // (sleep / dreams) without abandoning the cyan/teal/orange system
         // accents.
@@ -2801,8 +2801,8 @@ final class DashboardWindowController: NSObject {
         return (sv, tv)
     }
 
-    /// Horizontal stats banner — T-A1 (2026-05-01): rendered as a row of
-    /// "stat chips" instead of the comma-soup that round-2 reviewer A
+    /// Horizontal stats banner — rendered as a row of
+    /// "stat chips" instead of the comma-soup that a reviewer
     /// flagged as "a paragraph to read." Each chip is a stacked
     /// caption-on-top + value-below pair, with tabular numerals so values
     /// align column-by-column across chips.
@@ -3326,7 +3326,7 @@ final class DashboardWindowController: NSObject {
         detailTV.backgroundColor = .clear; detailTV.drawsBackground = false
         patternDetailTextView = detailTV
 
-        // T-S7 (2026-05-01): default summary card replaces the dim "Select…"
+        // default summary card replaces the dim "Select…"
         // wall. Surfaces the top-5-by-confidence patterns + keyboard hints
         // so the dead pane becomes a useful default workspace.
         detailTV.textStorage?.setAttributedString(buildPatternsDefaultSummary())
@@ -3377,7 +3377,7 @@ final class DashboardWindowController: NSObject {
                     if let r = found {
                         // Extend highlight to cover the full line (including badge before the link)
                         let lineRange = (ts.string as NSString).lineRange(for: r)
-                        // T-S1 minimal: bumped from 0.15 → 0.32 alpha for
+                        // minimal: bumped from 0.15 → 0.32 alpha for
                         // visibility from peripheral vision. Combined with
                         // the existing graph-side highlight halo, selection
                         // is now reliably scannable. The full three-cue
@@ -3393,7 +3393,7 @@ final class DashboardWindowController: NSObject {
             guard let self = self, let dtv = detailTV else { return }
             guard let id = selectedId,
                   let pat = self.patterns.first(where: { $0.stableKey == id }) else {
-                // T-S7: deselection returns to the default summary, not the
+                // deselection returns to the default summary, not the
                 // dim "Select…" placeholder.
                 dtv.textStorage?.setAttributedString(self.buildPatternsDefaultSummary())
                 return
@@ -3419,7 +3419,7 @@ final class DashboardWindowController: NSObject {
         gv.onNodeSelected = { selectedId in
             selectPattern(selectedId)
         }
-        // M14 — right-click on a pattern node opens an actions menu:
+        // right-click on a pattern node opens an actions menu:
         // "Append as guideline to active CLAUDE.md", "Generate Hook scaffold".
         // Both write into ~/.i-dream/exports/ and reveal in Finder so the
         // user can move them deliberately rather than auto-mutating CLAUDE.md.
@@ -3465,7 +3465,7 @@ final class DashboardWindowController: NSObject {
         patternGraphView?.applySearch(sender.stringValue)
     }
 
-    /// T-S7 (2026-05-01): default summary card for the Patterns detail pane
+    /// default summary card for the Patterns detail pane
     /// when nothing is selected. Replaces the dim "Select…" wall with a
     /// useful at-a-glance overview: counts + top 5 by confidence + keyboard
     /// hints. Reads `patterns` already in memory — no I/O.
@@ -3499,7 +3499,7 @@ final class DashboardWindowController: NSObject {
         return rt.build()
     }
 
-    /// T-S7: same default summary pattern for Associations.
+    /// same default summary pattern for Associations.
     private func buildAssociationsDefaultSummary() -> NSAttributedString {
         let rt = RichText()
         rt.header("Associations")
@@ -3790,7 +3790,7 @@ final class DashboardWindowController: NSObject {
         detailTV.backgroundColor = .clear; detailTV.drawsBackground = false
         assocDetailTextView = detailTV
 
-        // T-S7: default summary card — same pattern as the Patterns tab.
+        // default summary card — same pattern as the Patterns tab.
         detailTV.textStorage?.setAttributedString(buildAssociationsDefaultSummary())
 
         // Detail card wrapper — rounded border with subtle background
@@ -3838,7 +3838,7 @@ final class DashboardWindowController: NSObject {
                     }
                     if let r = found {
                         let lineRange = (ts.string as NSString).lineRange(for: r)
-                        // T-S1 minimal: bumped from 0.15 → 0.32 alpha for
+                        // minimal: bumped from 0.15 → 0.32 alpha for
                         // visibility from peripheral vision. Combined with
                         // the existing graph-side highlight halo, selection
                         // is now reliably scannable. The full three-cue
@@ -3854,7 +3854,7 @@ final class DashboardWindowController: NSObject {
             guard let self = self, let dtv = detailTV else { return }
             guard let id = selectedId,
                   let assoc = self.associations.first(where: { $0.id == id }) else {
-                // T-S7: deselection returns to the default summary card.
+                // deselection returns to the default summary card.
                 dtv.textStorage?.setAttributedString(self.buildAssociationsDefaultSummary())
                 return
             }
@@ -5317,7 +5317,7 @@ final class DashboardWindowController: NSObject {
         return sv
     }
 
-    // MARK: - M14 — Pattern context menu (drag-to-CLAUDE.md / drag-to-hook)
+    // MARK: - Pattern context menu (drag-to-CLAUDE.md / drag-to-hook)
 
     /// Build the right-click menu for a pattern node. Two destructive-but-
     /// reversible actions: append a guideline line to a CLAUDE.md draft, or
@@ -5389,7 +5389,7 @@ final class DashboardWindowController: NSObject {
         pb.setString(pat.pattern, forType: .string)
     }
 
-    // M14 helpers — file IO
+    // helpers — file IO
 
     private func m14_exportRoot() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -5453,7 +5453,7 @@ final class DashboardWindowController: NSObject {
         }
     }
 
-    // M14 templates — pure-string, no dependencies
+    // templates — pure-string, no dependencies
 
     private func m14_renderGuidelineSnippet(for pat: Pattern) -> String {
         let conf = Int(pat.confidence * 100)
@@ -5943,7 +5943,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var animFrame       = 0
     private var animTimer:      Timer?
 
-    /// D4 v2 — throttle for the briefing-state poll. refresh() ticks
+    /// throttle for the briefing-state poll. refresh() ticks
     /// roughly once a minute; we only want to check briefing state every
     /// ~5 minutes (a Sunday briefing fires at most once per ISO week
     /// anyway).
@@ -5960,7 +5960,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // .appearance overrides the process default for that panel only.
         NSApp.appearance = NSAppearance(named: .darkAqua)
 
-        // D4 v2: no permission request needed — using osascript fallback
+        // no permission request needed — using osascript fallback
         // (see top-of-file comment). Authorization on macOS for shell
         // notifications happens once via System Settings → Notifications
         // → Script Editor → allow notifications, but the first call will
@@ -6421,11 +6421,11 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(domainsParent)
         menu.setSubmenu(domainsMenu, for: domainsParent)
 
-        // ─ Today (B Stage 4 — daily digest reader) ───────────────────────────
+        // ─ Today ───────────────────────────
         // Reads ~/.claude/i-dream/daily/latest.md, parses the 7 fixed sections,
         // shows item counts inline + an "Open full digest" action. Stateless;
         // re-read on every menu open. The digest file is written by
-        // `i-dream digest` (manual) or the daily cron (B Stage 7).
+        // `i-dream digest` (manual) or the daily cron.
         let todayCounts = loadTodayDigestCounts()
         let todayMenu = NSMenu()
         if let counts = todayCounts {
@@ -7668,7 +7668,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return hudProcSample
     }
 
-    /// D4 v2: read dreams/briefings/state.json and compare its
+    /// read dreams/briefings/state.json and compare its
     /// last_iso_week against the previously-seen value in UserDefaults.
     /// On change → fire a UNUserNotification linking to the new
     /// briefing file. Silently degrades on read errors / missing file
