@@ -6359,20 +6359,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Submenu with frequency choices
         let freqMenu = NSMenu()
-        let freqOptions: [(label: String, hours: Double)] = [
-            ("30 minutes", 0.5),
-            ("1 hour",     1.0),
-            ("2 hours",    2.0),
-            ("3 hours",    3.0),
+        // A few sensible presets, not a 12-option wall. The exact hour is still
+        // settable via Edit Config for anyone who wants a non-preset value.
+        var freqOptions: [(label: String, hours: Double)] = [
+            ("1 hour",            1.0),
+            ("2 hours",           2.0),
             ("4 hours (default)", 4.0),
-            ("6 hours",    6.0),
-            ("9 hours",    9.0),
-            ("12 hours",  12.0),
-            ("18 hours",  18.0),
-            ("24 hours",  24.0),
-            ("36 hours",  36.0),
-            ("48 hours",  48.0),
+            ("12 hours",         12.0),
         ]
+        // Keep the current value visible/checkable even if it isn't a preset.
+        let curHz = cachedFrequencyHours ?? 4.0
+        if !freqOptions.contains(where: { $0.hours == curHz }) {
+            let curLabel = curHz < 1.0 ? "\(Int(curHz * 60)) minutes (current)"
+                                       : "\(curHz.rounded() == curHz ? String(Int(curHz)) : String(format: "%.1f", curHz)) hours (current)"
+            freqOptions.append((curLabel, curHz))
+        }
         for opt in freqOptions {
             let item = NSMenuItem(title: opt.label, action: #selector(setDreamFrequency(_:)),
                                   keyEquivalent: "")
