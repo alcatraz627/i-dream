@@ -6287,6 +6287,30 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let statusText  = running ? "◉  i-dream  —  Running" : "○  i-dream  —  Stopped"
         addColored(menu, statusText, color: statusColor,
                    font: .systemFont(ofSize: 13, weight: .semibold))
+
+        // ─ Outcome: is the dreaming actually making Claude sharper? ────────────
+        // The point of the whole system — surfaced first, not buried under
+        // activity counts. A weekly review waiting is the one actionable thing;
+        // the landing/worsening line is the at-a-glance "is it working?".
+        let snap = DataStore.shared.snapshot
+        if let pending = snap.reviewPending {
+            let label = pending.isEmpty
+                ? "Weekly review pending — open"
+                : "Weekly review pending (\(pending)) — open"
+            let rev = add(menu, label, #selector(openWeeklyReview), key: "")
+            setIcon(rev, "tray.full.fill")
+        }
+        if let reflect = snap.reflect, reflect.summary.total > 0 {
+            let sum = reflect.summary
+            let outcomeColor: NSColor = sum.worsening > 0 ? .systemOrange : .systemGreen
+            addRow(menu, "  Mistakes", "\(sum.landing) landing · \(sum.worsening) worsening",
+                   valueColor: outcomeColor)
+            // Name the worst recurrence so it's actionable, not just a number.
+            if let worst = reflect.patterns.first(where: { $0.trend == "worsening" }) {
+                addDim(menu, "  ↑ \(worst.slug)")
+            }
+        }
+
         // Cognitive load gauge — inline with status
         if !cachedJournal.isEmpty {
             let load      = cognitiveLoadScore(journal: cachedJournal)
@@ -8986,6 +9010,18 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dlog("runPrune")
         openInTerminal("\(iDream) prune")
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.refresh() }
+    }
+
+    /// Open the weekly review — `i-dream review` spawns its own Ghostty + claude
+    /// session seeded with the staged proposals, so just launch and return.
+    @objc private func openWeeklyReview() {
+        dlog("openWeeklyReview")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: resolveIDreamBinary())
+        p.arguments = ["review"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
     }
 
     /// Trigger a dream cycle, first checking usage limits.
