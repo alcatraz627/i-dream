@@ -1,8 +1,8 @@
 # Widget audit + rebuild plan (macOS menu-bar / dashboard)
 
-> **Status:** audited 2026-05-25, **re-verified 2026-05-31 (new machine) — still
-> 0% done, all claims hold.** Plan ready, not started. Pick-up doc — any Claude
-> (or this session post-compaction) can resume from here.
+> **Status:** **SHIPPED 2026-05-31** (Tier 0+1+2, merged to master `fdc527d`).
+> Audited 2026-05-25, rebuilt + skeptical-reviewed + live-verified 2026-05-31.
+> The one deferred piece: the graph-view dedup (see Tier 4 / §"deferred" below).
 > **Raw reports** (if present locally, not committed): `.claude/output/20260525-widget-audit/{ux,fault-tolerance,architecture-perf,SYNTHESIS}.md`.
 >
 > **Re-verification (2026-05-31):** Swift source byte-identical to the audit
