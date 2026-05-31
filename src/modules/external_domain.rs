@@ -313,28 +313,72 @@ impl DreamDomain for ExternalDomain {
     }
 
     fn contribute_tldr(&self) -> Result<Vec<TldrLine>> {
-        let Some(p) = &self.manifest.hinter.tldr_path else {
-            return Ok(vec![]);
-        };
-        let path = expand_path(p);
-        if !path.exists() {
-            return Ok(vec![]);
-        }
-        let content = fs::read_to_string(&path)?;
         let weight = self.manifest.hinter.weight;
-        Ok(content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .enumerate()
-            .map(|(i, text)| TldrLine {
-                source_domain: self.name().to_string(),
-                slug: format!("{}-tldr-{}", self.name(), i),
-                text: text.to_string(),
-                // Top lines weight slightly higher; multiply by manifest weight.
-                score: weight * (1.0 / (1.0 + i as f64)),
-            })
-            .collect())
+
+        // Primary source: the consolidation-produced derived/_tldr.txt.
+        if let Some(p) = &self.manifest.hinter.tldr_path {
+            let path = expand_path(p);
+            if path.exists() {
+                let content = fs::read_to_string(&path)?;
+                if !content.trim().is_empty() {
+                    return Ok(content
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .enumerate()
+                        .map(|(i, text)| TldrLine {
+                            source_domain: self.name().to_string(),
+                            slug: format!("{}-tldr-{}", self.name(), i),
+                            text: text.to_string(),
+                            // Top lines weight slightly higher; multiply by manifest weight.
+                            score: weight * (1.0 / (1.0 + i as f64)),
+                        })
+                        .collect());
+                }
+            }
+        }
+
+        // Fallback: a domain whose dream pass produces insights but that has no
+        // consolidation step (e.g. affirm sets `consolidation.enabled = false`)
+        // never writes derived/_tldr.txt, so the primary source above is empty
+        // and the domain silently vanishes from the union view and the daily
+        // digest. Surface its most recent dream summary instead, so dreamt-over
+        // domains still reach the reader rather than reading as "no activity".
+        if let Some(ip) = &self.manifest.dream.insights_path {
+            let path = expand_path(ip);
+            if path.exists() {
+                let content = fs::read_to_string(&path)?;
+                if let Some(summary) = content
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .next_back()
+                    .and_then(|l| serde_json::from_str::<DreamOutput>(l).ok())
+                    .and_then(|o| o.summary)
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    return Ok(vec![TldrLine {
+                        source_domain: self.name().to_string(),
+                        slug: format!("{}-dream-summary", self.name()),
+                        text: summary_headline(&summary, 220),
+                        score: weight,
+                    }]);
+                }
+            }
+        }
+
+        Ok(vec![])
     }
+}
+
+/// The opening of a dream summary, capped at `max_chars` on a char boundary
+/// with a trailing ellipsis when shortened. Keeps a multi-sentence summary to
+/// a single union line so it reads as a TL;DR, not a paragraph.
+fn summary_headline(s: &str, max_chars: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars).collect();
+    format!("{}…", head.trim_end())
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -578,6 +622,19 @@ mod tests {
     use super::*;
     use std::env;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn summary_headline_passes_short_through_and_truncates_long() {
+        assert_eq!(summary_headline("  short summary  ", 220), "short summary");
+        let long = "a".repeat(300);
+        let got = summary_headline(&long, 220);
+        assert_eq!(got.chars().count(), 221); // 220 chars + ellipsis
+        assert!(got.ends_with('…'));
+        // Truncates on a char boundary for multibyte input without panicking.
+        let multi = "é".repeat(300);
+        let got = summary_headline(&multi, 10);
+        assert!(got.ends_with('…'));
+    }
 
     // Each call gets a process-unique subdir so parallel tests never share
     // a path or race a global cleanup. (The earlier shared-dir + cleanup()
