@@ -6267,6 +6267,28 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // ── Menu construction ──────────────────────────────────────────────────────
 
+    /// Word-wrap a long insight string so it spans a few lines in the menu
+    /// instead of forcing the whole dropdown absurdly wide. Continuation lines
+    /// get a hanging indent so they sit under the first line's text.
+    private func wrapForMenu(_ text: String, width: Int = 58, indent: String = "     ") -> String {
+        var lines: [String] = []
+        var line = ""
+        for word in text.split(separator: " ", omittingEmptySubsequences: true) {
+            if line.isEmpty {
+                line = String(word)
+            } else if line.count + 1 + word.count <= width {
+                line += " " + word
+            } else {
+                lines.append(line)
+                line = String(word)
+            }
+        }
+        if !line.isEmpty { lines.append(line) }
+        return lines.enumerated()
+            .map { idx, l in idx == 0 ? l : indent + l }
+            .joined(separator: "\n")
+    }
+
     private func populateMenuItems(_ menu: NSMenu) {
         let running = cachedRunning
         let s       = cachedState
@@ -6527,7 +6549,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let digestItem = NSMenuItem()
                 let digestAttr = NSMutableAttributedString()
                 let truncDigest = digest.count > 220 ? String(digest.prefix(217)) + "…" : digest
-                digestAttr.append(NSAttributedString(string: "  \(truncDigest)\n",
+                digestAttr.append(NSAttributedString(string: "  \(wrapForMenu(truncDigest))\n",
                     attributes: [.font: NSFont.systemFont(ofSize: 13),
                                  .foregroundColor: sentimentColor]))
                 digestAttr.append(NSAttributedString(string: "  Recent Dreams Inference  ·  updated every 3h",
@@ -6573,7 +6595,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Show recent pattern learnings — hover to expand submenu with full details
             if !cachedPatterns.isEmpty {
                 for p in cachedPatterns {
-                    let truncated = p.pattern.count > 180 ? String(p.pattern.prefix(177)) + "…" : p.pattern
+                    let truncated = p.pattern.count > 200 ? String(p.pattern.prefix(197)) + "…" : p.pattern
                     let sym  = valenceSymbol(p.valence)
                     // Confidence colour: green ≥85%, blue ≥65%, muted <65%
                     let confColor: NSColor = p.confidence >= 0.85 ? .systemGreen
@@ -6583,11 +6605,11 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let dateStr = p.firstSeen != nil ? "  ·  \(fmtDateWithAge(p.firstSeen))" : ""
                     let item = NSMenuItem()
                     let full = NSMutableAttributedString()
-                    full.append(NSAttributedString(string: "  \(sym) \"\(truncated)\"\n",
-                                                   attributes: [.font: NSFont.systemFont(ofSize: 14)]))
+                    full.append(NSAttributedString(string: "  \(sym) \"\(wrapForMenu(truncated))\"\n",
+                                                   attributes: [.font: NSFont.systemFont(ofSize: 13)]))
                     full.append(NSAttributedString(string: "  \(confDot) \(Int(p.confidence * 100))%  ·  \(p.category)\(dateStr)",
                                                    attributes: [
-                                                       .font: NSFont.systemFont(ofSize: 12),
+                                                       .font: NSFont.systemFont(ofSize: 11),
                                                        .foregroundColor: confColor,
                                                    ]))
                     item.attributedTitle = full
@@ -6609,8 +6631,8 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             addSection(menu, "⚠  Last Error  (today)")
             let errItem = NSMenuItem()
             let errFull = NSMutableAttributedString()
-            let truncErr = err.count > 90 ? String(err.prefix(87)) + "…" : err
-            errFull.append(NSAttributedString(string: "  " + truncErr + "\n",
+            let truncErr = err.count > 200 ? String(err.prefix(197)) + "…" : err
+            errFull.append(NSAttributedString(string: "  " + wrapForMenu(truncErr) + "\n",
                                               attributes: [
                                                   .foregroundColor: NSColor.systemRed,
                                                   .font: NSFont.systemFont(ofSize: 13),
