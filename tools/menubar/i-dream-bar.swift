@@ -5803,6 +5803,124 @@ private func loadRegisteredDomains() -> [DomainEntry]? {
     return try? JSONDecoder().decode([DomainEntry].self, from: data)
 }
 
+// ─── Outcome readers (is the dreaming actually helping?) ───────────────────────
+
+/// One recurring mistake pattern from `i-dream reflect --json`.
+struct ReflectPattern: Decodable {
+    let slug:     String
+    let severity: String
+    let total:    Int
+    let trend:    String   // landing | worsening | persisting | dormant
+}
+
+/// Aggregate "is my Claude getting sharper?" counts across recurring patterns.
+struct ReflectSummary: Decodable {
+    let total:      Int
+    let landing:    Int
+    let worsening:  Int
+    let persisting: Int
+    let dormant:    Int
+}
+
+struct ReflectData: Decodable {
+    let summary:  ReflectSummary
+    let patterns: [ReflectPattern]
+}
+
+/// Run `i-dream reflect --json` and decode it. Callers MUST be off the main
+/// thread (it spawns a subprocess). nil on any failure — the menu just omits
+/// the outcome line rather than blocking or erroring.
+private func readReflect() -> ReflectData? {
+    let task = Process()
+    task.launchPath = resolveIDreamBinary()
+    task.arguments  = ["reflect", "--json"]
+    let stdout = Pipe()
+    let stderr = Pipe()
+    task.standardOutput = stdout
+    task.standardError  = stderr
+    do { try task.run() } catch { return nil }
+    task.waitUntilExit()
+    guard task.terminationStatus == 0 else { return nil }
+    let data = stdout.fileHandleForReading.readDataToEndOfFile()
+    return try? JSONDecoder().decode(ReflectData.self, from: data)
+}
+
+/// Whether a weekly review is staged and waiting. The audit's non-interactive
+/// path writes ~/.claude/i-dream/.review-pending (body = the audit date) when it
+/// stages proposals; `i-dream review` clears it once they're handled. Returns
+/// the date string (possibly empty) when pending, nil when not.
+private func readReviewPending() -> String? {
+    let path = home + "/.claude/i-dream/.review-pending"
+    guard let body = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+    return body.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+// ─── DataStore ─────────────────────────────────────────────────────────────────
+
+/// Everything the menu and HUD render, gathered as one value. Built off the main
+/// thread and published on main, so the menu paints from a ready snapshot
+/// instead of doing ~8 disk reads + 2 subprocesses synchronously each time it
+/// opens (the old cause of the slow dropdown + the menu-open freeze).
+private struct DataSnapshot {
+    var running         = false
+    var state:          DaemonState?
+    var board:          BoardData?
+    var patterns:       [Pattern]      = []
+    var journal:        [JournalEntry] = []
+    var storeFiles:     [StoreFile]    = []
+    var digest:         String?
+    var frequencyHours: Double?
+    var patternCount    = 0
+    var highConfCount   = 0
+    var domains:        [DomainEntry]?   // was the blocking call inside the menu path
+    var reflect:        ReflectData?     // outcome: is the guidance landing?
+    var reviewPending:  String?          // non-nil → a weekly review is staged
+}
+
+/// Single owner of all `~/.claude/{subconscious,i-dream}` reads. One off-main
+/// `reload()` replaces the two identical synchronous read blocks that used to
+/// live in both `refresh` and `menuNeedsUpdate`.
+private final class DataStore {
+    static let shared = DataStore()
+    private(set) var snapshot = DataSnapshot()
+    private let queue = DispatchQueue(label: "dev.i-dream.datastore", qos: .utility)
+    private var loading = false
+
+    /// Gather everything off-main, then publish the snapshot and run `then` on
+    /// the main thread. A reload already in flight wins — concurrent calls
+    /// (30s timer overlapping a manual refresh) coalesce rather than pile up.
+    /// Call from the main thread.
+    func reload(then: (() -> Void)? = nil) {
+        if loading {
+            then?()
+            return
+        }
+        loading = true
+        queue.async {
+            var s = DataSnapshot()
+            s.running        = isDaemonRunning()
+            s.state          = readState()
+            s.board          = readBoard()
+            s.patterns       = recentPatterns(limit: 5)
+            s.journal        = recentJournal(limit: 20)
+            s.storeFiles     = readStoreFiles()
+            s.digest         = readInsightDigest()
+            s.frequencyHours = readDreamFrequency()
+            let all          = allPatterns()
+            s.patternCount   = all.count
+            s.highConfCount  = all.filter { $0.confidence >= 0.8 }.count
+            s.domains        = loadRegisteredDomains()
+            s.reflect        = readReflect()
+            s.reviewPending  = readReviewPending()
+            DispatchQueue.main.async {
+                self.snapshot = s
+                self.loading  = false
+                then?()
+            }
+        }
+    }
+}
+
 // ─── App delegate ─────────────────────────────────────────────────────────────
 
 final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -5954,31 +6072,34 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func refresh() {
-        cachedRunning          = isDaemonRunning()
-        cachedState            = readState()
-        cachedBoard            = readBoard()
-        cachedPatterns         = recentPatterns(limit: 5)
-        cachedJournal          = recentJournal(limit: 20)
-        cachedStoreFiles       = readStoreFiles()
-        cachedDigest           = readInsightDigest()
-        cachedFrequencyHours   = readDreamFrequency()
-        let allPats            = allPatterns()
-        cachedPatternCount     = allPats.count
-        cachedHighConfCount    = allPats.filter { $0.confidence >= 0.8 }.count
-        dlog("refresh: running=\(cachedRunning) cycles=\(cachedState?.totalCycles ?? -1)")
-        checkCycleCompletion()
-        // D4 v2: poll briefing state every ~5min (refresh runs ~1min,
-        // counter throttles to 5). Reads dreams/briefings/state.json,
-        // compares last_iso_week to UserDefaults; if changed → notify.
-        briefingCheckCounter += 1
-        if briefingCheckCounter >= 5 {
-            briefingCheckCounter = 0
-            checkForNewBriefing()
-        }
-        updateButton()
-        // Keep HUD current if visible
-        if let panel = hudPanel, let tv = panel.contentView?.subviews.first as? NSTextView {
-            updateHUDContent(tv)
+        DataStore.shared.reload { [weak self] in
+            guard let self = self else { return }
+            let s = DataStore.shared.snapshot
+            self.cachedRunning        = s.running
+            self.cachedState          = s.state
+            self.cachedBoard          = s.board
+            self.cachedPatterns       = s.patterns
+            self.cachedJournal        = s.journal
+            self.cachedStoreFiles     = s.storeFiles
+            self.cachedDigest         = s.digest
+            self.cachedFrequencyHours = s.frequencyHours
+            self.cachedPatternCount   = s.patternCount
+            self.cachedHighConfCount  = s.highConfCount
+            dlog("refresh: running=\(s.running) cycles=\(s.state?.totalCycles ?? -1)")
+            self.checkCycleCompletion()
+            // Poll briefing state every ~5 refreshes (~5min): reads
+            // dreams/briefings/state.json, compares last_iso_week to
+            // UserDefaults; if changed → notify.
+            self.briefingCheckCounter += 1
+            if self.briefingCheckCounter >= 5 {
+                self.briefingCheckCounter = 0
+                self.checkForNewBriefing()
+            }
+            self.updateButton()
+            // Keep HUD current if visible
+            if let panel = self.hudPanel, let tv = panel.contentView?.subviews.first as? NSTextView {
+                self.updateHUDContent(tv)
+            }
         }
     }
 
