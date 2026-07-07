@@ -10,6 +10,7 @@
 
 use crate::config::Config;
 use crate::modules::registry::DomainRegistry;
+use crate::modules::{Cursor, DomainEvent};
 use crate::store::Store;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, NaiveDate, Utc};
@@ -30,7 +31,11 @@ pub struct DayBundle {
 
 #[derive(Debug, Default)]
 pub struct DomainSlice {
+    /// Events dated on the digest's day (local time).
     pub raw_event_count: usize,
+    /// Events dated the day before. The daily cron renders today's file at
+    /// 03:00, so the previous day's count carries most of the signal.
+    pub prev_day_count: usize,
     pub note: Option<String>,
 }
 
@@ -72,9 +77,24 @@ pub fn gather_day_bundle(date: NaiveDate, config: &Config, store: &Store) -> Res
         ..Default::default()
     };
     for d in registry.iter() {
-        bundle
-            .per_domain
-            .insert(d.name().to_string(), DomainSlice::default());
+        // A fresh default cursor makes delta() return the whole stream
+        // without touching the domain's real consolidation cursor. Streams
+        // are small (hundreds of lines), so the full read is cheap.
+        let slice = match d.delta(&Cursor::default()) {
+            Ok(events) => {
+                let (today, yesterday) = bucket_event_counts(&events, date);
+                DomainSlice {
+                    raw_event_count: today,
+                    prev_day_count: yesterday,
+                    note: None,
+                }
+            }
+            Err(e) => DomainSlice {
+                note: Some(format!("event stream unreadable: {e:#}")),
+                ..Default::default()
+            },
+        };
+        bundle.per_domain.insert(d.name().to_string(), slice);
     }
     bundle.sources = scan_one_off_sources(date)?;
     Ok(bundle)
@@ -134,6 +154,23 @@ fn scan_one_off_sources(date: NaiveDate) -> Result<Vec<SourceLink>> {
     Ok(sources)
 }
 
+/// Split a domain's events into (on the digest date, on the day before),
+/// judged in local time. Older and future-dated events are ignored.
+fn bucket_event_counts(events: &[DomainEvent], date: NaiveDate) -> (usize, usize) {
+    let prev = date.pred_opt().unwrap_or(date);
+    let mut today = 0;
+    let mut yesterday = 0;
+    for e in events {
+        let d = e.ts.with_timezone(&Local).date_naive();
+        if d == date {
+            today += 1;
+        } else if d == prev {
+            yesterday += 1;
+        }
+    }
+    (today, yesterday)
+}
+
 fn was_modified_on(mtime: SystemTime, date: NaiveDate) -> bool {
     let dt: DateTime<Utc> = mtime.into();
     let local = dt.with_timezone(&Local);
@@ -183,11 +220,14 @@ pub fn render_markdown(bundle: &DayBundle) -> String {
     } else {
         for (name, slice) in &bundle.per_domain {
             out.push_str(&format!("### {name}\n"));
-            if slice.raw_event_count == 0 && slice.note.is_none() {
-                out.push_str("_(no activity tracked yet)_\n\n");
+            if slice.raw_event_count == 0 && slice.prev_day_count == 0 && slice.note.is_none() {
+                out.push_str("_(no new events)_\n\n");
             } else {
-                if slice.raw_event_count > 0 {
-                    out.push_str(&format!("- {} new events\n", slice.raw_event_count));
+                if slice.raw_event_count > 0 || slice.prev_day_count > 0 {
+                    out.push_str(&format!(
+                        "- {} new events today · {} yesterday\n",
+                        slice.raw_event_count, slice.prev_day_count
+                    ));
                 }
                 if let Some(n) = &slice.note {
                     out.push_str(&format!("- {n}\n"));
@@ -432,7 +472,7 @@ mod tests {
         assert!(md.contains("### atone"));
         assert!(md.contains("### dreaming"));
         // Empty slices get the italic placeholder
-        assert!(md.matches("_(no activity tracked yet)_").count() == 2);
+        assert!(md.matches("_(no new events)_").count() == 2);
     }
 
     #[test]
@@ -442,11 +482,52 @@ mod tests {
             "atone".into(),
             DomainSlice {
                 raw_event_count: 3,
+                prev_day_count: 0,
                 note: None,
             },
         );
         let md = render_markdown(&bundle);
-        assert!(md.contains("3 new events"));
+        assert!(md.contains("3 new events today · 0 yesterday"));
+    }
+
+    #[test]
+    fn render_per_domain_shows_counts_when_only_yesterday_had_events() {
+        // The 03:00 cron case: nothing yet today, but yesterday was busy —
+        // the section must NOT fall back to the placeholder.
+        let mut bundle = empty_bundle(NaiveDate::from_ymd_opt(2026, 5, 16).unwrap());
+        bundle.per_domain.insert(
+            "atone".into(),
+            DomainSlice {
+                raw_event_count: 0,
+                prev_day_count: 7,
+                note: None,
+            },
+        );
+        let md = render_markdown(&bundle);
+        assert!(md.contains("0 new events today · 7 yesterday"));
+        assert!(!md.contains("_(no new events)_"));
+    }
+
+    #[test]
+    fn bucket_event_counts_splits_today_yesterday_and_ignores_older() {
+        use chrono::TimeZone;
+        let date = NaiveDate::from_ymd_opt(2026, 5, 16).unwrap();
+        let mk = |y: i32, m: u32, d: u32| DomainEvent {
+            id: format!("{y}-{m}-{d}"),
+            ts: Local
+                .with_ymd_and_hms(y, m, d, 12, 0, 0)
+                .unwrap()
+                .with_timezone(&Utc),
+            raw: serde_json::Value::Null,
+        };
+        let events = vec![
+            mk(2026, 5, 16), // today
+            mk(2026, 5, 16), // today
+            mk(2026, 5, 15), // yesterday
+            mk(2026, 5, 14), // older — ignored
+            mk(2026, 5, 20), // future — ignored
+        ];
+        assert_eq!(bucket_event_counts(&events, date), (2, 1));
     }
 
     #[test]
