@@ -8,7 +8,17 @@ commit 79f3f2f). Stage 1 shipped 2026-07-07 (honest views: 500 patterns →
 cluster; ages + honest totals live at `~/.claude/i-dream/derived/views/`).
 Stage-1 deviation, evidence-based: digest Top-signals needed NO dedup — its
 five lines come from five distinct domains; the dup disease lived in
-patterns/associations only. Stages 2–5 pending.
+patterns/associations only.
+Stage 2 session 1 shipped 2026-07-07: 4-tab cutover live (Overview · Browse ·
+Journal · Search), SwiftUI Browse pane on the derived views (chips, ×N
+cluster badges, ages, honest footer, inline expand + rate); Help/About are
+menu panels. Remaining for Stage 2: delete the dead per-type builders +
+graph views (~2.5K lines, compiled but unreachable), Overview felt-value
+repivot, Journal pane rebuild (investigated: no width clamp — 36-char
+monospace bars; "14K tokens" is real ~13.5K data rounding, not a bug).
+Known follow-up surfaced BY the new UI: the insights store itself is ~20
+rewordings of one meta-lesson — extend Stage-1 clustering to insights
+(needs Rust-side insights.md parsing). Stages 3–5 pending.
 Owner decisions locked 2026-07-07: collapse dashboard to 4 surfaces · HUD kept
 as-is for now (bug-fix only, repivot later) · dedup/age-anchoring live in the
 Rust engine as derived views · SwiftUI panes inside the dashboard window, menus

@@ -8,6 +8,7 @@
 
 import AppKit
 import Foundation
+import SwiftUI
 // we deliberately do NOT import UserNotifications. The
 // widget runs as an ad-hoc-signed loose binary (no .app bundle), and
 // `+[UNUserNotificationCenter currentNotificationCenter]` crashes for
@@ -2433,16 +2434,14 @@ final class DashboardWindowController: NSObject {
     }
     private var lastRefreshedDate:     Date?
 
+    // v3 (docs/23 Stage 2): four surfaces. Browse replaces the per-type
+    // Patterns/Associations/Insights/Metacog tabs with one paradigm on the
+    // engine's deduped views; Help/About live in the status menu now.
     private let tabs: [(title: String, symbol: String)] = [
-        ("Overview",     "square.grid.2x2.fill"),
-        ("Patterns",     "brain.head.profile"),
-        ("Associations", "link"),
-        ("Journal",      "book.fill"),
-        ("Insights",     "sparkles"),
-        ("Metacog",      "checkmark.seal.fill"),
-        ("Search",       "magnifyingglass"),
-        ("Help",         "questionmark.circle.fill"),
-        ("About",        "info.circle.fill"),
+        ("Overview", "square.grid.2x2.fill"),
+        ("Browse",   "list.bullet.rectangle"),
+        ("Journal",  "book.fill"),
+        ("Search",   "magnifyingglass"),
     ]
 
     // Data snapshots — reloaded on each showOrFront() call
@@ -2452,6 +2451,7 @@ final class DashboardWindowController: NSObject {
     private var state:        DaemonState?
     private var board:        BoardData?
     private var digest:       String?
+    let browseModel = BrowseModel()
 
     // ── Public interface ───────────────────────────────────────────────────────
 
@@ -2489,6 +2489,7 @@ final class DashboardWindowController: NSObject {
             let st    = readState()
             let bd    = readBoard()
             let dg    = readInsightDigest()
+            let (browseRows, browseTotals) = buildBrowseRows()
             DispatchQueue.main.async {
                 guard let self, self.panel != nil else { return }
                 self.patterns     = pat
@@ -2497,11 +2498,39 @@ final class DashboardWindowController: NSObject {
                 self.state        = st
                 self.board        = bd
                 self.digest       = dg
+                self.browseModel.apply(rows: browseRows, totals: browseTotals)
                 self.rebuildContentViews()
-                dlog("dashboard: async data loaded (\(pat.count)p/\(assoc.count)a/\(jour.count)j)")
+                dlog("dashboard: async data loaded (\(pat.count)p/\(assoc.count)a/\(jour.count)j/\(browseRows.count)b)")
                 completion?()
             }
         }
+    }
+
+    /// Persist an insight rating and refresh Browse so the badge updates.
+    private func rateInsightFromBrowse(id: String, rating: String) {
+        recordDashboardInsightFeedback(insightId: id, rating: rating)
+        reloadDataAsync()
+    }
+
+    /// Help and About lost their tabs in the v3 cutover (docs/23 Stage 2);
+    /// their content opens in a small panel from the status menu instead.
+    private var infoPanel: NSPanel?
+    func showInfoPanel(about: Bool) {
+        let f = NSRect(x: 0, y: 0, width: 720, height: 640)
+        let v = about ? buildAboutView(frame: f) : buildHelpView(frame: f)
+        let p = NSPanel(contentRect: f, styleMask: [.titled, .closable, .resizable],
+                        backing: .buffered, defer: false)
+        p.title = about ? "About i-dream" : "i-dream — Help & Shortcuts"
+        p.isReleasedWhenClosed = false
+        p.appearance = NSAppearance(named: .darkAqua)
+        p.level = .floating
+        v.autoresizingMask = [.width, .height]
+        p.contentView?.addSubview(v)
+        p.center()
+        infoPanel?.close()
+        infoPanel = p
+        p.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // ── Panel construction ─────────────────────────────────────────────────────
@@ -2708,7 +2737,7 @@ final class DashboardWindowController: NSObject {
             }
             if ch == "r" { self.refreshDashboard(); return nil }
             if ch == "f" {
-                self.selectTab(6)
+                self.selectTab(3)
                 if let sf = self.searchField { p.makeFirstResponder(sf) }
                 return nil
             }
@@ -2730,24 +2759,22 @@ final class DashboardWindowController: NSObject {
         let f = contentContainer.bounds
         dlog("dashboard: building overview")
         let v0 = buildOverviewView(frame: f)
-        dlog("dashboard: building pattern")
-        let v1 = buildPatternView(frame: f)
-        dlog("dashboard: building association")
-        let v2 = buildAssociationView(frame: f)
+        dlog("dashboard: building browse")
+        browseModel.onRate = { [weak self] id, rating in
+            self?.rateInsightFromBrowse(id: id, rating: rating)
+        }
+        let v1: NSView = {
+            let host = NSHostingView(rootView: BrowseView(model: browseModel))
+            host.frame = f
+            host.autoresizingMask = [.width, .height]
+            return host
+        }()
         dlog("dashboard: building journal")
-        let v3 = buildJournalView(frame: f)
-        dlog("dashboard: building insights")
-        let v4 = buildInsightsView(frame: f)
-        dlog("dashboard: building metacog")
-        let v5 = buildMetacogView(frame: f)
+        let v2 = buildJournalView(frame: f)
         dlog("dashboard: building search")
-        let v6 = buildSearchView(frame: f)
-        dlog("dashboard: building help")
-        let v7 = buildHelpView(frame: f)
-        dlog("dashboard: building about")
-        let v8 = buildAboutView(frame: f)
+        let v3 = buildSearchView(frame: f)
         dlog("dashboard: all views built")
-        contentViews = [v0, v1, v2, v3, v4, v5, v6, v7, v8]
+        contentViews = [v0, v1, v2, v3]
         for v in contentViews { contentContainer.addSubview(v) }
         let sel = navButtons.first(where: { $0.isSelectedTab })?.tag ?? 0
         for (i, v) in contentViews.enumerated() { v.isHidden = (i != sel) }
@@ -2757,25 +2784,10 @@ final class DashboardWindowController: NSObject {
     }
 
     private func updateSidebarBadges() {
-        guard navButtons.count >= 9 else { return }
-        // 0: Overview — no count
-        // 1: Patterns
-        navButtons[1].updateTitle("Patterns (\(patterns.count))")
-        // 2: Associations
-        navButtons[2].updateTitle("Associations (\(associations.count))")
-        // 3: Journal
-        navButtons[3].updateTitle("Journal (\(journal.count))")
-        // 4: Insights — count insight blocks from raw markdown
-        let insightBlockCount: Int = {
-            guard let raw = readAllInsights() else { return 0 }
-            return raw.components(separatedBy: "\n").filter { $0.hasPrefix("### Insight") }.count
-        }()
-        navButtons[4].updateTitle("Insights (\(insightBlockCount))")
-        // 5: Metacog — show calibration score
-        let (audit, _) = readLatestAudit()
-        let calStr = audit?.calibrationScore.map { String(format: "%.2f", $0) } ?? "—"
-        navButtons[5].updateTitle("Metacog (\(calStr))")
-        // 6: Search, 7: Help, 8: About — no counts
+        guard navButtons.count >= 4 else { return }
+        // Browse shows deduped rows; the honest full total lives in its footer.
+        navButtons[1].updateTitle("Browse (\(browseModel.rows.count))")
+        navButtons[2].updateTitle("Journal (\(journal.count))")
     }
 
     // ── Navigation ─────────────────────────────────────────────────────────────
@@ -3181,7 +3193,7 @@ final class DashboardWindowController: NSObject {
         overviewLinkDelegate = JournalLinkDelegate { [weak self] linkStr in
             guard let self = self else { return }
             if linkStr.hasPrefix("overview-cycle:") {
-                self.selectTab(3)  // Journal tab
+                self.selectTab(2)  // Journal tab
             }
         }
         tv.delegate = overviewLinkDelegate
@@ -3473,7 +3485,7 @@ final class DashboardWindowController: NSObject {
                 selectPattern(String(link.dropFirst("pattern:".count)))
             } else if link.hasPrefix("assoc:") {
                 // Navigate to Associations tab and select the association
-                self?.selectTab(2)
+                self?.selectTab(1)
             }
         }
         patternListDelegate = ld
@@ -4768,13 +4780,13 @@ final class DashboardWindowController: NSObject {
         // Wire up link delegate for clickable search results
         searchLinkDelegate = JournalLinkDelegate { [weak self] link in
             if link.hasPrefix("pattern:") {
-                self?.selectTab(1) // Navigate to Patterns tab
+                self?.selectTab(1) // Navigate to Browse
             } else if link.hasPrefix("assoc:") {
-                self?.selectTab(2) // Navigate to Associations tab
+                self?.selectTab(1) // Navigate to Browse
             } else if link.hasPrefix("insight:") {
-                self?.selectTab(4) // Navigate to Insights tab
+                self?.selectTab(1) // Navigate to Browse
             } else if link.hasPrefix("metacog:") {
-                self?.selectTab(5) // Navigate to Metacog tab
+                self?.selectTab(1) // Navigate to Browse
             }
         }
         tv.delegate = searchLinkDelegate
@@ -6723,6 +6735,13 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let dash = add(menu, "Open Dashboard", #selector(openDashboard), key: "d")
         setIcon(dash, "chart.bar.doc.horizontal.fill")
+
+        // Help/About lost their dashboard tabs in the v3 cutover — they open
+        // as small panels from here now.
+        let helpItem = add(menu, "Help & Shortcuts", #selector(openHelpPanel))
+        setIcon(helpItem, "questionmark.circle.fill")
+        let aboutItem = add(menu, "About i-dream", #selector(openAboutPanel))
+        setIcon(aboutItem, "info.circle.fill")
 
         let cfg = add(menu, "Edit Config in VS Code", #selector(openConfigInVSCode))
         setIcon(cfg, "gearshape.fill")
@@ -8830,25 +8849,33 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboardController!.showOrFront()
     }
 
+    @objc private func openHelpPanel() {
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showInfoPanel(about: false)
+    }
+    @objc private func openAboutPanel() {
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showInfoPanel(about: true)
+    }
+
     /// HUD task #7: openDashboard variants for the HUD cells. Each opens
-    /// the dashboard scrolled to the matching tab. Tab index map:
-    /// 0=Overview · 1=Patterns · 2=Associations · 3=Journal · 4=Insights
-    /// · 5=Metacog · 6=Search · 7=Help · 8=About.
+    /// the dashboard at the matching v3 surface. Tab index map (v3):
+    /// 0=Overview · 1=Browse · 2=Journal · 3=Search.
     @objc private func openDashboardPatterns() {
         if dashboardController == nil { dashboardController = DashboardWindowController() }
         dashboardController!.showOrFront(tab: 1)
     }
     @objc private func openDashboardAssociations() {
         if dashboardController == nil { dashboardController = DashboardWindowController() }
-        dashboardController!.showOrFront(tab: 2)
+        dashboardController!.showOrFront(tab: 1)
     }
     @objc private func openDashboardInsights() {
         if dashboardController == nil { dashboardController = DashboardWindowController() }
-        dashboardController!.showOrFront(tab: 4)
+        dashboardController!.showOrFront(tab: 1)
     }
     @objc private func openDashboardMetacog() {
         if dashboardController == nil { dashboardController = DashboardWindowController() }
-        dashboardController!.showOrFront(tab: 5)
+        dashboardController!.showOrFront(tab: 1)
     }
 
     @objc private func openLogs() {
@@ -9214,6 +9241,376 @@ private class CalendarHeatMapView: NSView {
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
+
+// ═══════════════════ Dashboard v3 — SwiftUI pane layer ═══════════════════
+// Browse is the single paradigm for every knowledge type. It reads the
+// engine's honest derived views (~/.claude/i-dream/derived/views/) so the
+// ×N cluster badges, item ages, and "showing N of M" totals come from the
+// data layer, not per-tab formatting. SwiftUI lives ONLY inside the
+// dashboard window — menus stay pure AppKit (the sibling widget's A-3
+// lesson: hosting SwiftUI in NSMenuItem views crashes).
+// Design: docs/23-widget-v3-plan.md Stage 2.
+
+// — Wire format of a derived view file (mirrors src/consolidation/views.rs;
+//   decoded with convertFromSnakeCase) —
+private struct DerivedViewFile: Codable {
+    let kind: String
+    let total: Int
+    let clusterCount: Int
+    let truncatedAt: Int?
+    let hasMore: Bool
+    let items: [DerivedViewItem]
+}
+
+private struct DerivedViewItem: Codable {
+    let stableId: String
+    let id: String
+    let text: String
+    let category: String?
+    let valence: String?
+    let confidence: Double
+    let daysSinceFirstSeen: Int?
+    let daysSinceLastSeen: Int?
+    let clusterId: String
+    let clusterSize: Int
+    let isRepresentative: Bool
+    let actionable: Bool?
+    let promoted: Bool?
+    let dismissed: Bool?
+}
+
+private func readDerivedView(_ name: String) -> DerivedViewFile? {
+    let path = home + "/.claude/i-dream/derived/views/\(name).json"
+    guard let data = FileManager.default.contents(atPath: path) else { return nil }
+    let dec = JSONDecoder()
+    dec.keyDecodingStrategy = .convertFromSnakeCase
+    return try? dec.decode(DerivedViewFile.self, from: data)
+}
+
+/// Stable id for an insight block header — must produce the same ids as the
+/// historical ratings already recorded in insight-feedback.jsonl.
+private func stableInsightHash(_ header: String) -> String {
+    let hash = header.utf8.reduce(0) { ($0 &* 31) &+ UInt64($1) }
+    return String(format: "%016llx", hash)
+}
+
+private func insightFeedbackMap() -> [String: String] {
+    let path = subDir + "/dreams/insight-feedback.jsonl"
+    guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return [:] }
+    var result: [String: String] = [:]
+    for line in raw.components(separatedBy: "\n") where !line.isEmpty {
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = obj["insight_id"] as? String,
+              let rating = obj["rating"] as? String
+        else { continue }
+        result[id] = rating
+    }
+    return result
+}
+
+// — Browse row model —
+
+struct BrowseRow: Identifiable {
+    enum Kind: String, CaseIterable, Identifiable {
+        case pattern = "Patterns"
+        case association = "Associations"
+        case insight = "Insights"
+        case metacog = "Metacog"
+        var id: String { rawValue }
+        var tint: Color {
+            switch self {
+            case .pattern: return .cyan
+            case .association: return .orange
+            case .insight: return .yellow
+            case .metacog: return .pink
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .pattern: return "brain.head.profile"
+            case .association: return "link"
+            case .insight: return "sparkles"
+            case .metacog: return "checkmark.seal.fill"
+            }
+        }
+    }
+
+    let id: String
+    let kind: Kind
+    let title: String
+    let detail: String
+    let confidence: Double?
+    let clusterSize: Int
+    let ageDays: Int?
+    let category: String?
+    var rating: String?
+    /// Insights only: the id ratings are recorded under. Content-hashed —
+    /// the legacy header-only hash collides ("### Insight (conf=0.82)"
+    /// repeats 13× in the live store), which both dropped SwiftUI ForEach
+    /// rows and mis-attributed legacy ratings across header-twins.
+    var ratingId: String = ""
+}
+
+struct BrowseTotals {
+    var totalItems = 0
+    var clusters = 0
+    var note = ""
+}
+
+/// Assemble Browse rows from every knowledge store. Pure file reads —
+/// safe to call off the main thread (reloadDataAsync does).
+func buildBrowseRows() -> ([BrowseRow], BrowseTotals) {
+    var rows: [BrowseRow] = []
+    var totals = BrowseTotals()
+
+    if let v = readDerivedView("patterns") {
+        totals.totalItems += v.total
+        totals.clusters += v.clusterCount
+        for it in v.items where it.isRepresentative {
+            rows.append(BrowseRow(
+                id: it.stableId, kind: .pattern, title: it.text, detail: it.text,
+                confidence: it.confidence, clusterSize: it.clusterSize,
+                ageDays: it.daysSinceLastSeen, category: it.category, rating: nil))
+        }
+    }
+    if let v = readDerivedView("associations") {
+        totals.totalItems += v.total
+        totals.clusters += v.clusterCount
+        for it in v.items where it.isRepresentative && !(it.dismissed ?? false) {
+            rows.append(BrowseRow(
+                id: it.stableId, kind: .association, title: it.text, detail: it.text,
+                confidence: it.confidence, clusterSize: it.clusterSize,
+                ageDays: it.daysSinceLastSeen,
+                category: (it.actionable ?? false) ? "actionable" : nil, rating: nil))
+        }
+    }
+
+    let feedback = insightFeedbackMap()
+    if let raw = readAllInsights() {
+        let blocks = raw.components(separatedBy: "\n").reduce(into: [(header: String, lines: [String])]()) { acc, line in
+            if line.hasPrefix("### Insight") { acc.append((header: line, lines: [])) }
+            else if !acc.isEmpty { acc[acc.count - 1].lines.append(line) }
+        }
+        totals.totalItems += blocks.count
+        for b in blocks.reversed() {
+            let legacyId = stableInsightHash(b.header)
+            let body = b.lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let contentId = stableInsightHash(b.header + body)
+            var conf: Double? = nil
+            if let r = b.header.range(of: #"conf=([0-9.]+)"#, options: .regularExpression) {
+                conf = Double(b.header[r].replacingOccurrences(of: "conf=", with: ""))
+            }
+            let title = body.components(separatedBy: "\n").first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) ?? b.header
+            rows.append(BrowseRow(
+                id: contentId, kind: .insight, title: title, detail: body,
+                confidence: conf, clusterSize: 1, ageDays: nil,
+                category: nil,
+                rating: feedback[contentId] ?? feedback[legacyId],
+                ratingId: contentId))
+        }
+    }
+
+    let (audit, filename) = readLatestAudit()
+    if let a = audit {
+        let cal = a.calibrationScore.map { String(format: "%.2f", $0) } ?? "—"
+        rows.append(BrowseRow(
+            id: "metacog-latest", kind: .metacog,
+            title: "Latest metacog audit — calibration \(cal)",
+            detail: "File: \(filename ?? "?")\nCalibration: \(cal)\nSee daemon metacog audits dir for history.",
+            confidence: a.calibrationScore, clusterSize: 1, ageDays: nil,
+            category: nil, rating: nil))
+        totals.totalItems += 1
+    }
+
+    // Freshest first; unknown ages sink; confidence breaks ties.
+    rows.sort {
+        let a = $0.ageDays ?? Int.max
+        let b = $1.ageDays ?? Int.max
+        if a != b { return a < b }
+        return ($0.confidence ?? 0) > ($1.confidence ?? 0)
+    }
+    totals.note = "showing \(rows.count) rows · \(totals.totalItems) items in stores"
+    return (rows, totals)
+}
+
+// — Model + view —
+
+final class BrowseModel: ObservableObject {
+    @Published var rows: [BrowseRow] = []
+    @Published var totals = BrowseTotals()
+    @Published var filter: BrowseRow.Kind? = nil
+    @Published var expandedId: String? = nil
+    /// Writes the rating and refreshes; wired by the dashboard controller.
+    var onRate: ((String, String) -> Void)?
+
+    func apply(rows: [BrowseRow], totals: BrowseTotals) {
+        self.rows = rows
+        self.totals = totals
+        if let e = expandedId, !rows.contains(where: { $0.id == e }) {
+            expandedId = nil   // selection never outlives a shrunk refresh
+        }
+    }
+    var filtered: [BrowseRow] {
+        guard let f = filter else { return rows }
+        return rows.filter { $0.kind == f }
+    }
+    func count(of kind: BrowseRow.Kind) -> Int {
+        rows.filter { $0.kind == kind }.count
+    }
+}
+
+struct BrowseView: View {
+    @ObservedObject var model: BrowseModel
+    /// Hard exact row height — hover/expansion must never shift layout
+    /// (sibling anti-idea A-7: minHeight lets hover change the box).
+    private let rowH: CGFloat = 30
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            chipBar
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(model.filtered) { row in
+                        rowView(row)
+                        if model.expandedId == row.id {
+                            detailView(row)
+                        }
+                    }
+                }
+            }
+            Divider()
+            footer
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var chipBar: some View {
+        HStack(spacing: 6) {
+            chip(nil, label: "All (\(model.rows.count))")
+            ForEach(BrowseRow.Kind.allCases) { k in
+                chip(k, label: "\(k.rawValue) (\(model.count(of: k)))")
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private func chip(_ kind: BrowseRow.Kind?, label: String) -> some View {
+        let active = model.filter == kind
+        return Button(action: { model.filter = kind }) {
+            Text(label)
+                .font(.system(size: 11, weight: active ? .semibold : .regular))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background((kind?.tint ?? .secondary).opacity(active ? 0.28 : 0.10))
+                .foregroundColor(active ? .primary : .secondary)
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func rowView(_ row: BrowseRow) -> some View {
+        Button(action: {
+            model.expandedId = (model.expandedId == row.id) ? nil : row.id
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: row.kind.symbol)
+                    .font(.system(size: 11))
+                    .foregroundColor(row.kind.tint)
+                    .frame(width: 16)
+                Text(row.title)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundColor(.primary)
+                Spacer(minLength: 8)
+                if row.clusterSize > 1 {
+                    Text("×\(row.clusterSize)")
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(row.kind.tint.opacity(0.18))
+                        .clipShape(Capsule())
+                }
+                if let r = row.rating {
+                    Text(r == "up" ? "👍" : "👎").font(.system(size: 10))
+                }
+                if let c = row.confidence {
+                    Text("\(Int(c * 100))%")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundColor(.secondary)
+                        .frame(width: 34, alignment: .trailing)
+                }
+                Text(ageLabel(row.ageDays))
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundColor(ageColor(row.ageDays))
+                    .frame(width: 38, alignment: .trailing)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: rowH)   // exact, not min
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(model.expandedId == row.id ? Color.primary.opacity(0.06) : Color.clear)
+    }
+
+    private func detailView(_ row: BrowseRow) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView {
+                Text(row.detail)
+                    .font(.system(size: 12))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxHeight: 240)
+            HStack(spacing: 10) {
+                if let cat = row.category {
+                    Text(cat).font(.system(size: 10))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.15))
+                        .clipShape(Capsule())
+                }
+                if row.clusterSize > 1 {
+                    Text("\(row.clusterSize) rewordings of this lesson collapsed into one row")
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+                }
+                Spacer()
+                if row.kind == .insight {
+                    Button("👍") { model.onRate?(row.ratingId, "up") }.buttonStyle(.plain)
+                    Button("👎") { model.onRate?(row.ratingId, "down") }.buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.04))
+    }
+
+    private var footer: some View {
+        HStack {
+            Text(model.totals.note + " · \(model.totals.clusters) deduped clusters")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+    }
+
+    private func ageLabel(_ d: Int?) -> String {
+        guard let d else { return "—" }
+        if d == 0 { return "today" }
+        if d < 30 { return "\(d)d" }
+        if d < 365 { return "\(d / 30)mo" }
+        return "\(d / 365)y"
+    }
+    private func ageColor(_ d: Int?) -> Color {
+        guard let d else { return .secondary }
+        return d >= 30 ? .orange : .secondary
+    }
+}
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
