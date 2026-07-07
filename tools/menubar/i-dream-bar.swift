@@ -1185,8 +1185,6 @@ final class DashboardWindowController: NSObject {
     private var insightFeedbackDelegate: InsightFeedbackDelegate?
 
     // Search tab state
-    private var searchField:           NSSearchField?
-    private var searchResultsTextView: NSTextView?
     private var searchLinkDelegate:    JournalLinkDelegate?
     private var searchDebounceTimer:   Timer?
 
@@ -1287,6 +1285,10 @@ final class DashboardWindowController: NSObject {
     let browseModel = BrowseModel()
     let overviewModel = OverviewModel()
     let journalModel = JournalModel()
+    let searchModel = SearchModel()
+    /// Which surface is showing — the key monitor needs it for the
+    /// Search tab's arrow-key flow.
+    private var currentTab = 0
 
     // ── Public interface ───────────────────────────────────────────────────────
 
@@ -1346,6 +1348,7 @@ final class DashboardWindowController: NSObject {
                 self.overviewModel.data = ov
                 self.journalModel.rows = journalRows
                 self.journalModel.heatEntries = heat
+                self.searchModel.allRows = browseRows
                 self.rebuildContentViews()
                 dlog("dashboard: async data loaded (\(pat.count)p/\(assoc.count)a/\(jour.count)j/\(browseRows.count)b)")
                 completion?()
@@ -1580,17 +1583,24 @@ final class DashboardWindowController: NSObject {
     private func installKeyMonitorIfNeeded() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
-            guard let self, let p = self.panel, ev.window === p,
-                  ev.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
+            guard let self, let p = self.panel, ev.window === p else { return ev }
+            let mods = ev.modifierFlags.intersection([.command, .option, .control, .shift])
+            // Search-tab keyboard flow: ↑/↓ move the selection while the
+            // field keeps focus; ⏎ is handled by the field's onSubmit.
+            if mods.isEmpty, self.currentTab == 3 {
+                if ev.keyCode == 125 { self.searchModel.moveSelection(+1); return nil }
+                if ev.keyCode == 126 { self.searchModel.moveSelection(-1); return nil }
+            }
+            guard mods == .command,
                   let ch = ev.charactersIgnoringModifiers?.first else { return ev }
             if ch >= "1" && ch <= "9" {
                 self.selectTab(Int(ch.asciiValue! - Character("1").asciiValue!))
                 return nil
             }
             if ch == "r" { self.refreshDashboard(); return nil }
-            if ch == "f" {
+            if ch == "f" || ch == "k" {
                 self.selectTab(3)
-                if let sf = self.searchField { p.makeFirstResponder(sf) }
+                self.searchModel.focusToken += 1
                 return nil
             }
             return ev
@@ -1600,8 +1610,6 @@ final class DashboardWindowController: NSObject {
     private func rebuildContentViews() {
         patternDetailTextView = nil
         assocDetailTextView = nil
-        searchField             = nil
-        searchResultsTextView   = nil
         for v in contentViews { v.removeFromSuperview() }
         contentViews = []
         let f = contentContainer.bounds
@@ -1648,7 +1656,17 @@ final class DashboardWindowController: NSObject {
             return host
         }()
         dlog("dashboard: building search")
-        let v3 = buildSearchView(frame: f)
+        searchModel.onOpen = { [weak self] id in
+            guard let self else { return }
+            self.selectTab(1)
+            self.browseModel.jump(to: id)
+        }
+        let v3: NSView = {
+            let host = NSHostingView(rootView: SearchPane(model: searchModel))
+            host.frame = f
+            host.autoresizingMask = [.width, .height]
+            return host
+        }()
         dlog("dashboard: all views built")
         contentViews = [v0, v1, v2, v3]
         for v in contentViews { contentContainer.addSubview(v) }
@@ -1672,9 +1690,11 @@ final class DashboardWindowController: NSObject {
 
     func selectTab(_ index: Int) {
         guard index >= 0 && index < tabs.count else { return }
+        currentTab = index
         for (i, btn) in navButtons.enumerated() { btn.isSelectedTab = (i == index) }
         for (i, v) in contentViews.enumerated()  { v.isHidden        = (i != index) }
         UserDefaults.standard.set(index, forKey: "idream-dashboard-selected-tab")
+        if index == 3 { searchModel.focusToken += 1 }
     }
 
     @objc private func refreshDashboard() {
@@ -2272,368 +2292,15 @@ final class DashboardWindowController: NSObject {
 
     // ── Tab 6: Search ──────────────────────────────────────────────────────────
 
-    private func buildSearchView(frame: NSRect) -> NSView {
-        let container = NSView(frame: frame)
-        container.autoresizingMask = [.width, .height]
 
-        // Search field at top
-        let fieldH: CGFloat = 32
-        let pad: CGFloat = 16
-        let tagBarH: CGFloat = 30
-        let sf = NSSearchField(frame: NSRect(x: pad, y: frame.height - fieldH - pad,
-                                              width: frame.width - pad * 2, height: fieldH))
-        sf.autoresizingMask = [.width, .minYMargin]
-        sf.placeholderString = "Search — supports multiple words (fuzzy), e.g. \"retry tool\""
-        sf.font = .systemFont(ofSize: 13)
-        sf.target = self
-        sf.action = #selector(searchChanged(_:))
-        sf.sendsSearchStringImmediately = true
-        container.addSubview(sf)
-        searchField = sf
 
-        // Quick-filter tag bar
-        let tagBar = NSView(frame: NSRect(x: 0, y: frame.height - fieldH - pad - tagBarH - 4,
-                                           width: frame.width, height: tagBarH))
-        tagBar.autoresizingMask = [.width, .minYMargin]
-        let categories = Set(patterns.map { $0.category }).sorted()
-        var tagX: CGFloat = pad
-        for cat in categories.prefix(12) {
-            let tag = NSButton(frame: NSRect(x: tagX, y: 4, width: 0, height: 22))
-            tag.title = cat
-            tag.bezelStyle = .inline
-            tag.font = .systemFont(ofSize: 10, weight: .medium)
-            tag.contentTintColor = .systemTeal
-            tag.target = self
-            tag.action = #selector(searchTagClicked(_:))
-            tag.sizeToFit()
-            tag.frame.size.width += 12
-            tagBar.addSubview(tag)
-            tagX += tag.frame.width + 6
-        }
-        container.addSubview(tagBar)
-
-        // Results area below
-        let topUsed = fieldH + pad + tagBarH + 8
-        let resultsFrame = NSRect(x: 0, y: 0,
-                                   width: frame.width,
-                                   height: frame.height - topUsed)
-        let (sv, tv) = makeScrollableTextView(frame: resultsFrame)
-        sv.autoresizingMask = [.width, .height]
-        container.addSubview(sv)
-        searchResultsTextView = tv
-
-        // Wire up link delegate for clickable search results
-        searchLinkDelegate = JournalLinkDelegate { [weak self] link in
-            if link.hasPrefix("pattern:") {
-                self?.selectTab(1) // Navigate to Browse
-            } else if link.hasPrefix("assoc:") {
-                self?.selectTab(1) // Navigate to Browse
-            } else if link.hasPrefix("insight:") {
-                self?.selectTab(1) // Navigate to Browse
-            } else if link.hasPrefix("metacog:") {
-                self?.selectTab(1) // Navigate to Browse
-            }
-        }
-        tv.delegate = searchLinkDelegate
-        tv.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
-
-        // Show initial placeholder with stats
-        renderSearchPlaceholder(tv)
-        return container
-    }
-
-    private func renderSearchPlaceholder(_ tv: NSTextView) {
-        let rt = RichText()
-        rt.spacer()
-        rt.subheader("  Search i-dream Knowledge Base")
-        rt.spacer()
-        rt.body("  Type to search across all data. Multiple words are matched independently")
-        rt.body("  (fuzzy): \"retry tool\" matches items containing both \"retry\" AND \"tool\".")
-        rt.spacer()
-        rt.dim("  ┌─ Data Sources ────────────────────────────────────────────┐")
-        rt.dim("  │  Patterns        \(patterns.count) items    pattern text, category, valence  │")
-        rt.dim("  │  Associations    \(associations.count) items    hypotheses, suggested rules     │")
-        rt.dim("  │  Insights        full text     insight blocks with context     │")
-        rt.dim("  │  Metacog         latest audit  biases and recommendations      │")
-        rt.dim("  └──────────────────────────────────────────────────────────────┘")
-        rt.spacer()
-        rt.dim("  Click a category tag above for quick filtering.")
-        rt.dim("  Use quotes for exact phrases (not yet supported — planned for V2).")
-        tv.textStorage?.setAttributedString(rt.build())
-    }
-
-    @objc private func searchTagClicked(_ sender: NSButton) {
-        searchField?.stringValue = sender.title
-        if let sf = searchField { searchChanged(sf) }
-    }
 
     /// Fuzzy match: returns true if ALL words in `queryWords` appear in `text`.
-    private func fuzzyMatch(_ text: String, queryWords: [String]) -> Bool {
-        let lower = text.lowercased()
-        return queryWords.allSatisfy { lower.contains($0) }
-    }
 
     /// Compute a relevance score: higher = better match. Rewards exact substring,
     /// word-boundary matches, and early position.
-    private func relevanceScore(_ text: String, queryWords: [String], fullQuery: String) -> Int {
-        let lower = text.lowercased()
-        var score = 0
-        // Exact full query match bonus
-        if lower.contains(fullQuery) { score += 100 }
-        // Word-boundary bonus for each word
-        for w in queryWords {
-            if lower.hasPrefix(w) { score += 20 }
-            if lower.contains(" \(w)") { score += 10 }
-            if lower.contains(w) { score += 5 }
-        }
-        return score
-    }
 
-    @objc private func searchChanged(_ sender: NSSearchField) {
-        let rawQuery = sender.stringValue.trimmingCharacters(in: .whitespaces)
-        guard let tv = searchResultsTextView else { return }
 
-        if rawQuery.isEmpty {
-            searchDebounceTimer?.invalidate()
-            renderSearchPlaceholder(tv)
-            return
-        }
-
-        // Debounce: wait 150ms after last keystroke before executing search
-        searchDebounceTimer?.invalidate()
-        searchDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
-            self?.performSearch(rawQuery)
-        }
-    }
-
-    private func performSearch(_ rawQuery: String) {
-        guard let tv = searchResultsTextView else { return }
-        let query = rawQuery.lowercased()
-        let queryWords = query.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-        let rt = RichText()
-        var totalHits = 0
-
-        // ── Patterns ────────────────────────────────────────────────────────
-        let matchedPatterns = patterns.enumerated().filter { (_, p) in
-            let searchable = "\(p.pattern) \(p.category) \(p.valence) \(p.id ?? "")"
-            return fuzzyMatch(searchable, queryWords: queryWords)
-        }.sorted { (a, b) in
-            let scoreA = relevanceScore(a.element.pattern, queryWords: queryWords, fullQuery: query)
-            let scoreB = relevanceScore(b.element.pattern, queryWords: queryWords, fullQuery: query)
-            return scoreA > scoreB
-        }
-        if !matchedPatterns.isEmpty {
-            rt.raw(sectionHeader("Patterns", count: matchedPatterns.count, icon: "◆", color: .systemTeal))
-            for (_, p) in matchedPatterns.prefix(30) {
-                let confPct = Int(p.confidence * 100)
-                let valColor: NSColor = p.valence == "positive" ? .systemGreen
-                    : p.valence == "negative" ? .systemRed : .secondaryLabelColor
-                let valIcon = p.valence == "positive" ? "▲" : p.valence == "negative" ? "▼" : "●"
-                // Tag pills: [category] [valence] [confidence]
-                let line = NSMutableAttributedString()
-                line.append(NSAttributedString(string: "  \(valIcon) ", attributes: [
-                    .font: NSFont.systemFont(ofSize: 12, weight: .bold), .foregroundColor: valColor]))
-                line.append(tagPill(p.category, color: .systemTeal))
-                line.append(NSAttributedString(string: " "))
-                line.append(tagPill(p.valence, color: valColor))
-                line.append(NSAttributedString(string: " "))
-                line.append(tagPill("\(confPct)%", color: confPct >= 80 ? .systemGreen : confPct >= 60 ? .systemBlue : .secondaryLabelColor))
-                line.append(NSAttributedString(string: "\n"))
-                rt.raw(line)
-                // Full pattern text with highlight — clickable link to Patterns tab
-                let patKey = p.stableKey
-                let highlighted = highlightQuery(in: p.pattern, queryWords: queryWords,
-                                                  baseFont: .systemFont(ofSize: 13),
-                                                  baseColor: .labelColor)
-                let indented = NSMutableAttributedString(string: "     ")
-                indented.append(highlighted)
-                // Add link attribute across the whole text range (excluding indent)
-                indented.addAttributes([
-                    .link: "pattern:\(patKey)" as NSString,
-                    .cursor: NSCursor.pointingHand,
-                ], range: NSRange(location: 5, length: indented.length - 5))
-                indented.append(NSAttributedString(string: "  → ", attributes: [
-                    .font: NSFont.systemFont(ofSize: 10),
-                    .foregroundColor: NSColor.systemTeal.withAlphaComponent(0.6)]))
-                indented.append(NSAttributedString(string: "view", attributes: [
-                    .font: NSFont.systemFont(ofSize: 10),
-                    .foregroundColor: NSColor.systemTeal.withAlphaComponent(0.6),
-                    .link: "pattern:\(patKey)" as NSString,
-                    .cursor: NSCursor.pointingHand]))
-                indented.append(NSAttributedString(string: "\n"))
-                rt.raw(indented)
-                // Date if available
-                if let fs = p.firstSeen, !fs.isEmpty {
-                    rt.raw(NSAttributedString(string: "     First seen: \(fmtDate(fs))\n", attributes: [
-                        .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.tertiaryLabelColor]))
-                }
-                rt.raw(NSAttributedString(string: "\n"))
-            }
-            if matchedPatterns.count > 30 {
-                rt.dim("    … and \(matchedPatterns.count - 30) more patterns")
-            }
-            totalHits += matchedPatterns.count
-            rt.spacer()
-        }
-
-        // ── Associations ────────────────────────────────────────────────────
-        let matchedAssocs = associations.enumerated().filter { (_, a) in
-            let searchable = "\(a.hypothesis) \(a.suggestedRule ?? "") \(a.id)"
-            return fuzzyMatch(searchable, queryWords: queryWords)
-        }.sorted { (a, b) in
-            let scoreA = relevanceScore(a.element.hypothesis, queryWords: queryWords, fullQuery: query)
-            let scoreB = relevanceScore(b.element.hypothesis, queryWords: queryWords, fullQuery: query)
-            return scoreA > scoreB
-        }
-        if !matchedAssocs.isEmpty {
-            rt.raw(sectionHeader("Associations", count: matchedAssocs.count, icon: "◇", color: .systemOrange))
-            for (_, a) in matchedAssocs.prefix(30) {
-                let confPct = Int(a.confidence * 100)
-                let line = NSMutableAttributedString()
-                line.append(NSAttributedString(string: "  ", attributes: [:]))
-                if a.actionable {
-                    line.append(tagPill("actionable", color: .systemYellow))
-                    line.append(NSAttributedString(string: " "))
-                }
-                line.append(tagPill("\(confPct)%", color: confPct >= 80 ? .systemGreen : confPct >= 60 ? .systemBlue : .secondaryLabelColor))
-                line.append(NSAttributedString(string: "\n"))
-                rt.raw(line)
-                // Hypothesis with highlight — clickable link to Associations tab
-                let highlighted = highlightQuery(in: a.hypothesis, queryWords: queryWords,
-                                                  baseFont: .systemFont(ofSize: 13),
-                                                  baseColor: .labelColor)
-                let indented = NSMutableAttributedString(string: "     ")
-                indented.append(highlighted)
-                indented.addAttributes([
-                    .link: "assoc:\(a.id)" as NSString,
-                    .cursor: NSCursor.pointingHand,
-                ], range: NSRange(location: 5, length: indented.length - 5))
-                indented.append(NSAttributedString(string: "  ��� ", attributes: [
-                    .font: NSFont.systemFont(ofSize: 10),
-                    .foregroundColor: NSColor.systemOrange.withAlphaComponent(0.6)]))
-                indented.append(NSAttributedString(string: "view", attributes: [
-                    .font: NSFont.systemFont(ofSize: 10),
-                    .foregroundColor: NSColor.systemOrange.withAlphaComponent(0.6),
-                    .link: "assoc:\(a.id)" as NSString,
-                    .cursor: NSCursor.pointingHand]))
-                indented.append(NSAttributedString(string: "\n"))
-                rt.raw(indented)
-                // Suggested rule if present
-                if let rule = a.suggestedRule, !rule.isEmpty {
-                    let ruleHl = highlightQuery(in: rule, queryWords: queryWords,
-                                                 baseFont: .systemFont(ofSize: 12),
-                                                 baseColor: .secondaryLabelColor)
-                    let ruleLine = NSMutableAttributedString(string: "     Rule: ", attributes: [
-                        .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-                        .foregroundColor: NSColor.secondaryLabelColor])
-                    ruleLine.append(ruleHl)
-                    ruleLine.append(NSAttributedString(string: "\n"))
-                    rt.raw(ruleLine)
-                }
-                rt.raw(NSAttributedString(string: "\n"))
-            }
-            if matchedAssocs.count > 30 {
-                rt.dim("    … and \(matchedAssocs.count - 30) more associations")
-            }
-            totalHits += matchedAssocs.count
-            rt.spacer()
-        }
-
-        // ── Insights ────────────────────────────────────────────────────────
-        if let raw = readAllInsights() {
-            let lines = raw.components(separatedBy: "\n")
-            var matchedLines: [(lineNum: Int, text: String)] = []
-            for (i, line) in lines.enumerated() {
-                if fuzzyMatch(line, queryWords: queryWords) {
-                    matchedLines.append((i + 1, line))
-                }
-            }
-            if !matchedLines.isEmpty {
-                rt.raw(sectionHeader("Insights", count: matchedLines.count, icon: "✦", color: .systemYellow))
-                for hit in matchedLines.prefix(25) {
-                    let trimmed = hit.text.trimmingCharacters(in: .whitespaces)
-                    if trimmed.isEmpty { continue }
-                    let insightLine = NSMutableAttributedString()
-                    insightLine.append(NSAttributedString(string: "  L\(hit.lineNum)  ", attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .regular),
-                        .foregroundColor: NSColor.tertiaryLabelColor,
-                    ]))
-                    let highlighted = highlightQuery(in: trimmed, queryWords: queryWords,
-                                                      baseFont: .systemFont(ofSize: 12),
-                                                      baseColor: .labelColor)
-                    insightLine.append(highlighted)
-                    // Make the entire line clickable to navigate to Insights tab
-                    insightLine.addAttributes([
-                        .link: "insight:L\(hit.lineNum)" as NSString,
-                        .cursor: NSCursor.pointingHand,
-                    ], range: NSRange(location: 0, length: insightLine.length))
-                    insightLine.append(NSAttributedString(string: "\n"))
-                    rt.raw(insightLine)
-                }
-                if matchedLines.count > 25 {
-                    rt.dim("    … and \(matchedLines.count - 25) more lines")
-                }
-                totalHits += matchedLines.count
-                rt.spacer()
-            }
-        }
-
-        // ── Metacog ─────────────────────────────────────────────────────────
-        let (audit, auditFile) = readLatestAudit()
-        if let audit = audit {
-            var metacogHits: [(kind: String, text: String)] = []
-            for b in (audit.biasesDetected ?? []) where fuzzyMatch(b, queryWords: queryWords) {
-                metacogHits.append(("bias", b))
-            }
-            for r in (audit.recommendations ?? []) where fuzzyMatch(r, queryWords: queryWords) {
-                metacogHits.append(("rec", r))
-            }
-            if !metacogHits.isEmpty {
-                let auditLabel: String = {
-                    guard let f = auditFile else { return "latest" }
-                    let name = (f as NSString).lastPathComponent
-                    return name.replacingOccurrences(of: "-audit.json", with: "")
-                }()
-                rt.raw(sectionHeader("Metacog (\(auditLabel))", count: metacogHits.count, icon: "⬡", color: .systemPink))
-                for hit in metacogHits.prefix(15) {
-                    let kindColor: NSColor = hit.kind == "bias" ? .systemOrange : .systemBlue
-                    let line = NSMutableAttributedString(string: "  ")
-                    line.append(tagPill(hit.kind, color: kindColor))
-                    line.append(NSAttributedString(string: " "))
-                    let highlighted = highlightQuery(in: hit.text, queryWords: queryWords,
-                                                      baseFont: .systemFont(ofSize: 12),
-                                                      baseColor: .labelColor)
-                    line.append(highlighted)
-                    // Make clickable to navigate to Metacog tab
-                    line.addAttributes([
-                        .link: "metacog:\(hit.kind)" as NSString,
-                        .cursor: NSCursor.pointingHand,
-                    ], range: NSRange(location: 0, length: line.length))
-                    line.append(NSAttributedString(string: "\n\n"))
-                    rt.raw(line)
-                }
-                totalHits += metacogHits.count
-                rt.spacer()
-            }
-        }
-
-        // ── Summary / no results ────────────────────────────────────────────
-        if totalHits == 0 {
-            rt.spacer()
-            rt.dim("  No results for \"\(rawQuery)\"")
-            rt.spacer()
-            rt.dim("  Tips:")
-            rt.dim("    • Try fewer or shorter words")
-            rt.dim("    • Click a category tag above to browse by topic")
-            rt.dim("    • All words must match (AND logic)")
-        } else {
-            rt.divider()
-            rt.dim("  \(totalHits) result(s) across all categories for \"\(rawQuery)\"")
-        }
-
-        tv.textStorage?.setAttributedString(rt.build())
-        tv.scrollToBeginningOfDocument(nil)
-    }
 
     /// Styled section header with icon and count.
     private func sectionHeader(_ title: String, count: Int, icon: String, color: NSColor) -> NSAttributedString {
@@ -7340,6 +7007,170 @@ struct BrowseView: View {
     private func ageColor(_ d: Int?) -> Color {
         guard let d else { return .secondary }
         return d >= 30 ? .orange : .secondary
+    }
+}
+
+// — Search: the query spine over the deduped knowledge base —
+// Results are Browse rows (cluster representatives), so grouping-by-lesson
+// is inherent: the push-approval query returns ONE ×22 row, not ten
+// rewordings. Quoted "exact phrases" are honored — the old pane's
+// "planned for V2" confession, shipped.
+
+final class SearchModel: ObservableObject {
+    @Published var query = ""
+    @Published var selected = 0
+    /// Incremented by the controller when ⌘F/tab-switch wants the field focused.
+    @Published var focusToken = 0
+    /// Snapshot of Browse rows; refreshed by every dashboard data load.
+    var allRows: [BrowseRow] = []
+    var onOpen: ((String) -> Void)?
+
+    struct Hit: Identifiable {
+        let row: BrowseRow
+        let score: Int
+        var id: String { row.id }
+    }
+
+    var hits: [Hit] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard q.count >= 2 else { return [] }
+        var phrases: [String] = []
+        var rest = q.lowercased()
+        while let a = rest.firstIndex(of: "\"") {
+            let after = rest.index(after: a)
+            guard let b = rest[after...].firstIndex(of: "\"") else { break }
+            let phrase = String(rest[after..<b]).trimmingCharacters(in: .whitespaces)
+            if !phrase.isEmpty { phrases.append(phrase) }
+            rest.removeSubrange(a...b)
+        }
+        let words = rest.split(separator: " ").map(String.init).filter { !$0.isEmpty }
+        guard !(phrases.isEmpty && words.isEmpty) else { return [] }
+
+        var out: [Hit] = []
+        for row in allRows {
+            let title = row.title.lowercased()
+            let body = row.detail.lowercased()
+            var ok = true
+            for p in phrases where !title.contains(p) && !body.contains(p) { ok = false; break }
+            if !ok { continue }
+            var score = phrases.count * 4
+            for w in words {
+                if title.contains(w) { score += 3 }
+                else if body.contains(w) { score += 1 }
+                else { ok = false; break }
+            }
+            if !ok { continue }
+            if let age = row.ageDays, age <= 14 { score += 1 }
+            if row.clusterSize > 1 { score += 1 }
+            out.append(Hit(row: row, score: score))
+        }
+        return out.sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            return ($0.row.ageDays ?? .max) < ($1.row.ageDays ?? .max)
+        }
+    }
+
+    func moveSelection(_ delta: Int) {
+        let n = hits.count
+        guard n > 0 else { return }
+        selected = min(max(0, selected + delta), n - 1)
+    }
+
+    func openSelected() {
+        let h = hits
+        guard !h.isEmpty else { return }
+        onOpen?(h[min(selected, h.count - 1)].row.id)
+    }
+}
+
+struct SearchPane: View {
+    @ObservedObject var model: SearchModel
+    @FocusState private var fieldFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextField("Search all lessons — words match independently, \"quotes\" match exactly", text: $model.query)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+                .focused($fieldFocused)
+                .onSubmit { model.openSelected() }
+                .padding(12)
+                .onChange(of: model.query) { _ in model.selected = 0 }
+                .onChange(of: model.focusToken) { _ in fieldFocused = true }
+                .onAppear { fieldFocused = true }
+            Divider()
+            if model.query.trimmingCharacters(in: .whitespaces).count < 2 {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Type to search patterns, associations, insights and metacog — one row per lesson (rewordings are collapsed).")
+                    Text("↑↓ select · ⏎ open in Browse · \"quoted phrases\" match exactly")
+                        .foregroundColor(.secondary)
+                }
+                .font(.system(size: 12))
+                .padding(16)
+                Spacer()
+            } else {
+                let hits = model.hits
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
+                                hitRow(hit.row, isSelected: i == model.selected)
+                                    .id(hit.id)
+                                    .onTapGesture { model.onOpen?(hit.row.id) }
+                            }
+                        }
+                    }
+                    .onChange(of: model.selected) { sel in
+                        guard sel < hits.count else { return }
+                        proxy.scrollTo(hits[sel].id)
+                    }
+                }
+                Divider()
+                HStack {
+                    Text("\(hits.count) of \(model.allRows.count) lessons match")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func hitRow(_ row: BrowseRow, isSelected: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: row.kind.symbol)
+                .font(.system(size: 11))
+                .foregroundColor(row.kind.tint)
+                .frame(width: 16)
+            Text(row.title)
+                .font(.system(size: 12))
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if row.clusterSize > 1 {
+                Text("×\(row.clusterSize)")
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(row.kind.tint.opacity(0.18))
+                    .clipShape(Capsule())
+            }
+            if let c = row.confidence {
+                Text("\(Int(c * 100))%")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundColor(.secondary)
+                    .frame(width: 34, alignment: .trailing)
+            }
+            Text(row.ageDays.map { $0 == 0 ? "today" : "\($0)d" } ?? "—")
+                .font(.system(size: 10).monospacedDigit())
+                .foregroundColor(.secondary)
+                .frame(width: 40, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 30)
+        .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
+        .contentShape(Rectangle())
     }
 }
 
