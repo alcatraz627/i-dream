@@ -9,16 +9,22 @@ cluster; ages + honest totals live at `~/.claude/i-dream/derived/views/`).
 Stage-1 deviation, evidence-based: digest Top-signals needed NO dedup — its
 five lines come from five distinct domains; the dup disease lived in
 patterns/associations only.
-Stage 2 session 1 shipped 2026-07-07: 4-tab cutover live (Overview · Browse ·
-Journal · Search), SwiftUI Browse pane on the derived views (chips, ×N
-cluster badges, ages, honest footer, inline expand + rate); Help/About are
-menu panels. Remaining for Stage 2: delete the dead per-type builders +
-graph views (~2.5K lines, compiled but unreachable), Overview felt-value
-repivot, Journal pane rebuild (investigated: no width clamp — 36-char
-monospace bars; "14K tokens" is real ~13.5K data rounding, not a bug).
-Known follow-up surfaced BY the new UI: the insights store itself is ~20
-rewordings of one meta-lesson — extend Stage-1 clustering to insights
-(needs Rust-side insights.md parsing). Stages 3–5 pending.
+**Stage 2 COMPLETE 2026-07-08** (commits c248c7d · 5861301 · 6b55224 ·
+f36c215 · 88f6ee2 · 95775b1): 4 surfaces live; Browse = two-line rich rows,
+markdown detail, linked-entity cross-nav chips, on-demand cluster map
+(bubbles + selective highlight — runtime UNCONFIRMED, built under a locked
+screen); Overview repivoted felt-value-first with the approved viz suite
+(top-lessons bars, distribution, 12-week timelines); Journal rebuilt
+(heatmap + exact tokens + per-cycle pattern chips); dead per-type builders,
+bead graphs, and network panels deleted (9.9K → 7.6K lines); dashboard
+panel follows the active Space (the J2 silent no-op root cause, caught by
+instrumentation).
+Engine follow-ups queued: extend clustering to insights (store is ~20
+rewordings of one meta-lesson); per-type cluster threshold (one ×52
+association cluster suggests over-chaining on verbose prose).
+Stage 4 evidence ready: `.claude/output/20260707-widget-redo/topbar-review.md`
+(verdict: keep NSMenu, diet it; DesignKit primitives port as pure AppKit).
+Stages 3–5 pending.
 Owner decisions locked 2026-07-07: collapse dashboard to 4 surfaces · HUD kept
 as-is for now (bug-fix only, repivot later) · dedup/age-anchoring live in the
 Rust engine as derived views · SwiftUI panes inside the dashboard window, menus
