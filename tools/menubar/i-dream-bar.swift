@@ -9269,6 +9269,7 @@ private struct DerivedViewItem: Codable {
     let category: String?
     let valence: String?
     let confidence: Double
+    let occurrences: Int?
     let daysSinceFirstSeen: Int?
     let daysSinceLastSeen: Int?
     let clusterId: String
@@ -9277,6 +9278,7 @@ private struct DerivedViewItem: Codable {
     let actionable: Bool?
     let promoted: Bool?
     let dismissed: Bool?
+    let patternsLinked: [String]?
 }
 
 private func readDerivedView(_ name: String) -> DerivedViewFile? {
@@ -9350,6 +9352,13 @@ struct BrowseRow: Identifiable {
     /// repeats 13× in the live store), which both dropped SwiftUI ForEach
     /// rows and mis-attributed legacy ratings across header-twins.
     var ratingId: String = ""
+    /// Second row of the two-line layout: valence dot + occurrences.
+    var valence: String? = nil
+    var occurrences: Int = 0
+    /// Cross-navigation: related rows (label, target row id). An
+    /// association chips to the pattern clusters it links; a pattern chips
+    /// to the associations built on it — the old graph's one real job.
+    var linkedChips: [(label: String, target: String)] = []
 }
 
 struct BrowseTotals {
@@ -9364,25 +9373,59 @@ func buildBrowseRows() -> ([BrowseRow], BrowseTotals) {
     var rows: [BrowseRow] = []
     var totals = BrowseTotals()
 
-    if let v = readDerivedView("patterns") {
+    let pv = readDerivedView("patterns")
+    let av = readDerivedView("associations")
+
+    // Cross-linking maps. Browse shows cluster representatives, so chip
+    // targets are cluster ids (== the representative's stable id).
+    var patClusterByUuid: [String: String] = [:]
+    var patTitleByCluster: [String: String] = [:]
+    if let v = pv {
+        for it in v.items { patClusterByUuid[it.id] = it.clusterId }
+        for it in v.items where it.isRepresentative { patTitleByCluster[it.clusterId] = it.text }
+    }
+    // Pattern cluster -> associations built on any of its members.
+    var assocChipsForPatCluster: [String: [(label: String, target: String)]] = [:]
+    if let v = av {
+        for it in v.items where it.isRepresentative && !(it.dismissed ?? false) {
+            var seen = Set<String>()
+            for uuid in it.patternsLinked ?? [] {
+                guard let cluster = patClusterByUuid[uuid], seen.insert(cluster).inserted else { continue }
+                assocChipsForPatCluster[cluster, default: []].append(
+                    (label: String(it.text.prefix(60)), target: it.stableId))
+            }
+        }
+    }
+
+    if let v = pv {
         totals.totalItems += v.total
         totals.clusters += v.clusterCount
         for it in v.items where it.isRepresentative {
             rows.append(BrowseRow(
                 id: it.stableId, kind: .pattern, title: it.text, detail: it.text,
                 confidence: it.confidence, clusterSize: it.clusterSize,
-                ageDays: it.daysSinceLastSeen, category: it.category, rating: nil))
+                ageDays: it.daysSinceLastSeen, category: it.category, rating: nil,
+                valence: it.valence, occurrences: it.occurrences ?? 0,
+                linkedChips: Array((assocChipsForPatCluster[it.clusterId] ?? []).prefix(4))))
         }
     }
-    if let v = readDerivedView("associations") {
+    if let v = av {
         totals.totalItems += v.total
         totals.clusters += v.clusterCount
         for it in v.items where it.isRepresentative && !(it.dismissed ?? false) {
+            var chips: [(label: String, target: String)] = []
+            var seen = Set<String>()
+            for uuid in it.patternsLinked ?? [] {
+                guard let cluster = patClusterByUuid[uuid], seen.insert(cluster).inserted,
+                      let title = patTitleByCluster[cluster] else { continue }
+                chips.append((label: String(title.prefix(60)), target: cluster))
+            }
             rows.append(BrowseRow(
                 id: it.stableId, kind: .association, title: it.text, detail: it.text,
                 confidence: it.confidence, clusterSize: it.clusterSize,
                 ageDays: it.daysSinceLastSeen,
-                category: (it.actionable ?? false) ? "actionable" : nil, rating: nil))
+                category: (it.actionable ?? false) ? "actionable" : nil, rating: nil,
+                linkedChips: Array(chips.prefix(4))))
         }
     }
 
@@ -9444,12 +9487,22 @@ final class BrowseModel: ObservableObject {
     /// Writes the rating and refreshes; wired by the dashboard controller.
     var onRate: ((String, String) -> Void)?
 
+    /// Set when a linked chip is clicked; the view scrolls there and expands.
+    @Published var jumpTarget: String? = nil
+
     func apply(rows: [BrowseRow], totals: BrowseTotals) {
         self.rows = rows
         self.totals = totals
         if let e = expandedId, !rows.contains(where: { $0.id == e }) {
             expandedId = nil   // selection never outlives a shrunk refresh
         }
+    }
+
+    func jump(to id: String) {
+        guard rows.contains(where: { $0.id == id }) else { return }
+        filter = nil          // target may live under another type filter
+        expandedId = id
+        jumpTarget = id
     }
     var filtered: [BrowseRow] {
         guard let f = filter else { return rows }
@@ -9464,20 +9517,29 @@ struct BrowseView: View {
     @ObservedObject var model: BrowseModel
     /// Hard exact row height — hover/expansion must never shift layout
     /// (sibling anti-idea A-7: minHeight lets hover change the box).
-    private let rowH: CGFloat = 30
+    /// Two-line layout: title + metadata line.
+    private let rowH: CGFloat = 42
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             chipBar
             Divider()
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(model.filtered) { row in
-                        rowView(row)
-                        if model.expandedId == row.id {
-                            detailView(row)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(model.filtered) { row in
+                            rowView(row)
+                                .id(row.id)
+                            if model.expandedId == row.id {
+                                detailView(row)
+                            }
                         }
                     }
+                }
+                .onChange(of: model.jumpTarget) { target in
+                    guard let target else { return }
+                    withAnimation { proxy.scrollTo(target, anchor: .center) }
+                    model.jumpTarget = nil
                 }
             }
             Divider()
@@ -9516,16 +9578,23 @@ struct BrowseView: View {
         Button(action: {
             model.expandedId = (model.expandedId == row.id) ? nil : row.id
         }) {
-            HStack(spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: row.kind.symbol)
                     .font(.system(size: 11))
                     .foregroundColor(row.kind.tint)
                     .frame(width: 16)
-                Text(row.title)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundColor(.primary)
+                    .padding(.top, 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(cleanTitle(row.title))
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundColor(.primary)
+                    Text(metaLine(row))
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .foregroundColor(.secondary)
+                }
                 Spacer(minLength: 8)
                 if row.clusterSize > 1 {
                     Text("×\(row.clusterSize)")
@@ -9549,6 +9618,7 @@ struct BrowseView: View {
                     .frame(width: 38, alignment: .trailing)
             }
             .padding(.horizontal, 10)
+            .padding(.vertical, 5)
             .frame(height: rowH)   // exact, not min
             .contentShape(Rectangle())
         }
@@ -9556,15 +9626,60 @@ struct BrowseView: View {
         .background(model.expandedId == row.id ? Color.primary.opacity(0.06) : Color.clear)
     }
 
+    /// Second line: kind · category · valence dot · occurrences · links.
+    private func metaLine(_ row: BrowseRow) -> AttributedString {
+        var parts: [String] = [String(row.kind.rawValue.dropLast())]  // singular-ish
+        if let c = row.category { parts.append(c) }
+        if let v = row.valence { parts.append(valenceGlyph(v)) }
+        if row.occurrences > 1 { parts.append("\(row.occurrences) occurrences") }
+        if !row.linkedChips.isEmpty { parts.append("\(row.linkedChips.count) linked") }
+        return AttributedString(parts.joined(separator: " · "))
+    }
+
+    private func valenceGlyph(_ v: String) -> String {
+        switch v {
+        case "positive": return "●pos"
+        case "negative": return "●neg"
+        default: return "●neu"
+        }
+    }
+
+    /// Insight titles arrive as blockquote lines ("> ..."); strip the syntax.
+    private func cleanTitle(_ t: String) -> String {
+        var s = t.trimmingCharacters(in: .whitespaces)
+        while s.hasPrefix(">") { s = String(s.dropFirst()).trimmingCharacters(in: .whitespaces) }
+        return s
+    }
+
     private func detailView(_ row: BrowseRow) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ScrollView {
-                Text(row.detail)
+                Text(richDetail(row.detail))
                     .font(.system(size: 12))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxHeight: 240)
+            if !row.linkedChips.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(row.kind == .association ? "LINKED PATTERNS" : "BUILT-ON ASSOCIATIONS")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(Array(row.linkedChips.enumerated()), id: \.offset) { _, chip in
+                        Button(action: { model.jump(to: chip.target) }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.right.circle")
+                                    .font(.system(size: 9))
+                                Text(chip.label + "…")
+                                    .font(.system(size: 10))
+                                    .lineLimit(1)
+                            }
+                            .foregroundColor(.cyan)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
             HStack(spacing: 10) {
                 if let cat = row.category {
                     Text(cat).font(.system(size: 10))
@@ -9597,6 +9712,26 @@ struct BrowseView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+    }
+
+    /// Markdown-aware detail rendering (bold, code, italics) that keeps the
+    /// store's line breaks. Falls back to the raw string on parse failure —
+    /// showing syntax beats showing nothing.
+    private func richDetail(_ raw: String) -> AttributedString {
+        let cleaned = raw
+            .components(separatedBy: "\n")
+            .map { line -> String in
+                var s = line
+                while s.hasPrefix("> ") { s = String(s.dropFirst(2)) }
+                return s
+            }
+            .joined(separator: "\n")
+        if let parsed = try? AttributedString(
+            markdown: cleaned,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return parsed
+        }
+        return AttributedString(cleaned)
     }
 
     private func ageLabel(_ d: Int?) -> String {
