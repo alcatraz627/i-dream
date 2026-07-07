@@ -158,6 +158,12 @@ pub enum Command {
         budget: u32,
     },
 
+    /// Rebuild the honest derived views at ~/.claude/i-dream/derived/views/
+    /// — per-type JSON where every item carries a stable id, its age, and
+    /// its near-duplicate cluster, and every file states its real total.
+    /// Deterministic, no LLM. Also runs nightly after the dream pass.
+    Views,
+
     /// Print the i-dream ingestion contract — how a local system integrates
     /// its events into the dreaming layer (event schema, manifest, semantics
     /// knobs, return channel, the integration handshake). Point another

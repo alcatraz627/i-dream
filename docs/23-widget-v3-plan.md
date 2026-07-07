@@ -2,7 +2,13 @@
 
 <!-- sessions: fable-audit-7c@2026-07-07 -->
 
-Status: **PLANNED — approved direction, staged, nothing implemented yet.**
+Status: **IN PROGRESS.** Stage 0 shipped 2026-07-07 (reliability floor,
+commit 79f3f2f). Stage 1 shipped 2026-07-07 (honest views: 500 patterns →
+231 clusters, 300 associations → 180; push-approval family = one 22-member
+cluster; ages + honest totals live at `~/.claude/i-dream/derived/views/`).
+Stage-1 deviation, evidence-based: digest Top-signals needed NO dedup — its
+five lines come from five distinct domains; the dup disease lived in
+patterns/associations only. Stages 2–5 pending.
 Owner decisions locked 2026-07-07: collapse dashboard to 4 surfaces · HUD kept
 as-is for now (bug-fix only, repivot later) · dedup/age-anchoring live in the
 Rust engine as derived views · SwiftUI panes inside the dashboard window, menus

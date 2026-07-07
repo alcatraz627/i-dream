@@ -217,7 +217,26 @@ async fn main() -> Result<()> {
                 budget,
             )
             .await?;
+            // Views feed the digest + widget from the stores the pass just
+            // updated — rebuild them in the same nightly slot.
+            match consolidation::views::rebuild_views(&store) {
+                Ok(paths) => {
+                    for p in &paths {
+                        eprintln!("[view rebuilt: {}]", p.display());
+                    }
+                }
+                Err(e) => eprintln!("[view rebuild failed: {e:#}]"),
+            }
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+
+        Command::Views => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir())?;
+            let paths = consolidation::views::rebuild_views(&store)?;
+            for p in &paths {
+                println!("{}", p.display());
+            }
         }
 
         Command::Contract { install } => {
