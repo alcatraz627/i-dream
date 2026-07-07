@@ -205,7 +205,12 @@ echo "▶ Compiling..."
 # Concatenate build-info.swift + main source into a temp file.
 # We cannot compile two .swift files together when the main file uses top-level
 # expressions as an entry point (Swift requires those in a single-file build).
-MERGED=$(mktemp /tmp/i-dream-bar-merged-XXXXXX.swift)
+# Sandboxed runs (agent harnesses) can make mktemp fall back to creating the
+# LITERAL template name; the leftover file then fails every later mkstemp
+# with "File exists". Clear it, and salt the template with the PID so two
+# builds can't collide on the fallback either.
+rm -f /tmp/i-dream-bar-merged-XXXXXX.swift
+MERGED=$(mktemp "/tmp/i-dream-bar-merged-$$-XXXXXX.swift")
 cat "$BUILD_INFO_SWIFT" "$SOURCE" > "$MERGED"
 /usr/bin/swiftc -O "$MERGED" -o "$BUILD_OUTPUT" 2>&1
 rm -f "$MERGED"
