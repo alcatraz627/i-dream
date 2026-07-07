@@ -20,7 +20,10 @@ private let home      = FileManager.default.homeDirectoryForCurrentUser.path
 private let subDir    = home + "/.claude/subconscious"
 private let statePath = subDir + "/state.json"
 private let pidPath   = subDir + "/daemon.pid"
-private let iDream    = home + "/.cargo/bin/i-dream"
+// Resolved by probing install locations (cargo, ~/.local/bin, /usr/local,
+// homebrew) so the daemon controls work wherever i-dream is installed —
+// a hardcoded cargo path silently no-ops on any other install.
+private let iDream    = resolveIDreamBinary()
 private let debugLog  = "/tmp/i-dream-bar.log"
 private let tracesDir   = subDir + "/dreams/traces"
 private let activityFile = subDir + "/.last-activity"
@@ -400,6 +403,29 @@ private class KeyablePanel: NSPanel {
             }
         }
         return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// A view whose background is a windowBackground/label blend resolved in
+/// updateLayer — i.e. under the view's effective appearance, re-resolved on
+/// theme change. Assigning `NSColor...cgColor` at build time snapshots the
+/// appearance that happens to be current, which paints light chrome inside
+/// dark windows (the dashboard stats-banner bug).
+private final class BlendedBackgroundView: NSView {
+    var blendFraction: CGFloat = 0
+    var chipCornerRadius: CGFloat = 0
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true   // updateLayer only runs on layer-backed views
+    }
+    required init?(coder: NSCoder) { fatalError("not used from nibs") }
+
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        layer?.cornerRadius = chipCornerRadius
+        layer?.backgroundColor = NSColor.windowBackgroundColor
+            .blended(withFraction: blendFraction, of: .labelColor)?.cgColor
     }
 }
 
@@ -2440,20 +2466,42 @@ final class DashboardWindowController: NSObject {
     }
 
     func showOrFront() {
-        patterns     = allPatterns()
-        associations = allAssociations()
-        journal      = allJournal()
-        state        = readState()
-        board        = readBoard()
-        digest       = readInsightDigest()
-
+        dlog("dashboard: showOrFront (visible=\(panel?.isVisible == true))")
         if let p = panel, p.isVisible {
-            rebuildContentViews()
             p.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            reloadDataAsync()
             return
         }
         buildAndShow()
+        reloadDataAsync()
+    }
+
+    /// Read the six data stores off the main thread, then rebuild the tab
+    /// views with the fresh data. The window appears immediately with
+    /// whatever data it already holds (empty states on first open) instead
+    /// of freezing while multi-hundred-KB JSON parses run on the main thread.
+    private func reloadDataAsync(completion: (() -> Void)? = nil) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let pat   = allPatterns()
+            let assoc = allAssociations()
+            let jour  = allJournal()
+            let st    = readState()
+            let bd    = readBoard()
+            let dg    = readInsightDigest()
+            DispatchQueue.main.async {
+                guard let self, self.panel != nil else { return }
+                self.patterns     = pat
+                self.associations = assoc
+                self.journal      = jour
+                self.state        = st
+                self.board        = bd
+                self.digest       = dg
+                self.rebuildContentViews()
+                dlog("dashboard: async data loaded (\(pat.count)p/\(assoc.count)a/\(jour.count)j)")
+                completion?()
+            }
+        }
     }
 
     // ── Panel construction ─────────────────────────────────────────────────────
@@ -2638,8 +2686,34 @@ final class DashboardWindowController: NSObject {
         let restored = UserDefaults.standard.integer(forKey: "idream-dashboard-selected-tab")
         selectTab(restored < tabs.count ? restored : 0)
 
+        installKeyMonitorIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
         p.makeKeyAndOrderFront(nil)
+    }
+
+    /// ⌘1–9 / ⌘R / ⌘F must work no matter which text field is focused.
+    /// The panel's performKeyEquivalent override stops being reached once a
+    /// field editor is active (that is how tab shortcuts died with the graph
+    /// filter focused), so intercept at the event level instead.
+    private var keyMonitor: Any?
+    private func installKeyMonitorIfNeeded() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
+            guard let self, let p = self.panel, ev.window === p,
+                  ev.modifierFlags.intersection([.command, .option, .control, .shift]) == .command,
+                  let ch = ev.charactersIgnoringModifiers?.first else { return ev }
+            if ch >= "1" && ch <= "9" {
+                self.selectTab(Int(ch.asciiValue! - Character("1").asciiValue!))
+                return nil
+            }
+            if ch == "r" { self.refreshDashboard(); return nil }
+            if ch == "f" {
+                self.selectTab(6)
+                if let sf = self.searchField { p.makeFirstResponder(sf) }
+                return nil
+            }
+            return ev
+        }
     }
 
     private func rebuildContentViews() {
@@ -2716,9 +2790,11 @@ final class DashboardWindowController: NSObject {
     }
 
     @objc private func refreshDashboard() {
-        showOrFront()
-        lastRefreshedDate = Date()
-        lastRefreshedLabel?.stringValue = "Refreshed just now"
+        guard let p = panel, p.isVisible else { showOrFront(); return }
+        reloadDataAsync { [weak self] in
+            self?.lastRefreshedDate = Date()
+            self?.lastRefreshedLabel?.stringValue = "Refreshed just now"
+        }
     }
 
     @objc private func exportDashboardData() {
@@ -2792,32 +2868,36 @@ final class DashboardWindowController: NSObject {
     /// flagged as "a paragraph to read." Each chip is a stacked
     /// caption-on-top + value-below pair, with tabular numerals so values
     /// align column-by-column across chips.
+    ///
+    /// Backing views resolve their layer color in updateLayer under the
+    /// view's effective appearance. Converting a semantic NSColor to cgColor
+    /// eagerly snapshots whatever appearance is current at build time —
+    /// which is how this banner shipped as a light band inside the dark
+    /// dashboard, with its caption labels drawing dark-appearance text on top.
     private func makeStatsBanner(frame: NSRect,
                                  stats: [(label: String, value: String, color: NSColor?)]) -> NSView {
-        let banner = NSView(frame: frame)
-        banner.wantsLayer = true
-        banner.layer?.backgroundColor = NSColor.windowBackgroundColor
-            .blended(withFraction: 0.04, of: .labelColor)?.cgColor
+        let banner = BlendedBackgroundView(frame: frame)
+        banner.blendFraction = 0.04
 
         // Bottom separator
         let sep = NSBox(frame: NSRect(x: 0, y: 0, width: frame.width, height: 1))
         sep.boxType = .separator; sep.autoresizingMask = [.width]
         banner.addSubview(sep)
 
-        // Lay out chips evenly across the banner width.
-        let chipW: CGFloat = 88
+        // Lay out chips evenly across the banner width. Width adapts to the
+        // banner so long captions (ASSOCIATIONS, CALIBRATION) stop truncating.
         let gap:   CGFloat = 4
+        let chipW: CGFloat = max(88, min(150,
+            (frame.width - 28 - CGFloat(max(stats.count - 1, 0)) * gap) / CGFloat(max(stats.count, 1))))
         let totalW = CGFloat(stats.count) * chipW + CGFloat(max(stats.count - 1, 0)) * gap
         var x: CGFloat = max(14, (frame.width - totalW) / 2)
         let chipY:    CGFloat = 4
         let chipH:    CGFloat = frame.height - 8
 
         for stat in stats {
-            let chip = NSView(frame: NSRect(x: x, y: chipY, width: chipW, height: chipH))
-            chip.wantsLayer = true
-            chip.layer?.cornerRadius = 4
-            chip.layer?.backgroundColor = NSColor.windowBackgroundColor
-                .blended(withFraction: 0.06, of: .labelColor)?.cgColor
+            let chip = BlendedBackgroundView(frame: NSRect(x: x, y: chipY, width: chipW, height: chipH))
+            chip.blendFraction = 0.06
+            chip.chipCornerRadius = 4
 
             let lbl = NSTextField(labelWithString: stat.label.uppercased())
             lbl.font = .systemFont(ofSize: 9, weight: .semibold)
@@ -7368,7 +7448,11 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.level                       = onTop ? .statusBar : .floating
         panel.isMovableByWindowBackground = true
         panel.backgroundColor             = .clear
-        panel.alphaValue                  = 0.94
+        // Fully opaque panel alpha: the old 0.94, stacked on the gradient's
+        // own alpha, let bright text from windows underneath ghost through
+        // the HUD legibly (field-study J8). The gradient below keeps a hint
+        // of depth without readable bleed.
+        panel.alphaValue                  = 1.0
         panel.hasShadow                   = true
         panel.isOpaque                    = false
         panel.collectionBehavior          = [.canJoinAllSpaces, .stationary]
@@ -7396,8 +7480,8 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             grad.frame = cv.bounds
             grad.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
             grad.colors = [
-                NSColor(red: 0.06, green: 0.10, blue: 0.18, alpha: 0.94).cgColor,
-                NSColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 0.96).cgColor,
+                NSColor(red: 0.06, green: 0.10, blue: 0.18, alpha: 0.985).cgColor,
+                NSColor(red: 0.02, green: 0.04, blue: 0.09, alpha: 1.0).cgColor,
             ]
             grad.startPoint   = CGPoint(x: 0.5, y: 1.0)
             grad.endPoint     = CGPoint(x: 0.5, y: 0.0)
