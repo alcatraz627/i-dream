@@ -2457,6 +2457,7 @@ final class DashboardWindowController: NSObject {
     private var digest:       String?
     let browseModel = BrowseModel()
     let overviewModel = OverviewModel()
+    let journalModel = JournalModel()
 
     // ── Public interface ───────────────────────────────────────────────────────
 
@@ -2503,6 +2504,7 @@ final class DashboardWindowController: NSObject {
                             lastDream: s.lastConsolidation.map { timeAgo($0) })
             }
             ov.viz = buildOverviewViz(rows: browseRows)
+            let (journalRows, heat) = buildJournalRows(journal: jour)
             DispatchQueue.main.async {
                 guard let self, self.panel != nil else { return }
                 self.patterns     = pat
@@ -2513,6 +2515,8 @@ final class DashboardWindowController: NSObject {
                 self.digest       = dg
                 self.browseModel.apply(rows: browseRows, totals: browseTotals)
                 self.overviewModel.data = ov
+                self.journalModel.rows = journalRows
+                self.journalModel.heatEntries = heat
                 self.rebuildContentViews()
                 dlog("dashboard: async data loaded (\(pat.count)p/\(assoc.count)a/\(jour.count)j/\(browseRows.count)b)")
                 completion?()
@@ -2562,6 +2566,11 @@ final class DashboardWindowController: NSObject {
         p.title                = "i-dream — Dashboard"
         p.isReleasedWhenClosed = false
         p.level                = .floating
+        // Follow the user to the ACTIVE Space when summoned. Without this,
+        // "Open Dashboard" silently fronts the panel on whatever Space it
+        // was born on — the window reports isVisible while nothing appears
+        // where the user is looking (field-study J2, reproduced + logged).
+        p.collectionBehavior.insert(.moveToActiveSpace)
         p.minSize              = NSSize(width: 960, height: 640)
         p.center()
         // Apply user's theme choice (defaults to dark — the brand
@@ -2802,7 +2811,17 @@ final class DashboardWindowController: NSObject {
             return host
         }()
         dlog("dashboard: building journal")
-        let v2 = buildJournalView(frame: f)
+        journalModel.onJumpToBrowse = { [weak self] id in
+            guard let self else { return }
+            self.selectTab(1)
+            self.browseModel.jump(to: id)
+        }
+        let v2: NSView = {
+            let host = NSHostingView(rootView: JournalPane(model: journalModel))
+            host.frame = f
+            host.autoresizingMask = [.width, .height]
+            return host
+        }()
         dlog("dashboard: building search")
         let v3 = buildSearchView(frame: f)
         dlog("dashboard: all views built")
@@ -9868,6 +9887,155 @@ struct BrowseView: View {
     private func ageColor(_ d: Int?) -> Color {
         guard let d else { return .secondary }
         return d >= 30 ? .orange : .secondary
+    }
+}
+
+// — Journal: cycle history with exact numbers + cross-nav into Browse —
+
+struct JournalRowVM: Identifiable {
+    let id: String
+    let dateLabel: String
+    let agoLabel: String
+    let counts: String
+    let tokens: Int
+    /// Patterns whose first_seen falls in this cycle's window, as
+    /// (label, Browse row id) chips — approximate but honest join.
+    let chips: [(label: String, target: String)]
+}
+
+final class JournalModel: ObservableObject {
+    @Published var rows: [JournalRowVM] = []
+    @Published var heatEntries: [(date: Date, tokens: Int)] = []
+    var onJumpToBrowse: ((String) -> Void)?
+}
+
+/// Join cycles to the patterns first seen inside each cycle's window.
+/// Off-main safe (pure computation over already-loaded data).
+private func buildJournalRows(journal: [JournalEntry]) -> ([JournalRowVM], [(date: Date, tokens: Int)]) {
+    var clusterOfUuid: [String: String] = [:]
+    var titleOfCluster: [String: String] = [:]
+    if let pv = readDerivedView("patterns") {
+        for it in pv.items {
+            clusterOfUuid[it.id] = it.clusterId
+            if it.isRepresentative { titleOfCluster[it.clusterId] = it.text }
+        }
+    }
+    // Parse every date exactly once — the naive per-(cycle × pattern) parse
+    // was ~185k ISO8601 formatter calls and held the pane blank for ~10s.
+    let firstSeens: [(date: Date, cluster: String, title: String)] = allPatterns()
+        .compactMap { p in
+            guard let fs = p.firstSeen, let d = isoDate(fs),
+                  let uuid = p.id, let cluster = clusterOfUuid[uuid],
+                  let title = titleOfCluster[cluster] else { return nil }
+            return (date: d, cluster: cluster, title: title)
+        }
+        .sorted { $0.date < $1.date }
+    let sorted = journal.compactMap { e -> (JournalEntry, Date)? in
+        guard let d = isoDate(e.timestamp) else { return nil }
+        return (e, d)
+    }.sorted { $0.1 < $1.1 }
+
+    var rows: [JournalRowVM] = []
+    var cursor = 0   // advances monotonically through firstSeens
+    for (i, (entry, ts)) in sorted.enumerated() {
+        let windowStart = i > 0 ? sorted[i - 1].1 : ts.addingTimeInterval(-6 * 3600)
+        var chips: [(String, String)] = []
+        var seen = Set<String>()
+        while cursor < firstSeens.count, firstSeens[cursor].date <= ts {
+            let f = firstSeens[cursor]
+            cursor += 1
+            guard entry.patternsExtracted > 0, f.date > windowStart,
+                  chips.count < 3, seen.insert(f.cluster).inserted else { continue }
+            chips.append((String(f.title.prefix(70)), f.cluster))
+        }
+        let counts = [
+            entry.sessionsAnalyzed > 0 ? "\(entry.sessionsAnalyzed) sessions" : nil,
+            entry.patternsExtracted > 0 ? "\(entry.patternsExtracted) patterns" : nil,
+            entry.associationsFound > 0 ? "\(entry.associationsFound) assoc" : nil,
+            entry.insightsPromoted > 0 ? "\(entry.insightsPromoted) insights" : nil,
+        ].compactMap { $0 }.joined(separator: " · ")
+        rows.append(JournalRowVM(
+            id: entry.timestamp,
+            dateLabel: fmtDate(entry.timestamp),
+            agoLabel: timeAgo(entry.timestamp),
+            counts: counts.isEmpty ? "skipped — no sessions to analyze" : counts,
+            tokens: entry.tokensUsed,
+            chips: chips))
+    }
+    let heat = sorted.map { (date: $0.1, tokens: $0.0.tokensUsed) }
+    return (rows.reversed(), heat)
+}
+
+/// The existing AppKit heat map, hosted in SwiftUI — same visual, new pane.
+private struct HeatMapWrapper: NSViewRepresentable {
+    let entries: [(date: Date, tokens: Int)]
+    func makeNSView(context: Context) -> CalendarHeatMapView {
+        CalendarHeatMapView(frame: .zero)
+    }
+    func updateNSView(_ v: CalendarHeatMapView, context: Context) {
+        v.entries = entries
+        v.needsDisplay = true
+    }
+}
+
+struct JournalPane: View {
+    @ObservedObject var model: JournalModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if !model.heatEntries.isEmpty {
+                HeatMapWrapper(entries: model.heatEntries)
+                    .frame(height: 120)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+            }
+            Divider().padding(.top, 8)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(model.rows) { row in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text(row.dateLabel)
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("·  \(row.agoLabel)")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text("\(row.tokens.formatted()) tokens")
+                                    .font(.system(size: 11).monospacedDigit())
+                                    .foregroundColor(.secondary)
+                            }
+                            Text(row.counts)
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                            if !row.chips.isEmpty {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    ForEach(Array(row.chips.enumerated()), id: \.offset) { _, chip in
+                                        Button(action: { model.onJumpToBrowse?(chip.target) }) {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "arrow.right.circle")
+                                                    .font(.system(size: 9))
+                                                Text(chip.label + "…")
+                                                    .font(.system(size: 10))
+                                                    .lineLimit(1)
+                                            }
+                                            .foregroundColor(.cyan)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.leading, 2)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Divider().padding(.horizontal, 16)
+                    }
+                }
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 
