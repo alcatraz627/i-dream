@@ -9,6 +9,10 @@ and promote insights about your work style.
 ## Quick Start
 
 ```bash
+# 0. Build + install the CLI binary (run after every code change you want live —
+#    the launchd jobs run the INSTALLED binary, not your working tree)
+bash scripts/install.sh
+
 # 1. Build and install the menu bar widget (run once)
 bash tools/menubar/build.sh --install
 
