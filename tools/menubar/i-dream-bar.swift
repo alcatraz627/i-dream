@@ -198,11 +198,15 @@ private struct Pattern: Codable {
     let confidence: Double
     let category:   String
     let firstSeen:  String?
+    /// Per-occurrence timestamps (D11 v2, capped at 50) — fuels the
+    /// Overview activity timelines.
+    let occurrenceHistory: [String]?
     /// Stable key for selection — uses id when available, falls back to text prefix.
     var stableKey: String { id ?? String(pattern.prefix(30)) }
     enum CodingKeys: String, CodingKey {
         case id, pattern, valence, confidence, category
         case firstSeen = "first_seen"
+        case occurrenceHistory = "occurrence_history"
     }
 }
 
@@ -2452,6 +2456,7 @@ final class DashboardWindowController: NSObject {
     private var board:        BoardData?
     private var digest:       String?
     let browseModel = BrowseModel()
+    let overviewModel = OverviewModel()
 
     // ── Public interface ───────────────────────────────────────────────────────
 
@@ -2490,6 +2495,14 @@ final class DashboardWindowController: NSObject {
             let bd    = readBoard()
             let dg    = readInsightDigest()
             let (browseRows, browseTotals) = buildBrowseRows()
+            var ov = OverviewData()
+            ov.reflect = readReflect()
+            ov.reviewPending = readReviewPending()
+            if let s = st {
+                ov.state = (cycles: s.totalCycles, tokens: s.totalTokensUsed,
+                            lastDream: s.lastConsolidation.map { timeAgo($0) })
+            }
+            ov.viz = buildOverviewViz(rows: browseRows)
             DispatchQueue.main.async {
                 guard let self, self.panel != nil else { return }
                 self.patterns     = pat
@@ -2499,6 +2512,7 @@ final class DashboardWindowController: NSObject {
                 self.board        = bd
                 self.digest       = dg
                 self.browseModel.apply(rows: browseRows, totals: browseTotals)
+                self.overviewModel.data = ov
                 self.rebuildContentViews()
                 dlog("dashboard: async data loaded (\(pat.count)p/\(assoc.count)a/\(jour.count)j/\(browseRows.count)b)")
                 completion?()
@@ -2758,7 +2772,25 @@ final class DashboardWindowController: NSObject {
         contentViews = []
         let f = contentContainer.bounds
         dlog("dashboard: building overview")
-        let v0 = buildOverviewView(frame: f)
+        overviewModel.onOpenReview = {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: resolveIDreamBinary())
+            p.arguments = ["review"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+        }
+        overviewModel.onJumpToBrowse = { [weak self] id in
+            guard let self else { return }
+            self.selectTab(1)
+            self.browseModel.jump(to: id)
+        }
+        let v0: NSView = {
+            let host = NSHostingView(rootView: OverviewPane(model: overviewModel))
+            host.frame = f
+            host.autoresizingMask = [.width, .height]
+            return host
+        }()
         dlog("dashboard: building browse")
         browseModel.onRate = { [weak self] id, rating in
             self?.rateInsightFromBrowse(id: id, rating: rating)
@@ -9477,6 +9509,98 @@ func buildBrowseRows() -> ([BrowseRow], BrowseTotals) {
     return (rows, totals)
 }
 
+// — Overview data (felt-value first, then honest viz) —
+
+struct OverviewViz {
+    /// Top repeated lessons by cluster size: (row id, title, size, tint kind).
+    var topLessons: [(id: String, title: String, size: Int, kind: BrowseRow.Kind)] = []
+    /// Weekly activity buckets for the biggest clusters, oldest → newest.
+    var timelines: [(title: String, weekly: [Int], total: Int)] = []
+    var kindCounts: [(String, Int, Int)] = []   // (label, raw total, clusters)
+    var valence: (pos: Int, neu: Int, neg: Int) = (0, 0, 0)
+}
+
+struct OverviewData {
+    var reflect: ReflectData?
+    var reviewPending: String?
+    var state: (cycles: Int, tokens: Int, lastDream: String?)?
+    var viz = OverviewViz()
+}
+
+/// Weekly ISO buckets covering the trailing `weeks`; index 0 = oldest.
+private func weekIndex(_ date: Date, now: Date, weeks: Int) -> Int? {
+    let secondsPerWeek = 7.0 * 86400.0
+    let delta = now.timeIntervalSince(date)
+    guard delta >= 0 else { return nil }
+    let idx = weeks - 1 - Int(delta / secondsPerWeek)
+    return (0..<weeks).contains(idx) ? idx : nil
+}
+
+/// Build the Overview's viz block from the derived views + raw pattern
+/// occurrence history. Pure file reads — off-main safe.
+func buildOverviewViz(rows: [BrowseRow]) -> OverviewViz {
+    var viz = OverviewViz()
+    let weeks = 12
+
+    viz.topLessons = rows
+        .filter { $0.clusterSize > 1 }
+        .sorted { $0.clusterSize > $1.clusterSize }
+        .prefix(10)
+        .map { (id: $0.id, title: $0.title, size: $0.clusterSize, kind: $0.kind) }
+
+    if let pv = readDerivedView("patterns") {
+        var clusterOfUuid: [String: String] = [:]
+        var titleOfCluster: [String: String] = [:]
+        for it in pv.items {
+            clusterOfUuid[it.id] = it.clusterId
+            if it.isRepresentative { titleOfCluster[it.clusterId] = it.text }
+        }
+        // Occurrence timestamps per cluster, bucketed by week.
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoPlain = ISO8601DateFormatter()
+        let now = Date()
+        var buckets: [String: [Int]] = [:]
+        var totals: [String: Int] = [:]
+        for p in allPatterns() {
+            guard let uuid = p.id, let cluster = clusterOfUuid[uuid] else { continue }
+            let stamps = (p.occurrenceHistory ?? []) + [p.firstSeen].compactMap { $0 }
+            for s in stamps {
+                guard let d = iso.date(from: s) ?? isoPlain.date(from: s) else { continue }
+                totals[cluster, default: 0] += 1
+                if let w = weekIndex(d, now: now, weeks: weeks) {
+                    buckets[cluster, default: Array(repeating: 0, count: weeks)][w] += 1
+                }
+            }
+        }
+        viz.timelines = totals.sorted { $0.value > $1.value }.prefix(5).compactMap { cluster, total in
+            guard let title = titleOfCluster[cluster] else { return nil }
+            return (title: title, weekly: buckets[cluster] ?? Array(repeating: 0, count: weeks), total: total)
+        }
+
+        var pos = 0, neu = 0, neg = 0
+        for it in pv.items {
+            switch it.valence {
+            case "positive": pos += 1
+            case "negative": neg += 1
+            default: neu += 1
+            }
+        }
+        viz.valence = (pos, neu, neg)
+        viz.kindCounts.append(("Patterns", pv.total, pv.clusterCount))
+    }
+    if let av = readDerivedView("associations") {
+        viz.kindCounts.append(("Associations", av.total, av.clusterCount))
+    }
+    return viz
+}
+
+final class OverviewModel: ObservableObject {
+    @Published var data = OverviewData()
+    var onOpenReview: (() -> Void)?
+    var onJumpToBrowse: ((String) -> Void)?
+}
+
 // — Model + view —
 
 final class BrowseModel: ObservableObject {
@@ -9744,6 +9868,177 @@ struct BrowseView: View {
     private func ageColor(_ d: Int?) -> Color {
         guard let d else { return .secondary }
         return d >= 30 ? .orange : .secondary
+    }
+}
+
+// — Overview: felt-value first, then honest visualization —
+
+struct OverviewPane: View {
+    @ObservedObject var model: OverviewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                feltValueCard
+                if let s = model.data.state { statusLine(s) }
+                if !model.data.viz.topLessons.isEmpty { topLessons }
+                if !model.data.viz.kindCounts.isEmpty { distribution }
+                if !model.data.viz.timelines.isEmpty { timelines }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// The dream→behavior loop, first. Same content as the menu's top block.
+    private var feltValueCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let pending = model.data.reviewPending {
+                Button(action: { model.onOpenReview?() }) {
+                    Label("Weekly review pending (\(pending)) — open", systemImage: "checklist")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.orange)
+                }
+                .buttonStyle(.plain)
+            }
+            if let r = model.data.reflect {
+                HStack(spacing: 6) {
+                    Text("Mistakes:")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("\(r.summary.landing) landing")
+                        .font(.system(size: 13))
+                        .foregroundColor(.green)
+                    Text("·").foregroundColor(.secondary)
+                    Text("\(r.summary.worsening) worsening")
+                        .font(.system(size: 13))
+                        .foregroundColor(r.summary.worsening > 0 ? .orange : .secondary)
+                }
+                if let worst = r.patterns.first(where: { $0.trend == "worsening" }) {
+                    Text("↑ \(worst.slug)")
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                }
+            } else if model.data.reviewPending == nil {
+                Text("No reflect data yet — run a few cycles.")
+                    .font(.system(size: 12)).foregroundColor(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05))
+        .cornerRadius(8)
+    }
+
+    private func statusLine(_ s: (cycles: Int, tokens: Int, lastDream: String?)) -> some View {
+        HStack(spacing: 14) {
+            Label("\(s.cycles) cycles", systemImage: "moon.zzz.fill")
+            Label(fmtNum(s.tokens) + " tokens", systemImage: "circle.hexagongrid.fill")
+            if let last = s.lastDream {
+                Label("last dream \(last)", systemImage: "clock")
+            }
+            Spacer()
+        }
+        .font(.system(size: 11))
+        .foregroundColor(.secondary)
+    }
+
+    /// "Your biggest repeated lessons" — cluster sizes as honest bars,
+    /// clicking a bar opens the lesson in Browse.
+    private var topLessons: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("TOP REPEATED LESSONS")
+            let maxSize = model.data.viz.topLessons.map(\.size).max() ?? 1
+            ForEach(Array(model.data.viz.topLessons.enumerated()), id: \.offset) { _, lesson in
+                Button(action: { model.onJumpToBrowse?(lesson.id) }) {
+                    HStack(spacing: 8) {
+                        Text(lesson.title)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .frame(width: 340, alignment: .leading)
+                        GeometryReader { geo in
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(lesson.kind.tint.opacity(0.65))
+                                .frame(width: max(4, geo.size.width * CGFloat(lesson.size) / CGFloat(maxSize)))
+                        }
+                        .frame(height: 12)
+                        Text("\(lesson.size)")
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .frame(width: 26, alignment: .trailing)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var distribution: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("STORES")
+            ForEach(Array(model.data.viz.kindCounts.enumerated()), id: \.offset) { _, kc in
+                HStack(spacing: 8) {
+                    Text(kc.0).font(.system(size: 11)).frame(width: 100, alignment: .leading)
+                    Text("\(kc.1) items → \(kc.2) lessons")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+            }
+            let v = model.data.viz.valence
+            let total = max(1, v.pos + v.neu + v.neg)
+            HStack(spacing: 8) {
+                Text("Valence").font(.system(size: 11)).frame(width: 100, alignment: .leading)
+                GeometryReader { geo in
+                    HStack(spacing: 1) {
+                        Rectangle().fill(Color.green.opacity(0.7))
+                            .frame(width: geo.size.width * CGFloat(v.pos) / CGFloat(total))
+                        Rectangle().fill(Color.gray.opacity(0.5))
+                            .frame(width: geo.size.width * CGFloat(v.neu) / CGFloat(total))
+                        Rectangle().fill(Color.orange.opacity(0.7))
+                            .frame(width: geo.size.width * CGFloat(v.neg) / CGFloat(total))
+                    }
+                }
+                .frame(height: 10)
+                Text("\(v.pos)+ · \(v.neu)○ · \(v.neg)−")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    /// Per-lesson weekly activity, trailing 12 weeks. Neutral bars — the
+    /// value's meaning lives in the label, not trace color (sibling #6).
+    private var timelines: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("ACTIVITY — TRAILING 12 WEEKS")
+            ForEach(Array(model.data.viz.timelines.enumerated()), id: \.offset) { _, t in
+                HStack(spacing: 8) {
+                    Text(t.title)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .frame(width: 340, alignment: .leading)
+                    let peak = max(1, t.weekly.max() ?? 1)
+                    HStack(alignment: .bottom, spacing: 2) {
+                        ForEach(Array(t.weekly.enumerated()), id: \.offset) { _, count in
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(Color.secondary.opacity(count == 0 ? 0.15 : 0.7))
+                                .frame(width: 8, height: max(2, 22 * CGFloat(count) / CGFloat(peak)))
+                        }
+                    }
+                    .frame(height: 22, alignment: .bottom)
+                    Text("\(t.total) hits")
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private func sectionHeader(_ s: String) -> some View {
+        Text(s)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(.secondary)
+            .kerning(0.5)
     }
 }
 
