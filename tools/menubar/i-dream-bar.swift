@@ -7039,10 +7039,19 @@ struct BrowseView: View {
     /// Two-line layout: title + metadata line.
     private let rowH: CGFloat = 42
 
+    /// On-demand cluster map overlay (user-requested viz): bubbles sized by
+    /// cluster membership, filterable by typing, click = jump to the row.
+    @State private var showClusterMap = false
+    @State private var clusterQuery = ""
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             chipBar
             Divider()
+            if showClusterMap {
+                clusterMap
+                Divider()
+            }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
@@ -7074,9 +7083,77 @@ struct BrowseView: View {
                 chip(k, label: "\(k.rawValue) (\(model.count(of: k)))")
             }
             Spacer()
+            Button(action: { showClusterMap.toggle() }) {
+                Label("Clusters", systemImage: "circle.hexagongrid")
+                    .font(.system(size: 11))
+                    .foregroundColor(showClusterMap ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+    }
+
+    /// The cluster map: every multi-member lesson as a bubble, area ∝
+    /// cluster size. Typing dims non-matching bubbles instead of hiding
+    /// them (selective highlight, as requested); clicking jumps to the row.
+    private var clusterMap: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Highlight clusters…", text: $clusterQuery)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .frame(maxWidth: 320)
+            let clusters = model.rows
+                .filter { $0.clusterSize > 1 }
+                .sorted { $0.clusterSize > $1.clusterSize }
+            ScrollView {
+                let cols = [GridItem(.adaptive(minimum: 92, maximum: 130), spacing: 8)]
+                LazyVGrid(columns: cols, spacing: 8) {
+                    ForEach(clusters) { c in
+                        clusterBubble(c)
+                    }
+                }
+            }
+            .frame(maxHeight: 260)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.03))
+    }
+
+    private func clusterBubble(_ c: BrowseRow) -> some View {
+        let maxSize = model.rows.map(\.clusterSize).max() ?? 1
+        // Area-proportional radius so a ×28 doesn't dwarf everything linearly.
+        let d = 34 + 56 * sqrt(CGFloat(c.clusterSize) / CGFloat(maxSize))
+        let q = clusterQuery.trimmingCharacters(in: .whitespaces).lowercased()
+        let words = q.split(separator: " ").map(String.init)
+        let matches = q.isEmpty || words.allSatisfy { c.title.lowercased().contains($0) }
+        return Button(action: {
+            showClusterMap = false
+            model.jump(to: c.id)
+        }) {
+            VStack(spacing: 3) {
+                ZStack {
+                    Circle()
+                        .fill(c.kind.tint.opacity(matches ? 0.35 : 0.06))
+                    Circle()
+                        .strokeBorder(c.kind.tint.opacity(matches ? 0.9 : 0.15), lineWidth: 1.5)
+                    Text("×\(c.clusterSize)")
+                        .font(.system(size: 11, weight: .bold).monospacedDigit())
+                        .foregroundColor(matches ? .primary : .secondary.opacity(0.4))
+                }
+                .frame(width: d, height: d)
+                Text(c.title)
+                    .font(.system(size: 9))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(matches ? .secondary : .secondary.opacity(0.3))
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(c.title)
     }
 
     private func chip(_ kind: BrowseRow.Kind?, label: String) -> some View {
