@@ -1356,6 +1356,21 @@ final class DashboardWindowController: NSObject {
         }
     }
 
+    /// Render the panel's view tree to /tmp as PNG — the display-independent
+    /// verification affordance (works while the physical display sleeps).
+    func dumpSnapshot() {
+        guard let v = panel?.contentView else {
+            dlog("dashboard: snapshot requested but no panel")
+            return
+        }
+        guard let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else { return }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        if let data = rep.representation(using: .png, properties: [:]) {
+            try? data.write(to: URL(fileURLWithPath: "/tmp/i-dream-dashboard-snap.png"))
+            dlog("dashboard: snapshot dumped (\(data.count) bytes)")
+        }
+    }
+
     /// Persist an insight rating and refresh Browse so the badge updates.
     private func rateInsightFromBrowse(id: String, rating: String) {
         recordDashboardInsightFeedback(insightId: id, rating: rating)
@@ -3304,12 +3319,39 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        // SIGUSR1 → open dashboard (sent by `i-dream dashboard` CLI)
+        // SIGUSR1 → open dashboard (sent by `i-dream dashboard` CLI).
+        // The sources MUST be retained: a resumed DispatchSource stored in a
+        // local is released when this method returns and its handler never
+        // fires — which is why the CLI summon had been a silent no-op since
+        // the feature shipped.
         signal(SIGUSR1, SIG_IGN)
         let usr1Src = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
         usr1Src.setEventHandler { [weak self] in self?.openDashboard() }
         usr1Src.resume()
+        signalSources.append(usr1Src)
+
+        // SIGUSR2 → dump a self-rendered PNG of the dashboard window to
+        // /tmp/i-dream-dashboard-snap.png. Screen capture reads the display
+        // framebuffer, which is black when the physical display sleeps
+        // (remote-control sessions) — the app rendering its own view tree
+        // is display-independent, and needs no screen-recording permission.
+        signal(SIGUSR2, SIG_IGN)
+        let usr2Src = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        usr2Src.setEventHandler { [weak self] in
+            guard let self, let dc = self.dashboardController else { return }
+            // Optional control file selects the tab first (signals carry no args).
+            if let s = try? String(contentsOfFile: "/tmp/i-dream-snap-tab", encoding: .utf8),
+               let idx = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                dc.selectTab(idx)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { dc.dumpSnapshot() }
+        }
+        usr2Src.resume()
+        signalSources.append(usr2Src)
     }
+
+    /// Keeps the signal dispatch sources alive for the app's lifetime.
+    private var signalSources: [DispatchSourceSignal] = []
 
     // Called by AppKit right before the menu is shown. Paints immediately from
     // the latest snapshot — NO synchronous disk reads or subprocesses on the
