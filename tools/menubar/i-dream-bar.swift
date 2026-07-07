@@ -1649,6 +1649,9 @@ final class DashboardWindowController: NSObject {
             self.selectTab(1)
             self.browseModel.jump(to: id)
         }
+        journalModel.lookupRow = { [weak self] id in
+            self?.browseModel.rows.first(where: { $0.id == id })
+        }
         let v2: NSView = {
             let host = NSHostingView(rootView: JournalPane(model: journalModel))
             host.frame = f
@@ -6475,6 +6478,144 @@ final class OverviewModel: ObservableObject {
     var onJumpToBrowse: ((String) -> Void)?
 }
 
+// — Shared design tokens + row primitives (visual-design.md: one type
+//   scale, one spacing rhythm, quiet ambient color, explicit affordances) —
+
+enum DS {
+    static let unit: CGFloat = 8
+    static let title = Font.system(size: 13, weight: .semibold)
+    static let body = Font.system(size: 12)
+    static let caption = Font.system(size: 10)
+    /// Ambient (quiet) tier: recognizable hue, de-chromaed so it recedes.
+    static func quiet(_ c: Color) -> Color { c.opacity(0.55) }
+    static let surface = Color.primary.opacity(0.05)
+    static let surfaceHover = Color.primary.opacity(0.09)
+}
+
+func cleanRowTitle(_ t: String) -> String {
+    var s = t.trimmingCharacters(in: .whitespaces)
+    while s.hasPrefix(">") { s = String(s.dropFirst()).trimmingCharacters(in: .whitespaces) }
+    return s
+}
+
+/// Markdown-aware detail rendering (bold/code kept, blockquote syntax
+/// stripped); falls back to the raw string — syntax beats nothing.
+func richDetailText(_ raw: String) -> AttributedString {
+    let cleaned = raw
+        .components(separatedBy: "\n")
+        .map { line -> String in
+            var s = line
+            while s.hasPrefix("> ") { s = String(s.dropFirst(2)) }
+            return s
+        }
+        .joined(separator: "\n")
+    if let parsed = try? AttributedString(
+        markdown: cleaned,
+        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+        return parsed
+    }
+    return AttributedString(cleaned)
+}
+
+func rowAgeLabel(_ d: Int?) -> String {
+    guard let d else { return "—" }
+    if d == 0 { return "today" }
+    if d < 30 { return "\(d)d" }
+    if d < 365 { return "\(d / 30)mo" }
+    return "\(d / 365)y"
+}
+
+func rowAgeColor(_ d: Int?) -> Color {
+    guard let d else { return .secondary }
+    return d >= 30 ? .orange : .secondary
+}
+
+/// The in-pane preview shown on the FIRST click of any cross-entity
+/// reference. Reviewing happens in place; jumping tabs is the explicit
+/// second action ("Open in Browse ↗") — this kills the click→teleport
+/// whiplash the user flagged.
+struct RowPreviewPanel: View {
+    let row: BrowseRow
+    var onOpenInBrowse: (String) -> Void
+    var onPreview: (String) -> Void
+    var onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.unit) {
+            HStack(spacing: 6) {
+                Image(systemName: row.kind.symbol)
+                    .foregroundColor(row.kind.tint)
+                Text(row.kind.rawValue.dropLast())
+                    .font(DS.caption).foregroundColor(.secondary)
+                if row.clusterSize > 1 {
+                    Text("×\(row.clusterSize)")
+                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(DS.quiet(row.kind.tint).opacity(0.25))
+                        .clipShape(Capsule())
+                }
+                Spacer()
+                if let c = row.confidence {
+                    Text("\(Int(c * 100))%").font(DS.caption.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+                Text(rowAgeLabel(row.ageDays))
+                    .font(DS.caption.monospacedDigit())
+                    .foregroundColor(rowAgeColor(row.ageDays))
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close preview")
+            }
+            Text(cleanRowTitle(row.title))
+                .font(DS.title)
+                .lineLimit(3)
+                .textSelection(.enabled)
+            Divider()
+            ScrollView {
+                Text(richDetailText(row.detail))
+                    .font(DS.body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !row.linkedChips.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(row.kind == .association ? "LINKED PATTERNS" : "BUILT-ON ASSOCIATIONS")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    ForEach(Array(row.linkedChips.enumerated()), id: \.offset) { _, chip in
+                        Button(action: { onPreview(chip.target) }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.right.circle").font(.system(size: 9))
+                                Text(chip.label + "…").font(DS.caption).lineLimit(1)
+                            }
+                            .foregroundColor(.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { inside in
+                            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                        }
+                    }
+                }
+            }
+            HStack {
+                Button(action: { onOpenInBrowse(row.id) }) {
+                    Label("Open in Browse", systemImage: "arrow.up.forward.square")
+                        .font(DS.caption)
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+            }
+        }
+        .padding(12)
+        .frame(width: 360, alignment: .topLeading)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(DS.surface)
+    }
+}
+
 // — Model + view —
 
 final class BrowseModel: ObservableObject {
@@ -6502,6 +6643,13 @@ final class BrowseModel: ObservableObject {
         expandedId = id
         jumpTarget = id
     }
+
+    /// First-click preview: show the referenced row in the side panel
+    /// without moving the list or switching tabs.
+    @Published var previewRow: BrowseRow? = nil
+    func preview(id: String) {
+        previewRow = rows.first(where: { $0.id == id })
+    }
     var filtered: [BrowseRow] {
         guard let f = filter else { return rows }
         return rows.filter { $0.kind == f }
@@ -6524,6 +6672,24 @@ struct BrowseView: View {
     @State private var clusterQuery = ""
 
     var body: some View {
+        HStack(spacing: 0) {
+            listColumn
+            if let preview = model.previewRow {
+                Divider()
+                RowPreviewPanel(
+                    row: preview,
+                    onOpenInBrowse: { id in
+                        model.previewRow = nil
+                        model.jump(to: id)
+                    },
+                    onPreview: { id in model.preview(id: id) },
+                    onClose: { model.previewRow = nil })
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var listColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             chipBar
             Divider()
@@ -6552,25 +6718,25 @@ struct BrowseView: View {
             Divider()
             footer
         }
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var chipBar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: DS.unit) {
             chip(nil, label: "All (\(model.rows.count))")
             ForEach(BrowseRow.Kind.allCases) { k in
                 chip(k, label: "\(k.rawValue) (\(model.count(of: k)))")
             }
             Spacer()
             Button(action: { showClusterMap.toggle() }) {
-                Label("Clusters", systemImage: "circle.hexagongrid")
-                    .font(.system(size: 11))
-                    .foregroundColor(showClusterMap ? .primary : .secondary)
+                Label("Clusters", systemImage: "circle.hexagongrid.fill")
+                    .font(.system(size: 11, weight: .medium))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.bordered)
+            .tint(showClusterMap ? Color.accentColor : Color.secondary)
+            .help("Cluster map — every repeated lesson as a bubble")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, DS.unit)
     }
 
     /// The cluster map: every multi-member lesson as a bubble, area ∝
@@ -6640,13 +6806,18 @@ struct BrowseView: View {
         return Button(action: { model.filter = kind }) {
             Text(label)
                 .font(.system(size: 11, weight: active ? .semibold : .regular))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background((kind?.tint ?? .secondary).opacity(active ? 0.28 : 0.10))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background((kind?.tint ?? .secondary).opacity(active ? 0.30 : 0.12))
+                .overlay(Capsule().strokeBorder(
+                    (kind?.tint ?? .secondary).opacity(active ? 0.55 : 0.0), lineWidth: 1))
                 .foregroundColor(active ? .primary : .secondary)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
+        .onHover { inside in
+            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
     }
 
     private func rowView(_ row: BrowseRow) -> some View {
@@ -6660,7 +6831,7 @@ struct BrowseView: View {
                     .frame(width: 16)
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(cleanTitle(row.title))
+                    Text(cleanRowTitle(row.title))
                         .font(.system(size: 12, weight: .medium))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -6687,9 +6858,9 @@ struct BrowseView: View {
                         .foregroundColor(.secondary)
                         .frame(width: 34, alignment: .trailing)
                 }
-                Text(ageLabel(row.ageDays))
+                Text(rowAgeLabel(row.ageDays))
                     .font(.system(size: 10).monospacedDigit())
-                    .foregroundColor(ageColor(row.ageDays))
+                    .foregroundColor(rowAgeColor(row.ageDays))
                     .frame(width: 38, alignment: .trailing)
             }
             .padding(.horizontal, 10)
@@ -6720,16 +6891,11 @@ struct BrowseView: View {
     }
 
     /// Insight titles arrive as blockquote lines ("> ..."); strip the syntax.
-    private func cleanTitle(_ t: String) -> String {
-        var s = t.trimmingCharacters(in: .whitespaces)
-        while s.hasPrefix(">") { s = String(s.dropFirst()).trimmingCharacters(in: .whitespaces) }
-        return s
-    }
 
     private func detailView(_ row: BrowseRow) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             ScrollView {
-                Text(richDetail(row.detail))
+                Text(richDetailText(row.detail))
                     .font(.system(size: 12))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -6741,7 +6907,7 @@ struct BrowseView: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundColor(.secondary)
                     ForEach(Array(row.linkedChips.enumerated()), id: \.offset) { _, chip in
-                        Button(action: { model.jump(to: chip.target) }) {
+                        Button(action: { model.preview(id: chip.target) }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.right.circle")
                                     .font(.system(size: 9))
@@ -6792,34 +6958,7 @@ struct BrowseView: View {
     /// Markdown-aware detail rendering (bold, code, italics) that keeps the
     /// store's line breaks. Falls back to the raw string on parse failure —
     /// showing syntax beats showing nothing.
-    private func richDetail(_ raw: String) -> AttributedString {
-        let cleaned = raw
-            .components(separatedBy: "\n")
-            .map { line -> String in
-                var s = line
-                while s.hasPrefix("> ") { s = String(s.dropFirst(2)) }
-                return s
-            }
-            .joined(separator: "\n")
-        if let parsed = try? AttributedString(
-            markdown: cleaned,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            return parsed
-        }
-        return AttributedString(cleaned)
-    }
 
-    private func ageLabel(_ d: Int?) -> String {
-        guard let d else { return "—" }
-        if d == 0 { return "today" }
-        if d < 30 { return "\(d)d" }
-        if d < 365 { return "\(d / 30)mo" }
-        return "\(d / 365)y"
-    }
-    private func ageColor(_ d: Int?) -> Color {
-        guard let d else { return .secondary }
-        return d >= 30 ? .orange : .secondary
-    }
 }
 
 // — Search: the query spine over the deduped knowledge base —
@@ -6891,8 +7030,12 @@ final class SearchModel: ObservableObject {
     func openSelected() {
         let h = hits
         guard !h.isEmpty else { return }
-        onOpen?(h[min(selected, h.count - 1)].row.id)
+        previewRow = h[min(selected, h.count - 1)].row
     }
+
+    /// First click (and ⏎) preview in place; tab-jump only from the
+    /// preview's explicit "Open in Browse".
+    @Published var previewRow: BrowseRow? = nil
 }
 
 struct SearchPane: View {
@@ -6900,6 +7043,28 @@ struct SearchPane: View {
     @FocusState private var fieldFocused: Bool
 
     var body: some View {
+        HStack(spacing: 0) {
+            searchColumn
+            if let preview = model.previewRow {
+                Divider()
+                RowPreviewPanel(
+                    row: preview,
+                    onOpenInBrowse: { id in
+                        model.previewRow = nil
+                        model.onOpen?(id)
+                    },
+                    onPreview: { id in
+                        if let r = model.allRows.first(where: { $0.id == id }) {
+                            model.previewRow = r
+                        }
+                    },
+                    onClose: { model.previewRow = nil })
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var searchColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             TextField("Search all lessons — words match independently, \"quotes\" match exactly", text: $model.query)
                 .textFieldStyle(.roundedBorder)
@@ -6928,7 +7093,10 @@ struct SearchPane: View {
                             ForEach(Array(hits.enumerated()), id: \.element.id) { i, hit in
                                 hitRow(hit.row, isSelected: i == model.selected)
                                     .id(hit.id)
-                                    .onTapGesture { model.onOpen?(hit.row.id) }
+                                    .onTapGesture {
+                                        model.selected = i
+                                        model.previewRow = hit.row
+                                    }
                             }
                         }
                     }
@@ -6948,7 +7116,6 @@ struct SearchPane: View {
                 .padding(.vertical, 6)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func hitRow(_ row: BrowseRow, isSelected: Bool) -> some View {
@@ -6994,6 +7161,7 @@ struct JournalRowVM: Identifiable {
     let agoLabel: String
     let counts: String
     let tokens: Int
+    let ageDays: Int
     /// Patterns whose first_seen falls in this cycle's window, as
     /// (label, Browse row id) chips — approximate but honest join.
     let chips: [(label: String, target: String)]
@@ -7002,7 +7170,26 @@ struct JournalRowVM: Identifiable {
 final class JournalModel: ObservableObject {
     @Published var rows: [JournalRowVM] = []
     @Published var heatEntries: [(date: Date, tokens: Int)] = []
+    @Published var query = ""
+    /// nil = all time; otherwise trailing N days.
+    @Published var rangeDays: Int? = nil
+    @Published var previewRow: BrowseRow? = nil
     var onJumpToBrowse: ((String) -> Void)?
+    var lookupRow: ((String) -> BrowseRow?)?
+
+    var filtered: [JournalRowVM] {
+        var out = rows
+        if let r = rangeDays { out = out.filter { $0.ageDays <= r } }
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if !q.isEmpty {
+            out = out.filter { row in
+                row.dateLabel.lowercased().contains(q)
+                    || row.counts.lowercased().contains(q)
+                    || row.chips.contains { $0.label.lowercased().contains(q) }
+            }
+        }
+        return out
+    }
 }
 
 /// Join cycles to the patterns first seen inside each cycle's window.
@@ -7056,6 +7243,7 @@ private func buildJournalRows(journal: [JournalEntry]) -> ([JournalRowVM], [(dat
             agoLabel: timeAgo(entry.timestamp),
             counts: counts.isEmpty ? "skipped — no sessions to analyze" : counts,
             tokens: entry.tokensUsed,
+            ageDays: max(0, Int(Date().timeIntervalSince(ts) / 86400)),
             chips: chips))
     }
     let heat = sorted.map { (date: $0.1, tokens: $0.0.tokensUsed) }
@@ -7078,17 +7266,52 @@ struct JournalPane: View {
     @ObservedObject var model: JournalModel
 
     var body: some View {
+        HStack(spacing: 0) {
+            journalColumn
+            if let preview = model.previewRow {
+                Divider()
+                RowPreviewPanel(
+                    row: preview,
+                    onOpenInBrowse: { id in
+                        model.previewRow = nil
+                        model.onJumpToBrowse?(id)
+                    },
+                    onPreview: { id in
+                        if let r = model.lookupRow?(id) { model.previewRow = r }
+                    },
+                    onClose: { model.previewRow = nil })
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var journalColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             if !model.heatEntries.isEmpty {
                 HeatMapWrapper(entries: model.heatEntries)
-                    .frame(height: 120)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 10)
+                    .frame(height: 64)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
             }
-            Divider().padding(.top, 8)
+            HStack(spacing: DS.unit) {
+                TextField("Filter cycles…", text: $model.query)
+                    .textFieldStyle(.roundedBorder)
+                    .font(DS.body)
+                    .frame(maxWidth: 260)
+                rangeChip(nil, "All")
+                rangeChip(7, "7d")
+                rangeChip(30, "30d")
+                Spacer()
+                Text("\(model.filtered.count) of \(model.rows.count) cycles")
+                    .font(DS.caption).foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, DS.unit)
+            Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(model.rows) { row in
+                    ForEach(model.filtered) { row in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 8) {
                                 Text(row.dateLabel)
@@ -7107,7 +7330,9 @@ struct JournalPane: View {
                             if !row.chips.isEmpty {
                                 VStack(alignment: .leading, spacing: 2) {
                                     ForEach(Array(row.chips.enumerated()), id: \.offset) { _, chip in
-                                        Button(action: { model.onJumpToBrowse?(chip.target) }) {
+                                        Button(action: {
+                                            if let r = model.lookupRow?(chip.target) { model.previewRow = r }
+                                        }) {
                                             HStack(spacing: 4) {
                                                 Image(systemName: "arrow.right.circle")
                                                     .font(.system(size: 9))
@@ -7131,7 +7356,18 @@ struct JournalPane: View {
                 }
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func rangeChip(_ days: Int?, _ label: String) -> some View {
+        let active = model.rangeDays == days
+        return Button(action: { model.rangeDays = days }) {
+            Text(label)
+                .font(.system(size: 11, weight: active ? .semibold : .regular))
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background(Color.secondary.opacity(active ? 0.28 : 0.10))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -7160,11 +7396,14 @@ struct OverviewPane: View {
         VStack(alignment: .leading, spacing: 6) {
             if let pending = model.data.reviewPending {
                 Button(action: { model.onOpenReview?() }) {
-                    Label("Weekly review pending (\(pending)) — open", systemImage: "checklist")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.orange)
+                    Label("Open weekly review (\(pending))", systemImage: "checklist")
+                        .font(.system(size: 12, weight: .semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             }
             if let r = model.data.reflect {
                 HStack(spacing: 6) {
@@ -7195,16 +7434,27 @@ struct OverviewPane: View {
     }
 
     private func statusLine(_ s: (cycles: Int, tokens: Int, lastDream: String?)) -> some View {
-        HStack(spacing: 14) {
-            Label("\(s.cycles) cycles", systemImage: "moon.zzz.fill")
-            Label(fmtNum(s.tokens) + " tokens", systemImage: "circle.hexagongrid.fill")
-            if let last = s.lastDream {
-                Label("last dream \(last)", systemImage: "clock")
-            }
+        HStack(spacing: DS.unit) {
+            statTile("CYCLES", "\(s.cycles)")
+            statTile("TOKENS", fmtNum(s.tokens))
+            if let last = s.lastDream { statTile("LAST DREAM", last) }
             Spacer()
         }
-        .font(.system(size: 11))
-        .foregroundColor(.secondary)
+    }
+
+    private func statTile(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.secondary)
+                .kerning(0.5)
+            Text(value)
+                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(DS.surface)
+        .cornerRadius(6)
     }
 
     /// "Your biggest repeated lessons" — cluster sizes as honest bars,
@@ -7229,10 +7479,16 @@ struct OverviewPane: View {
                         Text("\(lesson.size)")
                             .font(.system(size: 11, weight: .semibold).monospacedDigit())
                             .frame(width: 26, alignment: .trailing)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary.opacity(0.6))
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             }
         }
     }
