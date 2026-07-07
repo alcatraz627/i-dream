@@ -4280,42 +4280,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func showPatternsDetail() {
-        let patterns = allPatterns()
-        guard !patterns.isEmpty else {
-            alert("Patterns", "No patterns have been extracted yet."); return
-        }
-        let rt = RichText()
-        rt.header("Behavioral & Cognitive Patterns")
-        rt.dim("\(patterns.count) total patterns")
-        rt.spacer()
-        for p in patterns.suffix(15).reversed() {
-            let val   = p.valence == "positive" ? "+" : p.valence == "negative" ? "−" : "◦"
-            let since = p.firstSeen.map { "  ·  first seen \(fmtDate($0))" } ?? ""
-            let label = "\(val)  \(p.pattern)"
-            if p.valence == "positive"      { rt.ok(label) }
-            else if p.valence == "negative" { rt.warn(label) }
-            else                            { rt.subheader(label) }
-            rt.dim("  \(p.category)  ·  \(Int(p.confidence * 100))% confident\(since)")
-            rt.spacer()
-        }
-        if patterns.count > 15 { rt.dim("… and \(patterns.count - 15) earlier patterns") }
-        showResizablePanel(title: "Patterns (\(patterns.count))",
-                           content: rt.build(),
-                           filePath: subDir + "/dreams/patterns.json")
-        // Add "Network View →" and "Rate Insights →" buttons to the toolbar
-        if let panel = detailPanel,
-           let bar = panel.contentView?.subviews.first(where: { $0.frame.height == 48 && $0.frame.origin.y == 0 }) {
-            let panW = panel.contentView?.bounds.width ?? 900
-            let rateBtn = NSButton(title: "Rate Insights →", target: self,
-                                   action: #selector(showInsightsFeedback))
-            rateBtn.frame      = NSRect(x: 12, y: 8, width: 130, height: 32)
-            rateBtn.autoresizingMask = []
-            rateBtn.bezelStyle = .rounded
-            bar.addSubview(rateBtn)
-            _ = panW
-        }
-    }
 
     // ── Insight Feedback ──────────────────────────────────────────────────────
     // Opens a panel with top-15 patterns; user can rate each thumbs-up/down.
@@ -5244,123 +5208,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return "\(n)"
     }
 
-    @objc private func showAssociationsDetail() {
-        let assocs = allAssociations()
-        guard !assocs.isEmpty else {
-            alert("Associations", "No cross-pattern hypotheses have been formed yet."); return
-        }
-        let rt = RichText()
-        rt.header("Cross-Pattern Hypotheses")
-        rt.dim("\(assocs.count) total associations")
-        for (i, a) in assocs.reversed().enumerated() {
-            rt.spacer()
-            let confPct = Int(a.confidence * 100)
-            let actionTag = a.actionable ? "  · actionable" : ""
-            rt.dim("[\(assocs.count - i)]  \(confPct)% confident\(actionTag)")
-            // Color hypothesis by confidence: ≥80% = green, ≥60% = body, <60% = dim
-            if confPct >= 80        { rt.ok(a.hypothesis) }
-            else if confPct >= 60   { rt.body(a.hypothesis) }
-            else                    { rt.dim(a.hypothesis) }
-            if let rule = a.suggestedRule, !rule.isEmpty {
-                rt.accent("  → Rule: \(rule)")
-            }
-            rt.divider()
-        }
-        showResizablePanel(title: "Associations (\(assocs.count))",
-                           content: rt.build(),
-                           filePath: subDir + "/dreams/associations.json")
 
-    }
-
-    @objc private func showMetacogDetail() {
-        let (audit, filename) = readLatestAudit()
-        guard let audit = audit else {
-            alert("Metacog", "No metacognition audit data found.\n\nAudit files are created during background consolidation cycles. Ensure at least one cycle has completed with the metacog module enabled."); return
-        }
-        // Parse date from filename like "20260412-1032-audit.json"
-        var dateStr = filename ?? ""
-        if let fn = filename {
-            let parts = fn.components(separatedBy: "-")
-            if parts.count >= 2 {
-                let df = DateFormatter()
-                df.dateFormat = "yyyyMMdd HHmm"
-                if let d = df.date(from: "\(parts[0]) \(parts[1])") {
-                    dateStr = fmtDateWithAge(ISO8601DateFormatter().string(from: d))
-                }
-            }
-        }
-        let rt = RichText()
-        rt.header("Metacognition Audit")
-        if !dateStr.isEmpty { rt.dim("From: \(dateStr)") }
-
-        // ── Calibration score ──────────────────────────────────────────────
-        if let score = audit.calibrationScore {
-            rt.spacer()
-            rt.subheader("Calibration Score")
-            let scoreLabel = score >= 0.8 ? "well-calibrated"
-                           : score >= 0.5 ? "moderate"
-                           : score >= 0.2 ? "under-calibrated"
-                           : "poor"
-            rt.body(String(format: "%.2f / 1.00  (%@)", score, scoreLabel))
-            rt.dim("  1.0 = predictions match outcomes perfectly")
-            rt.dim("  <0.5 = systematically over- or under-confident")
-        }
-
-        // ── Sample breakdown ───────────────────────────────────────────────
-        let over   = audit.overconfidentCount  ?? 0
-        let under  = audit.underconfidentCount ?? 0
-        let well   = audit.wellCalibratedCount ?? 0
-        let total  = over + under + well
-        if total > 0 {
-            rt.spacer()
-            rt.subheader("Sample Breakdown  (\(total) units)")
-            func pct(_ n: Int) -> String { total > 0 ? String(format: "%d%%", n * 100 / total) : "–" }
-            rt.body(String(format: "  ✓ Well-calibrated   %3d  (%@)", well,  pct(well)))
-            rt.body(String(format: "  ↑ Overconfident     %3d  (%@)", over,  pct(over)))
-            rt.body(String(format: "  ↓ Underconfident    %3d  (%@)", under, pct(under)))
-        }
-
-        // ── Biases detected ────────────────────────────────────────────────
-        if let biases = audit.biasesDetected, !biases.isEmpty {
-            rt.spacer()
-            rt.subheader("Biases Detected  (\(biases.count))")
-            biases.forEach { rt.body("  • \($0)") }
-        }
-
-        // ── Recommendations ────────────────────────────────────────────────
-        if let recs = audit.recommendations, !recs.isEmpty {
-            rt.spacer()
-            rt.subheader("Recommendations")
-            recs.enumerated().forEach { i, r in rt.body("  \(i+1). \(r)") }
-        }
-
-        // ── Historical calibration trend ───────────────────────────────────
-        let calPath = subDir + "/metacog/calibration.jsonl"
-        if let calContent = try? String(contentsOfFile: calPath, encoding: .utf8) {
-            let scores: [Double] = calContent
-                .components(separatedBy: "\n").filter { !$0.isEmpty }
-                .compactMap { line -> Double? in
-                    guard let d = line.data(using: .utf8),
-                          let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                          let s = j["calibration_score"] as? Double else { return nil }
-                    return s
-                }
-            if scores.count >= 2 {
-                rt.spacer()
-                rt.subheader("Calibration Trend  (last \(min(scores.count, 10)) cycles)")
-                let window = Array(scores.suffix(10))
-                let sparkVals = window.map { Int($0 * 10) }
-                let avg = window.reduce(0, +) / Double(window.count)
-                rt.mono("  \(fmtSparkline(sparkVals, width: 10))  avg \(String(format: "%.2f", avg))")
-                let trend = (scores.last ?? 0) - (scores.first ?? 0)
-                let trendStr = trend > 0.05 ? "↑ improving" : trend < -0.05 ? "↓ declining" : "→ stable"
-                rt.dim("  Overall trend: \(trendStr)")
-            }
-        }
-
-        let auditPath = filename.map { subDir + "/metacog/audits/" + $0 }
-        showResizablePanel(title: "Metacog Audit", content: rt.build(), filePath: auditPath)
-    }
 
     @objc private func showSessionsDetail() {
         let journal = allJournal()
@@ -5648,56 +5496,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cycleDetailPanel?.close(); cycleDetailPanel = nil
     }
 
-    @objc private func showInsightsDetail() {
-        guard let raw = readAllInsights(), !raw.isEmpty else {
-            alert("Insights", "No dream insights have been recorded yet."); return
-        }
-        let rt = RichText()
-        rt.header("Dream Insights")
-
-        // Split on Wake Cycle boundaries to preserve the date for each insight.
-        // Format: "## Wake Cycle — 2026-04-14 16:12 UTC\n\n### Insight..."
-        let cycleParts = raw.components(separatedBy: "\n## Wake Cycle")
-        var pairs: [(date: String, block: String)] = []
-        for part in cycleParts.dropFirst() {
-            // First line of each part = " — 2026-04-14 16:12 UTC"
-            let eol = part.firstIndex(of: "\n") ?? part.endIndex
-            let dateStr = String(part[part.startIndex..<eol])
-                .replacingOccurrences(of: " — ", with: "")
-                .trimmingCharacters(in: .whitespaces)
-            let rest = String(part[eol...])
-            for block in rest.components(separatedBy: "\n### Insight").dropFirst() {
-                pairs.append((date: dateStr, block: block))
-            }
-        }
-
-        let total = pairs.count
-        let fb = readInsightFeedback()
-        let rated = fb.count
-        rt.dim("\(total) insight\(total == 1 ? "" : "s") recorded\(rated > 0 ? " · \(rated) rated" : "")")
-        rt.spacer()
-
-        // Render most-recent first
-        for (date, block) in pairs.reversed() {
-            renderInsight(rt, block: block, date: date, feedback: fb)
-        }
-
-        showResizablePanel(title: "All Insights (\(total))",
-                           content: rt.build(),
-                           filePath: subDir + "/dreams/insights.md")
-
-        // Wire up feedback link clicks on the text view inside the panel
-        if let contentView = detailPanel?.contentView,
-           let scrollView = contentView.subviews.first(where: { $0 is NSScrollView }) as? NSScrollView,
-           let textView = scrollView.documentView as? NSTextView {
-            insightFeedbackDelegate = InsightFeedbackDelegate { [weak self] insightId, rating in
-                self?.recordInsightFeedback(insightId: insightId, rating: rating)
-                // Refresh panel to update button colors
-                DispatchQueue.main.async { self?.showInsightsDetail() }
-            }
-            textView.delegate = insightFeedbackDelegate
-        }
-    }
 
     /// Render one `### Insight` block into `rt`.
     private func renderInsight(_ rt: RichText, block: String, date: String,
@@ -5935,6 +5733,20 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.refresh()
         }
     }
+
+    /// v3: the Knowledge/Insights menu launchers open the dashboard's
+    /// Browse surface filtered by type. Their legacy floating RichText
+    /// panels were the "fifth paradigm" the redesign deletes
+    /// (topbar-review.md "Load-bearing coupling to fix"; docs/23 Stage 4).
+    private func openDashboardBrowse(_ filter: BrowseRow.Kind?) {
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showOrFront(tab: 1)
+        dashboardController!.browseModel.filter = filter
+    }
+    @objc private func showPatternsDetail()     { openDashboardBrowse(.pattern) }
+    @objc private func showAssociationsDetail() { openDashboardBrowse(.association) }
+    @objc private func showInsightsDetail()     { openDashboardBrowse(.insight) }
+    @objc private func showMetacogDetail()      { openDashboardBrowse(.metacog) }
 
     @objc private func openDashboard() {
         if dashboardController == nil {
