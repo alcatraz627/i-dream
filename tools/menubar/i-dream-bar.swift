@@ -3239,7 +3239,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cachedRunning        = false
     private var cachedState:         DaemonState?
     private var cachedBoard:         BoardData?
-    private var cachedPatterns:      [Pattern]      = []
     private var cachedJournal:       [JournalEntry] = []
     private var cachedStoreFiles:    [StoreFile]    = []
     private var cachedDigest:        String?
@@ -3250,9 +3249,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Persistent resizable detail panel (replaces NSAlert popups)
     private var detailPanel:          NSPanel?
     private var detailFilePath:       String?
-    private var journalLinkDelegate:  JournalLinkDelegate?
     private var panelLinkDelegate:    JournalLinkDelegate?   // generic link handler for resizable panels
-    private var cycleDetailPanel:     NSPanel?
 
     // Dream completion card (auto-dismissing overlay)
     private var completionCard: NSPanel?
@@ -3390,7 +3387,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cachedRunning          = s.running
         cachedState            = s.state
         cachedBoard            = s.board
-        cachedPatterns         = s.patterns
         cachedJournal          = s.journal
         cachedStoreFiles       = s.storeFiles
         cachedDigest           = s.digest
@@ -3410,7 +3406,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.cachedRunning        = s.running
             self.cachedState          = s.state
             self.cachedBoard          = s.board
-            self.cachedPatterns       = s.patterns
             self.cachedJournal        = s.journal
             self.cachedStoreFiles     = s.storeFiles
             self.cachedDigest         = s.digest
@@ -3592,28 +3587,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // ── Menu construction ──────────────────────────────────────────────────────
-
-    /// Word-wrap a long insight string so it spans a few lines in the menu
-    /// instead of forcing the whole dropdown absurdly wide. Continuation lines
-    /// get a hanging indent so they sit under the first line's text.
-    private func wrapForMenu(_ text: String, width: Int = 58, indent: String = "     ") -> String {
-        var lines: [String] = []
-        var line = ""
-        for word in text.split(separator: " ", omittingEmptySubsequences: true) {
-            if line.isEmpty {
-                line = String(word)
-            } else if line.count + 1 + word.count <= width {
-                line += " " + word
-            } else {
-                lines.append(line)
-                line = String(word)
-            }
-        }
-        if !line.isEmpty { lines.append(line) }
-        return lines.enumerated()
-            .map { idx, l in idx == 0 ? l : indent + l }
-            .joined(separator: "\n")
-    }
 
     private func populateMenuItems(_ menu: NSMenu) {
         let running = cachedRunning
@@ -4010,83 +3983,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         i.attributedTitle = seg(title, BarFont.secondary,
                                 NSColor.labelColor.withAlphaComponent(0.6))
         i.isEnabled = false; menu.addItem(i)
-    }
-
-    private func valenceSymbol(_ v: String) -> String {
-        switch v {
-        case "positive": return "+"
-        case "negative": return "−"
-        default:         return "◦"
-        }
-    }
-
-    // ── Pattern detail submenu ────────────────────────────────────────────────
-    // Built per-pattern item in "Recent Inferences". Shows full text, metadata
-    // rows, and action items (copy, view all). Hover → submenu appears at right.
-
-    private func makePatternSubmenu(_ p: Pattern) -> NSMenu {
-        let sub = NSMenu()
-
-        // ── Full text (non-truncated) ──────────────────────────────────────────
-        let textItem = NSMenuItem()
-        let textAttr = NSMutableAttributedString()
-        textAttr.append(NSAttributedString(string: "  " + p.pattern,
-            attributes: [
-                .font:            NSFont.systemFont(ofSize: 13),
-                .foregroundColor: NSColor.labelColor,
-            ]))
-        textItem.attributedTitle = textAttr
-        textItem.isEnabled = false
-        sub.addItem(textItem)
-
-        sub.addItem(.separator())
-
-        // ── Metadata rows ──────────────────────────────────────────────────────
-        addRow(sub, "Category",   p.category)
-
-        let confColor: NSColor = p.confidence >= 0.85 ? .systemGreen
-                               : p.confidence >= 0.65 ? .systemBlue
-                               : .secondaryLabelColor
-        let confDot = p.confidence >= 0.85 ? "●●●●●"
-                    : p.confidence >= 0.65 ? "●●●○○" : "●●○○○"
-        addRow(sub, "Confidence", "\(confDot)  \(Int(p.confidence * 100))%",
-               valueColor: confColor)
-
-        let sym = valenceSymbol(p.valence)
-        addRow(sub, "Valence", "\(sym)  \(p.valence)")
-
-        if let fs = p.firstSeen, !fs.isEmpty {
-            addRow(sub, "First seen", fmtDateWithAge(fs))
-        }
-
-        if let pid = p.id, !pid.isEmpty {
-            addRow(sub, "ID", pid)
-        }
-
-        sub.addItem(.separator())
-
-        // ── Actions ────────────────────────────────────────────────────────────
-        let copyItem = NSMenuItem()
-        copyItem.attributedTitle = NSAttributedString(string: "  Copy text",
-            attributes: [.font: NSFont.systemFont(ofSize: 13)])
-        copyItem.action = #selector(copyItemText(_:))
-        copyItem.target = self
-        copyItem.isEnabled = true
-        copyItem.representedObject =
-            "\(sym) \(p.pattern)\nCategory: \(p.category) | Confidence: \(Int(p.confidence * 100))%"
-        setIcon(copyItem, "doc.on.clipboard")
-        sub.addItem(copyItem)
-
-        let viewAllItem = NSMenuItem()
-        viewAllItem.attributedTitle = NSAttributedString(string: "  View All Insights →",
-            attributes: [.font: NSFont.systemFont(ofSize: 13)])
-        viewAllItem.action = #selector(showInsightsDetail)
-        viewAllItem.target = self
-        viewAllItem.isEnabled = true
-        setIcon(viewAllItem, "list.bullet.rectangle")
-        sub.addItem(viewAllItem)
-
-        return sub
     }
 
     // ── SF Symbol icon helper ──────────────────────────────────────────────────
@@ -5152,170 +5048,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dashboardController!.showOrFront(tab: 2)
     }
 
-    /// Show a floating detail panel for one journal cycle entry.
-    /// Finds matching patterns (by first_seen ±30 min), associations linked to those
-    /// patterns, and a trace summary (if a matching trace file exists).
-    private func showCycleDetail(for entry: JournalEntry) {
-        cycleDetailPanel?.close(); cycleDetailPanel = nil
-
-        let entryDate = isoDate(entry.timestamp) ?? Date()
-        let windowSecs: TimeInterval = 30 * 60   // ±30 minutes
-
-        // ── 1. Patterns active in this cycle ────────────────────────────────
-        let cyclePats = allPatterns().filter { p in
-            guard let fs = p.firstSeen, let d = isoDate(fs) else { return false }
-            return abs(d.timeIntervalSince(entryDate)) <= windowSecs
-        }
-        let cyclePatIDs = Set(cyclePats.compactMap { $0.id })
-
-        // ── 2. Associations linked to those patterns ─────────────────────────
-        let cycleAssocs = allAssociations().filter { a in
-            guard let linked = a.patternsLinked, !linked.isEmpty else { return false }
-            return !linked.filter { cyclePatIDs.contains($0) }.isEmpty
-        }
-
-        // ── 3. Trace file summary ────────────────────────────────────────────
-        var traceLines: [String] = []
-        if let idPrefix = entry.id.map({ String($0.prefix(8)) }), !idPrefix.isEmpty {
-            let fm = FileManager.default
-            if let files = try? fm.contentsOfDirectory(atPath: tracesDir),
-               let traceFile = files.first(where: { $0.hasSuffix(".jsonl") && $0.contains(idPrefix) }) {
-                let path = tracesDir + "/" + traceFile
-                if let raw = try? String(contentsOfFile: path, encoding: .utf8) {
-                    traceLines = raw.components(separatedBy: "\n").filter { !$0.isEmpty }
-                }
-            }
-        }
-
-        // ── Build rich text ──────────────────────────────────────────────────
-        let rt = RichText()
-        rt.header("Cycle Detail")
-        rt.subheader("\(fmtDate(entry.timestamp))  ·  \(timeAgo(entry.timestamp))")
-        rt.spacer()
-
-        // Summary stats row
-        rt.subheader("Cycle Summary")
-        if entry.sessionsAnalyzed > 0 {
-            rt.body("  Sessions analyzed  \(entry.sessionsAnalyzed)")
-            rt.body("  Patterns extracted \(entry.patternsExtracted)")
-            rt.body("  Associations found \(entry.associationsFound)")
-            rt.body("  Insights promoted  \(entry.insightsPromoted)")
-            rt.body("  Tokens used        \(fmtNum(entry.tokensUsed))")
-        } else {
-            rt.dim("  Skipped — no new sessions to consolidate")
-        }
-        rt.divider()
-
-        // Patterns section
-        rt.subheader("Patterns (\(cyclePats.count))")
-        if cyclePats.isEmpty {
-            rt.dim("  No patterns matched to this cycle's timestamp window.")
-        } else {
-            for p in cyclePats.sorted(by: { $0.confidence > $1.confidence }) {
-                let pct = Int(p.confidence * 100)
-                let bar = String(repeating: "▮", count: pct / 10) + String(repeating: "░", count: 10 - pct / 10)
-                rt.body("  \(bar)  \(pct)%  \(p.pattern)")
-                let meta = [p.category, p.valence].filter { !$0.isEmpty }.joined(separator: "  ·  ")
-                if !meta.isEmpty { rt.dim("        \(meta)") }
-            }
-        }
-        rt.divider()
-
-        // Associations section
-        rt.subheader("Associations (\(cycleAssocs.count))")
-        if cycleAssocs.isEmpty {
-            rt.dim("  No associations linked to this cycle's patterns.")
-        } else {
-            for a in cycleAssocs.sorted(by: { $0.confidence > $1.confidence }) {
-                let pct = Int(a.confidence * 100)
-                rt.body("  \(pct)%  \(a.hypothesis)")
-                if let rule = a.suggestedRule, !rule.isEmpty {
-                    rt.dim("        Rule: \(rule)")
-                }
-            }
-        }
-        rt.divider()
-
-        // Trace phase breakdown (if available)
-        if !traceLines.isEmpty {
-            rt.subheader("Trace Events (\(traceLines.count))")
-            // Decode and show api_call + key events concisely
-            struct TraceEvent: Decodable {
-                let kind:    String?
-                let phase:   String?
-                let model:   String?
-                let tokens:  Int?
-                let message: String?
-                enum CodingKeys: String, CodingKey {
-                    case kind, phase, model, tokens, message
-                }
-            }
-            let events = traceLines.compactMap { line -> TraceEvent? in
-                guard let d = line.data(using: .utf8) else { return nil }
-                return try? JSONDecoder().decode(TraceEvent.self, from: d)
-            }
-            var phaseTokens: [String: Int] = [:]
-            for e in events {
-                if e.kind == "api_call" || e.kind == "api_response",
-                   let phase = e.phase, let tok = e.tokens {
-                    phaseTokens[phase, default: 0] += tok
-                }
-            }
-            if phaseTokens.isEmpty {
-                rt.dim("  \(traceLines.count) trace events recorded.")
-            } else {
-                for (phase, tok) in phaseTokens.sorted(by: { $0.key < $1.key }) {
-                    rt.body("  \(phase.capitalized.padding(toLength: 12, withPad: " ", startingAt: 0))  \(fmtNum(tok)) tokens")
-                }
-            }
-        }
-
-        // ── Panel setup ──────────────────────────────────────────────────────
-        let panW: CGFloat = 680, panH: CGFloat = 560, barH: CGFloat = 44
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
-            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        panel.title = "Cycle — \(fmtDate(entry.timestamp))"
-        panel.isReleasedWhenClosed = false; panel.level = .floating
-
-        // Offset from parent so both panels are visible at once
-        if let parent = detailPanel { panel.setFrameOrigin(NSPoint(x: parent.frame.origin.x + 40,
-                                                                    y: parent.frame.origin.y - 40)) }
-        else { panel.center() }
-
-        let sv = NSScrollView(frame: NSRect(x: 0, y: barH, width: panW, height: panH - barH))
-        sv.autoresizingMask = [.width, .height]; sv.hasVerticalScroller = true
-        sv.autohidesScrollers = true; sv.borderType = .noBorder
-        let cs = sv.contentSize
-        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: cs.width, height: cs.height))
-        tv.minSize = NSSize(width: 0, height: cs.height)
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.autoresizingMask = .width; tv.isEditable = false; tv.isSelectable = true
-        tv.backgroundColor = .textBackgroundColor; tv.textContainerInset = NSSize(width: 14, height: 14)
-        tv.isVerticallyResizable = true; tv.isHorizontallyResizable = false
-        tv.textContainer?.containerSize = NSSize(width: cs.width, height: CGFloat.greatestFiniteMagnitude)
-        tv.textContainer?.widthTracksTextView = true
-        sv.documentView = tv
-        tv.textStorage?.setAttributedString(rt.build())
-
-        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: barH))
-        bar.autoresizingMask = [.width]
-        let sep = NSBox(frame: NSRect(x: 0, y: barH - 1, width: panW, height: 1))
-        sep.boxType = .separator; sep.autoresizingMask = [.width]; bar.addSubview(sep)
-        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeCycleDetailPanel))
-        closeBtn.frame = NSRect(x: panW - 92, y: 6, width: 80, height: 30)
-        closeBtn.autoresizingMask = [.minXMargin]; closeBtn.bezelStyle = .rounded; bar.addSubview(closeBtn)
-        panel.contentView?.addSubview(sv); panel.contentView?.addSubview(bar)
-        cycleDetailPanel = panel
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    @objc private func closeCycleDetailPanel() {
-        cycleDetailPanel?.close(); cycleDetailPanel = nil
-    }
-
 
     /// Render one `### Insight` block into `rt`.
     private func renderInsight(_ rt: RichText, block: String, date: String,
@@ -5540,27 +5272,6 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         isCycling      = true
         cycleStartTime = Date()
         startDreamAnimation()
-    }
-
-    /// Re-run the Recent Dreams Inference (digest generation + sentiment tagging).
-    /// Runs `i-dream dream wake` which re-triggers the Wake phase that synthesizes
-    /// the digest from the top dream insights. Terminology: "Recent Dreams Inference"
-    /// is the process of synthesizing recent high-confidence patterns into a prose summary
-    /// with a sentiment tag (positive / neutral / negative).
-    @objc private func triggerRecentDreamsInference() {
-        dlog("triggerRecentDreamsInference")
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: iDream)
-        p.arguments     = ["dream", "wake"]
-        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        try? p.run()
-        isCycling      = true
-        cycleStartTime = Date()
-        startDreamAnimation()
-        // Refresh after a short delay to pick up the new digest
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-            self?.refresh()
-        }
     }
 
     /// v3: the Knowledge/Insights menu launchers open the dashboard's
