@@ -1013,17 +1013,14 @@ final class NavSidebarButton: NSButton {
     private var _symbol = ""
     private var _iconColor: NSColor = .labelColor
 
-    /// Per-tab icon colours (indexed by tab position).
+    /// Per-tab accent, shown ONLY on the selected tab (v3 4-tab order).
+    /// Unselected icons stay monochrome — one loud hue at a time. Journal
+    /// deliberately avoids orange: that hue means "association" in content.
     private static let iconColors: [NSColor] = [
         .systemPurple,   // Overview
-        .systemTeal,     // Patterns
-        .systemOrange,   // Associations
+        .systemCyan,     // Browse — echoes the pattern/content tint
         .systemIndigo,   // Journal
-        .systemYellow,   // Insights
-        .systemPink,     // Metacog
         .systemGreen,    // Search
-        .secondaryLabelColor, // Help
-        .secondaryLabelColor, // About
     ]
 
     /// 2px leading accent bar layer — visible only on selection.
@@ -1040,7 +1037,7 @@ final class NavSidebarButton: NSButton {
                 : nil
             self.contentTintColor = isSelectedTab
                 ? _iconColor
-                : _iconColor.withAlphaComponent(0.55)
+                : .secondaryLabelColor
             // Lazily create the accent bar; show only when selected.
             if accentBar == nil {
                 let bar = CALayer()
@@ -1064,15 +1061,10 @@ final class NavSidebarButton: NSButton {
     }
 
     private static let tabTooltips: [String] = [
-        "System overview — stats, digest, valence (⌘1)",
-        "Behavioral patterns extracted from sessions (⌘2)",
-        "Cross-pattern associations and hypotheses (⌘3)",
-        "Consolidation cycle history and token usage (⌘4)",
-        "Promoted insights with confidence ratings (⌘5)",
-        "Metacognitive audits and calibration (⌘6)",
-        "Search across all knowledge base data (⌘7)",
-        "Keyboard shortcuts and feature reference (⌘8)",
-        "Build info, daemon status, data paths (⌘9)",
+        "System overview — outcomes, stats, digest (⌘1)",
+        "Browse all lessons — patterns, associations, insights (⌘2)",
+        "Consolidation cycle history and token usage (⌘3)",
+        "Search across all knowledge base data (⌘4)",
     ]
 
     func configure(title: String, symbol: String, index: Int) {
@@ -1089,7 +1081,7 @@ final class NavSidebarButton: NSButton {
         if let img = NSImage(systemSymbolName: symbol, accessibilityDescription: title) {
             self.image = img
         }
-        self.contentTintColor = _iconColor.withAlphaComponent(0.7)
+        self.contentTintColor = .secondaryLabelColor
         if index < NavSidebarButton.tabTooltips.count {
             self.toolTip = NavSidebarButton.tabTooltips[index]
         }
@@ -1512,36 +1504,48 @@ final class DashboardWindowController: NSObject {
             navButtons.append(btn)
         }
 
-        // Bottom: export + refresh + theme + always-on-top + version + last-refreshed
+        // ── Footer — three grouped blocks on an 8px rhythm above a hairline:
+        //    actions (export/refresh) · prefs (theme, always-on-top) ·
+        //    metadata (build, refreshed). Everything aligns at x=14 with the
+        //    nav column; type sits on the DS scale (11 controls / 10 meta).
+        let footX: CGFloat = 14
+        let footW: CGFloat = sideW - 28
+
+        let footSep = NSBox(frame: NSRect(x: footX, y: 176, width: footW, height: 1))
+        footSep.boxType = .separator
+        sidebar.addSubview(footSep)
+
         let exportBtn = NSButton(title: "⬇  Export JSON", target: self, action: #selector(exportDashboardData))
-        exportBtn.frame            = NSRect(x: 8, y: 132, width: sideW - 16, height: 28)
+        exportBtn.frame            = NSRect(x: footX - 4, y: 144, width: footW + 8, height: 24)
         exportBtn.isBordered       = false
-        exportBtn.font             = .systemFont(ofSize: 12)
+        exportBtn.alignment        = .left
+        exportBtn.font             = .systemFont(ofSize: 11)
         exportBtn.contentTintColor = .secondaryLabelColor
         sidebar.addSubview(exportBtn)
 
         let refreshBtn = NSButton(title: "↺  Refresh  (⌘R)", target: self, action: #selector(refreshDashboard))
-        refreshBtn.frame            = NSRect(x: 8, y: 108, width: sideW - 16, height: 28)
+        refreshBtn.frame            = NSRect(x: footX - 4, y: 112, width: footW + 8, height: 24)
         refreshBtn.isBordered       = false
-        refreshBtn.font             = .systemFont(ofSize: 12)
+        refreshBtn.alignment        = .left
+        refreshBtn.font             = .systemFont(ofSize: 11)
         refreshBtn.contentTintColor = .secondaryLabelColor
         sidebar.addSubview(refreshBtn)
 
         // ── Theme picker — three icon-only HoverButtons ───────────────────
-        // No background unless hovered (uses the same HoverButton class as
-        // the floating HUD action row). Each button has a tooltip; the
-        // currently-selected theme is shown by tinting its icon brighter.
-        let themeRow = NSView(frame: NSRect(x: 8, y: 80, width: sideW - 16, height: 28))
+        // No background unless hovered. Only the SELECTED theme wears its
+        // hue; unselected icons stay monochrome (quiet tier — the old
+        // always-tinted yellow/violet/teal trio was three decorative hues).
+        let themeRow = NSView(frame: NSRect(x: footX, y: 76, width: footW, height: 28))
         let themes: [(symbol: String, tooltip: String, value: String, tint: NSColor)] = [
             ("sun.max.fill",          "Light theme",  "light",  NSColor.systemYellow),
             ("moon.fill",             "Dark theme",   "dark",   NSColor(red: 0.55, green: 0.41, blue: 0.85, alpha: 1)),
             ("circle.lefthalf.filled","Follow system","system", NSColor.systemTeal),
         ]
-        let bw  = (themeRow.bounds.width - 12) / 3   // 3 buttons + 2x6px gaps
+        let bw  = (themeRow.bounds.width - 16) / 3   // 3 buttons + 2×8px gaps
         let cur = UserDefaults.standard.string(forKey: dashThemeKey) ?? "dark"
         themePickerButtons.removeAll()
         for (i, t) in themes.enumerated() {
-            let btn = HoverButton(frame: NSRect(x: CGFloat(i) * (bw + 6), y: 0,
+            let btn = HoverButton(frame: NSRect(x: CGFloat(i) * (bw + 8), y: 0,
                                                 width: bw, height: 28))
             btn.hoverLabel = t.tooltip   // also drives the HUD-style hover label if delegate set
             btn.tintColor  = t.tint
@@ -1551,7 +1555,6 @@ final class DashboardWindowController: NSObject {
                 btn.image = img.withSymbolConfiguration(cfg) ?? img
                 btn.imagePosition = .imageOnly
             }
-            // Selected theme: full-color tint. Unselected: dim.
             btn.contentTintColor = (t.value == cur) ? t.tint : NSColor.tertiaryLabelColor
             btn.tag    = i
             btn.target = self
@@ -1564,22 +1567,23 @@ final class DashboardWindowController: NSObject {
         // ── Always-on-top toggle ──────────────────────────────────────────
         let aotBtn = NSButton(checkboxWithTitle: "  Always on top",
                                target: self, action: #selector(toggleDashboardAlwaysOnTop(_:)))
-        aotBtn.frame = NSRect(x: 8, y: 56, width: sideW - 16, height: 18)
+        aotBtn.frame = NSRect(x: footX, y: 50, width: footW, height: 18)
         aotBtn.font  = .systemFont(ofSize: 11)
         aotBtn.state = UserDefaults.standard.bool(forKey: dashAlwaysOnTopKey) ? .on : .off
         if let panel = panel, aotBtn.state == .on { panel.level = .statusBar }
         sidebar.addSubview(aotBtn)
 
+        // Metadata block: two 16px-pitch lines, 10pt (no more 9.5 strays).
         let verLabel = NSTextField(labelWithString: "build \(BuildInfo.commitHash.prefix(7))")
-        verLabel.font      = .monospacedSystemFont(ofSize: 9.5, weight: .regular)
+        verLabel.font      = .monospacedSystemFont(ofSize: 10, weight: .regular)
         verLabel.textColor = .tertiaryLabelColor
-        verLabel.frame     = NSRect(x: 14, y: 30, width: sideW - 28, height: 14)
+        verLabel.frame     = NSRect(x: footX, y: 28, width: footW, height: 14)
         sidebar.addSubview(verLabel)
 
         let refreshedLbl = NSTextField(labelWithString: "Refreshed just now")
-        refreshedLbl.font      = .systemFont(ofSize: 9.5)
+        refreshedLbl.font      = .systemFont(ofSize: 10)
         refreshedLbl.textColor = .tertiaryLabelColor
-        refreshedLbl.frame     = NSRect(x: 14, y: 10, width: sideW - 28, height: 14)
+        refreshedLbl.frame     = NSRect(x: footX, y: 12, width: footW, height: 14)
         sidebar.addSubview(refreshedLbl)
         lastRefreshedLabel = refreshedLbl
         lastRefreshedDate  = Date()
@@ -6076,10 +6080,19 @@ func tailTruncate(_ s: String, _ maxChars: Int) -> String {
 //   scale, one spacing rhythm, quiet ambient color, explicit affordances) —
 
 enum DS {
+    // Spacing rhythm: everything sits on 4/8/12/16. No 5s, 6s, 9s, 10s.
+    static let half: CGFloat = 4
     static let unit: CGFloat = 8
-    static let title = Font.system(size: 13, weight: .semibold)
-    static let body = Font.system(size: 12)
-    static let caption = Font.system(size: 10)
+    static let pad: CGFloat = 12
+    static let padWide: CGFloat = 16
+    // Type scale — six roles, one home for every SwiftUI pane (the AppKit
+    // menu has its BarFont mirror). Sizes outside this scale are a defect.
+    static let display = Font.system(size: 15, weight: .semibold)  // window identity
+    static let title = Font.system(size: 13, weight: .semibold)    // pane headings, key values
+    static let body = Font.system(size: 12)                        // prose, primary content
+    static let label = Font.system(size: 11)                       // row titles, controls
+    static let caption = Font.system(size: 10)                     // footnotes, hints
+    static let micro = Font.system(size: 9, weight: .semibold)     // tile labels, tracked caps
     /// Ambient (quiet) tier: recognizable hue, de-chromaed so it recedes.
     static func quiet(_ c: Color) -> Color { c.opacity(0.55) }
     static let surface = Color.primary.opacity(0.05)
@@ -6324,13 +6337,13 @@ struct BrowseView: View {
             Spacer()
             Button(action: { showClusterMap.toggle() }) {
                 Label("Clusters", systemImage: "circle.hexagongrid.fill")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(DS.label.weight(.medium))
             }
             .buttonStyle(.bordered)
             .tint(showClusterMap ? Color.accentColor : Color.secondary)
             .help("Cluster map — every repeated lesson as a bubble")
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, DS.pad)
         .padding(.vertical, DS.unit)
     }
 
@@ -6343,7 +6356,7 @@ struct BrowseView: View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Highlight clusters…", text: $clusterQuery)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11))
+                .font(DS.label)
                 .frame(maxWidth: 320)
             let clusters = model.rows
                 .filter { $0.clusterSize > 1 }
@@ -6372,11 +6385,11 @@ struct BrowseView: View {
             }
             .frame(maxHeight: 320)
             Text("\(clusters.count) repeated lessons · hover a row to see its cross-links · click to jump")
-                .font(.system(size: 9))
+                .font(DS.caption)
                 .foregroundColor(.secondary)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, DS.unit)
+        .padding(.vertical, DS.unit)
         .background(Color.primary.opacity(0.03))
     }
 
@@ -6394,11 +6407,11 @@ struct BrowseView: View {
         }) {
             HStack(spacing: 8) {
                 Image(systemName: c.kind.symbol)
-                    .font(.system(size: 9))
+                    .font(DS.caption)
                     .foregroundColor(emphasized ? c.kind.tint : .secondary.opacity(0.3))
                     .frame(width: 14)
                 Text(c.title)
-                    .font(.system(size: 11))
+                    .font(DS.label)
                     .lineLimit(1)
                     .foregroundColor(emphasized ? .primary : .secondary.opacity(0.35))
                     .frame(width: 320, alignment: .leading)
@@ -6410,7 +6423,7 @@ struct BrowseView: View {
                 }
                 .frame(height: 10)
                 Text("×\(c.clusterSize)")
-                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .font(DS.caption.weight(.semibold).monospacedDigit())
                     .foregroundColor(emphasized ? .primary : .secondary.opacity(0.35))
                     .frame(width: 30, alignment: .trailing)
                 Image(systemName: "link")
@@ -6440,8 +6453,8 @@ struct BrowseView: View {
         let active = model.filter == kind
         return Button(action: { model.filter = kind }) {
             Text(label)
-                .font(.system(size: 11, weight: active ? .semibold : .regular))
-                .padding(.horizontal, 9)
+                .font(DS.label.weight(active ? .semibold : .regular))
+                .padding(.horizontal, DS.unit)
                 .padding(.vertical, 4)
                 .background((kind?.tint ?? .secondary).opacity(active ? 0.30 : 0.12))
                 .overlay(Capsule().strokeBorder(
@@ -6461,7 +6474,7 @@ struct BrowseView: View {
         }) {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: row.kind.symbol)
-                    .font(.system(size: 11))
+                    .font(DS.label)
                     .foregroundColor(row.kind.tint)
                     .frame(width: 16)
                     .padding(.top, 2)
@@ -6479,7 +6492,7 @@ struct BrowseView: View {
                 Spacer(minLength: 8)
                 if row.clusterSize > 1 {
                     Text("×\(row.clusterSize)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                        .font(DS.caption.weight(.semibold).monospacedDigit())
                         .padding(.horizontal, 5).padding(.vertical, 1)
                         .background(row.kind.tint.opacity(0.18))
                         .clipShape(Capsule())
@@ -6498,7 +6511,7 @@ struct BrowseView: View {
                     .foregroundColor(rowAgeColor(row.ageDays))
                     .frame(width: 38, alignment: .trailing)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, DS.unit)
             .padding(.vertical, 5)
             .frame(height: rowH)   // exact, not min
             .contentShape(Rectangle())
@@ -6545,7 +6558,7 @@ struct BrowseView: View {
                         Button(action: { model.preview(id: chip.target) }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "arrow.right.circle")
-                                    .font(.system(size: 9))
+                                    .font(DS.caption)
                                 Text(chip.label + "…")
                                     .font(.system(size: 10))
                                     .lineLimit(1)
@@ -6574,8 +6587,8 @@ struct BrowseView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, DS.pad)
+        .padding(.vertical, DS.unit)
         .background(Color.primary.opacity(0.04))
     }
 
@@ -7021,7 +7034,7 @@ struct OverviewPane: View {
                 if !model.data.viz.kindCounts.isEmpty { distribution }
                 if !model.data.viz.timelines.isEmpty { timelines }
             }
-            .padding(16)
+            .padding(DS.padWide)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(nsColor: .windowBackgroundColor))
@@ -7033,7 +7046,7 @@ struct OverviewPane: View {
             if let pending = model.data.reviewPending {
                 Button(action: { model.onOpenReview?() }) {
                     Label("Open weekly review (\(pending))", systemImage: "checklist")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(DS.body.weight(.semibold))
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
@@ -7044,26 +7057,26 @@ struct OverviewPane: View {
             if let r = model.data.reflect {
                 HStack(spacing: 6) {
                     Text("Mistakes:")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(DS.title)
                     Text("\(r.summary.landing) landing")
-                        .font(.system(size: 13))
+                        .font(DS.body)
                         .foregroundColor(.green)
                     Text("·").foregroundColor(.secondary)
                     Text("\(r.summary.worsening) worsening")
-                        .font(.system(size: 13))
+                        .font(DS.body)
                         .foregroundColor(r.summary.worsening > 0 ? .orange : .secondary)
                 }
                 if let worst = r.patterns.first(where: { $0.trend == "worsening" }) {
                     Text("↑ \(worst.slug)")
-                        .font(.system(size: 11))
+                        .font(DS.label)
                         .foregroundColor(.orange)
                 }
             } else if model.data.reviewPending == nil {
                 Text("No reflect data yet — run a few cycles.")
-                    .font(.system(size: 12)).foregroundColor(.secondary)
+                    .font(DS.body).foregroundColor(.secondary)
             }
         }
-        .padding(12)
+        .padding(DS.pad)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.05))
         .cornerRadius(8)
@@ -7090,15 +7103,15 @@ struct OverviewPane: View {
     private func statTile(_ label: String, _ value: String, tint: Color? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.system(size: 9, weight: .semibold))
+                .font(DS.micro)
                 .foregroundColor(.secondary)
                 .kerning(0.5)
             Text(value)
-                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                .font(DS.title.monospacedDigit())
                 .foregroundColor(tint ?? .primary)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, DS.unit)
+        .padding(.vertical, DS.half)
         .background(DS.surface)
         .cornerRadius(6)
     }
@@ -7109,18 +7122,18 @@ struct OverviewPane: View {
         VStack(alignment: .leading, spacing: 6) {
             sectionHeader("RECENT DREAMS INFERENCE")
             Text(d.text)
-                .font(.system(size: 12))
+                .font(DS.body)
                 .foregroundColor(d.sentiment == "positive" ? .green
                                : d.sentiment == "negative" ? .orange : .primary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
             HStack(spacing: 10) {
                 Text("updated every 3h")
-                    .font(.system(size: 10))
+                    .font(DS.caption)
                     .foregroundColor(.secondary)
                 Button(action: { model.onRerunInference?() }) {
                     Label("Re-run", systemImage: "arrow.clockwise")
-                        .font(.system(size: 10))
+                        .font(DS.caption)
                 }
                 .buttonStyle(.borderless)
                 .onHover { inside in
@@ -7128,7 +7141,7 @@ struct OverviewPane: View {
                 }
             }
         }
-        .padding(12)
+        .padding(DS.pad)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(DS.surface)
         .cornerRadius(8)
@@ -7144,7 +7157,7 @@ struct OverviewPane: View {
                 Button(action: { model.onJumpToBrowse?(lesson.id) }) {
                     HStack(spacing: 8) {
                         Text(lesson.title)
-                            .font(.system(size: 11))
+                            .font(DS.label)
                             .lineLimit(1)
                             .frame(width: 340, alignment: .leading)
                         GeometryReader { geo in
@@ -7154,10 +7167,10 @@ struct OverviewPane: View {
                         }
                         .frame(height: 12)
                         Text("\(lesson.size)")
-                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .font(DS.label.weight(.semibold).monospacedDigit())
                             .frame(width: 26, alignment: .trailing)
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 9))
+                            .font(DS.micro)
                             .foregroundColor(.secondary.opacity(0.6))
                     }
                     .contentShape(Rectangle())
@@ -7175,16 +7188,16 @@ struct OverviewPane: View {
             sectionHeader("STORES")
             ForEach(Array(model.data.viz.kindCounts.enumerated()), id: \.offset) { _, kc in
                 HStack(spacing: 8) {
-                    Text(kc.0).font(.system(size: 11)).frame(width: 100, alignment: .leading)
+                    Text(kc.0).font(DS.label).frame(width: 100, alignment: .leading)
                     Text("\(kc.1) items → \(kc.2) lessons")
-                        .font(.system(size: 11).monospacedDigit())
+                        .font(DS.label.monospacedDigit())
                         .foregroundColor(.secondary)
                 }
             }
             let v = model.data.viz.valence
             let total = max(1, v.pos + v.neu + v.neg)
             HStack(spacing: 8) {
-                Text("Valence").font(.system(size: 11)).frame(width: 100, alignment: .leading)
+                Text("Valence").font(DS.label).frame(width: 100, alignment: .leading)
                 GeometryReader { geo in
                     HStack(spacing: 1) {
                         Rectangle().fill(Color.green.opacity(0.7))
@@ -7197,7 +7210,7 @@ struct OverviewPane: View {
                 }
                 .frame(height: 10)
                 Text("\(v.pos)+ · \(v.neu)○ · \(v.neg)−")
-                    .font(.system(size: 10).monospacedDigit())
+                    .font(DS.caption.monospacedDigit())
                     .foregroundColor(.secondary)
             }
         }
@@ -7211,7 +7224,7 @@ struct OverviewPane: View {
             ForEach(Array(model.data.viz.timelines.enumerated()), id: \.offset) { _, t in
                 HStack(spacing: 8) {
                     Text(t.title)
-                        .font(.system(size: 11))
+                        .font(DS.label)
                         .lineLimit(1)
                         .frame(width: 340, alignment: .leading)
                     let peak = max(1, t.weekly.max() ?? 1)
@@ -7224,7 +7237,7 @@ struct OverviewPane: View {
                     }
                     .frame(height: 22, alignment: .bottom)
                     Text("\(t.total) hits")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(DS.caption.monospacedDigit())
                         .foregroundColor(.secondary)
                 }
             }
@@ -7233,7 +7246,7 @@ struct OverviewPane: View {
 
     private func sectionHeader(_ s: String) -> some View {
         Text(s)
-            .font(.system(size: 9, weight: .semibold))
+            .font(DS.micro)
             .foregroundColor(.secondary)
             .kerning(0.5)
     }
