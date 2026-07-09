@@ -6264,6 +6264,7 @@ struct BrowseView: View {
     /// cluster membership, filterable by typing, click = jump to the row.
     @State private var showClusterMap = false
     @State private var clusterQuery = ""
+    @State private var hoverClusterId: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -6333,9 +6334,11 @@ struct BrowseView: View {
         .padding(.vertical, DS.unit)
     }
 
-    /// The cluster map: every multi-member lesson as a bubble, area ∝
-    /// cluster size. Typing dims non-matching bubbles instead of hiding
-    /// them (selective highlight, as requested); clicking jumps to the row.
+    /// The cluster panel: repeated lessons as a ranked thin-bar list — the
+    /// Overview's TOP REPEATED LESSONS idiom, because bar length reads
+    /// magnitude honestly where bubble area does not. Hovering a row lights
+    /// up the clusters it cross-links to (pattern ↔ association) and recedes
+    /// the rest; typing dims non-matches; clicking jumps to the row.
     private var clusterMap: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Highlight clusters…", text: $clusterQuery)
@@ -6345,54 +6348,92 @@ struct BrowseView: View {
             let clusters = model.rows
                 .filter { $0.clusterSize > 1 }
                 .sorted { $0.clusterSize > $1.clusterSize }
+            let maxSize = clusters.map(\.clusterSize).max() ?? 1
+            // The hovered cluster plus everything it links to. Chips are
+            // written on both sides of a link, but scan the reverse direction
+            // too so emphasis never looks one-directional.
+            let linked: Set<String> = {
+                guard let h = hoverClusterId else { return [] }
+                var s: Set<String> = [h]
+                if let row = clusters.first(where: { $0.id == h }) {
+                    for chip in row.linkedChips { s.insert(chip.target) }
+                }
+                for r in clusters where r.linkedChips.contains(where: { $0.target == h }) {
+                    s.insert(r.id)
+                }
+                return s
+            }()
             ScrollView {
-                let cols = [GridItem(.adaptive(minimum: 92, maximum: 130), spacing: 8)]
-                LazyVGrid(columns: cols, spacing: 8) {
+                LazyVStack(spacing: 2) {
                     ForEach(clusters) { c in
-                        clusterBubble(c)
+                        clusterBar(c, maxSize: maxSize, linked: linked)
                     }
                 }
             }
-            .frame(maxHeight: 260)
+            .frame(maxHeight: 320)
+            Text("\(clusters.count) repeated lessons · hover a row to see its cross-links · click to jump")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Color.primary.opacity(0.03))
     }
 
-    private func clusterBubble(_ c: BrowseRow) -> some View {
-        let maxSize = model.rows.map(\.clusterSize).max() ?? 1
-        // Area-proportional radius so a ×28 doesn't dwarf everything linearly.
-        let d = 34 + 56 * sqrt(CGFloat(c.clusterSize) / CGFloat(maxSize))
+    private func clusterBar(_ c: BrowseRow, maxSize: Int, linked: Set<String>) -> some View {
         let q = clusterQuery.trimmingCharacters(in: .whitespaces).lowercased()
         let words = q.split(separator: " ").map(String.init)
-        let matches = q.isEmpty || words.allSatisfy { c.title.lowercased().contains($0) }
+        let matchesQuery = q.isEmpty || words.allSatisfy { c.title.lowercased().contains($0) }
+        // Emphasis: with no hover every matching row is full strength; while
+        // hovering, only the linked set stays loud. Opacity-only, fixed row
+        // height — hover must never shift layout (sibling anti-idea A-7).
+        let emphasized = matchesQuery && (hoverClusterId == nil || linked.contains(c.id))
         return Button(action: {
             showClusterMap = false
             model.jump(to: c.id)
         }) {
-            VStack(spacing: 3) {
-                ZStack {
-                    Circle()
-                        .fill(c.kind.tint.opacity(matches ? 0.35 : 0.06))
-                    Circle()
-                        .strokeBorder(c.kind.tint.opacity(matches ? 0.9 : 0.15), lineWidth: 1.5)
-                    Text("×\(c.clusterSize)")
-                        .font(.system(size: 11, weight: .bold).monospacedDigit())
-                        .foregroundColor(matches ? .primary : .secondary.opacity(0.4))
-                }
-                .frame(width: d, height: d)
-                Text(c.title)
+            HStack(spacing: 8) {
+                Image(systemName: c.kind.symbol)
                     .font(.system(size: 9))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(matches ? .secondary : .secondary.opacity(0.3))
+                    .foregroundColor(emphasized ? c.kind.tint : .secondary.opacity(0.3))
+                    .frame(width: 14)
+                Text(c.title)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .foregroundColor(emphasized ? .primary : .secondary.opacity(0.35))
+                    .frame(width: 320, alignment: .leading)
+                GeometryReader { geo in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(c.kind.tint.opacity(emphasized ? 0.65 : 0.10))
+                        .frame(width: max(3, geo.size.width * CGFloat(c.clusterSize) / CGFloat(maxSize)))
+                        .frame(maxHeight: .infinity, alignment: .center)
+                }
+                .frame(height: 10)
+                Text("×\(c.clusterSize)")
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundColor(emphasized ? .primary : .secondary.opacity(0.35))
+                    .frame(width: 30, alignment: .trailing)
+                Image(systemName: "link")
+                    .font(.system(size: 8))
+                    .foregroundColor(c.linkedChips.isEmpty ? .clear
+                                     : emphasized ? .secondary : .secondary.opacity(0.25))
+                    .frame(width: 12)
             }
-            .frame(maxWidth: .infinity)
+            .frame(height: 22)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(c.title)
+        .onHover { inside in
+            if inside {
+                hoverClusterId = c.id
+                NSCursor.pointingHand.push()
+            } else {
+                if hoverClusterId == c.id { hoverClusterId = nil }
+                NSCursor.pop()
+            }
+        }
+        .help(c.linkedChips.isEmpty ? "\(c.title) — ×\(c.clusterSize)"
+              : "\(c.title) — ×\(c.clusterSize) · linked: \(c.linkedChips.map { $0.label }.joined(separator: " · "))")
     }
 
     private func chip(_ kind: BrowseRow.Kind?, label: String) -> some View {
