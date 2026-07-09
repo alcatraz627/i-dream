@@ -3785,19 +3785,21 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ─ Knowledge launchers — each opens the dashboard Browse filtered ─────
         menu.addItem(.separator())
         if let b = b {
+            // Quiet chroma tier: counts on launcher rows are secondary — only
+            // identity (status header) and severity (warnings) stay loud.
             let pi = addClickable(menu, "Patterns",    "\(b.dreamsPatterns)",
-                                  valueColor: .systemBlue, action: #selector(showPatternsDetail))
+                                  valueColor: .secondaryLabelColor, action: #selector(showPatternsDetail))
             setIcon(pi, "brain")
             let ai = addClickable(menu, "Associations", "\(b.associations)",
-                                  valueColor: .systemBlue, action: #selector(showAssociationsDetail))
+                                  valueColor: .secondaryLabelColor, action: #selector(showAssociationsDetail))
             setIcon(ai, "link")
             let si = addClickable(menu, "Sessions",
                                   "\(b.dreamsProcessed) dreams  ·  \(b.metacogProcessed) metacog",
-                                  action: #selector(showSessionsDetail))
+                                  valueColor: .secondaryLabelColor, action: #selector(showSessionsDetail))
             setIcon(si, "book.fill")
             if b.metacogAudits > 0 {
                 let mi = addClickable(menu, "Metacog audits", "\(b.metacogAudits)",
-                                      action: #selector(showMetacogDetail))
+                                      valueColor: .secondaryLabelColor, action: #selector(showMetacogDetail))
                 setIcon(mi, "checkmark.seal.fill")
             }
         }
