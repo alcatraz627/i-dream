@@ -1333,6 +1333,22 @@ final class DashboardWindowController: NSObject {
             if let s = st {
                 ov.state = (cycles: s.totalCycles, tokens: s.totalTokensUsed,
                             lastDream: s.lastConsolidation.map { timeAgo($0) })
+                if let usage = s.usage, usage.limit5h > 0 || usage.limit7d > 0 {
+                    ov.usage = (line: usage.warningLine, warn: usage.overWarnThreshold)
+                }
+            }
+            ov.lastActive = lastActivityDate().map { d in
+                let secs = Date().timeIntervalSince(d)
+                switch secs {
+                case ..<60:    return "just now"
+                case ..<3600:  return "\(Int(secs / 60))m ago"
+                case ..<86400: return "\(Int(secs / 3600))h ago"
+                default:       return "\(Int(secs / 86400))d ago"
+                }
+            }
+            ov.signals = signalsCount()
+            if let text = dg {
+                ov.digest = (text: text, sentiment: readDigestSentiment())
             }
             ov.viz = buildOverviewViz(rows: browseRows)
             let (journalRows, heat) = buildJournalRows(journal: jour)
@@ -1641,6 +1657,16 @@ final class DashboardWindowController: NSObject {
             guard let self else { return }
             self.selectTab(1)
             self.browseModel.jump(to: id)
+        }
+        overviewModel.onRerunInference = { [weak self] in
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: resolveIDreamBinary())
+            p.arguments = ["dream", "wake"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            // The digest lands asynchronously; refresh once it has had a chance.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { self?.reloadDataAsync() }
         }
         let v0: NSView = {
             let host = NSHostingView(rootView: OverviewPane(model: overviewModel))
@@ -3631,6 +3657,11 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
+        // Flagship launcher — promoted from the old footer, where it sat at
+        // row ~46 below the inference wall (field-study J1).
+        let dash = add(menu, "Open Dashboard", #selector(openDashboard), key: "d")
+        setIcon(dash, "chart.bar.doc.horizontal.fill")
+
         // ─ Daemon controls ────────────────────────────────────────────────────
         if running {
             let s = add(menu, "Stop Daemon", #selector(stopDaemon), key: "s")
@@ -3656,44 +3687,14 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // ─ Activity ───────────────────────────────────────────────────────────
-        addSection(menu, "Activity")
+        // ─ Rhythm — when it last ran, when it thinks next ─────────────────────
+        // The old ACTIVITY block (cycles/usage/tokens/last-active/signals)
+        // lives on the dashboard Overview now; only glance values stay inline.
         if let s = s {
-            addRow(menu, "Cycles",      "\(s.totalCycles)",        valueColor: .systemBlue)
-            // Usage window stats if limits are configured
-            if let usage = s.usage, usage.limit5h > 0 || usage.limit7d > 0 {
-                let usageStr = usage.warningLine
-                let usageColor: NSColor = usage.overWarnThreshold ? .systemOrange : .systemGreen
-                addRow(menu, "Usage", usageStr, valueColor: usageColor)
-            }
-            addRow(menu, "Tokens used", fmtNum(s.totalTokensUsed), valueColor: .systemBlue)
-            addRow(menu, "Last run",    fmtDateWithAge(s.lastConsolidation))
-            // last_activity in state.json is always null — use the activity-file
-            // mtime from the snapshot instead.
-            let lastAct = DataStore.shared.snapshot.lastActivity
-            let lastActStr: String = lastAct.map { d in
-                let d2 = Date().timeIntervalSince(d)
-                let ago: String
-                switch d2 {
-                case ..<60:    ago = "just now"
-                case ..<3600:  ago = "\(Int(d2 / 60))m ago"
-                case ..<86400: ago = "\(Int(d2 / 3600))h ago"
-                default:       ago = "\(Int(d2 / 86400))d ago"
-                }
-                return "\(fmtDateDirect(d))  (\(ago))"
-            } ?? "—"
-            addRow(menu, "Last active", lastActStr)
-            let sigs = DataStore.shared.snapshot.signals
-            if sigs > 0 {
-                addRow(menu, "User signals", "\(sigs)", valueColor: .systemPurple)
-            }
+            addRow(menu, "Last run", fmtDateWithAge(s.lastConsolidation))
         } else {
             addDim(menu, "  state.json not found")
         }
-
-        // ─ Dream Frequency ────────────────────────────────────────────────────
-        menu.addItem(.separator())
-        addSection(menu, "Dream Frequency")
         let effectiveHz = cachedFrequencyHours ?? 4.0
         let freqLabel: String
         if effectiveHz < 1.0 {
@@ -3707,8 +3708,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // mtime the snapshot already holds — no extra stat on the menu path).
         let nextDream = DataStore.shared.snapshot.lastActivity?.addingTimeInterval(effectiveHz * 3600)
         let nextStr   = nextDream.map { fmtCountdown($0) } ?? "—"
-        addRow(menu, "  Frequency", freqLabel, valueColor: .systemBlue)
-        addRow(menu, "  Next dream", nextStr)
+        addRow(menu, "Next dream", "\(nextStr)  ·  every \(freqLabel)")
 
         // Submenu with frequency choices
         let freqMenu = NSMenu()
@@ -3735,7 +3735,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.state = (opt.hours == (cachedFrequencyHours ?? 4.0)) ? .on : .off
             freqMenu.addItem(item)
         }
-        let freqParent = NSMenuItem(title: "  Change Frequency →", action: nil, keyEquivalent: "")
+        let freqParent = NSMenuItem(title: "Change Frequency →", action: nil, keyEquivalent: "")
         setIcon(freqParent, "clock")
         menu.addItem(freqParent)
         menu.setSubmenu(freqMenu, for: freqParent)
@@ -3765,7 +3765,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let domainCount = registered?.count ?? 0
         let domainsParent = NSMenuItem(
-            title: "  Dream Domains (\(domainCount)) →",
+            title: "Dream Domains (\(domainCount)) →",
             action: nil, keyEquivalent: "")
         setIcon(domainsParent, "circle.grid.3x3.fill")
         menu.addItem(domainsParent)
@@ -3803,142 +3803,44 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let todayDateStr = todayCounts?.date ?? "no digest"
         let todayParent = NSMenuItem(
-            title: "  Today (\(todayDateStr)) →",
+            title: "Today (\(todayDateStr)) →",
             action: nil, keyEquivalent: "")
         setIcon(todayParent, "calendar")
         menu.addItem(todayParent)
         menu.setSubmenu(todayMenu, for: todayParent)
 
-        // ─ Knowledge Base ─────────────────────────────────────────────────────
+        // ─ Knowledge launchers — each opens the dashboard Browse filtered ─────
         menu.addItem(.separator())
-        addSection(menu, "Knowledge Base  (tap to explore)")
         if let b = b {
-            let pi = addClickable(menu, "  Patterns",    "\(b.dreamsPatterns)",
+            let pi = addClickable(menu, "Patterns",    "\(b.dreamsPatterns)",
                                   valueColor: .systemBlue, action: #selector(showPatternsDetail))
             setIcon(pi, "brain")
-            let ai = addClickable(menu, "  Associations", "\(b.associations)",
+            let ai = addClickable(menu, "Associations", "\(b.associations)",
                                   valueColor: .systemBlue, action: #selector(showAssociationsDetail))
             setIcon(ai, "link")
-            let si = addClickable(menu, "  Sessions",
+            let si = addClickable(menu, "Sessions",
                                   "\(b.dreamsProcessed) dreams  ·  \(b.metacogProcessed) metacog",
                                   action: #selector(showSessionsDetail))
             setIcon(si, "book.fill")
             if b.metacogAudits > 0 {
-                let mi = addClickable(menu, "  Metacog audits", "\(b.metacogAudits)",
+                let mi = addClickable(menu, "Metacog audits", "\(b.metacogAudits)",
                                       action: #selector(showMetacogDetail))
                 setIcon(mi, "checkmark.seal.fill")
             }
         }
+        // One row replaces the old RECENT INFERENCES wall (digest prose, last
+        // cycle, five pattern quotes). The digest + re-run live on the
+        // dashboard Overview; the quotes live in Browse where age is visible.
+        let ins = addClickable(menu, "Insights", "", action: #selector(showInsightsDetail))
+        setIcon(ins, "sparkles")
 
-        // ─ Recent inferences ──────────────────────────────────────────────────
-        if !cachedJournal.isEmpty || !cachedPatterns.isEmpty || cachedDigest != nil {
-            menu.addItem(.separator())
-            addSection(menu, "Recent Inferences")
-
-            // Insight digest — "Recent Dreams Inference": prose synthesis of last 5 dream insights.
-            // Sentiment is read from dreams/digest-meta.json { "sentiment": "positive"|"neutral"|"negative" }
-            if let digest = cachedDigest {
-                let sentiment = DataStore.shared.snapshot.digestSentiment
-                let sentimentColor: NSColor = sentiment == "positive" ? .systemGreen
-                                           : sentiment == "negative" ? .systemOrange
-                                           : .labelColor
-                let digestItem = NSMenuItem()
-                let digestAttr = NSMutableAttributedString()
-                let truncDigest = digest.count > 220 ? String(digest.prefix(217)) + "…" : digest
-                digestAttr.append(NSAttributedString(string: "  \(wrapForMenu(truncDigest))\n",
-                    attributes: [.font: NSFont.systemFont(ofSize: 13),
-                                 .foregroundColor: sentimentColor]))
-                digestAttr.append(NSAttributedString(string: "  Recent Dreams Inference  ·  updated every 3h",
-                    attributes: [.font: NSFont.systemFont(ofSize: 11),
-                                 .foregroundColor: NSColor.tertiaryLabelColor]))
-                digestItem.attributedTitle = digestAttr
-                digestItem.isEnabled = false
-                // Golden-yellow sparkles icon tinted at render time
-                if let img = NSImage(systemSymbolName: "sparkles", accessibilityDescription: "insights") {
-                    let tintedImg = img.copy() as! NSImage
-                    tintedImg.isTemplate = false
-                    let gold = NSColor(red: 1.0, green: 0.80, blue: 0.10, alpha: 1.0)
-                    let tinted = NSImage(size: tintedImg.size, flipped: false) { _ in
-                        gold.setFill()
-                        img.draw(in: NSRect(origin: .zero, size: tintedImg.size),
-                                 from: .zero, operation: .sourceOver, fraction: 1.0)
-                        return true
-                    }
-                    digestItem.image = tinted
-                }
-                menu.addItem(digestItem)
-
-                // Re-trigger "Recent Dreams Inference" button
-                let reInferItem = add(menu, "  ↺ Re-run Recent Dreams Inference",
-                                      #selector(triggerRecentDreamsInference))
-                setIcon(reInferItem, "arrow.clockwise.circle")
-                reInferItem.indentationLevel = 1
-            }
-
-            // Show last cycle summary — with how long ago it happened
-            if let latest = cachedJournal.last {
-                let parts = [
-                    latest.sessionsAnalyzed > 0 ? "\(latest.sessionsAnalyzed) sessions" : nil,
-                    latest.patternsExtracted > 0 ? "\(latest.patternsExtracted) patterns" : nil,
-                    latest.associationsFound > 0 ? "\(latest.associationsFound) associations" : nil,
-                    latest.insightsPromoted  > 0 ? "\(latest.insightsPromoted) insights" : nil,
-                ].compactMap { $0 }.joined(separator: "  ·  ")
-                let summary = parts.isEmpty ? "skipped — no sessions" : parts
-                addTwoLine(menu,
-                           top:    "  Last cycle  \(fmtDate(latest.timestamp))  (\(timeAgo(latest.timestamp)))",
-                           bottom: "  \(summary)  ·  \(fmtNum(latest.tokensUsed)) tokens")
-            }
-            // Show recent pattern learnings — hover to expand submenu with full details
-            if !cachedPatterns.isEmpty {
-                for p in cachedPatterns {
-                    let truncated = p.pattern.count > 200 ? String(p.pattern.prefix(197)) + "…" : p.pattern
-                    let sym  = valenceSymbol(p.valence)
-                    // Confidence colour: green ≥85%, blue ≥65%, muted <65%
-                    let confColor: NSColor = p.confidence >= 0.85 ? .systemGreen
-                                          : p.confidence >= 0.65 ? .systemBlue
-                                          : .secondaryLabelColor
-                    let confDot = p.confidence >= 0.85 ? "●" : p.confidence >= 0.65 ? "◕" : "○"
-                    let dateStr = p.firstSeen != nil ? "  ·  \(fmtDateWithAge(p.firstSeen))" : ""
-                    let item = NSMenuItem()
-                    let full = NSMutableAttributedString()
-                    full.append(NSAttributedString(string: "  \(sym) \"\(wrapForMenu(truncated))\"\n",
-                                                   attributes: [.font: NSFont.systemFont(ofSize: 13)]))
-                    full.append(NSAttributedString(string: "  \(confDot) \(Int(p.confidence * 100))%  ·  \(p.category)\(dateStr)",
-                                                   attributes: [
-                                                       .font: NSFont.systemFont(ofSize: 11),
-                                                       .foregroundColor: confColor,
-                                                   ]))
-                    item.attributedTitle = full
-                    item.isEnabled = true
-                    item.submenu = makePatternSubmenu(p)
-                    setIcon(item, "sparkle")
-                    menu.addItem(item)
-                }
-                // View All Insights link
-                let viewAll = addClickable(menu, "  View All Insights →", "",
-                                           action: #selector(showInsightsDetail))
-                setIcon(viewAll, "list.bullet.rectangle")
-            }
-        }
-
-        // ─ Last error ─────────────────────────────────────────────────────────
+        // ─ Last error — one line, click to copy; hover for the full text ──────
         if let err = b?.lastError {
             menu.addItem(.separator())
-            addSection(menu, "⚠  Last Error  (today)")
+            let one = err.replacingOccurrences(of: "\n", with: "  ")
             let errItem = NSMenuItem()
-            let errFull = NSMutableAttributedString()
-            let truncErr = err.count > 200 ? String(err.prefix(197)) + "…" : err
-            errFull.append(NSAttributedString(string: "  " + wrapForMenu(truncErr) + "\n",
-                                              attributes: [
-                                                  .foregroundColor: NSColor.systemRed,
-                                                  .font: NSFont.systemFont(ofSize: 13),
-                                              ]))
-            errFull.append(NSAttributedString(string: "  click to copy",
-                                              attributes: [
-                                                  .font: NSFont.systemFont(ofSize: 11),
-                                                  .foregroundColor: NSColor.tertiaryLabelColor,
-                                              ]))
-            errItem.attributedTitle = errFull
+            errItem.attributedTitle = seg("⚠ \(tailTruncate(one, 64))", BarFont.secondary, .systemRed)
+            errItem.toolTip = err
             errItem.action = #selector(copyItemText(_:))
             errItem.target = self
             errItem.isEnabled = true
@@ -3947,22 +3849,31 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(errItem)
         }
 
-        // ─ Store Health ───────────────────────────────────────────────────────
-        if !cachedStoreFiles.isEmpty {
-            menu.addItem(.separator())
-            let hasWarnings = cachedStoreFiles.contains { $0.isLarge }
-            addSection(menu, hasWarnings ? "⚠  Store Health" : "Store Health")
+        // ─ Store health — one conditional row; healthy stores stay silent ─────
+        let largeStores = cachedStoreFiles.filter { $0.isLarge }
+        if !largeStores.isEmpty {
+            let healthMenu = NSMenu()
             for f in cachedStoreFiles {
-                let prefix     = f.isLarge ? "⚠ " : "✓ "
-                let valueColor: NSColor = f.isLarge ? .systemOrange : .secondaryLabelColor
-                addRow(menu, "  \(prefix)\(f.label)",
-                       "\(f.entries) entries · \(fmtBytes(f.sizeBytes))",
-                       valueColor: valueColor)
+                let item = NSMenuItem()
+                item.attributedTitle = columned([
+                    seg("  \(f.isLarge ? "⚠" : "✓") \(f.label)", BarFont.monoSecondary,
+                        f.isLarge ? .labelColor : .secondaryLabelColor),
+                    seg("\(f.entries) entries · \(fmtBytes(f.sizeBytes))", BarFont.monoSecondary,
+                        f.isLarge ? .systemOrange : .secondaryLabelColor),
+                ], stops: [200])
+                healthMenu.addItem(item)
             }
-            if hasWarnings {
-                let pruneItem = add(menu, "  Run Prune in Terminal…", #selector(runPrune))
-                setIcon(pruneItem, "arrow.3.trianglepath")
-            }
+            healthMenu.addItem(.separator())
+            let pruneItem = NSMenuItem(title: "  Run Prune in Terminal…",
+                                       action: #selector(runPrune), keyEquivalent: "")
+            pruneItem.target = self
+            setIcon(pruneItem, "arrow.3.trianglepath")
+            healthMenu.addItem(pruneItem)
+            let healthParent = NSMenuItem()
+            healthParent.attributedTitle = seg("⚠ Store Health (\(largeStores.count) large)",
+                                               BarFont.body, .systemOrange)
+            menu.addItem(healthParent)
+            menu.setSubmenu(healthMenu, for: healthParent)
         }
 
         menu.addItem(.separator())
@@ -3982,18 +3893,26 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             _ = pinItem
         }
 
-        let dash = add(menu, "Open Dashboard", #selector(openDashboard), key: "d")
-        setIcon(dash, "chart.bar.doc.horizontal.fill")
-
-        // Help/About lost their dashboard tabs in the v3 cutover — they open
-        // as small panels from here now.
-        let helpItem = add(menu, "Help & Shortcuts", #selector(openHelpPanel))
+        // Low-frequency footer actions collapse into one row (menu diet).
+        // Help/About open as small panels (they lost their tabs in the v3
+        // cutover); config opens in the editor.
+        let moreMenu = NSMenu()
+        let helpItem = NSMenuItem(title: "Help & Shortcuts", action: #selector(openHelpPanel), keyEquivalent: "")
+        helpItem.target = self
         setIcon(helpItem, "questionmark.circle.fill")
-        let aboutItem = add(menu, "About i-dream", #selector(openAboutPanel))
+        moreMenu.addItem(helpItem)
+        let aboutItem = NSMenuItem(title: "About i-dream", action: #selector(openAboutPanel), keyEquivalent: "")
+        aboutItem.target = self
         setIcon(aboutItem, "info.circle.fill")
-
-        let cfg = add(menu, "Edit Config in VS Code", #selector(openConfigInVSCode))
+        moreMenu.addItem(aboutItem)
+        let cfg = NSMenuItem(title: "Edit Config in VS Code", action: #selector(openConfigInVSCode), keyEquivalent: "")
+        cfg.target = self
         setIcon(cfg, "gearshape.fill")
+        moreMenu.addItem(cfg)
+        let moreParent = NSMenuItem(title: "More", action: nil, keyEquivalent: "")
+        setIcon(moreParent, "ellipsis.circle")
+        menu.addItem(moreParent)
+        menu.setSubmenu(moreMenu, for: moreParent)
 
         // Logs submenu
         let logsMenu = NSMenu()
@@ -5225,126 +5144,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 
 
+    /// v3: Sessions opens the dashboard Journal — the canonical cycle-history
+    /// surface — replacing the legacy floating RichText journal panel
+    /// (topbar-review.md "Load-bearing coupling to fix"; docs/23 Stage 4).
     @objc private func showSessionsDetail() {
-        let journal = allJournal()
-        guard !journal.isEmpty else {
-            alert("Sessions", "No dream journal entries yet."); return
-        }
-        let rt = RichText()
-        rt.header("Dream Journal")
-        rt.dim("\(journal.count) total cycles")
-
-        // ── Sparkline history chart ──────────────────────────────────────────
-        let window = Array(journal.suffix(20))
-        if window.count >= 2 {
-            let tokVals = window.map { $0.tokensUsed }
-            let patVals = window.map { $0.patternsExtracted }
-            let avgTok = tokVals.reduce(0, +) / tokVals.count
-            let avgPat = patVals.reduce(0, +) / patVals.count
-            rt.spacer()
-            rt.subheader("Token & Pattern Trends  (last \(window.count) cycles)")
-            rt.mono("Tokens/cycle   \(fmtSparkline(tokVals, width: 20))  avg \(fmtNum(avgTok))")
-            rt.mono("Patterns/cycle \(fmtSparkline(patVals, width: 20))  avg \(avgPat)")
-            rt.divider()
-        }
-
-        // Compute averages for color-coding (only non-skipped entries)
-        let active = journal.filter { $0.sessionsAnalyzed > 0 }
-        let avgSessions = active.isEmpty ? 0.0 : Double(active.map { $0.sessionsAnalyzed }.reduce(0,+)) / Double(active.count)
-        let avgPatterns = active.isEmpty ? 0.0 : Double(active.map { $0.patternsExtracted }.reduce(0,+)) / Double(active.count)
-        let avgAssocs   = active.isEmpty ? 0.0 : Double(active.map { $0.associationsFound }.reduce(0,+)) / Double(active.count)
-        let avgInsights = active.isEmpty ? 0.0 : Double(active.map { $0.insightsPromoted  }.reduce(0,+)) / Double(active.count)
-        let avgTokens   = active.isEmpty ? 0.0 : Double(active.map { $0.tokensUsed        }.reduce(0,+)) / Double(active.count)
-
-        // Returns green/labelColor/orange based on whether value is high/normal/low vs average
-        func heatColor(_ value: Int, avg: Double) -> NSColor {
-            guard avg > 0 else { return .labelColor }
-            let ratio = Double(value) / avg
-            if ratio >= 1.3 { return .systemGreen }
-            if ratio <= 0.5 { return .systemOrange }
-            return .labelColor
-        }
-
-        for entry in journal.suffix(20).reversed() {
-            rt.spacer()
-            // Header: clickable link → opens cycle detail panel
-            let headerText = "▸ \(fmtDate(entry.timestamp))  (\(timeAgo(entry.timestamp)))"
-            if entry.id != nil {
-                rt.linkSubheader(headerText, linkValue: entry.timestamp)
-            } else {
-                rt.subheader(headerText)
-            }
-            if entry.sessionsAnalyzed == 0 {
-                rt.dim("  Skipped — no new sessions to consolidate")
-            } else {
-                // Color each metric relative to the cycle average
-                let fields: [(String, Int, Double)] = [
-                    ("Sessions analyzed  ", entry.sessionsAnalyzed,  avgSessions),
-                    ("Patterns extracted ", entry.patternsExtracted, avgPatterns),
-                    ("Associations found ", entry.associationsFound, avgAssocs),
-                    ("Insights promoted  ", entry.insightsPromoted,  avgInsights),
-                    ("Tokens used        ", entry.tokensUsed,        avgTokens),
-                ]
-                for (label, val, avg) in fields {
-                    guard val > 0 else { continue }
-                    let color = heatColor(val, avg: avg)
-                    let valStr = label.contains("Tokens") ? fmtNum(val) : "\(val)"
-                    let avgStr = label.contains("Tokens") ? fmtNum(Int(avg)) : String(format: "%.1f", avg)
-                    let indicator = color == .systemGreen ? " ↑" : color == .systemOrange ? " ↓" : ""
-                    rt.coloredLine("  \(label)  \(valStr)\(indicator)  (avg \(avgStr))", color: color)
-                }
-            }
-        }
-        if journal.count > 20 { rt.dim("… and \(journal.count - 20) earlier entries") }
-        rt.dim("\n  ▸ Click a blue header to see patterns & associations for that cycle.")
-
-        // Build the panel with a delegate so link-clicks work
-        detailPanel?.close(); detailPanel = nil; detailFilePath = subDir + "/dreams/journal.jsonl"
-        let content = rt.build()
-        let panW: CGFloat = 900, panH: CGFloat = 680, barH: CGFloat = 48
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: panW, height: panH),
-            styleMask:   [.titled, .closable, .resizable, .miniaturizable, .nonactivatingPanel],
-            backing: .buffered, defer: false)
-        panel.title = "Dream Journal (\(journal.count) cycles)"
-        panel.isReleasedWhenClosed = false; panel.level = .floating; panel.center()
-        let sv = NSScrollView(frame: NSRect(x: 0, y: barH, width: panW, height: panH - barH))
-        sv.autoresizingMask = [.width, .height]; sv.hasVerticalScroller = true
-        sv.autohidesScrollers = true; sv.borderType = .noBorder
-        let cs = sv.contentSize
-        let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: cs.width, height: cs.height))
-        tv.minSize = NSSize(width: 0, height: cs.height)
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        tv.autoresizingMask = .width; tv.isEditable = false; tv.isSelectable = true
-        tv.backgroundColor = .textBackgroundColor; tv.textContainerInset = NSSize(width: 14, height: 14)
-        tv.isVerticallyResizable = true; tv.isHorizontallyResizable = false
-        tv.textContainer?.containerSize = NSSize(width: cs.width, height: CGFloat.greatestFiniteMagnitude)
-        tv.textContainer?.widthTracksTextView = true
-        sv.documentView = tv
-        tv.textStorage?.setAttributedString(content)
-
-        // Wire up the delegate so link-attributed headers are clickable
-        let myJournal = journal
-        journalLinkDelegate = JournalLinkDelegate { [weak self] ts in
-            guard let self, let entry = myJournal.first(where: { $0.timestamp == ts }) else { return }
-            self.showCycleDetail(for: entry)
-        }
-        tv.delegate = journalLinkDelegate
-
-        let bar = NSView(frame: NSRect(x: 0, y: 0, width: panW, height: barH))
-        bar.autoresizingMask = [.width]
-        let sep = NSBox(frame: NSRect(x: 0, y: barH - 1, width: panW, height: 1))
-        sep.boxType = .separator; sep.autoresizingMask = [.width]; bar.addSubview(sep)
-        let openBtn = NSButton(title: "Open File", target: self, action: #selector(openDetailFile))
-        openBtn.frame = NSRect(x: panW - 184, y: 8, width: 84, height: 32)
-        openBtn.autoresizingMask = [.minXMargin]; openBtn.bezelStyle = .rounded; bar.addSubview(openBtn)
-        let closeBtn = NSButton(title: "Close", target: self, action: #selector(closeDetailPanel))
-        closeBtn.frame = NSRect(x: panW - 92, y: 8, width: 80, height: 32)
-        closeBtn.autoresizingMask = [.minXMargin]; closeBtn.bezelStyle = .rounded; bar.addSubview(closeBtn)
-        panel.contentView?.addSubview(sv); panel.contentView?.addSubview(bar)
-        detailPanel = panel
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        if dashboardController == nil { dashboardController = DashboardWindowController() }
+        dashboardController!.showOrFront(tab: 2)
     }
 
     /// Show a floating detail panel for one journal cycle entry.
@@ -5675,6 +5480,15 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func runPrune() {
         dlog("runPrune")
+        // Real click-to-run with a confirm (docs/23 Stage 4) — pruning rewrites
+        // store files, so it never fires off a stray menu click.
+        let a = NSAlert()
+        a.messageText = "Prune the knowledge stores?"
+        a.informativeText = "Opens Terminal and runs `i-dream prune` to compact the large store files."
+        a.addButton(withTitle: "Run in Terminal")
+        a.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
         openInTerminal("\(iDream) prune")
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.refresh() }
     }
@@ -6413,6 +6227,12 @@ struct OverviewData {
     var reflect: ReflectData?
     var reviewPending: String?
     var state: (cycles: Int, tokens: Int, lastDream: String?)?
+    // The dropdown's old ACTIVITY block lives here since the Stage-4 menu
+    // diet — the menu keeps only glance values, the Overview keeps the stats.
+    var usage: (line: String, warn: Bool)?
+    var lastActive: String?
+    var signals = 0
+    var digest: (text: String, sentiment: String)?
     var viz = OverviewViz()
 }
 
@@ -6488,6 +6308,7 @@ final class OverviewModel: ObservableObject {
     @Published var data = OverviewData()
     var onOpenReview: (() -> Void)?
     var onJumpToBrowse: ((String) -> Void)?
+    var onRerunInference: (() -> Void)?
 }
 
 // — DesignKit (AppKit) — ported from claude-instances/native/DesignKit.swift.
@@ -7440,7 +7261,8 @@ struct OverviewPane: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 feltValueCard
-                if let s = model.data.state { statusLine(s) }
+                statusRow
+                if let d = model.data.digest { digestCard(d) }
                 if !model.data.viz.topLessons.isEmpty { topLessons }
                 if !model.data.viz.kindCounts.isEmpty { distribution }
                 if !model.data.viz.timelines.isEmpty { timelines }
@@ -7493,16 +7315,25 @@ struct OverviewPane: View {
         .cornerRadius(8)
     }
 
-    private func statusLine(_ s: (cycles: Int, tokens: Int, lastDream: String?)) -> some View {
+    /// The stat strip. Usage, last-active, and signals moved here from the
+    /// dropdown's old ACTIVITY block in the Stage-4 menu diet.
+    private var statusRow: some View {
         HStack(spacing: DS.unit) {
-            statTile("CYCLES", "\(s.cycles)")
-            statTile("TOKENS", fmtNum(s.tokens))
-            if let last = s.lastDream { statTile("LAST DREAM", last) }
+            if let s = model.data.state {
+                statTile("CYCLES", "\(s.cycles)")
+                statTile("TOKENS", fmtNum(s.tokens))
+                if let last = s.lastDream { statTile("LAST DREAM", last) }
+            }
+            if let u = model.data.usage {
+                statTile("USAGE", u.line, tint: u.warn ? .orange : nil)
+            }
+            if let la = model.data.lastActive { statTile("LAST ACTIVE", la) }
+            if model.data.signals > 0 { statTile("SIGNALS", fmtNum(model.data.signals)) }
             Spacer()
         }
     }
 
-    private func statTile(_ label: String, _ value: String) -> some View {
+    private func statTile(_ label: String, _ value: String, tint: Color? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(.system(size: 9, weight: .semibold))
@@ -7510,11 +7341,43 @@ struct OverviewPane: View {
                 .kerning(0.5)
             Text(value)
                 .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                .foregroundColor(tint ?? .primary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .background(DS.surface)
         .cornerRadius(6)
+    }
+
+    /// "Recent Dreams Inference" — the 3-hourly prose synthesis that used to
+    /// wall the dropdown; sentiment tints the text as the menu did.
+    private func digestCard(_ d: (text: String, sentiment: String)) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("RECENT DREAMS INFERENCE")
+            Text(d.text)
+                .font(.system(size: 12))
+                .foregroundColor(d.sentiment == "positive" ? .green
+                               : d.sentiment == "negative" ? .orange : .primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            HStack(spacing: 10) {
+                Text("updated every 3h")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                Button(action: { model.onRerunInference?() }) {
+                    Label("Re-run", systemImage: "arrow.clockwise")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(DS.surface)
+        .cornerRadius(8)
     }
 
     /// "Your biggest repeated lessons" — cluster sizes as honest bars,
