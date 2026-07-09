@@ -3598,8 +3598,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if isCycling, let start = cycleStartTime {
             let progress = detectDreamProgress(since: start)
             let color    = dreamAnimColors[animFrame % dreamAnimColors.count]
-            addColored(menu, "◉  Dreaming   \(fmtElapsed(progress.elapsed))",
-                       color: color, font: .systemFont(ofSize: 13, weight: .semibold))
+            addColored(menu, "◉  Dreaming   \(fmtElapsed(progress.elapsed))", color: color)
             addDim(menu, "  Phase: \(progress.phase)")
             menu.addItem(.separator())
         }
@@ -3607,8 +3606,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // ─ Status header ──────────────────────────────────────────────────────
         let statusColor: NSColor = running ? .systemGreen : .systemOrange
         let statusText  = running ? "◉  i-dream  —  Running" : "○  i-dream  —  Stopped"
-        addColored(menu, statusText, color: statusColor,
-                   font: .systemFont(ofSize: 13, weight: .semibold))
+        addColored(menu, statusText, color: statusColor)
 
         // ─ Outcome: is the dreaming actually making Claude sharper? ────────────
         // The point of the whole system — surfaced first, not buried under
@@ -3751,13 +3749,10 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let domains = registered, !domains.isEmpty {
             for d in domains {
                 let item = NSMenuItem()
-                let pad = String(repeating: " ", count: max(0, 18 - d.name.count))
-                item.attributedTitle = NSAttributedString(
-                    string: "  \(d.name)\(pad) \(d.cadence)",
-                    attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                        .foregroundColor: NSColor.labelColor,
-                    ])
+                item.attributedTitle = columned([
+                    seg("  \(d.name)", BarFont.monoSecondary, .labelColor),
+                    seg(d.cadence, BarFont.monoSecondary, .labelColor),
+                ], stops: [150])
                 item.toolTip = "\(d.kind) — \(d.description)"
                 domainsMenu.addItem(item)
             }
@@ -3784,14 +3779,12 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let todayMenu = NSMenu()
         if let counts = todayCounts {
             for (section, count) in counts.itemized {
-                let item = NSMenuItem()
-                let pad = String(repeating: " ", count: max(0, 26 - section.count))
-                item.attributedTitle = NSAttributedString(
-                    string: "  \(section)\(pad) \(count)",
-                    attributes: [
-                        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-                        .foregroundColor: count > 0 ? NSColor.labelColor : NSColor.tertiaryLabelColor,
-                    ])
+                let item  = NSMenuItem()
+                let color: NSColor = count > 0 ? .labelColor : .tertiaryLabelColor
+                item.attributedTitle = columned([
+                    seg("  \(section)", BarFont.monoSecondary, color),
+                    seg("\(count)", BarFont.monoSecondary, color),
+                ], stops: [190])
                 todayMenu.addItem(item)
             }
             todayMenu.addItem(.separator())
@@ -4037,89 +4030,66 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // (mirrors the claude-instances pattern). Empty string = no
         // shortcut. Standard convention: lowercase = ⌘key, uppercase = ⌘⇧key.
         let i = NSMenuItem(title: title, action: sel, keyEquivalent: key)
-        i.attributedTitle = NSAttributedString(string: title,
-                                               attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        i.attributedTitle = seg(title, BarFont.body, .labelColor)
         i.target = self; i.isEnabled = true
         menu.addItem(i); return i
     }
 
     private func addSection(_ menu: NSMenu, _ title: String) {
         let i = NSMenuItem()
-        i.attributedTitle = NSAttributedString(string: title.uppercased(), attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.7),
-        ])
+        i.attributedTitle = seg(title.uppercased(), BarFont.sectionLabel,
+                                NSColor.labelColor.withAlphaComponent(0.7))
         i.isEnabled = false; menu.addItem(i)
     }
 
     private func addColored(_ menu: NSMenu, _ title: String,
-                            color: NSColor, font: NSFont = .systemFont(ofSize: 15)) {
+                            color: NSColor, font: NSFont = BarFont.title) {
         let i = NSMenuItem()
-        i.attributedTitle = NSAttributedString(string: title, attributes: [
-            .font: font, .foregroundColor: color,
-        ])
+        i.attributedTitle = seg(title, font, color)
         i.isEnabled = false; menu.addItem(i)
     }
 
+    /// Label + value column at a shared tab stop (real alignment, not pad).
+    private static let rowValueStop: CGFloat = 170
+
     private func addRow(_ menu: NSMenu, _ label: String, _ value: String,
                         valueColor: NSColor? = nil) {
-        let i    = NSMenuItem()
-        let full = NSMutableAttributedString()
-        let pad  = max(1, 24 - label.count)
-        full.append(NSAttributedString(string: "  \(label)" + String(repeating: " ", count: pad),
-                                       attributes: [
-                                           .font: NSFont.systemFont(ofSize: 14),
-                                           .foregroundColor: NSColor.labelColor,
-                                       ]))
-        full.append(NSAttributedString(string: value, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
-            .foregroundColor: valueColor ?? NSColor.labelColor,
-        ]))
-        i.attributedTitle = full; i.isEnabled = false; menu.addItem(i)
+        let i = NSMenuItem()
+        i.attributedTitle = columned([
+            seg("  \(label)", BarFont.body, .labelColor),
+            seg(value, BarFont.monoBody, valueColor ?? .labelColor),
+        ], stops: [Self.rowValueStop])
+        i.isEnabled = false; menu.addItem(i)
     }
 
     /// Like addRow but clickable — shows a subtle › arrow and has an action.
     @discardableResult
     private func addClickable(_ menu: NSMenu, _ label: String, _ value: String,
                                valueColor: NSColor? = nil, action: Selector) -> NSMenuItem {
-        let i    = NSMenuItem()
-        let full = NSMutableAttributedString()
-        let pad  = max(1, 24 - label.count)
-        full.append(NSAttributedString(string: "\(label)" + String(repeating: " ", count: pad),
-                                       attributes: [.font: NSFont.systemFont(ofSize: 14)]))
-        full.append(NSAttributedString(string: value, attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
-            .foregroundColor: valueColor ?? NSColor.labelColor,
-        ]))
-        full.append(NSAttributedString(string: "  ›", attributes: [
-            .font: NSFont.systemFont(ofSize: 14),
-            .foregroundColor: NSColor.tertiaryLabelColor,
-        ]))
-        i.attributedTitle = full; i.action = action; i.target = self; i.isEnabled = true
+        let i     = NSMenuItem()
+        let cell2 = NSMutableAttributedString()
+        cell2.append(seg(value, BarFont.monoBody, valueColor ?? .labelColor))
+        cell2.append(seg("  ›", BarFont.body, .tertiaryLabelColor))
+        i.attributedTitle = columned([
+            seg(label, BarFont.body, .labelColor),
+            cell2,
+        ], stops: [Self.rowValueStop])
+        i.action = action; i.target = self; i.isEnabled = true
         menu.addItem(i); return i
     }
 
     private func addTwoLine(_ menu: NSMenu, top: String, bottom: String) {
         let i    = NSMenuItem()
         let full = NSMutableAttributedString()
-        full.append(NSAttributedString(string: top + "\n",
-                                       attributes: [
-                                           .font: NSFont.systemFont(ofSize: 14),
-                                           .foregroundColor: NSColor.labelColor,
-                                       ]))
-        full.append(NSAttributedString(string: bottom, attributes: [
-            .font: NSFont.systemFont(ofSize: 13),
-            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.6),
-        ]))
+        full.append(seg(top + "\n", BarFont.body, .labelColor))
+        full.append(seg(bottom, BarFont.secondary, NSColor.labelColor.withAlphaComponent(0.6)))
         i.attributedTitle = full; i.isEnabled = false; menu.addItem(i)
     }
 
     private func addDim(_ menu: NSMenu, _ title: String) {
         let i = NSMenuItem()
-        i.attributedTitle = NSAttributedString(string: title, attributes: [
-            .foregroundColor: NSColor.labelColor.withAlphaComponent(0.6),
-            .font: NSFont.systemFont(ofSize: 13),
-        ])
+        i.attributedTitle = seg(title, BarFont.secondary,
+                                NSColor.labelColor.withAlphaComponent(0.6))
         i.isEnabled = false; menu.addItem(i)
     }
 
@@ -6518,6 +6488,54 @@ final class OverviewModel: ObservableObject {
     @Published var data = OverviewData()
     var onOpenReview: (() -> Void)?
     var onJumpToBrowse: ((String) -> Void)?
+}
+
+// — DesignKit (AppKit) — ported from claude-instances/native/DesignKit.swift.
+//   The dropdown's shared design system: one type scale, segment + columned
+//   text builders, one truncation rule per field kind. Menu helpers feed these
+//   instead of hand-rolling NSAttributedString math and left-pad alignment. —
+
+enum BarFont {
+    /// User font-size multiplier (`ui.fontScale`, default 1.0). Read at render
+    /// time and clamped to a sane range. No settings control ships until a
+    /// live reader exists; the default keeps rendering unchanged.
+    static var scale: CGFloat {
+        let s = UserDefaults.standard.double(forKey: "ui.fontScale")
+        return s > 0 ? min(1.6, max(0.7, CGFloat(s))) : 1.0
+    }
+    static var title:         NSFont { .systemFont(ofSize: 13 * scale, weight: .semibold) }  // identity/status
+    static var body:          NSFont { .systemFont(ofSize: 14 * scale, weight: .regular) }   // rows, prose
+    static var secondary:     NSFont { .systemFont(ofSize: 13 * scale, weight: .regular) }   // dim/detail rows
+    static var caption:       NSFont { .systemFont(ofSize: 11 * scale, weight: .regular) }   // footnotes
+    static var monoBody:      NSFont { .monospacedSystemFont(ofSize: 14 * scale, weight: .regular) }
+    static var monoSecondary: NSFont { .monospacedSystemFont(ofSize: 13 * scale, weight: .regular) }
+    static var sectionLabel:  NSFont { .systemFont(ofSize: 12 * scale, weight: .semibold) }
+}
+
+/// One styled text segment; `columned` and the menu helpers concatenate them.
+func seg(_ text: String, _ font: NSFont, _ color: NSColor) -> NSAttributedString {
+    NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
+}
+
+/// Real column alignment via tab stops — replaces hand-padded spaces, which
+/// break whenever content width changes. Cell 0 sits at the row origin,
+/// cells 1..n at their stop (pt).
+func columned(_ cells: [NSAttributedString], stops: [CGFloat]) -> NSAttributedString {
+    let ps = NSMutableParagraphStyle()
+    ps.tabStops = stops.map { NSTextTab(textAlignment: .left, location: $0) }
+    ps.defaultTabInterval = 0
+    let m = NSMutableAttributedString()
+    for (i, cell) in cells.enumerated() {
+        if i > 0 { m.append(NSAttributedString(string: "\t")) }
+        m.append(cell)
+    }
+    m.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: m.length))
+    return m
+}
+
+/// Identifiers and one-line prose tail-truncate; keep the head.
+func tailTruncate(_ s: String, _ maxChars: Int) -> String {
+    s.count <= maxChars ? s : String(s.prefix(max(0, maxChars - 1))) + "…"
 }
 
 // — Shared design tokens + row primitives (visual-design.md: one type
