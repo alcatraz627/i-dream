@@ -1088,9 +1088,11 @@ final class NavSidebarButton: NSButton {
         updateAttributedTitle()
     }
 
-    /// Update the displayed title (e.g. to add a count badge).
-    func updateTitle(_ newTitle: String) {
-        _title = newTitle
+    /// Trailing item count, rendered right-aligned in mono — replaces the
+    /// old "(463)" parenthetical baked into the title string.
+    private var _count: Int?
+    func updateCount(_ n: Int?) {
+        _count = n
         updateAttributedTitle()
     }
 
@@ -1099,11 +1101,22 @@ final class NavSidebarButton: NSButton {
         let color: NSColor = isSelectedTab
             ? .labelColor
             : .secondaryLabelColor   // dim unselected for visible hierarchy
-        let attrs: [NSAttributedString.Key: Any] = [
+        let m = NSMutableAttributedString(string: "  " + _title, attributes: [
             .font: NSFont.systemFont(ofSize: 13, weight: weight),
             .foregroundColor: color,
-        ]
-        self.attributedTitle = NSAttributedString(string: "  " + _title, attributes: attrs)
+        ])
+        // Count sits at a right-aligned tab stop in mono, so the label never
+        // shifts width and the numbers land in one column across tabs.
+        if let n = _count {
+            let ps = NSMutableParagraphStyle()
+            ps.tabStops = [NSTextTab(textAlignment: .right, location: max(40, bounds.width - 34))]
+            m.append(NSAttributedString(string: "\t\(n)", attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]))
+            m.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: m.length))
+        }
+        self.attributedTitle = m
     }
 }
 
@@ -1515,19 +1528,25 @@ final class DashboardWindowController: NSObject {
         footSep.boxType = .separator
         sidebar.addSubview(footSep)
 
-        let exportBtn = NSButton(title: "⬇  Export JSON", target: self, action: #selector(exportDashboardData))
-        exportBtn.frame            = NSRect(x: footX - 4, y: 144, width: footW + 8, height: 24)
-        exportBtn.isBordered       = false
+        // HoverButton gives the two actions the same hover wash + hand
+        // cursor the theme icons have — one affordance grammar in the column.
+        let exportBtn = HoverButton(frame: NSRect(x: footX - 4, y: 144, width: footW + 8, height: 24))
+        exportBtn.title            = "⬇  Export JSON"
+        exportBtn.target           = self
+        exportBtn.action           = #selector(exportDashboardData)
         exportBtn.alignment        = .left
         exportBtn.font             = .systemFont(ofSize: 11)
+        exportBtn.tintColor        = .secondaryLabelColor
         exportBtn.contentTintColor = .secondaryLabelColor
         sidebar.addSubview(exportBtn)
 
-        let refreshBtn = NSButton(title: "↺  Refresh  (⌘R)", target: self, action: #selector(refreshDashboard))
-        refreshBtn.frame            = NSRect(x: footX - 4, y: 112, width: footW + 8, height: 24)
-        refreshBtn.isBordered       = false
+        let refreshBtn = HoverButton(frame: NSRect(x: footX - 4, y: 112, width: footW + 8, height: 24))
+        refreshBtn.title            = "↺  Refresh  (⌘R)"
+        refreshBtn.target           = self
+        refreshBtn.action           = #selector(refreshDashboard)
         refreshBtn.alignment        = .left
         refreshBtn.font             = .systemFont(ofSize: 11)
+        refreshBtn.tintColor        = .secondaryLabelColor
         refreshBtn.contentTintColor = .secondaryLabelColor
         sidebar.addSubview(refreshBtn)
 
@@ -1728,8 +1747,8 @@ final class DashboardWindowController: NSObject {
     private func updateSidebarBadges() {
         guard navButtons.count >= 4 else { return }
         // Browse shows deduped rows; the honest full total lives in its footer.
-        navButtons[1].updateTitle("Browse (\(browseModel.rows.count))")
-        navButtons[2].updateTitle("Journal (\(journal.count))")
+        navButtons[1].updateCount(browseModel.rows.count)
+        navButtons[2].updateCount(journal.count)
     }
 
     // ── Navigation ─────────────────────────────────────────────────────────────
@@ -5471,6 +5490,12 @@ private final class HoverButton: NSButton {
         trackingArea = ta
     }
 
+    // Clickable things show the hand — the affordance the sidebar footer
+    // buttons and theme icons were missing.
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
         delegate?.setHUDHoverLabel(hoverLabel, color: tintColor)
@@ -6156,8 +6181,8 @@ struct RowPreviewPanel: View {
                     .font(DS.caption).foregroundColor(.secondary)
                 if row.clusterSize > 1 {
                     Text("×\(row.clusterSize)")
-                        .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .font(DS.caption.weight(.semibold).monospacedDigit())
+                        .padding(.horizontal, DS.half).padding(.vertical, 1)
                         .background(DS.quiet(row.kind.tint).opacity(0.25))
                         .clipShape(Capsule())
                 }
@@ -6190,12 +6215,12 @@ struct RowPreviewPanel: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 3) {
                     Text(row.kind == .association ? "LINKED PATTERNS" : "BUILT-ON ASSOCIATIONS")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(DS.micro)
                         .foregroundColor(.secondary)
                     ForEach(Array(row.linkedChips.enumerated()), id: \.offset) { _, chip in
                         Button(action: { onPreview(chip.target) }) {
                             HStack(spacing: 4) {
-                                Image(systemName: "arrow.right.circle").font(.system(size: 9))
+                                Image(systemName: "arrow.right.circle").font(DS.micro)
                                 Text(chip.label + "…").font(DS.caption).lineLimit(1)
                             }
                             .foregroundColor(.accentColor)
@@ -6236,9 +6261,16 @@ final class BrowseModel: ObservableObject {
     /// Set when a linked chip is clicked; the view scrolls there and expands.
     @Published var jumpTarget: String? = nil
 
+    /// Repeated lessons for the cluster panel, sorted once per data refresh.
+    /// The panel re-renders on every hover event, so it must never re-filter
+    /// and re-sort the full row set per mouse move.
+    private(set) var clusterRows: [BrowseRow] = []
+
     func apply(rows: [BrowseRow], totals: BrowseTotals) {
         self.rows = rows
         self.totals = totals
+        clusterRows = rows.filter { $0.clusterSize > 1 }
+                          .sorted { $0.clusterSize > $1.clusterSize }
         if let e = expandedId, !rows.contains(where: { $0.id == e }) {
             expandedId = nil   // selection never outlives a shrunk refresh
         }
@@ -6358,10 +6390,8 @@ struct BrowseView: View {
                 .textFieldStyle(.roundedBorder)
                 .font(DS.label)
                 .frame(maxWidth: 320)
-            let clusters = model.rows
-                .filter { $0.clusterSize > 1 }
-                .sorted { $0.clusterSize > $1.clusterSize }
-            let maxSize = clusters.map(\.clusterSize).max() ?? 1
+            let clusters = model.clusterRows
+            let maxSize = clusters.first?.clusterSize ?? 1   // sorted desc
             // The hovered cluster plus everything it links to. Chips are
             // written on both sides of a link, but scan the reverse direction
             // too so emphasis never looks one-directional.
@@ -6427,7 +6457,7 @@ struct BrowseView: View {
                     .foregroundColor(emphasized ? .primary : .secondary.opacity(0.35))
                     .frame(width: 30, alignment: .trailing)
                 Image(systemName: "link")
-                    .font(.system(size: 8))
+                    .font(DS.micro)
                     .foregroundColor(c.linkedChips.isEmpty ? .clear
                                      : emphasized ? .secondary : .secondary.opacity(0.25))
                     .frame(width: 12)
@@ -6480,12 +6510,12 @@ struct BrowseView: View {
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(cleanRowTitle(row.title))
-                        .font(.system(size: 12, weight: .medium))
+                        .font(DS.body.weight(.medium))
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .foregroundColor(.primary)
                     Text(metaLine(row))
-                        .font(.system(size: 10))
+                        .font(DS.caption)
                         .lineLimit(1)
                         .foregroundColor(.secondary)
                 }
@@ -6493,26 +6523,26 @@ struct BrowseView: View {
                 if row.clusterSize > 1 {
                     Text("×\(row.clusterSize)")
                         .font(DS.caption.weight(.semibold).monospacedDigit())
-                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .padding(.horizontal, DS.half).padding(.vertical, 1)
                         .background(row.kind.tint.opacity(0.18))
                         .clipShape(Capsule())
                 }
                 if let r = row.rating {
-                    Text(r == "up" ? "👍" : "👎").font(.system(size: 10))
+                    Text(r == "up" ? "👍" : "👎").font(DS.caption)
                 }
                 if let c = row.confidence {
                     Text("\(Int(c * 100))%")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(DS.caption.monospacedDigit())
                         .foregroundColor(.secondary)
                         .frame(width: 34, alignment: .trailing)
                 }
                 Text(rowAgeLabel(row.ageDays))
-                    .font(.system(size: 10).monospacedDigit())
+                    .font(DS.caption.monospacedDigit())
                     .foregroundColor(rowAgeColor(row.ageDays))
                     .frame(width: 38, alignment: .trailing)
             }
             .padding(.horizontal, DS.unit)
-            .padding(.vertical, 5)
+            .padding(.vertical, DS.half)
             .frame(height: rowH)   // exact, not min
             .contentShape(Rectangle())
         }
@@ -6544,7 +6574,7 @@ struct BrowseView: View {
         VStack(alignment: .leading, spacing: 8) {
             ScrollView {
                 Text(richDetailText(row.detail))
-                    .font(.system(size: 12))
+                    .font(DS.body)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -6552,7 +6582,7 @@ struct BrowseView: View {
             if !row.linkedChips.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(row.kind == .association ? "LINKED PATTERNS" : "BUILT-ON ASSOCIATIONS")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(DS.micro)
                         .foregroundColor(.secondary)
                     ForEach(Array(row.linkedChips.enumerated()), id: \.offset) { _, chip in
                         Button(action: { model.preview(id: chip.target) }) {
@@ -6560,7 +6590,7 @@ struct BrowseView: View {
                                 Image(systemName: "arrow.right.circle")
                                     .font(DS.caption)
                                 Text(chip.label + "…")
-                                    .font(.system(size: 10))
+                                    .font(DS.caption)
                                     .lineLimit(1)
                             }
                             .foregroundColor(.cyan)
@@ -6571,14 +6601,14 @@ struct BrowseView: View {
             }
             HStack(spacing: 10) {
                 if let cat = row.category {
-                    Text(cat).font(.system(size: 10))
-                        .padding(.horizontal, 6).padding(.vertical, 2)
+                    Text(cat).font(DS.caption)
+                        .padding(.horizontal, DS.half).padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.15))
                         .clipShape(Capsule())
                 }
                 if row.clusterSize > 1 {
                     Text("\(row.clusterSize) rewordings of this lesson collapsed into one row")
-                        .font(.system(size: 10)).foregroundColor(.secondary)
+                        .font(DS.caption).foregroundColor(.secondary)
                 }
                 Spacer()
                 if row.kind == .insight {
@@ -6595,12 +6625,12 @@ struct BrowseView: View {
     private var footer: some View {
         HStack {
             Text(model.totals.note + " · \(model.totals.clusters) deduped clusters")
-                .font(.system(size: 10))
+                .font(DS.caption)
                 .foregroundColor(.secondary)
             Spacer()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, DS.unit)
+        .padding(.vertical, DS.half)
     }
 
     /// Markdown-aware detail rendering (bold, code, italics) that keeps the
@@ -6716,7 +6746,7 @@ struct SearchPane: View {
         VStack(alignment: .leading, spacing: 0) {
             TextField("Search all lessons — words match independently, \"quotes\" match exactly", text: $model.query)
                 .textFieldStyle(.roundedBorder)
-                .font(.system(size: 13))
+                .font(DS.body)
                 .focused($fieldFocused)
                 .onSubmit { model.openSelected() }
                 .padding(12)
@@ -6730,7 +6760,7 @@ struct SearchPane: View {
                     Text("↑↓ select · ⏎ open in Browse · \"quoted phrases\" match exactly")
                         .foregroundColor(.secondary)
                 }
-                .font(.system(size: 12))
+                .font(DS.body)
                 .padding(16)
                 Spacer()
             } else {
@@ -6756,12 +6786,12 @@ struct SearchPane: View {
                 Divider()
                 HStack {
                     Text("\(hits.count) of \(model.allRows.count) lessons match")
-                        .font(.system(size: 10))
+                        .font(DS.caption)
                         .foregroundColor(.secondary)
                     Spacer()
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                .padding(.vertical, DS.half)
             }
         }
     }
@@ -6769,28 +6799,28 @@ struct SearchPane: View {
     private func hitRow(_ row: BrowseRow, isSelected: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: row.kind.symbol)
-                .font(.system(size: 11))
+                .font(DS.label)
                 .foregroundColor(row.kind.tint)
                 .frame(width: 16)
             Text(row.title)
-                .font(.system(size: 12))
+                .font(DS.body)
                 .lineLimit(1)
             Spacer(minLength: 8)
             if row.clusterSize > 1 {
                 Text("×\(row.clusterSize)")
-                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .font(DS.caption.weight(.semibold).monospacedDigit())
+                    .padding(.horizontal, DS.half).padding(.vertical, 1)
                     .background(row.kind.tint.opacity(0.18))
                     .clipShape(Capsule())
             }
             if let c = row.confidence {
                 Text("\(Int(c * 100))%")
-                    .font(.system(size: 10).monospacedDigit())
+                    .font(DS.caption.monospacedDigit())
                     .foregroundColor(.secondary)
                     .frame(width: 34, alignment: .trailing)
             }
             Text(row.ageDays.map { $0 == 0 ? "today" : "\($0)d" } ?? "—")
-                .font(.system(size: 10).monospacedDigit())
+                .font(DS.caption.monospacedDigit())
                 .foregroundColor(.secondary)
                 .frame(width: 40, alignment: .trailing)
         }
@@ -6963,17 +6993,17 @@ struct JournalPane: View {
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 8) {
                                 Text(row.dateLabel)
-                                    .font(.system(size: 12, weight: .semibold))
+                                    .font(DS.body.weight(.semibold))
                                 Text("·  \(row.agoLabel)")
-                                    .font(.system(size: 11))
+                                    .font(DS.label)
                                     .foregroundColor(.secondary)
                                 Spacer()
                                 Text("\(row.tokens.formatted()) tokens")
-                                    .font(.system(size: 11).monospacedDigit())
+                                    .font(DS.label.monospacedDigit())
                                     .foregroundColor(.secondary)
                             }
                             Text(row.counts)
-                                .font(.system(size: 11))
+                                .font(DS.label)
                                 .foregroundColor(.secondary)
                             if !row.chips.isEmpty {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -6983,9 +7013,9 @@ struct JournalPane: View {
                                         }) {
                                             HStack(spacing: 4) {
                                                 Image(systemName: "arrow.right.circle")
-                                                    .font(.system(size: 9))
+                                                    .font(DS.micro)
                                                 Text(chip.label + "…")
-                                                    .font(.system(size: 10))
+                                                    .font(DS.caption)
                                                     .lineLimit(1)
                                             }
                                             .foregroundColor(.cyan)
@@ -7010,8 +7040,8 @@ struct JournalPane: View {
         let active = model.rangeDays == days
         return Button(action: { model.rangeDays = days }) {
             Text(label)
-                .font(.system(size: 11, weight: active ? .semibold : .regular))
-                .padding(.horizontal, 9).padding(.vertical, 4)
+                .font(DS.label.weight(active ? .semibold : .regular))
+                .padding(.horizontal, DS.unit).padding(.vertical, 4)
                 .background(Color.secondary.opacity(active ? 0.28 : 0.10))
                 .clipShape(Capsule())
         }
