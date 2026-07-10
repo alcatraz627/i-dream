@@ -635,6 +635,48 @@ pub fn write_lane_health(store: &Store, cycle: u64) -> Result<()> {
     Ok(())
 }
 
+// ── Wiring contract (Wave 0 item 2) ──────────────────────────────────────────
+// The registry doubles as a contract: every lane must name a consumer that is
+// actually reading it. A lane that is red for a consumer-side reason — a dead
+// reader, a missing store, an undrained queue — has no resolving consumer, so
+// it is an orphan. Growth-bound reds (traces, snapshots) are NOT orphans: they
+// have a live consumer and merely need reaping (Wave 1 item 7).
+//
+// KNOWN_ORPHANS is the contract debt as of Wave 0 — the lanes already known to
+// be unwired. The live contract test holds the orphan set to exactly this list:
+// a new orphan fails it (debt must not grow silently), and a KNOWN_ORPHAN that
+// starts resolving also fails it (the list must shrink as Wave 1 reconnects
+// each flow). When the list reaches empty, the system honors its own contract.
+
+/// Lanes with no resolving consumer today — the debt Wave 1 is chartered to pay.
+/// Removing an entry asserts Wave 1 reconnected that lane; the live contract
+/// test then holds you to it.
+// Read by the contract test now, and by the `i-dream doctor` check once the
+// parallel session releases cli.rs (Wave 0 item 2's deferred half).
+#[allow(dead_code)]
+pub const KNOWN_ORPHANS: &[&str] = &[
+    "ingest-queue",    // 101 events, zero engine readers
+    "pins",            // decay logic exists but is never scheduled
+    "ipc",             // registered domain, source events never written
+    "sessions-domain", // extractor cursor frozen since May
+    "memory-domain",   // extractor cursor frozen since May
+];
+
+/// The lanes whose consumer does not resolve against the tree at `home`. An
+/// orphan is a consumer-liveness failure (a Freshness / BacklogAge / Existence
+/// check gone red), never a growth-bound breach.
+// Same as KNOWN_ORPHANS: exercised by the contract test, and the production
+// caller is the deferred `i-dream doctor` check.
+#[allow(dead_code)]
+pub fn contract_orphans(home: &Path) -> Vec<&'static str> {
+    LANES
+        .iter()
+        .filter(|l| !matches!(l.check, LaneCheck::Bound { .. }))
+        .filter(|l| l.evaluate(home).status == LaneStatus::Red)
+        .map(|l| l.name)
+        .collect()
+}
+
 #[cfg(test)]
 mod lane_health_tests {
     use super::*;
@@ -765,6 +807,73 @@ mod lane_health_tests {
         let home = PathBuf::from(std::env::var("HOME").unwrap());
         let store = Store::new(home.join(".claude/subconscious")).unwrap();
         write_lane_health(&store, 0).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn known_orphans_reference_real_lanes() {
+        let names: HashSet<&str> = LANES.iter().map(|l| l.name).collect();
+        for o in KNOWN_ORPHANS {
+            assert!(
+                names.contains(o),
+                "KNOWN_ORPHANS names a lane that does not exist: {o}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_flags_both_new_and_fixed_orphans() {
+        // The set logic the live gate relies on, proven hermetically.
+        let known: HashSet<&str> = ["a", "b"].into_iter().collect();
+        // A new orphan appears → caught as novel.
+        let with_new: HashSet<&str> = ["a", "b", "c"].into_iter().collect();
+        assert_eq!(
+            with_new.difference(&known).copied().collect::<Vec<_>>(),
+            vec!["c"]
+        );
+        // A known orphan resolves → caught as fixed (forces the list to shrink).
+        let fixed: HashSet<&str> = ["a"].into_iter().collect();
+        assert_eq!(
+            known.difference(&fixed).copied().collect::<Vec<_>>(),
+            vec!["b"]
+        );
+    }
+
+    // The contract gate against the REAL tree: the live orphan set must equal
+    // the known debt — no new orphans, and no stale entries that now resolve.
+    // Env-dependent → ignored by default; run per stage:
+    //   cargo test no_new_consumer_orphans -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn no_new_consumer_orphans_live() {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let orphans: HashSet<&str> = contract_orphans(&home).into_iter().collect();
+        let known: HashSet<&str> = KNOWN_ORPHANS.iter().copied().collect();
+
+        println!("\nCONTRACT — lanes whose consumer does not resolve:");
+        for l in LANES {
+            if orphans.contains(l.name) {
+                println!(
+                    "  ✗ {:<16} producer={:<26} consumer={}",
+                    l.name, l.producer, l.consumer
+                );
+            }
+        }
+
+        let novel: Vec<&str> = orphans.difference(&known).copied().collect();
+        assert!(
+            novel.is_empty(),
+            "NEW consumer orphans (wire a consumer, or add to KNOWN_ORPHANS): {novel:?}"
+        );
+        let now_resolving: Vec<&str> = known.difference(&orphans).copied().collect();
+        assert!(
+            now_resolving.is_empty(),
+            "these KNOWN_ORPHANS now resolve — remove them from the list: {now_resolving:?}"
+        );
     }
 }
 
