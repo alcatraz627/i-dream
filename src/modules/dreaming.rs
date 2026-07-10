@@ -101,6 +101,12 @@ pub struct DreamEntry {
     pub associations_found: u64,
     pub insights_promoted: u64,
     pub tokens_used: u64,
+    /// The dream cycle that produced this entry. Joins the journal row to its
+    /// event trace (traces/<ts>-<cycle_id prefix>.jsonl), so a one-line journal
+    /// summary and the full trace of the same cycle can be lined up. Empty on
+    /// rows written before this field existed.
+    #[serde(default)]
+    pub cycle_id: String,
 }
 
 /// Per-turn summary used to build the SWS consolidation prompt.
@@ -1431,6 +1437,7 @@ impl<'a> Module for DreamingModule<'a> {
             associations_found,
             insights_promoted,
             tokens_used: total_tokens,
+            cycle_id: tracer.cycle_id().to_string(),
         };
         self.store.append_jsonl("dreams/journal.jsonl", &entry)?;
         let entry_json = serde_json::to_string_pretty(&entry).ok();
@@ -1459,6 +1466,49 @@ impl<'a> Module for DreamingModule<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── cycle_id correlation (Wave 0 item 3) ────────────────────────────────
+
+    #[test]
+    fn journal_entry_cycle_id_joins_to_its_trace_file() {
+        // The trace filename embeds the first 8 hex of the cycle_id, and the
+        // journal row now carries the full cycle_id, so a row and its trace
+        // line up by construction. That is the join item 3 restores.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        let tracer = DreamTracer::new(&store);
+
+        let entry = DreamEntry {
+            id: "some-row-id".into(),
+            timestamp: Utc::now(),
+            phase: "all".into(),
+            sessions_analyzed: 0,
+            patterns_extracted: 0,
+            associations_found: 0,
+            insights_promoted: 0,
+            tokens_used: 0,
+            cycle_id: tracer.cycle_id().to_string(),
+        };
+
+        assert!(!entry.cycle_id.is_empty());
+        assert!(
+            tracer.trace_rel_path().contains(&entry.cycle_id[..8]),
+            "trace file {} should embed cycle_id prefix {}",
+            tracer.trace_rel_path(),
+            &entry.cycle_id[..8]
+        );
+    }
+
+    #[test]
+    fn old_journal_rows_deserialize_without_cycle_id() {
+        // Rows written before the field must still load (serde default -> "").
+        let old = r#"{"id":"x","timestamp":"2026-05-01T00:00:00Z","phase":"all",
+            "sessions_analyzed":3,"patterns_extracted":2,"associations_found":1,
+            "insights_promoted":0,"tokens_used":42}"#;
+        let entry: DreamEntry = serde_json::from_str(old).expect("old row must still parse");
+        assert_eq!(entry.cycle_id, "");
+        assert_eq!(entry.sessions_analyzed, 3);
+    }
 
     // ── normalize_pattern ──────────────────────────────────────────────────
 
