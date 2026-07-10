@@ -706,6 +706,13 @@ impl Daemon {
             self.config.budget.max_tokens_per_cycle
         );
 
+        // Wave 0: measure every experience lane and record a red/yellow/green
+        // reading to dreams/lane-health.jsonl, so a dead lane names itself on
+        // the menubar instead of rotting silently. Never fails the cycle.
+        if let Err(e) = crate::modules::registry::write_lane_health(&self.store, cycle_num) {
+            warn!("Lane-health computation failed: {e:#}");
+        }
+
         // Run post-consolidation hooks (dream-metrics refresh, etc.)
         Self::run_post_wake_hooks();
 

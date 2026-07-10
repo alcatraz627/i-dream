@@ -17,8 +17,12 @@ use crate::modules::{
     weekly_briefing::WeeklyBriefingModule,
 };
 use crate::store::Store;
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use tracing::warn;
 
 /// The native subconscious modules registered via `Module` trait. Ordering
@@ -196,6 +200,572 @@ fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
     }
 
     out
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Lane health — is every source of experience still flowing, or has one gone
+// dark while the surface stays polished?
+//
+// A "lane" is one path by which experience enters or moves through the
+// subconscious: a transcript stream, the atone log, the ingest queue, the pin
+// buffer. Each lane has a producer that writes it and a consumer that reads it
+// and advances. When the consumer dies the producer keeps writing into a void —
+// the write-only rot this whole plan exists to end. Once per dream cycle we
+// name the lanes and measure each from the filesystem alone, emitting a
+// red/yellow/green verdict to `dreams/lane-health.jsonl`; the menubar's
+// store-health row (and, later, the digest header) ride that file, so a dead
+// lane names itself instead of hiding.
+//
+// Every verdict is DERIVED from a real file fact — a frozen cursor, a missing
+// store, a months-old backlog — never a hardcoded "these are dead" list. That
+// is what makes the signal falsifiable: if a lane known to be dead does not go
+// red, the computation is wrong and should be ripped out (docs/24 Wave 0).
+
+/// A red/yellow/green liveness verdict for one lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaneStatus {
+    Green,
+    Yellow,
+    Red,
+}
+
+/// How a lane's liveness is read off the disk.
+pub enum LaneCheck {
+    /// A consumer proves it is alive by touching `signal` within the cadence.
+    /// Missing or older than 2× cadence is red; past 1× is yellow.
+    Freshness { signal: &'static str },
+    /// A queue is healthy only while its oldest item is younger than the
+    /// cadence (the drain SLA). Empty is green.
+    BacklogAge,
+    /// The store must exist and be non-empty — a store never created is a lane
+    /// that never lived.
+    Existence,
+    /// The store must stay under a growth bound; `warn` is yellow, `max` is red.
+    Bound {
+        metric: BoundMetric,
+        warn: u64,
+        max: u64,
+    },
+}
+
+/// What a `Bound` check counts.
+#[derive(Clone, Copy)]
+pub enum BoundMetric {
+    /// Number of entries in a directory.
+    DirEntries,
+    /// Non-empty lines in a JSONL file.
+    JsonlLines,
+}
+
+/// One data lane and the contract it is expected to honor. `producer` and
+/// `consumer` document the wiring and feed the contract-as-test (Wave 0
+/// item 2); `store` is the producer's output, given relative to `$HOME`.
+pub struct Lane {
+    pub name: &'static str,
+    // Read by the contract-as-test (Wave 0 item 2); documents the lane's writer.
+    #[allow(dead_code)]
+    pub producer: &'static str,
+    pub consumer: &'static str,
+    pub store: &'static str,
+    pub cadence_hours: u64,
+    pub check: LaneCheck,
+}
+
+/// Every lane the subconscious depends on. Adding a row here surfaces the lane
+/// in the health file and subjects it to the consumer-resolution test.
+pub const LANES: &[Lane] = &[
+    Lane {
+        name: "transcripts",
+        producer: "claude-code sessions",
+        consumer: "dreaming + metacog",
+        store: ".claude/projects",
+        cadence_hours: 24,
+        check: LaneCheck::Freshness {
+            signal: ".claude/subconscious/dreams/journal.jsonl",
+        },
+    },
+    Lane {
+        name: "atone",
+        producer: "/atone skill",
+        consumer: "atone external-domain",
+        store: ".claude/atone/events.jsonl",
+        cadence_hours: 96,
+        check: LaneCheck::Freshness {
+            signal: ".claude/atone/events.jsonl",
+        },
+    },
+    Lane {
+        name: "affirm",
+        producer: "/affirm skill",
+        consumer: "affirm external-domain",
+        store: ".claude/affirm/events.jsonl",
+        cadence_hours: 168,
+        check: LaneCheck::Freshness {
+            signal: ".claude/affirm/events.jsonl",
+        },
+    },
+    Lane {
+        name: "ingest-queue",
+        producer: "gcc /core-dump writers",
+        consumer: "DEAD: no engine reader",
+        store: ".claude/subconscious/dreams/ingest-queue",
+        cadence_hours: 48,
+        check: LaneCheck::BacklogAge,
+    },
+    Lane {
+        name: "pins",
+        producer: "/pin-for-dream skill",
+        consumer: "pin decay (unscheduled)",
+        store: ".claude/pinned/events.jsonl",
+        cadence_hours: 24,
+        check: LaneCheck::Freshness {
+            signal: ".claude/pinned/_decay-state.json",
+        },
+    },
+    Lane {
+        name: "valence",
+        producer: "intuition module",
+        consumer: "intuition valence-memory",
+        store: ".claude/subconscious/valence/memory.jsonl",
+        cadence_hours: 48,
+        check: LaneCheck::Freshness {
+            signal: ".claude/subconscious/valence/processed.json",
+        },
+    },
+    Lane {
+        name: "metacog",
+        producer: "metacog module",
+        consumer: "metacog audits",
+        store: ".claude/subconscious/metacog/activity.jsonl",
+        cadence_hours: 24,
+        check: LaneCheck::Freshness {
+            signal: ".claude/subconscious/metacog/activity.jsonl",
+        },
+    },
+    Lane {
+        name: "sessions-domain",
+        producer: "sessions-domain extractor",
+        consumer: "external-domain dream pass",
+        store: ".claude/sessions-domain/events.jsonl",
+        cadence_hours: 168,
+        check: LaneCheck::Freshness {
+            signal: ".claude/sessions-domain/_seen.json",
+        },
+    },
+    Lane {
+        name: "memory-domain",
+        producer: "memory-domain extractor",
+        consumer: "external-domain dream pass",
+        store: ".claude/memory-domain/events.jsonl",
+        cadence_hours: 168,
+        check: LaneCheck::Freshness {
+            signal: ".claude/memory-domain/_seen.json",
+        },
+    },
+    Lane {
+        name: "ipc",
+        producer: "claude-ipc bridge",
+        consumer: "ipc external-domain",
+        store: ".claude-ipc/i-dream-events.jsonl",
+        cadence_hours: 168,
+        check: LaneCheck::Existence,
+    },
+    Lane {
+        name: "traces",
+        producer: "dream tracer",
+        consumer: "dashboard + journal",
+        store: ".claude/subconscious/dreams/traces",
+        cadence_hours: 0,
+        check: LaneCheck::Bound {
+            metric: BoundMetric::DirEntries,
+            warn: 300,
+            max: 800,
+        },
+    },
+    Lane {
+        name: "snapshots",
+        producer: "cycle snapshot writer",
+        consumer: "dashboard cycle-diff",
+        store: ".claude/subconscious/dreams/snapshots",
+        cadence_hours: 0,
+        check: LaneCheck::Bound {
+            metric: BoundMetric::DirEntries,
+            warn: 20,
+            max: 60,
+        },
+    },
+    Lane {
+        name: "injections",
+        producer: "session-start injector",
+        consumer: "session-start hook",
+        store: ".claude/i-dream/injections.jsonl",
+        cadence_hours: 0,
+        check: LaneCheck::Bound {
+            metric: BoundMetric::JsonlLines,
+            warn: 5000,
+            max: 20000,
+        },
+    },
+    Lane {
+        name: "feedback",
+        producer: "insight up/down votes",
+        consumer: "intuition backfill",
+        store: ".claude/subconscious/dreams/insight-feedback.jsonl",
+        cadence_hours: 72,
+        check: LaneCheck::Freshness {
+            signal: ".claude/subconscious/dreams/insight-feedback.jsonl",
+        },
+    },
+];
+
+// ── Pure classifiers (hermetically testable — no filesystem) ─────────────────
+
+fn classify_freshness(age: Duration, cadence: Duration) -> LaneStatus {
+    if age > cadence * 2 {
+        LaneStatus::Red
+    } else if age > cadence {
+        LaneStatus::Yellow
+    } else {
+        LaneStatus::Green
+    }
+}
+
+fn classify_backlog(age: Duration, cadence: Duration) -> LaneStatus {
+    if age > cadence {
+        LaneStatus::Red
+    } else if age > cadence / 2 {
+        LaneStatus::Yellow
+    } else {
+        LaneStatus::Green
+    }
+}
+
+fn classify_bound(n: u64, warn: u64, max: u64) -> LaneStatus {
+    if n >= max {
+        LaneStatus::Red
+    } else if n >= warn {
+        LaneStatus::Yellow
+    } else {
+        LaneStatus::Green
+    }
+}
+
+// ── Filesystem probes ────────────────────────────────────────────────────────
+
+/// Age of a path's last modification, or None if it does not exist.
+fn file_age(path: &Path) -> Option<Duration> {
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(
+        SystemTime::now()
+            .duration_since(mtime)
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+/// Age of the OLDEST child of a directory (the head of a queue), or None if the
+/// directory is missing or empty.
+fn oldest_child_age(dir: &Path) -> Option<Duration> {
+    let mut oldest: Option<SystemTime> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+            oldest = Some(match oldest {
+                Some(o) if o <= mtime => o,
+                _ => mtime,
+            });
+        }
+    }
+    let oldest = oldest?;
+    Some(
+        SystemTime::now()
+            .duration_since(oldest)
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+/// Is there anything here? A non-empty file, or a directory with entries.
+fn path_nonempty(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::read_dir(path)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false),
+        Ok(m) => m.len() > 0,
+        Err(_) => false,
+    }
+}
+
+fn measure_bound(metric: BoundMetric, path: &Path) -> u64 {
+    match metric {
+        BoundMetric::DirEntries => std::fs::read_dir(path)
+            .map(|d| d.flatten().count() as u64)
+            .unwrap_or(0),
+        BoundMetric::JsonlLines => std::fs::read_to_string(path)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+            .unwrap_or(0),
+    }
+}
+
+/// Compact human age: "56d", "3h", "12m", "just now".
+fn fmt_age(age: Duration) -> String {
+    let secs = age.as_secs();
+    if secs >= 86_400 {
+        format!("{}d", secs / 86_400)
+    } else if secs >= 3_600 {
+        format!("{}h", secs / 3_600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        "just now".to_string()
+    }
+}
+
+// ── Evaluation + records ─────────────────────────────────────────────────────
+
+/// One lane's verdict for one cycle. `reason` is a compact human phrase (an age
+/// or a count) so surfaces can show the "why" without recomputing.
+#[derive(Serialize)]
+pub struct LaneHealth {
+    pub lane: &'static str,
+    pub status: LaneStatus,
+    pub reason: String,
+    pub consumer: &'static str,
+}
+
+impl Lane {
+    /// Measure this lane against the real filesystem rooted at `home`.
+    pub fn evaluate(&self, home: &Path) -> LaneHealth {
+        let cadence = Duration::from_secs(self.cadence_hours.max(1) * 3_600);
+        let store_abs = home.join(self.store);
+        let (status, reason) = match &self.check {
+            LaneCheck::Freshness { signal } => match file_age(&home.join(signal)) {
+                None => (LaneStatus::Red, format!("signal missing ({signal})")),
+                Some(age) => {
+                    let s = classify_freshness(age, cadence);
+                    let word = match s {
+                        LaneStatus::Green => "fresh",
+                        LaneStatus::Yellow => "aging",
+                        LaneStatus::Red => "stale",
+                    };
+                    (
+                        s,
+                        format!("{word} {} (cadence {}h)", fmt_age(age), self.cadence_hours),
+                    )
+                }
+            },
+            LaneCheck::BacklogAge => match oldest_child_age(&store_abs) {
+                None => (LaneStatus::Green, "queue empty".to_string()),
+                Some(age) => (
+                    classify_backlog(age, cadence),
+                    format!("oldest unconsumed {} (SLA {}h)", fmt_age(age), self.cadence_hours),
+                ),
+            },
+            LaneCheck::Existence => {
+                if path_nonempty(&store_abs) {
+                    (LaneStatus::Green, "present".to_string())
+                } else {
+                    (LaneStatus::Red, format!("store absent ({})", self.store))
+                }
+            }
+            LaneCheck::Bound { metric, warn, max } => {
+                let n = measure_bound(*metric, &store_abs);
+                let unit = match metric {
+                    BoundMetric::DirEntries => "entries",
+                    BoundMetric::JsonlLines => "lines",
+                };
+                (
+                    classify_bound(n, *warn, *max),
+                    format!("{n} {unit} (max {max})"),
+                )
+            }
+        };
+        LaneHealth {
+            lane: self.name,
+            status,
+            reason,
+            consumer: self.consumer,
+        }
+    }
+}
+
+/// A full lane-health reading for one cycle — one JSONL line in
+/// `dreams/lane-health.jsonl`. The counts let a surface show "3 red" without
+/// walking the array.
+#[derive(Serialize)]
+pub struct LaneHealthCycle {
+    pub ts: DateTime<Utc>,
+    pub cycle: u64,
+    pub red: usize,
+    pub yellow: usize,
+    pub green: usize,
+    pub lanes: Vec<LaneHealth>,
+}
+
+/// Measure every lane against the filesystem rooted at `home`.
+pub fn compute_lane_health(home: &Path) -> Vec<LaneHealth> {
+    LANES.iter().map(|l| l.evaluate(home)).collect()
+}
+
+/// Measure all lanes and append one reading to `dreams/lane-health.jsonl`,
+/// keeping the file bounded so the health log never becomes the rot it
+/// measures. Called once per dream cycle.
+pub fn write_lane_health(store: &Store, cycle: u64) -> Result<()> {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    let lanes = compute_lane_health(&home);
+    let mut red = 0;
+    let mut yellow = 0;
+    let mut green = 0;
+    for l in &lanes {
+        match l.status {
+            LaneStatus::Red => red += 1,
+            LaneStatus::Yellow => yellow += 1,
+            LaneStatus::Green => green += 1,
+        }
+    }
+    let record = LaneHealthCycle {
+        ts: Utc::now(),
+        cycle,
+        red,
+        yellow,
+        green,
+        lanes,
+    };
+    store.append_jsonl("dreams/lane-health.jsonl", &record)?;
+    // Keep the health log bounded — it is itself a lane.
+    store.prune_jsonl("dreams/lane-health.jsonl", 2_000)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod lane_health_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const H: u64 = 3_600;
+
+    #[test]
+    fn freshness_classifier_boundaries() {
+        let cad = Duration::from_secs(24 * H);
+        assert_eq!(
+            classify_freshness(Duration::from_secs(H), cad),
+            LaneStatus::Green
+        );
+        assert_eq!(
+            classify_freshness(Duration::from_secs(30 * H), cad),
+            LaneStatus::Yellow
+        );
+        assert_eq!(
+            classify_freshness(Duration::from_secs(60 * H), cad),
+            LaneStatus::Red
+        );
+    }
+
+    #[test]
+    fn backlog_classifier_boundaries() {
+        let cad = Duration::from_secs(48 * H);
+        assert_eq!(
+            classify_backlog(Duration::from_secs(H), cad),
+            LaneStatus::Green
+        );
+        assert_eq!(
+            classify_backlog(Duration::from_secs(30 * H), cad),
+            LaneStatus::Yellow
+        );
+        assert_eq!(
+            classify_backlog(Duration::from_secs(60 * 24 * H), cad),
+            LaneStatus::Red
+        );
+    }
+
+    #[test]
+    fn bound_classifier_boundaries() {
+        assert_eq!(classify_bound(100, 300, 800), LaneStatus::Green);
+        assert_eq!(classify_bound(400, 300, 800), LaneStatus::Yellow);
+        assert_eq!(classify_bound(900, 300, 800), LaneStatus::Red);
+    }
+
+    #[test]
+    fn existence_check_reads_real_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let lane = Lane {
+            name: "t",
+            producer: "p",
+            consumer: "c",
+            store: "nope/missing.jsonl",
+            cadence_hours: 24,
+            check: LaneCheck::Existence,
+        };
+        // Absent store → red.
+        assert_eq!(lane.evaluate(home).status, LaneStatus::Red);
+        // Created non-empty → green.
+        std::fs::create_dir_all(home.join("nope")).unwrap();
+        std::fs::write(home.join("nope/missing.jsonl"), b"x").unwrap();
+        assert_eq!(lane.evaluate(home).status, LaneStatus::Green);
+    }
+
+    #[test]
+    fn lane_table_is_well_formed() {
+        let mut seen = HashSet::new();
+        for l in LANES {
+            assert!(seen.insert(l.name), "duplicate lane name: {}", l.name);
+        }
+        assert_eq!(LANES.len(), 14, "expected 14 declared lanes");
+    }
+
+    // Live smoke: run against the real ~/.claude tree to prove the day-one
+    // reds fall out of real file facts. Ignored by default (env-dependent);
+    // run with: cargo test lane_health_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn lane_health_live_smoke() {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let lanes = compute_lane_health(&home);
+        println!("\n{:<16} {:<7} {}", "LANE", "STATUS", "REASON");
+        for l in &lanes {
+            println!("{:<16} {:<7?} {}", l.lane, l.status, l.reason);
+        }
+        let red: HashSet<&str> = lanes
+            .iter()
+            .filter(|l| l.status == LaneStatus::Red)
+            .map(|l| l.lane)
+            .collect();
+        for dead in ["pins", "ipc", "ingest-queue"] {
+            assert!(red.contains(dead), "expected {dead} RED on day one");
+        }
+        assert_eq!(lanes.len(), 14);
+    }
+
+    #[test]
+    fn write_round_trips_and_stays_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+        write_lane_health(&store, 1).unwrap();
+        write_lane_health(&store, 2).unwrap();
+        let body = std::fs::read_to_string(store.path("dreams/lane-health.jsonl")).unwrap();
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "one record per cycle");
+        let last: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(last["cycle"], 2);
+        assert_eq!(last["lanes"].as_array().unwrap().len(), 14);
+        let sum = last["red"].as_u64().unwrap()
+            + last["yellow"].as_u64().unwrap()
+            + last["green"].as_u64().unwrap();
+        assert_eq!(sum, 14, "every lane counted exactly once");
+    }
+
+    // Emit one reading to the REAL store so the artifact can be jq'd (docs/24
+    // item-1 validation) and the widget has data before the first daemon cycle.
+    // Ignored by default — it touches live data (append-only + self-pruning,
+    // the same write the daemon does per cycle).
+    // Run: cargo test emit_lane_health_to_real_store -- --ignored
+    #[test]
+    #[ignore]
+    fn emit_lane_health_to_real_store() {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let store = Store::new(home.join(".claude/subconscious")).unwrap();
+        write_lane_health(&store, 0).unwrap();
+    }
 }
 
 #[cfg(test)]

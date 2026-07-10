@@ -10,6 +10,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var cachedBoard:         BoardData?
     private var cachedJournal:       [JournalEntry] = []
     private var cachedStoreFiles:    [StoreFile]    = []
+    private var cachedLaneHealth:    LaneHealthReading? = nil
     private var cachedDigest:        String?
     private var cachedFrequencyHours: Double?
     private var cachedPatternCount:  Int = 0
@@ -235,6 +236,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cachedBoard            = s.board
         cachedJournal          = s.journal
         cachedStoreFiles       = s.storeFiles
+        cachedLaneHealth       = s.laneHealth
         cachedDigest           = s.digest
         cachedFrequencyHours   = s.frequencyHours
         cachedPatternCount     = s.patternCount
@@ -254,6 +256,7 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.cachedBoard          = s.board
             self.cachedJournal        = s.journal
             self.cachedStoreFiles     = s.storeFiles
+            self.cachedLaneHealth     = s.laneHealth
             self.cachedDigest         = s.digest
             self.cachedFrequencyHours = s.frequencyHours
             self.cachedPatternCount   = s.patternCount
@@ -670,10 +673,28 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(errItem)
         }
 
-        // ─ Store health — one conditional row; healthy stores stay silent ─────
+        // ─ Store & lane health — one conditional row; a dead lane names itself ─
         let largeStores = cachedStoreFiles.filter { $0.isLarge }
-        if !largeStores.isEmpty {
+        let redLanes    = cachedLaneHealth?.lanes.filter { $0.status == "red" }    ?? []
+        let yellowLanes = cachedLaneHealth?.lanes.filter { $0.status == "yellow" } ?? []
+        if !largeStores.isEmpty || !redLanes.isEmpty || !yellowLanes.isEmpty {
             let healthMenu = NSMenu()
+
+            // Failing lanes first — red, then yellow — each naming its bad fact.
+            func laneRow(_ l: LaneHealthLane, _ color: NSColor) {
+                let item = NSMenuItem()
+                item.attributedTitle = columned([
+                    seg("  ● \(l.lane)", BarFont.monoSecondary, color),
+                    seg(l.reason, BarFont.monoSecondary, .secondaryLabelColor),
+                ], stops: [200])
+                item.toolTip = "\(l.lane): \(l.reason)"
+                healthMenu.addItem(item)
+            }
+            for l in redLanes    { laneRow(l, .systemRed) }
+            for l in yellowLanes { laneRow(l, .systemYellow) }
+            if !redLanes.isEmpty || !yellowLanes.isEmpty { healthMenu.addItem(.separator()) }
+
+            // Then the store-size rows (existing behavior).
             for f in cachedStoreFiles {
                 let item = NSMenuItem()
                 item.attributedTitle = columned([
@@ -690,9 +711,23 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pruneItem.target = self
             setIcon(pruneItem, "arrow.3.trianglepath")
             healthMenu.addItem(pruneItem)
+
+            // Parent row leads with dead lanes when present, else the size warning.
+            let largeSuffix = largeStores.isEmpty ? "" : " · \(largeStores.count) large"
+            let title: String
+            let color: NSColor
+            if !redLanes.isEmpty {
+                title = "⚠ Health — \(redLanes.count) lane\(redLanes.count == 1 ? "" : "s") down\(largeSuffix)"
+                color = .systemRed
+            } else if !yellowLanes.isEmpty {
+                title = "⚠ Health — \(yellowLanes.count) aging\(largeSuffix)"
+                color = .systemOrange
+            } else {
+                title = "⚠ Store Health (\(largeStores.count) large)"
+                color = .systemOrange
+            }
             let healthParent = NSMenuItem()
-            healthParent.attributedTitle = seg("⚠ Store Health (\(largeStores.count) large)",
-                                               BarFont.body, .systemOrange)
+            healthParent.attributedTitle = seg(title, BarFont.body, color)
             menu.addItem(healthParent)
             menu.setSubmenu(healthMenu, for: healthParent)
         }

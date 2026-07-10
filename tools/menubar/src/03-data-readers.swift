@@ -420,6 +420,34 @@ private func readStoreFiles() -> [StoreFile] {
     }
 }
 
+// ─── Lane health ────────────────────────────────────────────────────────────
+// A dead input lane (a queue nobody drains, a decay that never runs) is
+// invisible until it is named. The engine writes a red/yellow/green verdict
+// per cycle; the menu reads the latest line and surfaces anything not green.
+
+private struct LaneHealthLane: Codable {
+    let lane:   String
+    let status: String   // "green" | "yellow" | "red"
+    let reason: String
+}
+
+private struct LaneHealthReading: Codable {
+    let red:    Int
+    let yellow: Int
+    let green:  Int
+    let lanes:  [LaneHealthLane]
+}
+
+/// Read the latest lane-health reading (last line of the per-cycle JSONL).
+/// Returns nil when the engine hasn't emitted one yet.
+private func readLaneHealth() -> LaneHealthReading? {
+    let path = subDir + "/dreams/lane-health.jsonl"
+    guard let content = try? String(contentsOfFile: path, encoding: .utf8),
+          let last = content.components(separatedBy: "\n").filter({ !$0.isEmpty }).last
+    else { return nil }
+    return try? JSONDecoder().decode(LaneHealthReading.self, from: Data(last.utf8))
+}
+
 private func readLatestAudit() -> (audit: MetacogAudit?, filename: String?) {
     let auditsDir = subDir + "/metacog/audits"
     guard let files = try? FileManager.default.contentsOfDirectory(atPath: auditsDir) else {

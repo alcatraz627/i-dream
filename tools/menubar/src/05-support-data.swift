@@ -277,6 +277,7 @@ private struct DataSnapshot {
     var patterns:       [Pattern]      = []
     var journal:        [JournalEntry] = []
     var storeFiles:     [StoreFile]    = []
+    var laneHealth:     LaneHealthReading? = nil
     var digest:         String?
     var frequencyHours: Double?
     var patternCount    = 0
@@ -321,6 +322,7 @@ private final class DataStore {
             s.board          = readBoard()
             s.journal        = recentJournal(limit: 20)
             s.storeFiles     = readStoreFiles()
+            s.laneHealth     = readLaneHealth()
             s.digest         = readInsightDigest()
             s.frequencyHours = readDreamFrequency()
             let all          = allPatterns()           // read+decode patterns.json once
