@@ -50,6 +50,23 @@ case "$MODE" in
     tail -f "$DEBUG_LOG"
     exit 0
     ;;
+  --smoke)
+    # Verification harness: run the already-built in-tree binary with
+    # --smoke — boots the real app on real data (no status item), renders
+    # all four dashboard tabs to /tmp/i-dream-smoke/, asserts the loads,
+    # exits 0/1. Does NOT touch the running widget. Compile first:
+    #   bash tools/menubar/build.sh && bash tools/menubar/build.sh --smoke
+    [[ -x "$BUILD_OUTPUT" ]] || { echo "✗ no built binary — run build.sh first"; exit 1; }
+    if [[ -f "$SCRIPT_DIR/.build-info" ]]; then
+      CURRENT_HASH=$(md5 "$SOURCE" | awk '{print substr($NF,1,8)}')
+      BUILT_HASH=$(awk -F= '/^src_hash/{print $2}' "$SCRIPT_DIR/.build-info")
+      if [[ "$CURRENT_HASH" != "$BUILT_HASH" ]]; then
+        echo "✗ binary is stale vs source — rebuild first"; exit 1
+      fi
+    fi
+    "$BUILD_OUTPUT" --smoke
+    exit $?
+    ;;
   --status)
     echo "Running instances:"
     pgrep -la "i-dream-bar" 2>/dev/null || echo "  (none)"

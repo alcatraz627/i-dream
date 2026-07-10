@@ -1112,7 +1112,9 @@ final class NavSidebarButton: NSButton {
             ps.tabStops = [NSTextTab(textAlignment: .right, location: max(40, bounds.width - 34))]
             m.append(NSAttributedString(string: "\t\(n)", attributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
-                .foregroundColor: NSColor.tertiaryLabelColor,
+                // Tertiary washes out over the selection tint — step up when selected.
+                .foregroundColor: isSelectedTab ? NSColor.secondaryLabelColor
+                                                : NSColor.tertiaryLabelColor,
             ]))
             m.addAttribute(.paragraphStyle, value: ps, range: NSRange(location: 0, length: m.length))
         }
@@ -1379,6 +1381,25 @@ final class DashboardWindowController: NSObject {
 
     /// Render the panel's view tree to /tmp as PNG — the display-independent
     /// verification affordance (works while the physical display sleeps).
+    /// Verification-protocol appearance override — panel-only, transient.
+    /// nil follows the system; the durable pref stays with the theme picker.
+    func applyTransientAppearance(_ name: NSAppearance.Name?) {
+        panel?.appearance = name.flatMap { NSAppearance(named: $0) }
+    }
+
+    /// Data-level assertions for the --smoke harness; empty = healthy.
+    /// Runs after the async load has had time to land.
+    func smokeDataChecks() -> [String] {
+        var f: [String] = []
+        if browseModel.rows.isEmpty { f.append("browse: 0 rows — stores unreadable?") }
+        if browseModel.clusterRows.isEmpty { f.append("browse: 0 repeated-lesson clusters") }
+        if journalModel.rows.isEmpty { f.append("journal: 0 cycles") }
+        if overviewModel.data.reflect == nil && overviewModel.data.state == nil {
+            f.append("overview: neither reflect nor state loaded")
+        }
+        return f
+    }
+
     func dumpSnapshot() {
         guard let v = panel?.contentView else {
             dlog("dashboard: snapshot requested but no panel")
@@ -3340,6 +3361,14 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         CrashReporter.install()
         CrashReporter.checkForPreviousCrash()
         dlog("launched PID=\(ProcessInfo.processInfo.processIdentifier) build=\(BuildInfo.commitHash)/\(BuildInfo.sourceHash) at=\(BuildInfo.builtAt)")
+
+        // --smoke: verification harness. Real boot, real data, no status
+        // item; renders every dashboard tab, asserts, exits. See runSmoke().
+        if CommandLine.arguments.contains("--smoke") {
+            runSmoke()
+            return
+        }
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         theMenu                  = NSMenu()
@@ -3385,10 +3414,30 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let usr2Src = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
         usr2Src.setEventHandler { [weak self] in
             guard let self, let dc = self.dashboardController else { return }
-            // Optional control file selects the tab first (signals carry no args).
+            // Optional control files drive the capture (signals carry no
+            // args): tab index, transient theme, cluster panel, hover row.
+            // Theme applies to the panel only and is never persisted — the
+            // sidebar picker still owns the durable preference.
             if let s = try? String(contentsOfFile: "/tmp/i-dream-snap-tab", encoding: .utf8),
                let idx = Int(s.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 dc.selectTab(idx)
+            }
+            if let s = try? String(contentsOfFile: "/tmp/i-dream-snap-theme", encoding: .utf8) {
+                switch s.trimmingCharacters(in: .whitespacesAndNewlines) {
+                case "light":  dc.applyTransientAppearance(.aqua)
+                case "dark":   dc.applyTransientAppearance(.darkAqua)
+                case "system": dc.applyTransientAppearance(nil)
+                default: break
+                }
+            }
+            if let s = try? String(contentsOfFile: "/tmp/i-dream-snap-cluster", encoding: .utf8) {
+                dc.browseModel.showClusterMap = s.trimmingCharacters(in: .whitespacesAndNewlines) != "0"
+            }
+            if let s = try? String(contentsOfFile: "/tmp/i-dream-snap-hover", encoding: .utf8) {
+                let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                dc.browseModel.hoverClusterId =
+                    t == "top" ? dc.browseModel.clusterRows.first?.id
+                               : (t.isEmpty ? nil : t)
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { dc.dumpSnapshot() }
         }
@@ -3398,6 +3447,55 @@ final class BarDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Keeps the signal dispatch sources alive for the app's lifetime.
     private var signalSources: [DispatchSourceSignal] = []
+
+    /// The `--smoke` verification harness: opens the dashboard on the real
+    /// data stores, walks all four tabs dumping self-rendered PNGs to
+    /// /tmp/i-dream-smoke/, runs the controller's data assertions, prints a
+    /// report, and exits 0/1. One command proves a build actually renders —
+    /// nothing here touches the running widget, prefs, or the stores.
+    private func runSmoke() {
+        dlog("smoke: start")
+        let dir = "/tmp/i-dream-smoke"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        dashboardController = DashboardWindowController()
+        let dc = dashboardController!
+        dc.showOrFront()
+        var failures: [String] = []
+
+        func capture(_ tab: Int) {
+            if tab >= 4 {
+                failures += dc.smokeDataChecks()
+                for i in 0..<4 {
+                    let p = "\(dir)/tab\(i).png"
+                    let sz = ((try? FileManager.default.attributesOfItem(atPath: p))?[.size] as? Int) ?? 0
+                    if sz < 5_000 { failures.append("tab\(i).png missing or tiny (\(sz)B)") }
+                }
+                if failures.isEmpty {
+                    print("SMOKE PASS — 4 tabs rendered to \(dir), data checks clean")
+                } else {
+                    print("SMOKE FAIL:\n  " + failures.joined(separator: "\n  "))
+                }
+                exit(failures.isEmpty ? 0 : 1)
+            }
+            dc.selectTab(tab)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                dc.dumpSnapshot()
+                try? FileManager.default.removeItem(atPath: "\(dir)/tab\(tab).png")
+                try? FileManager.default.copyItem(
+                    atPath: "/tmp/i-dream-dashboard-snap.png",
+                    toPath: "\(dir)/tab\(tab).png")
+                capture(tab + 1)
+            }
+        }
+
+        // Give the async data load a beat, then walk the tabs; a hang is a
+        // failure, not a wait.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { capture(0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25.0) {
+            print("SMOKE FAIL: timed out")
+            exit(1)
+        }
+    }
 
     // Called by AppKit right before the menu is shown. Paints immediately from
     // the latest snapshot — NO synchronous disk reads or subprocesses on the
@@ -6255,6 +6353,10 @@ final class BrowseModel: ObservableObject {
     @Published var totals = BrowseTotals()
     @Published var filter: BrowseRow.Kind? = nil
     @Published var expandedId: String? = nil
+    // Cluster-panel state lives on the model (not view @State) so the
+    // verification protocol can drive it and it survives tab switches.
+    @Published var showClusterMap = false
+    @Published var hoverClusterId: String? = nil
     /// Writes the rating and refreshes; wired by the dashboard controller.
     var onRate: ((String, String) -> Void)?
 
@@ -6305,11 +6407,7 @@ struct BrowseView: View {
     /// Two-line layout: title + metadata line.
     private let rowH: CGFloat = 42
 
-    /// On-demand cluster map overlay (user-requested viz): bubbles sized by
-    /// cluster membership, filterable by typing, click = jump to the row.
-    @State private var showClusterMap = false
     @State private var clusterQuery = ""
-    @State private var hoverClusterId: String?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -6333,7 +6431,7 @@ struct BrowseView: View {
         VStack(alignment: .leading, spacing: 0) {
             chipBar
             Divider()
-            if showClusterMap {
+            if model.showClusterMap {
                 clusterMap
                 Divider()
             }
@@ -6367,13 +6465,13 @@ struct BrowseView: View {
                 chip(k, label: "\(k.rawValue) (\(model.count(of: k)))")
             }
             Spacer()
-            Button(action: { showClusterMap.toggle() }) {
+            Button(action: { model.showClusterMap.toggle() }) {
                 Label("Clusters", systemImage: "circle.hexagongrid.fill")
                     .font(DS.label.weight(.medium))
             }
             .buttonStyle(.bordered)
-            .tint(showClusterMap ? Color.accentColor : Color.secondary)
-            .help("Cluster map — every repeated lesson as a bubble")
+            .tint(model.showClusterMap ? Color.accentColor : Color.secondary)
+            .help("Cluster map — repeated lessons ranked by recurrence")
         }
         .padding(.horizontal, DS.pad)
         .padding(.vertical, DS.unit)
@@ -6396,7 +6494,7 @@ struct BrowseView: View {
             // written on both sides of a link, but scan the reverse direction
             // too so emphasis never looks one-directional.
             let linked: Set<String> = {
-                guard let h = hoverClusterId else { return [] }
+                guard let h = model.hoverClusterId else { return [] }
                 var s: Set<String> = [h]
                 if let row = clusters.first(where: { $0.id == h }) {
                     for chip in row.linkedChips { s.insert(chip.target) }
@@ -6414,9 +6512,22 @@ struct BrowseView: View {
                 }
             }
             .frame(maxHeight: 320)
-            Text("\(clusters.count) repeated lessons · hover a row to see its cross-links · click to jump")
-                .font(DS.caption)
-                .foregroundColor(.secondary)
+            // The fixed-height footer doubles as the partner readout: partners
+            // of big clusters usually rank below the fold, so emphasis alone
+            // cannot show them — print them here while a linked row is hovered.
+            Group {
+                if let h = model.hoverClusterId,
+                   let row = clusters.first(where: { $0.id == h }),
+                   !row.linkedChips.isEmpty {
+                    Text("⛓ \(row.linkedChips.count) linked:  " +
+                         row.linkedChips.map { $0.label }.joined(separator: "  ·  "))
+                } else {
+                    Text("\(clusters.count) repeated lessons · hover a row to see its cross-links · click to jump")
+                }
+            }
+            .font(DS.caption)
+            .foregroundColor(.secondary)
+            .lineLimit(1)
         }
         .padding(.horizontal, DS.unit)
         .padding(.vertical, DS.unit)
@@ -6430,9 +6541,9 @@ struct BrowseView: View {
         // Emphasis: with no hover every matching row is full strength; while
         // hovering, only the linked set stays loud. Opacity-only, fixed row
         // height — hover must never shift layout (sibling anti-idea A-7).
-        let emphasized = matchesQuery && (hoverClusterId == nil || linked.contains(c.id))
+        let emphasized = matchesQuery && (model.hoverClusterId == nil || linked.contains(c.id))
         return Button(action: {
-            showClusterMap = false
+            model.showClusterMap = false
             model.jump(to: c.id)
         }) {
             HStack(spacing: 8) {
@@ -6456,11 +6567,13 @@ struct BrowseView: View {
                     .font(DS.caption.weight(.semibold).monospacedDigit())
                     .foregroundColor(emphasized ? .primary : .secondary.opacity(0.35))
                     .frame(width: 30, alignment: .trailing)
-                Image(systemName: "link")
-                    .font(DS.micro)
-                    .foregroundColor(c.linkedChips.isEmpty ? .clear
-                                     : emphasized ? .secondary : .secondary.opacity(0.25))
-                    .frame(width: 12)
+                HStack(spacing: 2) {
+                    Image(systemName: "link").font(DS.micro)
+                    Text("\(c.linkedChips.count)").font(DS.caption.monospacedDigit())
+                }
+                .foregroundColor(c.linkedChips.isEmpty ? .clear
+                                 : emphasized ? .secondary : .secondary.opacity(0.25))
+                .frame(width: 26, alignment: .trailing)
             }
             .frame(height: 22)
             .contentShape(Rectangle())
@@ -6468,10 +6581,10 @@ struct BrowseView: View {
         .buttonStyle(.plain)
         .onHover { inside in
             if inside {
-                hoverClusterId = c.id
+                model.hoverClusterId = c.id
                 NSCursor.pointingHand.push()
             } else {
-                if hoverClusterId == c.id { hoverClusterId = nil }
+                if model.hoverClusterId == c.id { model.hoverClusterId = nil }
                 NSCursor.pop()
             }
         }
