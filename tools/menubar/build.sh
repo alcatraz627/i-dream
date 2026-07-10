@@ -11,7 +11,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE="$SCRIPT_DIR/i-dream-bar.swift"
+# Source lives in src/ as ordered modules; the build CONCATENATES them (in
+# lexical order — 09-main.swift's top-level entry statements must stay last)
+# and compiles the merge as one file, preserving single-file semantics
+# (top-level `private` stays file-visible across modules).
+SRC_DIR="$SCRIPT_DIR/src"
+SOURCES=("$SRC_DIR"/*.swift)
+src_hash() { cat "${SOURCES[@]}" | md5 | awk '{print substr($NF,1,8)}'; }
 # The widget is shipped as an .app bundle so macOS (Login Items, Activity
 # Monitor, Notification Center) can find its Info.plist + AppIcon.icns and
 # render a proper identity instead of the generic gear-cog background icon.
@@ -58,7 +64,7 @@ case "$MODE" in
     #   bash tools/menubar/build.sh && bash tools/menubar/build.sh --smoke
     [[ -x "$BUILD_OUTPUT" ]] || { echo "✗ no built binary — run build.sh first"; exit 1; }
     if [[ -f "$SCRIPT_DIR/.build-info" ]]; then
-      CURRENT_HASH=$(md5 "$SOURCE" | awk '{print substr($NF,1,8)}')
+      CURRENT_HASH=$(src_hash)
       BUILT_HASH=$(awk -F= '/^src_hash/{print $2}' "$SCRIPT_DIR/.build-info")
       if [[ "$CURRENT_HASH" != "$BUILT_HASH" ]]; then
         echo "✗ binary is stale vs source — rebuild first"; exit 1
@@ -84,7 +90,7 @@ case "$MODE" in
       BUILT_COMMIT=$(grep "^commit=" "$BUILD_INFO_FILE" | cut -d= -f2)
       BUILT_HASH=$(grep "^src_hash=" "$BUILD_INFO_FILE" | cut -d= -f2)
       BUILT_AT=$(grep "^built_at=" "$BUILD_INFO_FILE" | cut -d= -f2)
-      CURRENT_HASH=$(md5 "$SOURCE" | awk '{print substr($NF,1,8)}')
+      CURRENT_HASH=$(src_hash)
       echo "  Built:   $BUILT_AT  (commit: $BUILT_COMMIT)"
       if [[ "$CURRENT_HASH" == "$BUILT_HASH" ]]; then
         echo "  Source:  ✓ Binary matches source (hash: $CURRENT_HASH)"
@@ -139,7 +145,7 @@ done
 
 echo "▶ Generating build-info..."
 COMMIT=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-SRC_HASH=$(md5 "$SOURCE" | awk '{print substr($NF,1,8)}')
+SRC_HASH=$(src_hash)
 BUILD_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 BUILD_INFO_SWIFT="$SCRIPT_DIR/build-info.swift"
 cat > "$BUILD_INFO_SWIFT" << 'SWIFT_EOF'
@@ -228,7 +234,7 @@ echo "▶ Compiling..."
 # builds can't collide on the fallback either.
 rm -f /tmp/i-dream-bar-merged-XXXXXX.swift
 MERGED=$(mktemp "/tmp/i-dream-bar-merged-$$-XXXXXX.swift")
-cat "$BUILD_INFO_SWIFT" "$SOURCE" > "$MERGED"
+cat "$BUILD_INFO_SWIFT" "${SOURCES[@]}" > "$MERGED"
 /usr/bin/swiftc -O "$MERGED" -o "$BUILD_OUTPUT" 2>&1
 rm -f "$MERGED"
 echo "  ✓ Built: $BUILD_OUTPUT"
