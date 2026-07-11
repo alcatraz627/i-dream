@@ -92,6 +92,9 @@ pub enum EventKind {
     InsightsPromoted,
     /// Updated `dreams/processed.json` with new session IDs.
     ProcessedStateUpdated,
+    /// Drained the ingest queue — queued checkpoints fed to SWS or archived
+    /// to `_processed/` (SWS only).
+    QueueDrained,
     /// Appended a journal entry.
     JournalWritten,
     /// Something went wrong but the cycle continued.
@@ -116,6 +119,7 @@ impl EventKind {
             EventKind::AssociationsFound => "associations_found",
             EventKind::InsightsPromoted => "insights_promoted",
             EventKind::ProcessedStateUpdated => "processed_state_updated",
+            EventKind::QueueDrained => "queue_drained",
             EventKind::JournalWritten => "journal_written",
             EventKind::Error => "error",
             EventKind::PhaseEnd => "phase_end",

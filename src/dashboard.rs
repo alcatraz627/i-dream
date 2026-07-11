@@ -2449,6 +2449,7 @@ fn event_kind_label(kind: EventKind) -> &'static str {
         EventKind::AssociationsFound => "associations_found",
         EventKind::InsightsPromoted => "insights_promoted",
         EventKind::ProcessedStateUpdated => "processed_state_updated",
+        EventKind::QueueDrained => "queue_drained",
         EventKind::JournalWritten => "journal_written",
         EventKind::Error => "error",
         EventKind::PhaseEnd => "phase_end",

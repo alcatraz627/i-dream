@@ -15,6 +15,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -259,6 +260,239 @@ fn normalize_pattern(s: &str) -> String {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Ingest-queue drain (docs/24 Wave 1, item 5) ──────────────────────────────
+//
+// Sessions leave a distilled checkpoint behind (insight + pending bullets from
+// /core-dump), and those land as JSON files in `dreams/ingest-queue/`. For
+// months nothing read them — the write-only lane the health registry flags
+// red. The drain makes SWS the queue's consumer: each cycle, entries whose
+// transcript was already dreamed archive as redundant, stale duplicates and
+// empty entries archive as such, and the rest join the SWS prompt as
+// pre-distilled session evidence. Files only ever MOVE (into
+// `_processed/<date>/`), never delete; entries that feed the prompt move only
+// after the API call succeeds, so a failed cycle leaves them queued.
+
+/// Cap on queued checkpoints fed to one SWS call. A deep backlog drains over
+/// several cycles instead of starving transcript signal; the remainder is
+/// counted in the trace, never silently dropped.
+const QUEUE_FEED_CAP: usize = 25;
+
+/// Budget (chars) for queue blocks appended to the SWS dump, separate from
+/// the ~30KB transcript budget.
+const QUEUE_DUMP_BUDGET: usize = 10_000;
+
+/// One queued checkpoint distillation awaiting a dream pass.
+///
+/// `id` is the contract id (docs/20 §2): the transcript UUID that joins
+/// `dreams/processed.json`. Entries written headless carry null — they can
+/// never be proven redundant, so they always read as new signal.
+#[derive(Debug, Deserialize)]
+struct QueueEntry {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    project_root: String,
+    #[serde(default)]
+    ts: String,
+    #[serde(default)]
+    insights: QueueInsights,
+    #[serde(default)]
+    pending: Vec<String>,
+}
+
+/// The five insight buckets ingest-checkpoint.sh distills from a checkpoint.
+#[derive(Debug, Default, Deserialize)]
+struct QueueInsights {
+    #[serde(default)]
+    worked: Vec<String>,
+    #[serde(default)]
+    didnt_work: Vec<String>,
+    #[serde(default)]
+    gotchas: Vec<String>,
+    #[serde(default)]
+    notes: Vec<String>,
+    #[serde(default)]
+    feedback: Vec<String>,
+}
+
+impl QueueEntry {
+    /// An entry with nothing to say — no insights, no pending items.
+    fn is_trivial(&self) -> bool {
+        let i = &self.insights;
+        i.worked.is_empty()
+            && i.didnt_work.is_empty()
+            && i.gotchas.is_empty()
+            && i.notes.is_empty()
+            && i.feedback.is_empty()
+            && self.pending.is_empty()
+    }
+
+    /// Identity for within-queue dedup: the contract id when present, the
+    /// friendly session id otherwise, the filename as a last resort (so
+    /// id-less entries never collapse into each other).
+    fn dedup_key(&self, path: &Path) -> String {
+        if let Some(id) = &self.id {
+            if !id.is_empty() {
+                return id.clone();
+            }
+        }
+        if !self.session_id.is_empty() {
+            return self.session_id.clone();
+        }
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
+/// What one cycle does with the scanned queue: which entries feed the SWS
+/// prompt, which archive immediately (and why), and how many stay queued.
+#[derive(Default)]
+struct QueueDrainPlan {
+    feed: Vec<(PathBuf, QueueEntry)>,
+    archive: Vec<(PathBuf, &'static str)>,
+    deferred: usize,
+}
+
+/// Read every pending queue file, tolerating rot. Unparseable files are
+/// returned separately as poison — quarantined by the caller so they can't
+/// wedge the drain forever — and `_`-prefixed entries (the `_processed/`
+/// archive itself) plus dotfiles are skipped.
+fn scan_ingest_queue(dir: &Path) -> (Vec<(PathBuf, QueueEntry)>, Vec<PathBuf>) {
+    let mut entries = Vec::new();
+    let mut poison = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return (entries, poison);
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('_') || name.starts_with('.') || !name.ends_with(".json") {
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let parsed = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<QueueEntry>(&s).ok());
+        match parsed {
+            Some(q) => entries.push((path, q)),
+            None => poison.push(path),
+        }
+    }
+    // Oldest first: the backlog drains in arrival order.
+    entries.sort_by(|a, b| a.1.ts.cmp(&b.1.ts));
+    (entries, poison)
+}
+
+/// Decide each entry's fate. Pure set logic — hermetically testable.
+///
+/// Within-queue duplicates keep only the newest entry per identity; survivors
+/// whose transcript already sits in `processed_sessions` are redundant (the
+/// raw session was dreamed through the transcript lane); empty entries are
+/// trivial; everything else feeds, up to `feed_cap`.
+fn classify_queue_entries(
+    entries: Vec<(PathBuf, QueueEntry)>,
+    processed_sessions: &HashMap<String, u64>,
+    feed_cap: usize,
+) -> QueueDrainPlan {
+    // Entries arrive oldest-first, so the last index per key is the survivor.
+    let keys: Vec<String> = entries
+        .iter()
+        .map(|(path, q)| q.dedup_key(path))
+        .collect();
+    let mut survivor: HashMap<&str, usize> = HashMap::new();
+    for (i, k) in keys.iter().enumerate() {
+        survivor.insert(k.as_str(), i);
+    }
+
+    let mut plan = QueueDrainPlan::default();
+    for (i, (path, q)) in entries.into_iter().enumerate() {
+        if survivor[keys[i].as_str()] != i {
+            plan.archive.push((path, "duplicate"));
+            continue;
+        }
+        if let Some(id) = &q.id {
+            if processed_sessions.contains_key(id) {
+                plan.archive.push((path, "redundant"));
+                continue;
+            }
+        }
+        if q.is_trivial() {
+            plan.archive.push((path, "trivial"));
+            continue;
+        }
+        if plan.feed.len() < feed_cap {
+            plan.feed.push((path, q));
+        } else {
+            plan.deferred += 1;
+        }
+    }
+    plan
+}
+
+/// Move a queue file into the archive rather than deleting it —
+/// `_processed/<bucket>/`, where bucket is the UTC date (or `_poison` for
+/// unparseable files). Archive-before-delete is a standing constraint.
+fn archive_queue_file(path: &Path, queue_dir: &Path, bucket: &str) -> Result<()> {
+    let dest_dir = queue_dir.join("_processed").join(bucket);
+    std::fs::create_dir_all(&dest_dir)?;
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    std::fs::rename(path, dest_dir.join(name))?;
+    Ok(())
+}
+
+/// Render one queued checkpoint in the same one-block-per-unit shape as the
+/// transcript turn blocks, so the model reads both as session evidence.
+fn format_queue_block(q: &QueueEntry) -> String {
+    fn push_bucket(out: &mut String, label: &str, items: &[String]) {
+        if items.is_empty() {
+            return;
+        }
+        let joined = items
+            .iter()
+            .map(|i| {
+                const MAX: usize = 200;
+                if i.chars().count() <= MAX {
+                    i.clone()
+                } else {
+                    let mut t: String = i.chars().take(MAX).collect();
+                    t.push('…');
+                    t
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        out.push_str(&format!("  {label}: {joined}\n"));
+    }
+
+    let project = q
+        .project_root
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let mut s = format!(
+        "─── queued-checkpoint session={} project={}─\n",
+        q.session_id, project
+    );
+    push_bucket(&mut s, "WORKED", &q.insights.worked);
+    push_bucket(&mut s, "DIDNT_WORK", &q.insights.didnt_work);
+    push_bucket(&mut s, "GOTCHAS", &q.insights.gotchas);
+    push_bucket(&mut s, "NOTES", &q.insights.notes);
+    push_bucket(&mut s, "FEEDBACK", &q.insights.feedback);
+    push_bucket(&mut s, "PENDING", &q.pending);
+    s
+}
+
 pub struct DreamingModule<'a> {
     config: &'a Config,
     store: &'a Store,
@@ -288,6 +522,38 @@ impl<'a> DreamingModule<'a> {
         // 1. Scan new sessions
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
         let (summaries, sessions_seen) = self.load_session_summaries()?;
+
+        // 1b. Drain the ingest queue (Wave 1 item 5). Bookkeeping dispositions
+        // — duplicate, redundant, trivial, poison — archive immediately; feed
+        // entries ride this cycle's SWS prompt and archive only after the API
+        // call succeeds, so a failed cycle redrives them next time.
+        let queue_dir = self.store.path("dreams/ingest-queue");
+        let processed_now: ProcessedState = if self.store.exists("dreams/processed.json") {
+            self.store
+                .read_json("dreams/processed.json")
+                .unwrap_or_default()
+        } else {
+            ProcessedState::default()
+        };
+        let (queue_entries, queue_poison) = scan_ingest_queue(&queue_dir);
+        let drain = classify_queue_entries(queue_entries, &processed_now.sessions, QUEUE_FEED_CAP);
+        let archive_date = Utc::now().format("%Y-%m-%d").to_string();
+        let (mut n_redundant, mut n_duplicate, mut n_trivial) = (0usize, 0usize, 0usize);
+        for (path, reason) in &drain.archive {
+            match *reason {
+                "redundant" => n_redundant += 1,
+                "duplicate" => n_duplicate += 1,
+                _ => n_trivial += 1,
+            }
+            if let Err(e) = archive_queue_file(path, &queue_dir, &archive_date) {
+                warn!("queue drain: cannot archive {}: {e:#}", path.display());
+            }
+        }
+        for path in &queue_poison {
+            if let Err(e) = archive_queue_file(path, &queue_dir, "_poison") {
+                warn!("queue drain: cannot quarantine {}: {e:#}", path.display());
+            }
+        }
 
         // Build the one-line-per-unit preview dump now so we can attach
         // it as the payload of the SessionsScanned event (the "what" the
@@ -329,6 +595,21 @@ impl<'a> DreamingModule<'a> {
             }
         }
 
+        // Queued checkpoints join the same dump under their own budget so a
+        // deep backlog can't starve transcript signal. Only blocks that made
+        // it into the prompt are archived as consumed later.
+        let queue_dump_start = dump.len();
+        let mut queue_fed = 0usize;
+        for (_path, q) in &drain.feed {
+            if dump.len() - queue_dump_start > QUEUE_DUMP_BUDGET {
+                break;
+            }
+            dump.push_str(&format_queue_block(q));
+            queue_fed += 1;
+        }
+        let fed = &drain.feed[..queue_fed];
+        let queue_deferred = drain.deferred + (drain.feed.len() - queue_fed);
+
         let (dump_payload, dump_kind) = if dump.is_empty() {
             (None, None)
         } else {
@@ -351,7 +632,25 @@ impl<'a> DreamingModule<'a> {
             dump_kind,
         )?;
 
-        if summaries.is_empty() {
+        if queue_fed + n_redundant + n_duplicate + n_trivial + queue_poison.len() + queue_deferred
+            > 0
+        {
+            tracer.emit(
+                TracePhase::Sws,
+                EventKind::QueueDrained,
+                format!(
+                    "queue drain: {queue_fed} feeding this cycle, {n_redundant} redundant, \
+                     {n_duplicate} duplicate, {n_trivial} trivial, {} poison, {queue_deferred} still queued",
+                    queue_poison.len()
+                ),
+                fed.iter()
+                    .map(|(_, q)| format!("session:{}", q.session_id))
+                    .collect(),
+                vec!["dreams/ingest-queue".into()],
+            )?;
+        }
+
+        if summaries.is_empty() && queue_fed == 0 {
             info!(
                 "SWS: no new sessions to consolidate (scanned {}), skipping API call",
                 sessions_seen.len()
@@ -381,6 +680,7 @@ The input is a sequence of turn-blocks. Each block contains:
   ASSISTANT: <first text reply from the agent, truncated>
   tools: <names of tools the assistant invoked in this turn>
 A `[CORRECTION]` tag on the session line marks turns that look like the user pushing back on the previous assistant action. Each block is also tagged with `project=<id>` — when you see the same behavior across multiple distinct projects, that is high-confidence evidence the pattern is general (not project-specific).
+Blocks headed `queued-checkpoint` are different: they are end-of-session insight digests the developer's checkpoint system distilled (WORKED / DIDNT_WORK / GOTCHAS / NOTES / FEEDBACK / PENDING lines). Treat each bullet as a pre-distilled, high-signal learning from that session.
 
 For each learning, output a JSON object with:
 - pattern: one concise sentence describing an abstract, reusable insight (no file paths, variable names, or session-specific details). Refer to roles ("the user", "the agent"), not names.
@@ -458,6 +758,29 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                 batch_projects.push(s.project_id.clone());
             }
         }
+        for (_path, q) in fed {
+            let project = q
+                .project_root
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            if !project.is_empty() && !batch_projects.contains(&project) {
+                batch_projects.push(project);
+            }
+        }
+
+        // Queue-fed sessions join the provenance list under their contract id
+        // (or the friendly id when the entry was written headless).
+        let mut batch_source_sessions: Vec<String> =
+            sessions_seen.iter().map(|(sid, _)| sid.clone()).collect();
+        for (_path, q) in fed {
+            let sid = q.id.clone().unwrap_or_else(|| q.session_id.clone());
+            if !sid.is_empty() && !batch_source_sessions.contains(&sid) {
+                batch_source_sessions.push(sid);
+            }
+        }
 
         let mut new_patterns: Vec<ExtractedPattern> = Vec::new();
         if let Some(json_str) = parse_json_codeblock(&response.content) {
@@ -470,10 +793,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                             valence: r.valence,
                             confidence: r.confidence,
                             category: r.category,
-                            source_sessions: sessions_seen
-                                .iter()
-                                .map(|(sid, _)| sid.clone())
-                                .collect(),
+                            source_sessions: batch_source_sessions.clone(),
                             source_projects: batch_projects.clone(),
                             occurrences: 1,
                             first_seen: now.clone(),
@@ -587,6 +907,28 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                 .collect(),
             vec!["dreams/processed.json".into()],
         )?;
+
+        // Consumed queue entries archive only now — after the successful API
+        // round — so a failed cycle redrives them. A crash between the API
+        // call and this rename re-feeds an entry once; acceptable, because
+        // extracted patterns dedup by normalized text downstream.
+        let mut queue_consumed = 0usize;
+        for (path, _q) in fed {
+            match archive_queue_file(path, &queue_dir, &archive_date) {
+                Ok(()) => queue_consumed += 1,
+                Err(e) => warn!(
+                    "queue drain: cannot archive consumed {}: {e:#}",
+                    path.display()
+                ),
+            }
+        }
+        if queue_consumed > 0 {
+            tracer.note(
+                TracePhase::Sws,
+                EventKind::QueueDrained,
+                format!("{queue_consumed} queued checkpoints consumed → _processed/{archive_date}/"),
+            )?;
+        }
 
         info!("SWS phase complete ({} tokens used)", response.tokens_used);
         tracer.note(TracePhase::Sws, EventKind::PhaseEnd, "complete")?;
@@ -1530,6 +1872,144 @@ mod tests {
         let a = normalize_pattern("Use cargo test before committing.");
         let b = normalize_pattern("use cargo test before committing");
         assert_eq!(a, b);
+    }
+
+    // ── ingest-queue drain (Wave 1 item 5) ─────────────────────────────────
+
+    fn queue_entry(id: Option<&str>, sid: &str, ts: &str, gotchas: &[&str]) -> QueueEntry {
+        QueueEntry {
+            id: id.map(|s| s.to_string()),
+            session_id: sid.to_string(),
+            project_root: format!("/Users/u/Code/{sid}-proj"),
+            ts: ts.to_string(),
+            insights: QueueInsights {
+                gotchas: gotchas.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            pending: vec![],
+        }
+    }
+
+    #[test]
+    fn queue_classify_keeps_newest_duplicate_and_flags_redundant() {
+        let processed: HashMap<String, u64> = [("uuid-processed".to_string(), 10u64)].into();
+        let entries = vec![
+            (
+                PathBuf::from("a.json"),
+                queue_entry(None, "same-slug", "2026-01-01", &["old"]),
+            ),
+            (
+                PathBuf::from("b.json"),
+                queue_entry(None, "same-slug", "2026-02-01", &["new"]),
+            ),
+            (
+                PathBuf::from("c.json"),
+                queue_entry(Some("uuid-processed"), "done", "2026-03-01", &["x"]),
+            ),
+            (
+                PathBuf::from("d.json"),
+                queue_entry(Some("uuid-new"), "fresh", "2026-04-01", &["y"]),
+            ),
+            (
+                PathBuf::from("e.json"),
+                queue_entry(None, "empty", "2026-05-01", &[]),
+            ),
+        ];
+        let plan = classify_queue_entries(entries, &processed, 25);
+        let feed: Vec<&str> = plan.feed.iter().map(|(_, q)| q.session_id.as_str()).collect();
+        assert_eq!(feed, vec!["same-slug", "fresh"]);
+        // The surviving same-slug entry is the newest of the pair.
+        assert_eq!(plan.feed[0].1.insights.gotchas, vec!["new"]);
+        let mut reasons: Vec<(&str, &str)> = plan
+            .archive
+            .iter()
+            .map(|(p, r)| (p.to_str().unwrap(), *r))
+            .collect();
+        reasons.sort();
+        assert_eq!(
+            reasons,
+            vec![
+                ("a.json", "duplicate"),
+                ("c.json", "redundant"),
+                ("e.json", "trivial")
+            ]
+        );
+        assert_eq!(plan.deferred, 0);
+    }
+
+    #[test]
+    fn queue_classify_defers_beyond_feed_cap() {
+        let processed = HashMap::new();
+        let entries: Vec<(PathBuf, QueueEntry)> = (0..4)
+            .map(|i| {
+                (
+                    PathBuf::from(format!("{i}.json")),
+                    queue_entry(None, &format!("s{i}"), &format!("2026-0{}-01", i + 1), &["g"]),
+                )
+            })
+            .collect();
+        let plan = classify_queue_entries(entries, &processed, 2);
+        assert_eq!(plan.feed.len(), 2);
+        assert_eq!(plan.deferred, 2);
+        assert!(plan.archive.is_empty(), "deferred entries stay queued, not archived");
+    }
+
+    #[test]
+    fn queue_scan_skips_archives_and_quarantines_poison() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("good.json"),
+            r#"{"id":"u","session_id":"s","ts":"t","insights":{"gotchas":["g"]},"pending":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("rotten.json"), "not json").unwrap();
+        std::fs::write(root.join(".hidden.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join("_processed/2026-07-11")).unwrap();
+        std::fs::write(root.join("_processed/2026-07-11/old.json"), "{}").unwrap();
+        let (entries, poison) = scan_ingest_queue(root);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.session_id, "s");
+        assert_eq!(poison.len(), 1);
+        assert!(poison[0].ends_with("rotten.json"));
+    }
+
+    #[test]
+    fn queue_archive_moves_not_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let f = root.join("x.json");
+        std::fs::write(&f, "{}").unwrap();
+        archive_queue_file(&f, root, "2026-07-11").unwrap();
+        assert!(!f.exists());
+        assert!(root.join("_processed/2026-07-11/x.json").exists());
+    }
+
+    #[test]
+    fn queue_block_renders_buckets_and_clips() {
+        let mut q = queue_entry(None, "sess-1", "t", &["watch the symlink trap"]);
+        q.pending = vec!["push the branch".into()];
+        let block = format_queue_block(&q);
+        assert!(block.starts_with("─── queued-checkpoint session=sess-1 project=sess-1-proj─"));
+        assert!(block.contains("GOTCHAS: watch the symlink trap"));
+        assert!(block.contains("PENDING: push the branch"));
+        // Long bullets clip at 200 chars.
+        let long = "x".repeat(500);
+        let q2 = queue_entry(None, "s2", "t", &[long.as_str()]);
+        let b2 = format_queue_block(&q2);
+        assert!(b2.contains('…'));
+        assert!(b2.len() < 400);
+    }
+
+    #[test]
+    fn queue_entry_dedup_key_prefers_contract_id() {
+        let p = PathBuf::from("f.json");
+        assert_eq!(
+            queue_entry(Some("uuid-1"), "slug", "t", &[]).dedup_key(&p),
+            "uuid-1"
+        );
+        assert_eq!(queue_entry(None, "slug", "t", &[]).dedup_key(&p), "slug");
+        assert_eq!(queue_entry(None, "", "t", &[]).dedup_key(&p), "f.json");
     }
 
     // ── parse_json_codeblock ────────────────────────────────────────────────

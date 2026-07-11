@@ -308,7 +308,7 @@ pub const LANES: &[Lane] = &[
     Lane {
         name: "ingest-queue",
         producer: "gcc /core-dump writers",
-        consumer: "DEAD: no engine reader",
+        consumer: "dreaming SWS drain (per cycle)",
         store: ".claude/subconscious/dreams/ingest-queue",
         cadence_hours: 48,
         check: LaneCheck::BacklogAge,
@@ -463,11 +463,26 @@ fn file_age(path: &Path) -> Option<Duration> {
     )
 }
 
+/// True for bookkeeping entries that live inside a store but are not items of
+/// it: archive subdirs (`_processed/`, `_archived/`) and dotfiles. Probes and
+/// bounds skip these so an archive can't hold a lane red — or green — on its
+/// own.
+fn is_bookkeeping_entry(entry: &std::fs::DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_str()
+        .map(|n| n.starts_with('_') || n.starts_with('.'))
+        .unwrap_or(false)
+}
+
 /// Age of the OLDEST child of a directory (the head of a queue), or None if the
 /// directory is missing or empty.
 fn oldest_child_age(dir: &Path) -> Option<Duration> {
     let mut oldest: Option<SystemTime> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        if is_bookkeeping_entry(&entry) {
+            continue;
+        }
         if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
             oldest = Some(match oldest {
                 Some(o) if o <= mtime => o,
@@ -497,7 +512,11 @@ fn path_nonempty(path: &Path) -> bool {
 fn measure_bound(metric: BoundMetric, path: &Path) -> u64 {
     match metric {
         BoundMetric::DirEntries => std::fs::read_dir(path)
-            .map(|d| d.flatten().count() as u64)
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| !is_bookkeeping_entry(e))
+                    .count() as u64
+            })
             .unwrap_or(0),
         BoundMetric::JsonlLines => std::fs::read_to_string(path)
             .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u64)
@@ -655,7 +674,6 @@ pub fn write_lane_health(store: &Store, cycle: u64) -> Result<()> {
 // parallel session releases cli.rs (Wave 0 item 2's deferred half).
 #[allow(dead_code)]
 pub const KNOWN_ORPHANS: &[&str] = &[
-    "ingest-queue",    // 101 events, zero engine readers
     "pins",            // decay logic exists but is never scheduled
     "ipc",             // registered domain, source events never written
     "sessions-domain", // extractor cursor frozen since May
@@ -726,6 +744,32 @@ mod lane_health_tests {
     }
 
     #[test]
+    fn backlog_probe_ignores_bookkeeping_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Only an archive subdir + a dotfile: the queue reads as empty.
+        std::fs::create_dir_all(root.join("_processed/2026-07-11")).unwrap();
+        std::fs::write(root.join("_processed/2026-07-11/x.json"), "{}").unwrap();
+        std::fs::write(root.join(".DS_Store"), "").unwrap();
+        assert!(oldest_child_age(root).is_none());
+        // A real queue item is still seen.
+        std::fs::write(root.join("item.json"), "{}").unwrap();
+        assert!(oldest_child_age(root).is_some());
+    }
+
+    #[test]
+    fn dir_entry_bound_ignores_bookkeeping_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..3 {
+            std::fs::write(root.join(format!("t{i}.jsonl")), "x").unwrap();
+        }
+        std::fs::create_dir_all(root.join("_archived/2026-07-11")).unwrap();
+        std::fs::write(root.join(".DS_Store"), "").unwrap();
+        assert_eq!(measure_bound(BoundMetric::DirEntries, root), 3);
+    }
+
+    #[test]
     fn existence_check_reads_real_paths() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
@@ -771,8 +815,10 @@ mod lane_health_tests {
             .filter(|l| l.status == LaneStatus::Red)
             .map(|l| l.lane)
             .collect();
-        for dead in ["pins", "ipc", "ingest-queue"] {
-            assert!(red.contains(dead), "expected {dead} RED on day one");
+        // ingest-queue left this list when Wave 1 wired its drain; pins and
+        // ipc stay until engine cadence (item 6) and the gcc-side ipc bridge.
+        for dead in ["pins", "ipc"] {
+            assert!(red.contains(dead), "expected {dead} RED while still unwired");
         }
         assert_eq!(lanes.len(), 14);
     }
