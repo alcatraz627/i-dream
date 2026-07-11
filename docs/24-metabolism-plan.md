@@ -205,6 +205,12 @@ radius" warning is accepted).
     too aggressive.
 
 ### Wave 3 — autonomy + relevance (~2 sessions)
+
+> Buildable steps + the validation contract (per-item acceptance, health signal,
+> failure signal, kill line) live in `docs/25-wave3-plan-and-validation.md`. That
+> doc is the build guide and the running-system self-check; this section stays the
+> source of intent.
+
 12. **Autonomous weekly janitor**: scheduled (gcc-schedule + Calendar
     companion; or engine cron) — ONLY reversible judgment-free work: drain,
     decay, merge, archive, suppression-fold. Every action →
