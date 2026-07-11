@@ -713,6 +713,19 @@ impl Daemon {
             self.config.budget.max_tokens_per_cycle
         );
 
+        // Wave 1 item 7 — universal retention: archive each bounded store's
+        // overflow into its _archived/<date>/ (traces beyond 30d, all but the
+        // 10 newest snapshots, JSONL logs beyond 10k lines). Runs before the
+        // lane-health reading so this cycle's verdict reflects the reap.
+        for r in crate::modules::registry::run_retention() {
+            if r.archived > 0 {
+                info!(
+                    "Retention: {} → {} overflow entries archived",
+                    r.store, r.archived
+                );
+            }
+        }
+
         // Wave 0: measure every experience lane and record a red/yellow/green
         // reading to dreams/lane-health.jsonl, so a dead lane names itself on
         // the menubar instead of rotting silently. Never fails the cycle.

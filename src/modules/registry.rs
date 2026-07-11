@@ -674,10 +674,12 @@ pub fn write_lane_health(store: &Store, cycle: u64) -> Result<()> {
 // parallel session releases cli.rs (Wave 0 item 2's deferred half).
 #[allow(dead_code)]
 pub const KNOWN_ORPHANS: &[&str] = &[
-    "pins",            // decay logic exists but is never scheduled
+    // ingest-queue and pins left this list when Wave 1 wired the SWS drain
+    // and the engine cadence dispatch (2026-07-11); sustained green needs the
+    // daemon running the new binary.
     "ipc",             // registered domain, source events never written
-    "sessions-domain", // extractor cursor frozen since May
-    "memory-domain",   // extractor cursor frozen since May
+    "sessions-domain", // extractor cursor frozen since May; engine dispatch (W1.6) should revive
+    "memory-domain",   // extractor cursor frozen since May; engine dispatch (W1.6) should revive
 ];
 
 /// The lanes whose consumer does not resolve against the tree at `home`. An
@@ -693,6 +695,207 @@ pub fn contract_orphans(home: &Path) -> Vec<&'static str> {
         .filter(|l| l.evaluate(home).status == LaneStatus::Red)
         .map(|l| l.name)
         .collect()
+}
+
+// ── Universal retention (Wave 1 item 7) ──────────────────────────────────────
+//
+// Every unbounded store eventually becomes the rot the lane registry measures:
+// traces and snapshots grew to ~49MB with only a manual prune nag standing in
+// the way. Retention generalizes the valence ring buffer (intuition.rs) into a
+// per-store policy: each cycle, overflow moves — never deletes — into an
+// `_archived/<date>/` sibling the health probes already ignore. Manual prune
+// stays available for deep compaction; this is the steady state.
+
+/// How a store sheds overflow.
+pub enum RetentionPolicy {
+    /// Directory entries older than this many days archive.
+    MaxAgeDays(u64),
+    /// Directory keeps only this many newest entries (files or dirs).
+    KeepNewest(usize),
+    /// A JSONL file keeps its newest N lines; the older head archives.
+    MaxLines(usize),
+}
+
+/// One bounded store. `store` is relative to `$HOME`, like `Lane::store`.
+pub struct RetentionRule {
+    pub store: &'static str,
+    pub policy: RetentionPolicy,
+}
+
+/// Every store the reaper bounds. Starting set per docs/24 item 7.
+pub const RETENTION: &[RetentionRule] = &[
+    RetentionRule {
+        store: ".claude/subconscious/dreams/traces",
+        policy: RetentionPolicy::MaxAgeDays(30),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/dreams/snapshots",
+        policy: RetentionPolicy::KeepNewest(10),
+    },
+    RetentionRule {
+        store: ".claude/i-dream/injections.jsonl",
+        policy: RetentionPolicy::MaxLines(10_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/valence/surfaced.jsonl",
+        policy: RetentionPolicy::MaxLines(10_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/dreams/insight-feedback.jsonl",
+        policy: RetentionPolicy::MaxLines(10_000),
+    },
+];
+
+/// What one reap pass did to one store.
+pub struct ReapReport {
+    pub store: &'static str,
+    pub archived: usize,
+}
+
+/// Apply every retention rule against the real `$HOME`. Per-rule failures
+/// count as zero and never propagate — retention must not fail a cycle.
+pub fn run_retention() -> Vec<ReapReport> {
+    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    run_retention_at(&home)
+}
+
+/// Apply every retention rule against a filesystem rooted at `home`.
+pub fn run_retention_at(home: &Path) -> Vec<ReapReport> {
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    RETENTION
+        .iter()
+        .map(|r| {
+            let target = home.join(r.store);
+            let archived = match r.policy {
+                RetentionPolicy::MaxAgeDays(days) => {
+                    let cutoff = SystemTime::now() - Duration::from_secs(days * 86_400);
+                    reap_dir_by_age(&target, cutoff, &date)
+                }
+                RetentionPolicy::KeepNewest(n) => reap_dir_keep_newest(&target, n, &date),
+                RetentionPolicy::MaxLines(n) => reap_jsonl_max_lines(&target, n, &date),
+            };
+            ReapReport {
+                store: r.store,
+                archived,
+            }
+        })
+        .collect()
+}
+
+/// Move one overflow entry into `<root>/_archived/<date_bucket>/`.
+fn archive_entry(path: &Path, root: &Path, date_bucket: &str) -> std::io::Result<()> {
+    let dest_dir = root.join("_archived").join(date_bucket);
+    std::fs::create_dir_all(&dest_dir)?;
+    let Some(name) = path.file_name() else {
+        return Ok(());
+    };
+    std::fs::rename(path, dest_dir.join(name))
+}
+
+/// Archive every non-bookkeeping entry whose mtime predates `cutoff`.
+fn reap_dir_by_age(dir: &Path, cutoff: SystemTime, date_bucket: &str) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut moved = 0;
+    for e in rd.flatten() {
+        if is_bookkeeping_entry(&e) {
+            continue;
+        }
+        let Ok(mtime) = e.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if mtime < cutoff && archive_entry(&e.path(), dir, date_bucket).is_ok() {
+            moved += 1;
+        }
+    }
+    moved
+}
+
+/// Archive all but the `keep` newest non-bookkeeping entries (by mtime).
+fn reap_dir_keep_newest(dir: &Path, keep: usize, date_bucket: &str) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut items: Vec<(SystemTime, PathBuf)> = rd
+        .flatten()
+        .filter(|e| !is_bookkeeping_entry(e))
+        .filter_map(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| (t, e.path()))
+        })
+        .collect();
+    if items.len() <= keep {
+        return 0;
+    }
+    items.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+    let mut moved = 0;
+    for (_, p) in items.into_iter().skip(keep) {
+        if archive_entry(&p, dir, date_bucket).is_ok() {
+            moved += 1;
+        }
+    }
+    moved
+}
+
+/// Ring-buffer a JSONL file: archive the oldest overflow lines, keep the
+/// newest `max_lines` in place.
+///
+/// Archive is appended BEFORE the source shrinks (tmp + rename, the same
+/// atomic pattern as the valence ring buffer) — a crash between the two
+/// leaves duplicate archived lines, never lost ones. Concurrent appenders
+/// have a small lost-append window during the rename; the reaper only fires
+/// past 10k lines, once per cycle, matching the risk the valence buffer
+/// already accepts.
+fn reap_jsonl_max_lines(path: &Path, max_lines: usize, date_bucket: &str) -> usize {
+    use std::io::Write;
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    let lines: Vec<&str> = body.lines().collect();
+    if lines.len() <= max_lines {
+        return 0;
+    }
+    let overflow = lines.len() - max_lines;
+    let (head, tail) = lines.split_at(overflow);
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dest_dir = parent.join("_archived").join(date_bucket);
+    if std::fs::create_dir_all(&dest_dir).is_err() {
+        return 0;
+    }
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("overflow.jsonl");
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dest_dir.join(name))
+        .and_then(|mut f| {
+            for l in head {
+                writeln!(f, "{l}")?;
+            }
+            f.sync_all()
+        });
+    if appended.is_err() {
+        return 0;
+    }
+
+    let tmp = path.with_extension("jsonl.tmp");
+    let wrote = std::fs::File::create(&tmp).and_then(|mut f| {
+        for l in tail {
+            writeln!(f, "{l}")?;
+        }
+        f.sync_all()
+    });
+    if wrote.is_ok() && std::fs::rename(&tmp, path).is_ok() {
+        overflow
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -769,6 +972,87 @@ mod lane_health_tests {
         assert_eq!(measure_bound(BoundMetric::DirEntries, root), 3);
     }
 
+    // ── Universal retention (Wave 1 item 7) ───────────────────────────────
+
+    #[test]
+    fn reap_by_age_archives_only_entries_past_cutoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.jsonl"), "x").unwrap();
+        std::fs::write(root.join("b.jsonl"), "x").unwrap();
+        // Cutoff in the past: nothing is old enough.
+        let epoch = SystemTime::UNIX_EPOCH;
+        assert_eq!(reap_dir_by_age(root, epoch, "d"), 0);
+        // Cutoff in the future: everything archives.
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        assert_eq!(reap_dir_by_age(root, future, "d"), 2);
+        assert!(root.join("_archived/d/a.jsonl").exists());
+        assert!(!root.join("a.jsonl").exists());
+        // Idempotent: the archive itself is bookkeeping, not re-reaped.
+        assert_eq!(reap_dir_by_age(root, future, "d"), 0);
+    }
+
+    #[test]
+    fn reap_keep_newest_archives_the_rest_including_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..3 {
+            std::fs::write(root.join(format!("f{i}")), "x").unwrap();
+        }
+        std::fs::create_dir_all(root.join("snap-dir")).unwrap();
+        assert_eq!(reap_dir_keep_newest(root, 2, "d"), 2);
+        // 2 survivors outside the archive, 2 archived (dirs move too).
+        let survivors = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter(|e| !is_bookkeeping_entry(e))
+            .count();
+        assert_eq!(survivors, 2);
+        let archived = std::fs::read_dir(root.join("_archived/d"))
+            .unwrap()
+            .flatten()
+            .count();
+        assert_eq!(archived, 2);
+        // Under the cap now: no further reaping.
+        assert_eq!(reap_dir_keep_newest(root, 2, "d"), 0);
+    }
+
+    #[test]
+    fn reap_jsonl_keeps_newest_tail_and_archives_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("log.jsonl");
+        let body: String = (0..10).map(|i| format!("line-{i}\n")).collect();
+        std::fs::write(&f, body).unwrap();
+        assert_eq!(reap_jsonl_max_lines(&f, 6, "d"), 4);
+        let kept = std::fs::read_to_string(&f).unwrap();
+        assert_eq!(kept.lines().count(), 6);
+        assert!(kept.starts_with("line-4"), "newest tail survives");
+        let archived = std::fs::read_to_string(dir.path().join("_archived/d/log.jsonl")).unwrap();
+        assert_eq!(archived.lines().count(), 4);
+        assert!(archived.starts_with("line-0"), "oldest head archives");
+        // Under the cap: no-op.
+        assert_eq!(reap_jsonl_max_lines(&f, 6, "d"), 0);
+    }
+
+    // Live one-shot: apply retention to the REAL tree. Archive-only moves —
+    // reversible, the same work one daemon cycle does. Ignored by default.
+    // Run: cargo test run_retention_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn run_retention_live() {
+        for r in run_retention() {
+            println!("{:<55} archived {:>5}", r.store, r.archived);
+        }
+    }
+
+    #[test]
+    fn retention_on_empty_home_is_a_quiet_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = run_retention_at(dir.path());
+        assert_eq!(reports.len(), RETENTION.len());
+        assert!(reports.iter().all(|r| r.archived == 0));
+    }
+
     #[test]
     fn existence_check_reads_real_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -815,9 +1099,9 @@ mod lane_health_tests {
             .filter(|l| l.status == LaneStatus::Red)
             .map(|l| l.lane)
             .collect();
-        // ingest-queue left this list when Wave 1 wired its drain; pins and
-        // ipc stay until engine cadence (item 6) and the gcc-side ipc bridge.
-        for dead in ["pins", "ipc"] {
+        // ingest-queue and pins left this list as Wave 1 wired them; ipc
+        // stays red until the gcc-side bridge writes its store.
+        for dead in ["ipc"] {
             assert!(red.contains(dead), "expected {dead} RED while still unwired");
         }
         assert_eq!(lanes.len(), 14);
