@@ -719,9 +719,9 @@ impl Daemon {
         // dreaming (fresh patterns/associations) and intuition (fresh feedback),
         // and is the single writer of patterns.json's strength dimension.
         match crate::consolidation::reinforce::run_cycle(&self.store) {
-            Ok(r) if r.reactivated + r.weakened + r.evicted > 0 => info!(
-                "Reinforcement: {} reactivated, {} weakened, {} evicted, {} surviving",
-                r.reactivated, r.weakened, r.evicted, r.surviving
+            Ok(r) if r.reactivated + r.weakened + r.evicted + r.forgotten > 0 => info!(
+                "Reinforcement: {} reactivated, {} weakened, {} forgotten, {} evicted, {} surviving",
+                r.reactivated, r.weakened, r.forgotten, r.evicted, r.surviving
             ),
             Ok(_) => {}
             Err(e) => warn!("Reinforcement pass failed: {e:#}"),

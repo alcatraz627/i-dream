@@ -1491,6 +1491,25 @@ Output ONLY a JSON array. No commentary."#;
             }
         }
 
+        // Governed forgetting (Wave 2 item 11): a gap-claim reality has already
+        // resolved must not be promoted or re-surfaced. Dismiss any association
+        // a resolution overtakes, and record each retirement once in the
+        // forgotten ledger — the single writer of that file.
+        let resolutions = crate::modules::grounding::load_resolutions(self.store);
+        let forgotten =
+            crate::consolidation::forgetting::govern_associations(&mut all_assocs, &resolutions, Utc::now());
+        for f in &forgotten {
+            self.store.append_jsonl("dreams/forgotten.jsonl", f)?;
+        }
+        if !forgotten.is_empty() {
+            self.store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
+            tracer.note(
+                TracePhase::Wake,
+                EventKind::InsightsPromoted,
+                format!("{} resolved gap-claims forgotten (governed)", forgotten.len()),
+            )?;
+        }
+
         // Collect candidates by cloning so we can mutate all_assocs afterward
         // without fighting the borrow checker. D3 v1: filter dismissed too.
         let candidates: Vec<Association> = all_assocs

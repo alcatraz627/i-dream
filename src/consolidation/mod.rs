@@ -7,6 +7,7 @@
 //! placeholder until then.
 
 pub mod dream_pass;
+pub mod forgetting;
 pub mod l2_digest;
 pub mod reinforce;
 pub mod schemas;

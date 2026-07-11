@@ -286,8 +286,21 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
     let moves = apply_feedback(&mut patterns, &associations, &fresh);
     let reactivated = moves.iter().filter(|m| m.direction == "reactivate").count();
     let weakened = moves.iter().filter(|m| m.direction == "weaken").count();
-    let evicted = evict_to_cap(&mut patterns, MAX_PATTERNS);
 
+    // Governed forgetting (item 11): drop lessons reality has overtaken before
+    // capacity-eviction runs, so a resolved claim leaves even if it was an
+    // anchor. grounding owns the resolution list; forgetting is the single
+    // writer of the forgotten ledger.
+    let resolutions = crate::modules::grounding::load_resolutions(store);
+    let forgotten = super::forgetting::govern(&mut patterns, &resolutions, Utc::now());
+    for f in &forgotten {
+        store.append_jsonl("dreams/forgotten.jsonl", f)?;
+    }
+    if !forgotten.is_empty() {
+        store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
+    }
+
+    let evicted = evict_to_cap(&mut patterns, MAX_PATTERNS);
     for e in &evicted {
         store.append_jsonl("dreams/evicted.jsonl", e)?;
     }
@@ -300,6 +313,7 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         reactivated,
         weakened,
         evicted: evicted.len(),
+        forgotten: forgotten.len(),
     })
 }
 
@@ -358,6 +372,8 @@ pub struct ReinforceReport {
     pub reactivated: usize,
     pub weakened: usize,
     pub evicted: usize,
+    /// Patterns dropped because a resolution overtook their claim (item 11).
+    pub forgotten: usize,
 }
 
 #[cfg(test)]
