@@ -2446,6 +2446,7 @@ fn event_kind_label(kind: EventKind) -> &'static str {
         EventKind::ApiCall => "api_call",
         EventKind::ApiResponse => "api_response",
         EventKind::PatternsExtracted => "patterns_extracted",
+        EventKind::PatternsMerged => "patterns_merged",
         EventKind::AssociationsFound => "associations_found",
         EventKind::InsightsPromoted => "insights_promoted",
         EventKind::ProcessedStateUpdated => "processed_state_updated",

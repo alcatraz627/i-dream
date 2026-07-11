@@ -30,7 +30,7 @@ use std::path::PathBuf;
 /// while 231 clusters remain overall — no runaway merging. 0.22 strands the
 /// push anchor; plain unweighted Jaccard needs thresholds so low that
 /// corpus-common words ("agent", "user", "session") over-merge.
-const CLUSTER_SIM_THRESHOLD: f64 = 0.20;
+pub(crate) const CLUSTER_SIM_THRESHOLD: f64 = 0.20;
 
 #[derive(Debug, Serialize)]
 pub struct ViewFile<T: Serialize> {
@@ -251,7 +251,7 @@ pub fn stable_id(text: &str) -> String {
     hash.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-fn token_set(text: &str) -> HashSet<String> {
+pub(crate) fn token_set(text: &str) -> HashSet<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.len() > 2)
@@ -287,7 +287,7 @@ fn weighted_sim(
 /// pairwise, but each links to a near neighbor and the family connects
 /// through those paths (the live push-approval family clusters exactly this
 /// way). O(n²) — fine at the stores' real scale (hundreds of items).
-fn assign_clusters(keys: &[HashSet<String>]) -> Vec<usize> {
+pub(crate) fn assign_clusters(keys: &[HashSet<String>]) -> Vec<usize> {
     let n = keys.len();
     let mut doc_freq: std::collections::HashMap<String, usize> = Default::default();
     for set in keys {

@@ -86,6 +86,8 @@ pub enum EventKind {
     ApiResponse,
     /// Extracted N patterns from the response (SWS only).
     PatternsExtracted,
+    /// Folded near-duplicate patterns into consolidated schemas.
+    PatternsMerged,
     /// Found N creative associations (REM only).
     AssociationsFound,
     /// Promoted N insights to durable storage (Wake only).
@@ -116,6 +118,7 @@ impl EventKind {
             EventKind::ApiCall => "api_call",
             EventKind::ApiResponse => "api_response",
             EventKind::PatternsExtracted => "patterns_extracted",
+            EventKind::PatternsMerged => "patterns_merged",
             EventKind::AssociationsFound => "associations_found",
             EventKind::InsightsPromoted => "insights_promoted",
             EventKind::ProcessedStateUpdated => "processed_state_updated",

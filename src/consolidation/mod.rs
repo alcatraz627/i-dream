@@ -8,4 +8,5 @@
 
 pub mod dream_pass;
 pub mod l2_digest;
+pub mod schemas;
 pub mod views;

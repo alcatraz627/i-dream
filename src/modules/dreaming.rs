@@ -1088,28 +1088,57 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
             return Ok((0, 0));
         }
 
-        // Serialize patterns into a compact line-per-pattern digest the model
-        // can reference by ID. Short form: [id] (category, valence, conf): text
-        // Cap at top 50 by confidence to prevent token bloat as patterns.json grows.
+        // Serialize the store into a compact line-per-lesson digest the model
+        // can reference by ID, capped at 50 lines to bound tokens.
+        //
+        // The cap is why this reads SCHEMAS (Wave 2 item 8) and not raw
+        // patterns: at 2.16 rewordings per lesson, a top-50-by-confidence
+        // window over the episodic store spent most of its slots on near-
+        // copies of a handful of lessons — REM was recombining a lesson with
+        // itself, which is why 293 of 300 associations came back "promotable".
+        // Schemas give 50 DISTINCT lessons, ranked by weight of evidence
+        // (how often a lesson was actually observed) rather than by the
+        // confidence of a single assertion. Falls back to raw patterns when
+        // the merge has not run yet.
         const MAX_PATTERNS_FOR_REM: usize = 50;
-        let mut sorted_patterns: Vec<&ExtractedPattern> = all_patterns.iter().collect();
-        sorted_patterns.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        sorted_patterns.truncate(MAX_PATTERNS_FOR_REM);
+        let schemas = crate::consolidation::schemas::load_schemas(self.store);
 
-        let pattern_digest: String = sorted_patterns
-            .iter()
-            .map(|p| {
-                format!(
-                    "[{}] ({}, valence={}, conf={:.2}): {}",
-                    p.id, p.category, p.valence, p.confidence, p.pattern
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let pattern_digest: String = if !schemas.is_empty() {
+            info!(
+                "REM: reasoning over {} consolidated schemas (from {} episodic patterns)",
+                schemas.len(),
+                all_patterns.len()
+            );
+            schemas
+                .iter()
+                .take(MAX_PATTERNS_FOR_REM)
+                .map(|s| {
+                    format!(
+                        "[{}] ({}, valence={}, conf={:.2}, seen {}×): {}",
+                        s.id, s.category, s.valence, s.confidence, s.occurrences, s.text
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            let mut sorted_patterns: Vec<&ExtractedPattern> = all_patterns.iter().collect();
+            sorted_patterns.sort_by(|a, b| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            sorted_patterns.truncate(MAX_PATTERNS_FOR_REM);
+            sorted_patterns
+                .iter()
+                .map(|p| {
+                    format!(
+                        "[{}] ({}, valence={}, conf={:.2}): {}",
+                        p.id, p.category, p.valence, p.confidence, p.pattern
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
 
         let system_prompt = r#"You are in creative association mode for an AI assistant's memory system. Find non-obvious connections between behavioral patterns across sessions and domains.
 
@@ -1133,14 +1162,24 @@ Output ONLY a JSON array. No commentary."#;
 
         let full_prompt_payload = format!("{system_prompt}\n\n---\n\n{prompt}");
 
+        let digest_lines = pattern_digest.lines().count();
         tracer.emit_with_payload(
             TracePhase::Rem,
             EventKind::ApiCall,
             format!(
-                "model={} (heavy), patterns={}/{} (capped), max_tokens=4096, temp=0.9",
+                "model={} (heavy), {} {}/{} (capped), max_tokens=4096, temp=0.9",
                 self.config.budget.model_heavy,
-                sorted_patterns.len(),
-                all_patterns.len()
+                if schemas.is_empty() {
+                    "patterns"
+                } else {
+                    "schemas"
+                },
+                digest_lines,
+                if schemas.is_empty() {
+                    all_patterns.len()
+                } else {
+                    schemas.len()
+                }
             ),
             vec!["dreams/patterns.json".into()],
             vec![],
@@ -1176,7 +1215,13 @@ Output ONLY a JSON array. No commentary."#;
                     for r in raw {
                         new_assocs.push(Association {
                             id: Uuid::new_v4().to_string(),
-                            patterns_linked: r.patterns_linked,
+                            // The model links what it was shown (schema ids),
+                            // but this field is resolved against patterns.json
+                            // downstream — translate back to episodic ids.
+                            patterns_linked: crate::consolidation::schemas::resolve_to_episodic_ids(
+                                &r.patterns_linked,
+                                &schemas,
+                            ),
                             hypothesis: r.hypothesis,
                             confidence: r.confidence,
                             actionable: r.actionable,
@@ -1218,7 +1263,11 @@ Output ONLY a JSON array. No commentary."#;
                                 for r in raw {
                                     new_assocs.push(Association {
                                         id: Uuid::new_v4().to_string(),
-                                        patterns_linked: r.patterns_linked,
+                                        patterns_linked:
+                                            crate::consolidation::schemas::resolve_to_episodic_ids(
+                                                &r.patterns_linked,
+                                                &schemas,
+                                            ),
                                         hypothesis: r.hypothesis,
                                         confidence: r.confidence,
                                         actionable: r.actionable,
@@ -1740,6 +1789,36 @@ impl<'a> Module for DreamingModule<'a> {
                 EventKind::PhaseSkipped,
                 "disabled in config or budget exhausted",
             )?;
+        }
+
+        // Merge pass (Wave 2 item 8) — fold this cycle's fresh patterns into
+        // schemas before REM reads them, so REM reasons over distinct lessons
+        // ranked by weight of evidence rather than over rewordings. Cheap,
+        // deterministic, no API budget. A failure here is not fatal: REM falls
+        // back to raw patterns.
+        match crate::consolidation::schemas::rebuild_schemas(self.store) {
+            Ok(report) => {
+                info!(
+                    "Merge pass: {} patterns → {} schemas ({} collapsed, redundancy {:.2}, largest {}×)",
+                    report.patterns,
+                    report.schemas,
+                    report.collapsed,
+                    report.redundancy_ratio(),
+                    report.largest
+                );
+                tracer.note(
+                    TracePhase::Sws,
+                    EventKind::PatternsMerged,
+                    format!(
+                        "{} patterns → {} schemas ({} rewordings collapsed, redundancy {:.2})",
+                        report.patterns,
+                        report.schemas,
+                        report.collapsed,
+                        report.redundancy_ratio()
+                    ),
+                )?;
+            }
+            Err(e) => warn!("Merge pass failed (REM falls back to raw patterns): {e:#}"),
         }
 
         // Phase 2: REM
