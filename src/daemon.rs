@@ -809,25 +809,15 @@ impl Daemon {
         }
     }
 
-    /// M17 daemon hook — write a snapshot, then trim to the most-recent 30.
-    /// Trimming uses filename sort order (filenames are rfc3339-ish stamps).
+    /// M17 daemon hook — write the snapshot that `snapshot-diff` reads.
+    ///
+    /// Writing only. Bounding this directory belongs to retention, which
+    /// archives old snapshots instead of deleting them; this used to hard-delete
+    /// everything past the newest 30, which the plan of record forbids (archive
+    /// before delete). Two owners of one directory, one of them destructive, is
+    /// how a store quietly loses history — so there is now one owner.
     fn cycle_auto_snapshot(store: &Store) -> Result<()> {
-        const KEEP: usize = 30;
         let _ = crate::graph_metrics::snapshot_for_diff(store)?;
-        let dir = store.path("dreams/snapshots");
-        if !dir.exists() {
-            return Ok(());
-        }
-        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
-            .collect();
-        entries.sort();
-        if entries.len() > KEEP {
-            for old in &entries[..entries.len() - KEEP] {
-                let _ = std::fs::remove_file(old);
-            }
-        }
         Ok(())
     }
 

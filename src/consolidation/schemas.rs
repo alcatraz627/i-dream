@@ -197,10 +197,16 @@ pub fn rebuild_schemas(store: &Store) -> Result<MergeReport> {
 }
 
 /// The consolidated lessons, most-observed first — REM and WAKE's input.
-/// Falls back to an empty vec when the merge has not run yet; callers keep
-/// their raw-pattern path for that case.
+///
+/// Returns nothing when the merge is missing OR out of date, which is what
+/// makes "fall back to raw patterns" true every time rather than only on the
+/// first cycle. Staleness matters more than it sounds: a schema names a
+/// representative pattern, `i-dream prune` removes dormant patterns, and an
+/// association pointing at a pruned representative is exactly the dangling
+/// link this system already suffers from. Better to reason over raw patterns
+/// than over a stale map of them.
 pub fn load_schemas(store: &Store) -> Vec<Schema> {
-    if !store.exists(SCHEMAS_PATH) {
+    if !is_fresh(store) {
         return vec![];
     }
     let mut schemas: Vec<Schema> = store.read_json(SCHEMAS_PATH).unwrap_or_default();
@@ -214,10 +220,27 @@ pub fn load_schemas(store: &Store) -> Vec<Schema> {
     schemas
 }
 
-/// Age of the schemas file, for freshness checks.
+/// Do the schemas still describe the patterns they were built from? False when
+/// the merge never ran, or when the episodic store has been written since
+/// (a new cycle's patterns, or a prune) and the merge did not follow.
+fn is_fresh(store: &Store) -> bool {
+    let Some(built) = schemas_generated_at(store) else {
+        return false;
+    };
+    match mtime(&store.path("dreams/patterns.json")) {
+        Some(patterns_changed) => built >= patterns_changed,
+        // No episodic store to be stale against.
+        None => true,
+    }
+}
+
+/// When the merge last wrote the schemas, or None if it never has.
 pub fn schemas_generated_at(store: &Store) -> Option<DateTime<Utc>> {
-    let meta = std::fs::metadata(store.path(SCHEMAS_PATH)).ok()?;
-    Some(meta.modified().ok()?.into())
+    mtime(&store.path(SCHEMAS_PATH))
+}
+
+fn mtime(path: &std::path::Path) -> Option<DateTime<Utc>> {
+    Some(std::fs::metadata(path).ok()?.modified().ok()?.into())
 }
 
 /// Translate ids the model returned in schema space back into episodic
@@ -541,6 +564,54 @@ mod tests {
         // Unknown ids (fallback path / model echo) pass through untouched.
         let passthrough = resolve_to_episodic_ids(&["p3".to_string()], &schemas);
         assert_eq!(passthrough, vec!["p3".to_string()]);
+    }
+
+    /// The guard that keeps "REM falls back to raw patterns" honest: schemas
+    /// written BEFORE the patterns they claim to summarize are not served.
+    #[test]
+    fn stale_schemas_are_not_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+        let patterns = vec![
+            pat(
+                "p1",
+                "never commit or push to git without explicit per-push user approval",
+                0.9,
+                1,
+                "2026-05-01",
+            ),
+            pat(
+                "p2",
+                "never commit or push to git without fresh explicit per-push approval from the user",
+                0.8,
+                1,
+                "2026-05-02",
+            ),
+            pat(
+                "p3",
+                "comments are for humans first and docstrings should open code-agnostic",
+                0.7,
+                1,
+                "2026-05-03",
+            ),
+        ];
+        store.write_json("dreams/patterns.json", &patterns).unwrap();
+        rebuild_schemas(&store).unwrap();
+        assert!(!load_schemas(&store).is_empty(), "fresh schemas are served");
+
+        // A later cycle rewrites patterns.json and the merge fails (or is
+        // skipped): the schemas now describe a store that has moved on.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.write_json("dreams/patterns.json", &patterns).unwrap();
+        assert!(
+            load_schemas(&store).is_empty(),
+            "stale schemas must not be served — REM falls back to raw patterns"
+        );
+
+        // Re-running the merge makes them current again.
+        rebuild_schemas(&store).unwrap();
+        assert!(!load_schemas(&store).is_empty());
     }
 
     #[test]

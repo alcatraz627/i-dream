@@ -262,15 +262,26 @@ fn normalize_pattern(s: &str) -> String {
 
 // ── Ingest-queue drain (docs/24 Wave 1, item 5) ──────────────────────────────
 //
-// Sessions leave a distilled checkpoint behind (insight + pending bullets from
-// /core-dump), and those land as JSON files in `dreams/ingest-queue/`. For
-// months nothing read them — the write-only lane the health registry flags
-// red. The drain makes SWS the queue's consumer: each cycle, entries whose
-// transcript was already dreamed archive as redundant, stale duplicates and
-// empty entries archive as such, and the rest join the SWS prompt as
+// Sessions leave a distilled checkpoint behind (the insight and pending bullets
+// a `/core-dump` writes), and those land as JSON files in
+// `dreams/ingest-queue/`. For months nothing read them — the write-only lane
+// the health registry flags red. The drain makes SWS the queue's consumer:
+// each cycle, empty entries archive as trivial, files queued twice collapse to
+// the newest, unparseable ones quarantine, and the rest join the SWS prompt as
 // pre-distilled session evidence. Files only ever MOVE (into
 // `_processed/<date>/`), never delete; entries that feed the prompt move only
 // after the API call succeeds, so a failed cycle leaves them queued.
+//
+// A checkpoint is NOT a copy of its session's transcript, so the drain does not
+// skip entries whose session was already read by the transcript scanner. That
+// scanner sees raw, truncated turn-blocks; a checkpoint carries the conclusions
+// an agent drew at the end of the session — the one artifact the raw scan
+// cannot produce. Discarding it whenever the transcript had been scanned would
+// have emptied this lane permanently (the scanner reads nearly every session),
+// which is a green light over an unread backlog. Where the same lesson does
+// arrive twice by both routes, the merge pass folds the rewordings into one
+// schema and counts the evidence twice, which is the correct outcome:
+// corroboration, not noise.
 
 /// Cap on queued checkpoints fed to one SWS call. A deep backlog drains over
 /// several cycles instead of starving transcript signal; the remainder is
@@ -329,17 +340,21 @@ impl QueueEntry {
             && self.pending.is_empty()
     }
 
-    /// Identity for within-queue dedup: the contract id when present, the
-    /// friendly session id otherwise, the filename as a last resort (so
-    /// id-less entries never collapse into each other).
+    /// Identity for within-queue dedup: the contract id — the transcript UUID,
+    /// which is genuinely unique.
+    ///
+    /// With no id (a headless writer) the entry falls back to its filename,
+    /// deliberately NOT the friendly session id: friendly ids are
+    /// `[word]-[word]-[2 hex]` and repeat across time, so keying on one would
+    /// silently collapse two unrelated sessions that happened to draw the same
+    /// slug and archive the older one unread. A filename key means such an
+    /// entry simply never dedups, which costs at worst a duplicate reading of
+    /// one checkpoint — the safe direction.
     fn dedup_key(&self, path: &Path) -> String {
         if let Some(id) = &self.id {
             if !id.is_empty() {
                 return id.clone();
             }
-        }
-        if !self.session_id.is_empty() {
-            return self.session_id.clone();
         }
         path.file_name()
             .and_then(|n| n.to_str())
@@ -393,20 +408,13 @@ fn scan_ingest_queue(dir: &Path) -> (Vec<(PathBuf, QueueEntry)>, Vec<PathBuf>) {
 
 /// Decide each entry's fate. Pure set logic — hermetically testable.
 ///
-/// Within-queue duplicates keep only the newest entry per identity; survivors
-/// whose transcript already sits in `processed_sessions` are redundant (the
-/// raw session was dreamed through the transcript lane); empty entries are
-/// trivial; everything else feeds, up to `feed_cap`.
-fn classify_queue_entries(
-    entries: Vec<(PathBuf, QueueEntry)>,
-    processed_sessions: &HashMap<String, u64>,
-    feed_cap: usize,
-) -> QueueDrainPlan {
+/// The same checkpoint queued twice keeps only the newest; entries with nothing
+/// in them are trivial; everything else feeds, up to `feed_cap`. Consumption is
+/// tracked by the move into `_processed/`, so the queue is its own cursor and
+/// needs no cross-reference to decide what it has already read.
+fn classify_queue_entries(entries: Vec<(PathBuf, QueueEntry)>, feed_cap: usize) -> QueueDrainPlan {
     // Entries arrive oldest-first, so the last index per key is the survivor.
-    let keys: Vec<String> = entries
-        .iter()
-        .map(|(path, q)| q.dedup_key(path))
-        .collect();
+    let keys: Vec<String> = entries.iter().map(|(path, q)| q.dedup_key(path)).collect();
     let mut survivor: HashMap<&str, usize> = HashMap::new();
     for (i, k) in keys.iter().enumerate() {
         survivor.insert(k.as_str(), i);
@@ -417,12 +425,6 @@ fn classify_queue_entries(
         if survivor[keys[i].as_str()] != i {
             plan.archive.push((path, "duplicate"));
             continue;
-        }
-        if let Some(id) = &q.id {
-            if processed_sessions.contains_key(id) {
-                plan.archive.push((path, "redundant"));
-                continue;
-            }
         }
         if q.is_trivial() {
             plan.archive.push((path, "trivial"));
@@ -528,20 +530,12 @@ impl<'a> DreamingModule<'a> {
         // entries ride this cycle's SWS prompt and archive only after the API
         // call succeeds, so a failed cycle redrives them next time.
         let queue_dir = self.store.path("dreams/ingest-queue");
-        let processed_now: ProcessedState = if self.store.exists("dreams/processed.json") {
-            self.store
-                .read_json("dreams/processed.json")
-                .unwrap_or_default()
-        } else {
-            ProcessedState::default()
-        };
         let (queue_entries, queue_poison) = scan_ingest_queue(&queue_dir);
-        let drain = classify_queue_entries(queue_entries, &processed_now.sessions, QUEUE_FEED_CAP);
+        let drain = classify_queue_entries(queue_entries, QUEUE_FEED_CAP);
         let archive_date = Utc::now().format("%Y-%m-%d").to_string();
-        let (mut n_redundant, mut n_duplicate, mut n_trivial) = (0usize, 0usize, 0usize);
+        let (mut n_duplicate, mut n_trivial) = (0usize, 0usize);
         for (path, reason) in &drain.archive {
             match *reason {
-                "redundant" => n_redundant += 1,
                 "duplicate" => n_duplicate += 1,
                 _ => n_trivial += 1,
             }
@@ -632,21 +626,19 @@ impl<'a> DreamingModule<'a> {
             dump_kind,
         )?;
 
-        if queue_fed + n_redundant + n_duplicate + n_trivial + queue_poison.len() + queue_deferred
-            > 0
-        {
+        if queue_fed + n_duplicate + n_trivial + queue_poison.len() + queue_deferred > 0 {
+            let mut drain_inputs = vec!["dreams/ingest-queue".to_string()];
+            drain_inputs.extend(fed.iter().map(|(_, q)| format!("session:{}", q.session_id)));
             tracer.emit(
                 TracePhase::Sws,
                 EventKind::QueueDrained,
                 format!(
-                    "queue drain: {queue_fed} feeding this cycle, {n_redundant} redundant, \
-                     {n_duplicate} duplicate, {n_trivial} trivial, {} poison, {queue_deferred} still queued",
+                    "queue drain: {queue_fed} feeding this cycle, {n_duplicate} duplicate, \
+                     {n_trivial} trivial, {} poison, {queue_deferred} still queued",
                     queue_poison.len()
                 ),
-                fed.iter()
-                    .map(|(_, q)| format!("session:{}", q.session_id))
-                    .collect(),
-                vec!["dreams/ingest-queue".into()],
+                drain_inputs,
+                vec![format!("dreams/ingest-queue/_processed/{archive_date}")],
             )?;
         }
 
@@ -909,9 +901,12 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
         )?;
 
         // Consumed queue entries archive only now — after the successful API
-        // round — so a failed cycle redrives them. A crash between the API
-        // call and this rename re-feeds an entry once; acceptable, because
-        // extracted patterns dedup by normalized text downstream.
+        // round — so a failed cycle redrives them. A crash between the API call
+        // and this rename re-feeds an entry once. That costs a duplicate
+        // reading of one checkpoint, which the merge pass folds back into a
+        // single schema; losing a checkpoint by archiving it before the model
+        // saw it would be unrecoverable, so the duplicate is the right way to
+        // fail.
         let mut queue_consumed = 0usize;
         for (path, _q) in fed {
             match archive_queue_file(path, &queue_dir, &archive_date) {
@@ -1163,6 +1158,13 @@ Output ONLY a JSON array. No commentary."#;
         let full_prompt_payload = format!("{system_prompt}\n\n---\n\n{prompt}");
 
         let digest_lines = pattern_digest.lines().count();
+        // Name the file the digest was actually built from — the dashboard turns
+        // these into lineage chips, so a stale path opens the wrong evidence.
+        let digest_source = if schemas.is_empty() {
+            "dreams/patterns.json"
+        } else {
+            crate::consolidation::schemas::SCHEMAS_PATH
+        };
         tracer.emit_with_payload(
             TracePhase::Rem,
             EventKind::ApiCall,
@@ -1181,7 +1183,7 @@ Output ONLY a JSON array. No commentary."#;
                     schemas.len()
                 }
             ),
-            vec!["dreams/patterns.json".into()],
+            vec![digest_source.to_string()],
             vec![],
             Some(full_prompt_payload),
             Some("text"),
@@ -1970,20 +1972,15 @@ mod tests {
     }
 
     #[test]
-    fn queue_classify_keeps_newest_duplicate_and_flags_redundant() {
-        let processed: HashMap<String, u64> = [("uuid-processed".to_string(), 10u64)].into();
+    fn queue_classify_keeps_newest_duplicate_and_archives_empty() {
         let entries = vec![
             (
                 PathBuf::from("a.json"),
-                queue_entry(None, "same-slug", "2026-01-01", &["old"]),
+                queue_entry(Some("uuid-same"), "sess", "2026-01-01", &["old"]),
             ),
             (
                 PathBuf::from("b.json"),
-                queue_entry(None, "same-slug", "2026-02-01", &["new"]),
-            ),
-            (
-                PathBuf::from("c.json"),
-                queue_entry(Some("uuid-processed"), "done", "2026-03-01", &["x"]),
+                queue_entry(Some("uuid-same"), "sess", "2026-02-01", &["new"]),
             ),
             (
                 PathBuf::from("d.json"),
@@ -1991,13 +1988,17 @@ mod tests {
             ),
             (
                 PathBuf::from("e.json"),
-                queue_entry(None, "empty", "2026-05-01", &[]),
+                queue_entry(Some("uuid-empty"), "empty", "2026-05-01", &[]),
             ),
         ];
-        let plan = classify_queue_entries(entries, &processed, 25);
-        let feed: Vec<&str> = plan.feed.iter().map(|(_, q)| q.session_id.as_str()).collect();
-        assert_eq!(feed, vec!["same-slug", "fresh"]);
-        // The surviving same-slug entry is the newest of the pair.
+        let plan = classify_queue_entries(entries, 25);
+        let feed: Vec<&str> = plan
+            .feed
+            .iter()
+            .map(|(_, q)| q.session_id.as_str())
+            .collect();
+        assert_eq!(feed, vec!["sess", "fresh"]);
+        // The surviving entry of the re-queued pair is the newest.
         assert_eq!(plan.feed[0].1.insights.gotchas, vec!["new"]);
         let mut reasons: Vec<(&str, &str)> = plan
             .archive
@@ -2007,30 +2008,67 @@ mod tests {
         reasons.sort();
         assert_eq!(
             reasons,
-            vec![
-                ("a.json", "duplicate"),
-                ("c.json", "redundant"),
-                ("e.json", "trivial")
-            ]
+            vec![("a.json", "duplicate"), ("e.json", "trivial")]
         );
         assert_eq!(plan.deferred, 0);
     }
 
+    /// A checkpoint whose session the transcript scanner already read must STILL
+    /// feed: the two carry different artifacts (raw turns vs the conclusions the
+    /// agent drew), and skipping on that basis emptied the lane permanently.
+    #[test]
+    fn queue_feeds_even_when_the_transcript_was_already_scanned() {
+        let entries = vec![(
+            PathBuf::from("seen.json"),
+            queue_entry(Some("uuid-already-dreamed"), "sess", "2026-05-01", &["g"]),
+        )];
+        let plan = classify_queue_entries(entries, 25);
+        assert_eq!(plan.feed.len(), 1, "an already-scanned session still feeds");
+        assert!(plan.archive.is_empty());
+    }
+
+    /// Id-less entries key on their filename, never the friendly session id —
+    /// friendly ids repeat across time, so two unrelated sessions sharing a slug
+    /// must not collapse into one.
+    #[test]
+    fn idless_entries_with_a_shared_slug_do_not_collapse() {
+        let entries = vec![
+            (
+                PathBuf::from("one.json"),
+                queue_entry(None, "recycled-slug-a1", "2026-01-01", &["first"]),
+            ),
+            (
+                PathBuf::from("two.json"),
+                queue_entry(None, "recycled-slug-a1", "2026-06-01", &["second"]),
+            ),
+        ];
+        let plan = classify_queue_entries(entries, 25);
+        assert_eq!(plan.feed.len(), 2, "distinct sessions must both survive");
+        assert!(plan.archive.is_empty());
+    }
+
     #[test]
     fn queue_classify_defers_beyond_feed_cap() {
-        let processed = HashMap::new();
         let entries: Vec<(PathBuf, QueueEntry)> = (0..4)
             .map(|i| {
                 (
                     PathBuf::from(format!("{i}.json")),
-                    queue_entry(None, &format!("s{i}"), &format!("2026-0{}-01", i + 1), &["g"]),
+                    queue_entry(
+                        Some(&format!("uuid-{i}")),
+                        &format!("s{i}"),
+                        &format!("2026-0{}-01", i + 1),
+                        &["g"],
+                    ),
                 )
             })
             .collect();
-        let plan = classify_queue_entries(entries, &processed, 2);
+        let plan = classify_queue_entries(entries, 2);
         assert_eq!(plan.feed.len(), 2);
         assert_eq!(plan.deferred, 2);
-        assert!(plan.archive.is_empty(), "deferred entries stay queued, not archived");
+        assert!(
+            plan.archive.is_empty(),
+            "deferred entries stay queued, not archived"
+        );
     }
 
     #[test]
@@ -2087,7 +2125,9 @@ mod tests {
             queue_entry(Some("uuid-1"), "slug", "t", &[]).dedup_key(&p),
             "uuid-1"
         );
-        assert_eq!(queue_entry(None, "slug", "t", &[]).dedup_key(&p), "slug");
+        // No id → the filename, never the friendly slug: slugs are reused over
+        // time, and keying on one would collapse two unrelated sessions.
+        assert_eq!(queue_entry(None, "slug", "t", &[]).dedup_key(&p), "f.json");
         assert_eq!(queue_entry(None, "", "t", &[]).dedup_key(&p), "f.json");
     }
 

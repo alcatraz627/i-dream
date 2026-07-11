@@ -30,7 +30,7 @@ use std::path::PathBuf;
 /// while 231 clusters remain overall — no runaway merging. 0.22 strands the
 /// push anchor; plain unweighted Jaccard needs thresholds so low that
 /// corpus-common words ("agent", "user", "session") over-merge.
-pub(crate) const CLUSTER_SIM_THRESHOLD: f64 = 0.20;
+const CLUSTER_SIM_THRESHOLD: f64 = 0.20;
 
 #[derive(Debug, Serialize)]
 pub struct ViewFile<T: Serialize> {

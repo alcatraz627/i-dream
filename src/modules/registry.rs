@@ -678,8 +678,11 @@ pub const KNOWN_ORPHANS: &[&str] = &[
     // and the engine cadence dispatch (2026-07-11); sustained green needs the
     // daemon running the new binary.
     "ipc",             // registered domain, source events never written
-    "sessions-domain", // extractor cursor frozen since May; engine dispatch (W1.6) should revive
-    "memory-domain",   // extractor cursor frozen since May; engine dispatch (W1.6) should revive
+    // Both extractors' cursors have been frozen since May. Engine dispatch runs
+    // their consolidate scripts, which is not the same thing as advancing an
+    // extraction cursor — whether that alone revives them is still unproven.
+    "sessions-domain",
+    "memory-domain",
 ];
 
 /// The lanes whose consumer does not resolve against the tree at `home`. An
@@ -752,11 +755,23 @@ pub struct ReapReport {
     pub archived: usize,
 }
 
-/// Apply every retention rule against the real `$HOME`. Per-rule failures
-/// count as zero and never propagate — retention must not fail a cycle.
+/// Apply every retention rule against the real `$HOME`. Per-rule failures count
+/// as zero and never propagate — retention must not fail a cycle.
+///
+/// With no `$HOME` this does nothing at all. It must not fall back to an empty
+/// path: the rules are relative, so an empty root would resolve them against the
+/// working directory and move files out of whatever tree the process happens to
+/// be standing in.
 pub fn run_retention() -> Vec<ReapReport> {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-    run_retention_at(&home)
+    let Ok(home) = std::env::var("HOME") else {
+        warn!("retention: HOME unset — skipping (refusing to reap a relative path)");
+        return vec![];
+    };
+    if home.is_empty() {
+        warn!("retention: HOME empty — skipping (refusing to reap a relative path)");
+        return vec![];
+    }
+    run_retention_at(&PathBuf::from(home))
 }
 
 /// Apply every retention rule against a filesystem rooted at `home`.
@@ -840,16 +855,40 @@ fn reap_dir_keep_newest(dir: &Path, keep: usize, date_bucket: &str) -> usize {
     moved
 }
 
-/// Ring-buffer a JSONL file: archive the oldest overflow lines, keep the
-/// newest `max_lines` in place.
+/// Ring-buffer a JSONL file: archive the oldest overflow lines, keep the newest
+/// `max_lines` in place.
 ///
-/// Archive is appended BEFORE the source shrinks (tmp + rename, the same
-/// atomic pattern as the valence ring buffer) — a crash between the two
-/// leaves duplicate archived lines, never lost ones. Concurrent appenders
-/// have a small lost-append window during the rename; the reaper only fires
-/// past 10k lines, once per cycle, matching the risk the valence buffer
-/// already accepts.
+/// These files have writers outside this process — a SessionStart hook appends
+/// to `injections.jsonl`, the menubar app to `insight-feedback.jsonl` — and none
+/// of them take a lock we could share. A plain read-then-replace would silently
+/// drop anything they appended while we worked. So the rewrite is guarded like a
+/// compare-and-swap: remember the file's size before reading, and abandon the
+/// whole reap if the file has grown by the time we are ready to swap it. Losing
+/// a reap costs nothing (the next cycle retries, and the trigger is 10k lines);
+/// losing a hook's append is unrecoverable.
+///
+/// The archive is written only once the swap is committed to, so a crash can
+/// duplicate archived lines but never lose live ones.
+///
+/// This is deliberately NOT the pattern `intuition.rs` uses for the valence ring
+/// buffer: that file is written by the daemon alone, so it can rewrite freely.
 fn reap_jsonl_max_lines(path: &Path, max_lines: usize, date_bucket: &str) -> usize {
+    let size_before = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return 0,
+    };
+    reap_jsonl_guarded(path, max_lines, date_bucket, size_before)
+}
+
+/// The body of the reap, with the compare-and-swap size passed in so the abort
+/// path can be exercised deterministically: hand it a size the file no longer
+/// has and it must leave the file completely alone.
+fn reap_jsonl_guarded(
+    path: &Path,
+    max_lines: usize,
+    date_bucket: &str,
+    size_before: u64,
+) -> usize {
     use std::io::Write;
     let Ok(body) = std::fs::read_to_string(path) else {
         return 0;
@@ -861,39 +900,61 @@ fn reap_jsonl_max_lines(path: &Path, max_lines: usize, date_bucket: &str) -> usi
     let overflow = lines.len() - max_lines;
     let (head, tail) = lines.split_at(overflow);
 
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let dest_dir = parent.join("_archived").join(date_bucket);
-    if std::fs::create_dir_all(&dest_dir).is_err() {
-        return 0;
-    }
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("overflow.jsonl");
-    let appended = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dest_dir.join(name))
-        .and_then(|mut f| {
-            for l in head {
-                writeln!(f, "{l}")?;
-            }
-            f.sync_all()
-        });
-    if appended.is_err() {
-        return 0;
-    }
-
+    // Stage the survivors first, so the window between the last check and the
+    // swap is a single rename.
     let tmp = path.with_extension("jsonl.tmp");
-    let wrote = std::fs::File::create(&tmp).and_then(|mut f| {
+    let staged = std::fs::File::create(&tmp).and_then(|mut f| {
         for l in tail {
             writeln!(f, "{l}")?;
         }
         f.sync_all()
     });
-    if wrote.is_ok() && std::fs::rename(&tmp, path).is_ok() {
+    if staged.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return 0;
+    }
+
+    // Did anyone append while we were reading and staging? Then our tail is
+    // already missing their lines — walk away and leave the file whole.
+    let grew = std::fs::metadata(path)
+        .map(|m| m.len() != size_before)
+        .unwrap_or(true);
+    if grew {
+        let _ = std::fs::remove_file(&tmp);
+        warn!(
+            "retention: {} changed underneath the reaper — skipping this cycle",
+            path.display()
+        );
+        return 0;
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dest_dir = parent.join("_archived").join(date_bucket);
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("overflow.jsonl");
+    let archived = std::fs::create_dir_all(&dest_dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dest_dir.join(name))
+            .and_then(|mut f| {
+                for l in head {
+                    writeln!(f, "{l}")?;
+                }
+                f.sync_all()
+            })
+    });
+    if archived.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return 0;
+    }
+
+    if std::fs::rename(&tmp, path).is_ok() {
         overflow
     } else {
+        let _ = std::fs::remove_file(&tmp);
         0
     }
 }
@@ -1043,6 +1104,38 @@ mod lane_health_tests {
         for r in run_retention() {
             println!("{:<55} archived {:>5}", r.store, r.archived);
         }
+    }
+
+    /// A SessionStart hook appending mid-reap must not lose its line. The reaper
+    /// notices the file is no longer the size it read and abandons the swap,
+    /// leaving the file whole for the next cycle to bound.
+    #[test]
+    fn jsonl_reap_abandons_the_swap_when_an_appender_wins_the_race() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("injections.jsonl");
+        let body: String = (0..20).map(|i| format!("line-{i}\n")).collect();
+        std::fs::write(&f, &body).unwrap();
+        let before = std::fs::read_to_string(&f).unwrap();
+
+        // Hand it a stale size — exactly what it would compute if a hook had
+        // appended between its read and its swap.
+        let stale = std::fs::metadata(&f).unwrap().len() - 1;
+        let moved = reap_jsonl_guarded(&f, 5, "d", stale);
+
+        assert_eq!(moved, 0, "a lost race must reap nothing");
+        assert_eq!(
+            before,
+            std::fs::read_to_string(&f).unwrap(),
+            "the source must be left byte-identical — the appender's line is in it"
+        );
+        assert!(
+            !dir.path().join("_archived/d/injections.jsonl").exists(),
+            "nothing is archived when the swap is abandoned"
+        );
+        assert!(
+            !dir.path().join("injections.jsonl.tmp").exists(),
+            "no tmp file left behind"
+        );
     }
 
     #[test]
