@@ -680,6 +680,13 @@ impl Daemon {
         let prospective = ProspectiveModule::new(&self.config, &self.store);
         prospective.cleanup_expired()?;
 
+        // Phase 7 (Wave 1 item 6): engine-driven cadence — run every declared
+        // external domain's consolidation that has come due (pin decay, atone
+        // consolidate, …). Replaces the hand-written per-domain launchd
+        // plists. Runs before the lane-health reading below so this cycle's
+        // verdict already reflects the dispatch.
+        self.dispatch_domain_consolidations(&registry);
+
         // Record the cycle in persistent state. `used` is derived from
         // the original budget minus whatever's left — saturates at zero
         // if modules somehow overspent (shouldn't, but defensive).
@@ -759,6 +766,34 @@ impl Daemon {
         }
 
         Ok(())
+    }
+
+    /// Wave 1 item 6 — the engine drives every declared domain cadence.
+    ///
+    /// External domains declare `[consolidation] cadence` in their manifest,
+    /// but until now only hand-written launchd plists actually ran any of
+    /// them (atone had one; pinned never did, so pins never decayed). Each
+    /// cycle this walks the registry and runs `consolidate()` for every
+    /// external domain whose cadence has elapsed, tracking last-run stamps in
+    /// `dreams/domain-cadence.json`. Failures log and leave the stamp
+    /// unadvanced so the next cycle retries; nothing here fails the cycle.
+    fn dispatch_domain_consolidations(&self, registry: &DomainRegistry) {
+        let mut state: DomainCadenceState = if self.store.exists(DOMAIN_CADENCE_STATE) {
+            self.store
+                .read_json(DOMAIN_CADENCE_STATE)
+                .unwrap_or_default()
+        } else {
+            DomainCadenceState::default()
+        };
+        let (ran, failed) = dispatch_due_consolidations(registry, &mut state, Utc::now());
+        if ran > 0 || failed > 0 {
+            info!("Domain cadence dispatch: {ran} consolidations ran, {failed} failed");
+        }
+        if ran > 0
+            && let Err(e) = self.store.write_json(DOMAIN_CADENCE_STATE, &state)
+        {
+            warn!("Cannot persist domain-cadence state: {e:#}");
+        }
     }
 
     /// M17 daemon hook — write a snapshot, then trim to the most-recent 30.
@@ -1306,6 +1341,93 @@ fn is_process_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// Relative path (under the data dir) of the engine-dispatch cadence ledger.
+const DOMAIN_CADENCE_STATE: &str = "dreams/domain-cadence.json";
+
+/// When each external domain's consolidation last ran under engine dispatch.
+/// Persisted at `dreams/domain-cadence.json` so cadences survive daemon
+/// restarts.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DomainCadenceState {
+    #[serde(default)]
+    last_run: std::collections::HashMap<String, DateTime<Utc>>,
+}
+
+/// Parse a manifest cadence word into a period. Vocabulary in the wild:
+/// "daily", "weekly", "every-2-days" (plus "hourly"/"every-N-hours" for
+/// symmetry). Unknown values yield None — the caller warns and skips, so a
+/// typo'd manifest can't silently settle on some default rhythm.
+fn parse_cadence(s: &str) -> Option<chrono::Duration> {
+    let s = s.trim().to_ascii_lowercase();
+    match s.as_str() {
+        "hourly" => return Some(chrono::Duration::hours(1)),
+        "daily" => return Some(chrono::Duration::days(1)),
+        "weekly" => return Some(chrono::Duration::weeks(1)),
+        _ => {}
+    }
+    let rest = s.strip_prefix("every-")?;
+    if let Some(n) = rest.strip_suffix("-days") {
+        return n.parse::<i64>().ok().map(chrono::Duration::days);
+    }
+    if let Some(n) = rest.strip_suffix("-hours") {
+        return n.parse::<i64>().ok().map(chrono::Duration::hours);
+    }
+    None
+}
+
+/// Run `consolidate()` for every external domain whose cadence has elapsed.
+/// Returns `(ran, failed)`. Success advances the domain's last-run stamp;
+/// failure leaves it, so the next cycle retries. Native modules (their
+/// synthetic manifests carry no script) and disabled specs are skipped.
+fn dispatch_due_consolidations(
+    registry: &DomainRegistry,
+    state: &mut DomainCadenceState,
+    now: DateTime<Utc>,
+) -> (usize, usize) {
+    let (mut ran, mut failed) = (0usize, 0usize);
+    for d in registry.iter() {
+        let spec = &d.manifest().consolidation;
+        if !spec.enabled || spec.script.is_none() {
+            continue;
+        }
+        let Some(period) = parse_cadence(&spec.cadence) else {
+            warn!(
+                "Domain '{}' has unparseable consolidation cadence '{}' — skipping",
+                d.name(),
+                spec.cadence
+            );
+            continue;
+        };
+        if let Some(last) = state.last_run.get(d.name())
+            && now - *last < period
+        {
+            continue;
+        }
+        match d.consolidate() {
+            Ok(report) => {
+                info!(
+                    "Domain '{}' consolidated: {} events, {}ms{}",
+                    d.name(),
+                    report.events_processed,
+                    report.runtime_ms,
+                    report
+                        .note
+                        .as_deref()
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default()
+                );
+                state.last_run.insert(d.name().to_string(), now);
+                ran += 1;
+            }
+            Err(e) => {
+                warn!("Domain '{}' consolidation failed: {e:#}", d.name());
+                failed += 1;
+            }
+        }
+    }
+    (ran, failed)
+}
+
 /// Poll `is_process_alive` up to `attempts` times waiting `interval`
 /// between each check. Returns `true` as soon as the process is gone,
 /// `false` if it was still alive at the final check.
@@ -1713,6 +1835,168 @@ mod tests {
     use crate::modules::prospective::Action;
     use tempfile::TempDir;
     use tokio::io::AsyncReadExt;
+
+    // ── Engine-driven cadence dispatch (Wave 1 item 6) ────────
+
+    #[test]
+    fn cadence_words_parse() {
+        assert_eq!(parse_cadence("daily"), Some(chrono::Duration::days(1)));
+        assert_eq!(parse_cadence("weekly"), Some(chrono::Duration::weeks(1)));
+        assert_eq!(
+            parse_cadence("every-2-days"),
+            Some(chrono::Duration::days(2))
+        );
+        assert_eq!(
+            parse_cadence("Every-12-Hours"),
+            Some(chrono::Duration::hours(12))
+        );
+        assert_eq!(parse_cadence("manifest"), None);
+        assert_eq!(parse_cadence(""), None);
+    }
+
+    /// Build a throwaway external domain whose consolidate script appends a
+    /// line to `ran.log`, exiting with `exit_code`.
+    fn test_external_domain(root: &Path, exit_code: i32) -> crate::modules::external_domain::ExternalDomain {
+        use std::os::unix::fs::PermissionsExt;
+        let script = root.join("consolidate.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho ran >> {}\nexit {exit_code}\n",
+                root.join("ran.log").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("events.jsonl"), "").unwrap();
+        let manifest_path = root.join("dom.toml");
+        std::fs::write(
+            &manifest_path,
+            format!(
+                r#"
+[domain]
+name = "testdom"
+version = "0"
+description = "cadence-dispatch test domain"
+root = "{root}"
+
+[event_stream]
+path = "{root}/events.jsonl"
+format = "jsonl"
+id_field = "id"
+ts_field = "ts"
+
+[consolidation]
+enabled = true
+type = "external_script"
+script = "{root}/consolidate.sh"
+cadence = "daily"
+timeout = "10s"
+"#,
+                root = root.display()
+            ),
+        )
+        .unwrap();
+        let m = crate::modules::external_domain::load_manifest(&manifest_path).unwrap();
+        crate::modules::external_domain::ExternalDomain::from_manifest(m).unwrap()
+    }
+
+    #[test]
+    fn dispatch_runs_due_domain_then_waits_out_its_cadence() {
+        let dir = TempDir::new().unwrap();
+        let ed = test_external_domain(dir.path(), 0);
+        let registry = DomainRegistry::from_domains(vec![Box::new(ed)]);
+        let mut state = DomainCadenceState::default();
+        let t0 = Utc::now();
+
+        // No prior stamp → due → runs.
+        assert_eq!(dispatch_due_consolidations(&registry, &mut state, t0), (1, 0));
+        // Immediately again → inside the daily cadence → skipped.
+        assert_eq!(dispatch_due_consolidations(&registry, &mut state, t0), (0, 0));
+        // A day and change later → due again.
+        let t1 = t0 + chrono::Duration::hours(25);
+        assert_eq!(dispatch_due_consolidations(&registry, &mut state, t1), (1, 0));
+        let runs = std::fs::read_to_string(dir.path().join("ran.log")).unwrap();
+        assert_eq!(runs.lines().count(), 2);
+    }
+
+    #[test]
+    fn dispatch_failure_leaves_stamp_unset_for_retry() {
+        let dir = TempDir::new().unwrap();
+        let ed = test_external_domain(dir.path(), 1);
+        let registry = DomainRegistry::from_domains(vec![Box::new(ed)]);
+        let mut state = DomainCadenceState::default();
+        assert_eq!(
+            dispatch_due_consolidations(&registry, &mut state, Utc::now()),
+            (0, 1)
+        );
+        assert!(
+            state.last_run.is_empty(),
+            "failed run must not advance the stamp"
+        );
+    }
+
+    // Live one-shot: boot the REAL registry and run pinned's consolidation —
+    // the docs/24 item-6 validation target (pins finally decay, active.md
+    // regenerates). Ignored by default: it touches live pin data, with the
+    // same effects as one daemon dispatch.
+    // Run: cargo test dispatch_pinned_consolidation_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dispatch_pinned_consolidation_live() {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let config = Config::default();
+        let store = Store::new(home.join(".claude/subconscious")).unwrap();
+        let registry = DomainRegistry::boot(&config, &store);
+        let pinned = registry
+            .get("pinned")
+            .expect("pinned domain must be discovered from its inline manifest");
+        let report = pinned.consolidate().expect("pinned consolidation runs");
+        println!(
+            "pinned consolidated: events={}, runtime={}ms, note={:?}",
+            report.events_processed, report.runtime_ms, report.note
+        );
+        let decay = home.join(".claude/pinned/_decay-state.json");
+        let age = std::fs::metadata(&decay)
+            .and_then(|m| m.modified())
+            .map(|t| {
+                std::time::SystemTime::now()
+                    .duration_since(t)
+                    .unwrap_or_default()
+            })
+            .expect("decay state exists");
+        assert!(
+            age.as_secs() < 300,
+            "decay state should be freshly rewritten, is {}s old",
+            age.as_secs()
+        );
+    }
+
+    #[test]
+    fn dispatch_skips_native_domains() {
+        struct Stub;
+        impl crate::modules::Module for Stub {
+            fn should_run(&self) -> Result<bool> {
+                Ok(false)
+            }
+            fn run(
+                &self,
+                _client: &ClaudeClient,
+                _budget_tokens: u64,
+            ) -> impl std::future::Future<Output = Result<u64>> + Send {
+                async { Ok(0) }
+            }
+        }
+        let registry = DomainRegistry::from_domains(vec![Box::new(
+            crate::modules::NativeAdapter::new("native-stub", Stub),
+        )]);
+        let mut state = DomainCadenceState::default();
+        assert_eq!(
+            dispatch_due_consolidations(&registry, &mut state, Utc::now()),
+            (0, 0)
+        );
+        assert!(state.last_run.is_empty());
+    }
 
     // ── Socket listener end-to-end ────────────────────────────
     // This is the only test in the project that actually spins up
