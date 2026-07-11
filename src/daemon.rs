@@ -713,6 +713,20 @@ impl Daemon {
             self.config.budget.max_tokens_per_cycle
         );
 
+        // Wave 2 items 9+10 — reinforcement: fade every pattern a little, feed
+        // this cycle's honored/rejected feedback back onto the source patterns,
+        // and evict the weakest so the store keeps what it uses. Runs after
+        // dreaming (fresh patterns/associations) and intuition (fresh feedback),
+        // and is the single writer of patterns.json's strength dimension.
+        match crate::consolidation::reinforce::run_cycle(&self.store) {
+            Ok(r) if r.reactivated + r.weakened + r.evicted > 0 => info!(
+                "Reinforcement: {} reactivated, {} weakened, {} evicted, {} surviving",
+                r.reactivated, r.weakened, r.evicted, r.surviving
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("Reinforcement pass failed: {e:#}"),
+        }
+
         // Wave 1 item 7 — universal retention: archive each bounded store's
         // overflow into its _archived/<date>/ (traces beyond 30d, all but the
         // 10 newest snapshots, JSONL logs beyond 10k lines). Runs before the
@@ -2821,6 +2835,9 @@ timeout = "10s"
             source_sessions: vec![],
             source_projects: vec![],
             occurrence_history: vec![],
+            strength: conf,
+            ease: 2.5,
+            reactivations: 0,
         }
     }
 

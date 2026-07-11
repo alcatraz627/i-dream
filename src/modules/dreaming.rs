@@ -54,6 +54,39 @@ pub struct ExtractedPattern {
     /// patterns without the field deserialize as an empty history.
     #[serde(default)]
     pub occurrence_history: Vec<String>,
+    /// Memory strength (Wave 2 item 9). A lesson the store keeps rediscovering
+    /// but never reusing should fade; one that keeps proving useful should
+    /// endure. Strength starts at the pattern's confidence, decays a little
+    /// each cycle, and is re-potentiated when the insight it feeds is honored.
+    /// Eviction removes the weakest, not the least confident — confidence is
+    /// saturated (nearly every pattern sits at ~0.9) and cannot rank.
+    /// The sentinel default (-1) means "not yet initialized"; the first decay
+    /// pass seeds it from confidence, so legacy rows migrate transparently.
+    #[serde(default = "uninitialized_strength")]
+    pub strength: f64,
+    /// Decay-rate governor (SM-2's ease factor). Higher = slower forgetting.
+    /// Honoring a lesson raises it; rejecting one lowers it, so a repeatedly
+    /// rejected lesson forgets itself faster each time.
+    #[serde(default = "default_ease")]
+    pub ease: f64,
+    /// How many times this pattern's insight has been honored (an up-vote or a
+    /// surfaced-and-not-corrected reactivation). Zero for a pattern that has
+    /// never earned its keep; the reactivation-rate metric docs/24 asks for,
+    /// and the signal that marks a graduated anchor eviction must spare.
+    #[serde(default)]
+    pub reactivations: u32,
+}
+
+/// Sentinel for a strength field that predates the field (or a brand-new
+/// pattern): the reinforcement pass seeds it from confidence on first touch.
+/// A real strength is always in [0, 1], so a negative value is unambiguous.
+fn uninitialized_strength() -> f64 {
+    -1.0
+}
+
+/// SM-2's initial ease factor. The reinforcement pass keeps ease in [1.3, 3.0].
+fn default_ease() -> f64 {
+    2.5
 }
 
 /// D11 v2 — cap occurrence_history at 50 most-recent entries. Keeps
@@ -791,6 +824,9 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                             first_seen: now.clone(),
                             last_seen: now.clone(),
                             occurrence_history: vec![now.clone()],
+                            strength: r.confidence,
+                            ease: default_ease(),
+                            reactivations: 0,
                         });
                     }
                 }
@@ -866,19 +902,10 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
 
         if had_merges || !truly_new.is_empty() {
             all.extend(truly_new);
-
-            // Cap total patterns at 500, keeping highest-confidence ones.
-            // Without a cap patterns.json grows unboundedly and REM prompts bloat.
-            const MAX_PATTERNS: usize = 500;
-            if all.len() > MAX_PATTERNS {
-                all.sort_by(|a, b| {
-                    b.confidence
-                        .partial_cmp(&a.confidence)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                all.truncate(MAX_PATTERNS);
-            }
-
+            // The 500-cap is enforced by the reinforcement pass (Wave 2 item 9),
+            // which evicts by memory STRENGTH — a signal that ranks — not by the
+            // saturated confidence value this used to sort on. SWS just records
+            // what it learned; a cycle's post-phase trims the store.
             self.store.write_json("dreams/patterns.json", &all)?;
         }
 

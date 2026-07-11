@@ -284,6 +284,9 @@ mod tests {
             first_seen: seen.into(),
             last_seen: seen.into(),
             occurrence_history: vec![],
+            strength: conf,
+            ease: 2.5,
+            reactivations: 0,
         }
     }
 

@@ -344,6 +344,9 @@ mod tests {
             first_seen: "2026-05-01T00:00:00Z".into(),
             last_seen: "2026-05-01T00:00:00Z".into(),
             occurrence_history: vec![],
+            strength: conf,
+            ease: 2.5,
+            reactivations: 0,
         }
     }
 
