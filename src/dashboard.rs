@@ -3038,6 +3038,13 @@ fn render_patterns_graph_section(snap: &Snapshot) -> String {
     var ts = new Date().toISOString().replace(/[:.]/g, '-');
     var doc =
       '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+      // Same crescent-moon icon as the dashboard, so the exported page shares
+      // its identity in the tab bar. Single quotes in the SVG are %27-encoded
+      // so the data URI survives this JS single-quoted string.
+      '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,' +
+      '%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E' +
+      '%3Ccircle cx=%2716%27 cy=%2716%27 r=%2713%27 fill=%27%237aa2f7%27/%3E' +
+      '%3Ccircle cx=%2721%27 cy=%2712%27 r=%279%27 fill=%27%230c0e12%27/%3E%3C/svg%3E">' +
       '<title>i-dream Patterns Graph — ' + ts.slice(0, 19) + '</title>' +
       '<style>' +
       'body {{ margin:0; padding:18px; background:#0d1117; color:#c9d1d9; ' +
