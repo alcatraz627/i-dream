@@ -747,6 +747,24 @@ pub const RETENTION: &[RetentionRule] = &[
         store: ".claude/subconscious/dreams/insight-feedback.jsonl",
         policy: RetentionPolicy::MaxLines(10_000),
     },
+    // Process-audit additions (census 2026-07-12, unpaired-writes table).
+    // `_rejections.jsonl` inside audits/ is underscore-prefixed, so directory
+    // rules skip it — its TTL prune lives in audit.rs::load_active_rejections.
+    RetentionRule {
+        store: ".claude/i-dream/audits",
+        policy: RetentionPolicy::MaxAgeDays(180),
+    },
+    RetentionRule {
+        store: ".claude/i-dream/daily",
+        policy: RetentionPolicy::MaxAgeDays(90),
+    },
+    // Live logs keep a fresh mtime; only logs a renamed/retired job stopped
+    // writing get archived (launchd recreates a StandardErrorPath on demand,
+    // so archiving a quiet-but-live path is harmless).
+    RetentionRule {
+        store: ".claude/i-dream/logs",
+        policy: RetentionPolicy::MaxAgeDays(45),
+    },
 ];
 
 /// What one reap pass did to one store.

@@ -215,7 +215,7 @@ near-zero on quiet ones.
 | Daily digest empty / placeholder-heavy | Either no dream-pass has run yet (`i-dream dream-pass`) or no domain has events (memory/sessions: run extract scripts; atone/affirm: invoke their skills) |
 | Cron status says "NOT INSTALLED" | `i-dream cron install` |
 | Widget "Today" submenu shows old counts | Click "Regenerate" or run `i-dream digest` |
-| Two `i-dream` binaries on PATH — one stale | `cp -f ~/.cargo/bin/i-dream ~/.local/bin/i-dream` |
+| Two `i-dream` binaries on PATH — one stale | `bash scripts/install.sh` (installs both atomically; never `cp -f` in place — it invalidates the Mach-O signature cache and launchd's next spawn gets SIGKILLed) |
 
 ---
 

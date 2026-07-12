@@ -13,10 +13,12 @@ Thanks for considering a contribution. i-dream is built solo right now but PRs a
 
 ```bash
 # Rust changes
-cargo build --release
 cargo test --release --bins
-cp target/release/i-dream ~/.local/bin/i-dream
-~/.local/bin/i-dream --help          # verify
+bash scripts/install.sh              # builds + installs atomically (tmp + mv)
+# NEVER cp over ~/.local/bin/i-dream in place: overwriting a signed Mach-O
+# reuses the vnode and invalidates the kernel's cached code signature, and
+# the next launchd spawn gets SIGKILLed (OS_REASON_CODESIGNING) or EX_CONFIG.
+# This killed the 2026-07-12 02:30/02:45/03:00 nightly jobs.
 
 # Swift changes
 bash tools/menubar/build.sh          # builds + ad-hoc signs + relaunches

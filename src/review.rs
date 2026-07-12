@@ -72,11 +72,26 @@ pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
 
     // Quote-safe: single-quoted, and neither value contains a single quote.
     // Backticks stay literal inside single quotes (no command substitution).
+    //
+    // The apply instruction matters: interactive `i-dream audit run` REGENERATES
+    // proposals (fresh LLM call) rather than resuming the staged file, so the
+    // review agent must apply approved edits directly and close the loop by
+    // hand. The 2026-07-12 review paid for the old wording that said otherwise.
     let prompt = "Run the i-dream weekly review. Read the most recent staged audit \
-                  under ~/.claude/i-dream/audits/ and the output of `i-dream reflect`, \
-                  then walk me through each proposal (including any hook graduate / \
-                  de-escalate suggestions) and apply the ones I approve via \
-                  `i-dream audit run`. Start by summarizing what is pending.";
+                  under ~/.claude/i-dream/audits/ (check its header first — a \
+                  Reviewed note means it is already actioned, nothing pending) and \
+                  the output of `i-dream reflect`, then walk me through each \
+                  proposal with your recommendation. Apply the ones I approve by \
+                  editing the target files directly — do NOT apply via \
+                  `i-dream audit run`; it regenerates a fresh proposal set instead \
+                  of resuming the staged one. Record each rejection as a line in \
+                  ~/.claude/i-dream/audits/_rejections.jsonl with \
+                  fp = sha256(expanded_target + newline + lowercased \
+                  whitespace-collapsed intent) and a dated reason — verify the fp \
+                  recipe by reproducing an existing ledger line first. When done, \
+                  update the audit file header with Reviewed counts and remove the \
+                  ~/.claude/i-dream/.review-pending flag (trash, not rm). Start by \
+                  summarizing what is pending.";
     let inner = format!("cd '{cd_target}' && claude '{prompt}'");
 
     // Launch a *fresh* Ghostty instance, not a window off the running one.
@@ -96,10 +111,11 @@ pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
         .with_context(|| format!("Cannot launch Ghostty ({GHOSTTY_APP})"))?;
 
     // Intentionally do NOT clear the flag here: opening a window is not the same
-    // as reviewing. The flag clears when an interactive `audit run` completes
-    // (the real review), so the Monday LaunchAgent keeps re-surfacing pending
-    // proposals until they're actually handled — and a failed launch never
-    // silently consumes them.
+    // as reviewing. The flag clears when the review actually completes — the
+    // seeded prompt tells the review agent to remove it at the end, and an
+    // interactive `audit run` also clears it — so the Monday LaunchAgent keeps
+    // re-surfacing pending proposals until they're actually handled, and a
+    // failed launch never silently consumes them.
     match staged {
         Some(d) => println!("✓ opened the weekly review (proposals staged {}).", d.trim()),
         None => println!("✓ opened the weekly review in a new Ghostty window."),

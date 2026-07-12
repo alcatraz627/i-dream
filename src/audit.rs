@@ -352,6 +352,11 @@ struct AuditInputs {
     dailies: Vec<String>,
     domain_summaries: Vec<DomainSummary>,
     active_rejections: HashSet<String>,
+    /// Full active rejection records, fed to the proposal prompt grouped by
+    /// target — so a reworded intent against a rejected target meets the
+    /// recorded reasons instead of dodging the fingerprint filter
+    /// (prop-20260709-232250-a1; the cli-gating thread resurfaced 4 times).
+    rejection_history: Vec<Rejection>,
 }
 
 struct DomainSummary {
@@ -413,23 +418,32 @@ fn gather_inputs(week_days: i64) -> Result<AuditInputs> {
         }
     }
 
-    let active_rejections = load_active_rejections()?;
+    let (active_rejections, rejection_history) = load_active_rejections()?;
 
     Ok(AuditInputs {
         audit_date: today,
         dailies,
         domain_summaries,
         active_rejections,
+        rejection_history,
     })
 }
 
-fn load_active_rejections() -> Result<HashSet<String>> {
+/// Load the rejection ledger: fingerprints for the hard filter plus the full
+/// active records for the prompt's per-target history. Expired lines (past
+/// REJECTION_TTL_DAYS) are pruned from the file on the way through — the TTL
+/// previously existed only in this read path, so the ledger grew forever
+/// (census 2026-07-12, unpaired-writes table).
+fn load_active_rejections() -> Result<(HashSet<String>, Vec<Rejection>)> {
     let path = audit_dir()?.join("_rejections.jsonl");
     let mut set = HashSet::new();
+    let mut records: Vec<Rejection> = vec![];
     if !path.exists() {
-        return Ok(set);
+        return Ok((set, records));
     }
     let cutoff = Utc::now() - chrono::Duration::days(REJECTION_TTL_DAYS);
+    let mut kept_lines: Vec<String> = vec![];
+    let mut expired_lines: Vec<String> = vec![];
     let f = fs::File::open(&path)?;
     for line in BufReader::new(f).lines().map_while(Result::ok) {
         let line = line.trim();
@@ -437,16 +451,46 @@ fn load_active_rejections() -> Result<HashSet<String>> {
             continue;
         }
         let Ok(r) = serde_json::from_str::<Rejection>(line) else {
+            // Pruning must never eat lines it doesn't understand — keep them
+            // on disk, just don't feed them to the filter.
+            kept_lines.push(line.to_string());
             continue;
         };
         let Ok(ts) = DateTime::parse_from_rfc3339(&r.rejected_ts) else {
+            kept_lines.push(line.to_string());
             continue;
         };
         if ts.with_timezone(&Utc) >= cutoff {
-            set.insert(r.fp);
+            set.insert(r.fp.clone());
+            kept_lines.push(line.to_string());
+            records.push(r);
+        } else {
+            expired_lines.push(line.to_string());
         }
     }
-    Ok(set)
+    if !expired_lines.is_empty() {
+        // Archive-never-delete, matching the retention reaper's philosophy:
+        // expired rejections carry the zombie-proposal lineage, so they move
+        // to the audits _archived bucket instead of vanishing.
+        let archive_dir = audit_dir()?.join("_archived");
+        fs::create_dir_all(&archive_dir)?;
+        let archive = archive_dir.join("rejections-expired.jsonl");
+        let mut af = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&archive)?;
+        for l in &expired_lines {
+            writeln!(af, "{l}")?;
+        }
+        let tmp = path.with_extension("jsonl.tmp");
+        fs::write(&tmp, kept_lines.join("\n") + "\n")?;
+        fs::rename(&tmp, &path)?;
+        println!(
+            "  ({} expired rejection line(s) archived to _archived/rejections-expired.jsonl)",
+            expired_lines.len()
+        );
+    }
+    Ok((set, records))
 }
 
 // ── LLM calls ───────────────────────────────────────────────────────────────
@@ -498,6 +542,16 @@ to the user's ~/.claude/ Global Claude Config (GCC) based on this week's signals
 
 {domain_tldrs}
 
+# Rejection memory (last {REJECTION_TTL_DAYS}d) — same-target proposals must overcome these
+
+Proposals whose intent duplicates a listed rejection IN ANY WORDING are wasted
+output: the exact-fingerprint filter catches verbatim repeats, and the reviewer
+rejects rewordings on sight (the cli-gating thread was re-proposed 4 times this
+way). Only propose against a listed target if you bring NEW evidence that
+overcomes the recorded reason — and name that evidence explicitly in `rationale`.
+
+{rejection_block}
+
 # Output (strict JSON array)
 
 ```json
@@ -547,6 +601,30 @@ Parseable JSON array only. No markdown fences. No preamble."#,
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
+        },
+        rejection_block = if inputs.rejection_history.is_empty() {
+            "_(no active rejections)_".to_string()
+        } else {
+            let mut by_target: std::collections::BTreeMap<&str, Vec<&Rejection>> =
+                Default::default();
+            for r in &inputs.rejection_history {
+                by_target.entry(r.target.as_str()).or_default().push(r);
+            }
+            by_target
+                .iter()
+                .map(|(target, rs)| {
+                    let mut s = format!("- `{}` — {} rejection(s):\n", target, rs.len());
+                    for r in rs {
+                        s.push_str(&format!(
+                            "    - \"{}\" → {}\n",
+                            r.intent.chars().take(120).collect::<String>(),
+                            r.reason.chars().take(220).collect::<String>()
+                        ));
+                    }
+                    s
+                })
+                .collect::<Vec<_>>()
+                .join("")
         },
     );
 
