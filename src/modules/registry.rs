@@ -754,6 +754,15 @@ pub const RETENTION: &[RetentionRule] = &[
         store: ".claude/i-dream/audits",
         policy: RetentionPolicy::MaxAgeDays(180),
     },
+    // The janitor ledger is underscore-prefixed too, so the directory rule
+    // above skips it (same mechanism that exempts `_rejections.jsonl`), and
+    // each removal record embeds a full pre-image payload — cap the file
+    // directly or it grows without bound (gate finding, 2026-07-13). Overflow
+    // lines append to audits/_archived/<date>/_autonomous.jsonl.
+    RetentionRule {
+        store: ".claude/i-dream/audits/_autonomous.jsonl",
+        policy: RetentionPolicy::MaxLines(20_000),
+    },
     RetentionRule {
         store: ".claude/i-dream/daily",
         policy: RetentionPolicy::MaxAgeDays(90),
@@ -807,6 +816,30 @@ pub fn run_retention_at(home: &Path) -> Vec<ReapReport> {
                 RetentionPolicy::KeepNewest(n) => reap_dir_keep_newest(&target, n, &date),
                 RetentionPolicy::MaxLines(n) => reap_jsonl_max_lines(&target, n, &date),
             };
+            // Janitor ledger (docs/25 item 12). Coarse by design: the reap
+            // helpers report counts, not paths, so the token names the
+            // per-store archive bucket for the date — revert restores from
+            // there. Recorded only when something actually moved. For a
+            // file-target rule (MaxLines) the bucket lives under the file's
+            // PARENT — naming `<file>/_archived/<date>` would record a path
+            // that can never exist.
+            if archived > 0 {
+                let bucket_root = match r.policy {
+                    RetentionPolicy::MaxLines(_) => Path::new(r.store)
+                        .parent()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| r.store.to_string()),
+                    _ => r.store.to_string(),
+                };
+                crate::consolidation::autonomous::record_if_live(
+                    &target,
+                    "retention-archive",
+                    r.store,
+                    &format!("{archived} item(s) archived"),
+                    &format!("restore-dir:{bucket_root}/_archived/{date}"),
+                    "registry::retention",
+                );
+            }
             ReapReport {
                 store: r.store,
                 archived,

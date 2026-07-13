@@ -475,13 +475,29 @@ fn classify_queue_entries(entries: Vec<(PathBuf, QueueEntry)>, feed_cap: usize) 
 /// Move a queue file into the archive rather than deleting it —
 /// `_processed/<bucket>/`, where bucket is the UTC date (or `_poison` for
 /// unparseable files). Archive-before-delete is a standing constraint.
-fn archive_queue_file(path: &Path, queue_dir: &Path, bucket: &str) -> Result<()> {
+fn archive_queue_file(path: &Path, queue_dir: &Path, bucket: &str, disposition: &str) -> Result<()> {
     let dest_dir = queue_dir.join("_processed").join(bucket);
     std::fs::create_dir_all(&dest_dir)?;
     let Some(name) = path.file_name() else {
         return Ok(());
     };
-    std::fs::rename(path, dest_dir.join(name))?;
+    let dest = dest_dir.join(name);
+    std::fs::rename(path, &dest)?;
+    // Janitor ledger (docs/25 item 12): the move is reversible by moving the
+    // file back — the token names the archived copy. The disposition rides in
+    // `diff` because the two archive reasons revert differently: a
+    // duplicate/trivial/poison file was never read into the store (restore is
+    // free), while a "consumed" entry's content already lives in patterns —
+    // restoring it re-feeds one duplicate reading, which the merge pass folds
+    // (gate finding, 2026-07-13).
+    crate::consolidation::autonomous::record_if_live(
+        queue_dir,
+        "drain-checkpoint",
+        &path.to_string_lossy(),
+        disposition,
+        &format!("restore:{}", dest.to_string_lossy()),
+        "dreaming::drain",
+    );
     Ok(())
 }
 
@@ -572,12 +588,12 @@ impl<'a> DreamingModule<'a> {
                 "duplicate" => n_duplicate += 1,
                 _ => n_trivial += 1,
             }
-            if let Err(e) = archive_queue_file(path, &queue_dir, &archive_date) {
+            if let Err(e) = archive_queue_file(path, &queue_dir, &archive_date, reason) {
                 warn!("queue drain: cannot archive {}: {e:#}", path.display());
             }
         }
         for path in &queue_poison {
-            if let Err(e) = archive_queue_file(path, &queue_dir, "_poison") {
+            if let Err(e) = archive_queue_file(path, &queue_dir, "_poison", "poison") {
                 warn!("queue drain: cannot quarantine {}: {e:#}", path.display());
             }
         }
@@ -936,7 +952,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
         // fail.
         let mut queue_consumed = 0usize;
         for (path, _q) in fed {
-            match archive_queue_file(path, &queue_dir, &archive_date) {
+            match archive_queue_file(path, &queue_dir, &archive_date, "consumed") {
                 Ok(()) => queue_consumed += 1,
                 Err(e) => warn!(
                     "queue drain: cannot archive consumed {}: {e:#}",
@@ -1496,10 +1512,24 @@ Output ONLY a JSON array. No commentary."#;
         // a resolution overtakes, and record each retirement once in the
         // forgotten ledger — the single writer of that file.
         let resolutions = crate::modules::grounding::load_resolutions(self.store);
+        // Pre-images for the janitor ledger (docs/25 item 12): the removed
+        // association rides in the record, so the revert is a re-insert.
+        let assoc_pre_image: HashMap<String, String> = all_assocs
+            .iter()
+            .map(|a| (a.id.clone(), serde_json::to_string(a).unwrap_or_default()))
+            .collect();
         let forgotten =
             crate::consolidation::forgetting::govern_associations(&mut all_assocs, &resolutions, Utc::now());
         for f in &forgotten {
             self.store.append_jsonl("dreams/forgotten.jsonl", f)?;
+            crate::consolidation::autonomous::record_if_live(
+                &self.store.path(""),
+                "forget-association",
+                &f.id,
+                assoc_pre_image.get(&f.id).map(String::as_str).unwrap_or(""),
+                "reinsert:dreams/associations.json",
+                "dreaming::wake-govern",
+            );
         }
         if !forgotten.is_empty() {
             self.store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
@@ -2182,7 +2212,7 @@ mod tests {
         let root = dir.path();
         let f = root.join("x.json");
         std::fs::write(&f, "{}").unwrap();
-        archive_queue_file(&f, root, "2026-07-11").unwrap();
+        archive_queue_file(&f, root, "2026-07-11", "duplicate").unwrap();
         assert!(!f.exists());
         assert!(root.join("_processed/2026-07-11/x.json").exists());
     }

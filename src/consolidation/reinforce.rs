@@ -362,9 +362,27 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
     // capacity-eviction runs, so a resolved claim leaves even if it was an
     // anchor. grounding owns the resolution list; forgetting is the single
     // writer of the forgotten ledger.
+    //
+    // Pre-images for the janitor ledger (docs/25 item 12): a removal's
+    // autonomous record embeds the full serialized object, so its revert is
+    // a mechanical re-insert with no judgment.
+    let pre_image: HashMap<String, String> = patterns
+        .iter()
+        .map(|p| (p.id.clone(), serde_json::to_string(p).unwrap_or_default()))
+        .collect();
     let forgotten = super::forgetting::govern(&mut patterns, &resolutions, Utc::now());
     for f in &forgotten {
         store.append_jsonl("dreams/forgotten.jsonl", f)?;
+        if f.kind == "pattern" {
+            super::autonomous::record_if_live(
+                &store.path(""),
+                "forget-pattern",
+                &f.id,
+                pre_image.get(&f.id).map(String::as_str).unwrap_or(""),
+                "reinsert:dreams/patterns.json",
+                "reinforce::govern",
+            );
+        }
     }
     if !forgotten.is_empty() {
         store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
@@ -373,6 +391,14 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
     let evicted = evict_to_cap(&mut patterns, MAX_PATTERNS);
     for e in &evicted {
         store.append_jsonl("dreams/evicted.jsonl", e)?;
+        super::autonomous::record_if_live(
+            &store.path(""),
+            "evict-pattern",
+            &e.id,
+            pre_image.get(&e.id).map(String::as_str).unwrap_or(""),
+            "reinsert:dreams/patterns.json",
+            "reinforce::evict",
+        );
     }
     store.prune_jsonl("dreams/evicted.jsonl", 5_000)?;
     store.write_json("dreams/patterns.json", &patterns)?;

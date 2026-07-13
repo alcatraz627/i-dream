@@ -80,6 +80,43 @@ than only draining/decaying/archiving).
 **Kill.** Human reverts >20% of auto-actions in 2 weeks → drop that action class
 back to propose-only (it surfaces the action for approval instead of taking it).
 
+**Shipped 2026-07-13** (validation:
+`.claude/output/20260713-item12-validation/findings.md`, ISSUES-FOUND → all
+actionable findings fixed). Shipped: `consolidation/autonomous.rs` (the ledger +
+the `record_if_live` path gate that keeps temp-copy probes out of the real audit
+trail), five instrumented passes (evict-pattern and forget-pattern with full
+pre-image payloads, forget-association, drain-checkpoint with a restore token,
+retention-archive), `scripts/revert-autonomous.sh` (restore / reinsert /
+restore-dir, idempotent, self-auditing), and `tests/revert_autonomous.rs` (five
+end-to-end script tests; the reinsert-idempotence mutation now goes red — it was
+green for the gate). The gate's best catches, all fixed: the live-gate resolved
+home via `$HOME` alone while `config::expand_tilde` uses `dirs::home_dir()`, so
+a HOME-less launchd run would mutate the real store and silently record nothing
+(both now share one primitive); `restore:` clobbered a differing live file
+(now refuses, exit 4) and crashed on double-revert (now no-ops); the documented
+default `last` crashed on the revert's own meta-record (selector now skips
+empty-token lines, tolerantly per-line); `_autonomous.jsonl` was exempt from all
+retention (now capped MaxLines 20,000 by a file-target rule — fixing, in
+passing, the restore-dir token for ALL file-target rules, which named
+`<file>/_archived/<date>`, a path that never exists; insight-feedback.jsonl
+records were affected too); drain records now carry their disposition
+(duplicate / trivial / poison / consumed) so a consumed checkpoint's revert
+warns that re-feeding duplicates one reading (the merge pass folds it).
+**Deferred, on the record:** per-ITEM retention revert tokens — the reap
+helpers report counts, not paths; `restore-dir` now mechanically restores at
+BUCKET granularity, skipping occupied live paths (a JSONL overflow archive
+always skips: its lines belong prepended, which no `mv` can do). Decay and
+merge remain deliberately unrecorded: their pre-images are derived and
+recomputable, a revert of either is just re-running the pass, and recording
+them would multiply ledger volume for no mechanical-revert value. UNCONFIRMED
+end-to-end: reverting a consumed checkpoint through a real API cycle (gate
+could not safely run one); the disposition warning is the mitigation. No
+automated HOME-unset regression test (process-global env mutation races the
+parallel suite) — the fix is structural, one shared primitive. The briefing
+shortlist surface stays with the parallel session that owns
+`weekly_briefing.rs` (ipc msg-29a88b16). No cron added; if one is wanted it
+goes via gcc-schedule + Calendar companion per the scheduling rule.
+
 ---
 
 ## Item 13 — Rejection memory
@@ -241,6 +278,25 @@ to the prior injector; the conditioning is not buying anything.
 
 **Blocked-by note.** docs/24 binds: no docs/21 hook-graduation ladder until this
 item (retrieval) is fixed. Item 15 is the prerequisite, not a parallel track.
+
+**Shipped 2026-07-13** (validation:
+`.claude/output/20260713-item15-validation/findings.md`, ISSUES-FOUND → all
+five findings fixed and re-exercised). Built: engine side — PatternViewItem
+gains strength/reactivations/source_projects (verified single-consumer safe);
+gcc side — dream-insights.sh Part 2 replaced with importance × recency ×
+relevance ranking over the derived view (query = cwd tokens + INJECT_QUERY;
+no embeddings per the binding), entropy log records {kind: dream-ranked, ids};
+atone lane gains the escalation ladder: rule+hook slugs drop with an honest
+omitted count (live: declared-ready), rule-no-hook slugs recurring ≥2×/7d
+emit a deduped hook proposal instead of repeating the failed advisory — the
+dedupe consults the backlog AND both rejection ledgers (live proof: it
+declined to re-file infra-before-grep, rejected 05-29). Acceptance 3/3 on
+real data: query-distinct sets, enforced-slug absence, escalation+dedupe.
+**Deferred honestly:** first-prompt + tool-signature query terms (needs a
+UserPromptSubmit lane; cwd-only today); full env-override testability for the
+script's remaining fixed paths; the dream half stays behind .inject-on —
+entropy/recurrence health signals accrue via injections.jsonl either way.
+Kill-criteria clock starts when .inject-on is enabled.
 
 ---
 
