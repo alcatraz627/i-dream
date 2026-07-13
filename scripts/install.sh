@@ -24,3 +24,22 @@ done
 
 "$HOME/.local/bin/i-dream" --help >/dev/null
 echo "ok: installed binary executes"
+
+# Reload the launchd services. A fresh inode alone is NOT enough: launchd
+# holds service-level validation state that survives binary replacement AND
+# `kickstart -k` — spawns keep dying (SIGKILL codesigning / 78 EX_CONFIG,
+# zero log output) until the service is booted out and bootstrapped again.
+# Proven 2026-07-13: kickstart after a clean install still exited 78; the
+# bootout/bootstrap cycle immediately produced exit 0.
+UID_N="$(id -u)"
+for plist in "$HOME"/Library/LaunchAgents/com.alcatraz.i-dream-*.plist \
+             "$HOME"/Library/LaunchAgents/dev.i-dream.daemon.plist; do
+    [ -f "$plist" ] || continue
+    label="$(basename "$plist" .plist)"
+    launchctl bootout "gui/$UID_N/$label" 2>/dev/null || true
+    # bootout can take a beat to drain; one retry covers the transient EIO.
+    launchctl bootstrap "gui/$UID_N" "$plist" 2>/dev/null \
+        || { sleep 2; launchctl bootstrap "gui/$UID_N" "$plist"; }
+    echo "reloaded: $label"
+done
+echo "ok: launchd services reloaded (fresh spawn state)"
