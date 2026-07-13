@@ -27,6 +27,7 @@ use crate::api::ClaudeClient;
 use crate::config::Config;
 use crate::modules::Module;
 use crate::modules::dreaming::{Association, ExtractedPattern};
+use crate::modules::grounding;
 use crate::store::Store;
 
 use anyhow::{Context, Result};
@@ -152,9 +153,13 @@ impl<'a> WeeklyBriefingModule<'a> {
         project_rank.sort_by(|a, b| b.1.cmp(&a.1));
 
         // Recent promoted insights from associations (for the "improved" / "frustration" sections).
+        // Resolved claims (dreams/resolutions.jsonl) are excluded so the briefing
+        // can't restate a gap reality has already closed.
+        let resolutions = grounding::load_resolutions(self.store);
         let recent_promoted: Vec<&Association> = associations
             .iter()
             .filter(|a| a.promoted && !a.dismissed)
+            .filter(|a| !grounding::is_resolved(&a.hypothesis, &resolutions))
             .take(20)
             .collect();
 

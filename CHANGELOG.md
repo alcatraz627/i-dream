@@ -4,6 +4,29 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
+### Added — Insight-digest grounding against the live tree (truth-decay fix)
+
+- **`dreams/resolutions.jsonl`** — explicit supersession records for insight
+  claims that reality has overtaken. Each line is `{pattern, reason, ts?,
+  evidence?}`; insight blocks containing `pattern` (case-insensitive) are
+  excluded from digest synthesis and `reason` reaches the prompt as ground
+  truth. First use: the git-push cluster, whose "no mechanical gate exists"
+  claim outlived guard-git-push.sh / guard-user-commit.sh by days and kept
+  misleading every SessionStart via the injected digest.
+- **Live hook-inventory grounding** — the digest prompt now carries the current
+  `~/.claude/scripts/hooks/*.sh` listing with an instruction that claims
+  contradicted by it are history, not open gaps. Covers stale-claim phrasings
+  no resolution pattern anticipates.
+- **`i-dream insight-digest`** (CLI) — force-refresh the insight digest,
+  ignoring the 3h cooldown; prints the result. Exists so a resolution edit can
+  be exercised immediately instead of waiting for the next daemon pass.
+- **`modules::grounding`** (review follow-up, same day) — the resolutions
+  loader/matcher extracted to a shared module and applied to the OTHER two
+  LLM-synthesis surfaces: project briefs (session-injected, same harm class as
+  the digest) and the weekly briefing now drop promoted associations whose
+  hypothesis matches a resolution. Patterns shorter than 12 chars are refused
+  at load so a lazy substring can't swallow unrelated future insights.
+
 ### Added — Grounded external dream prompts + severity-aware cross-domain join
 
 - **`[dream].prompt_fields`** (manifest) — external domains now declare which

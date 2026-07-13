@@ -146,6 +146,11 @@ pub enum Command {
         day: Option<String>,
     },
 
+    /// Force-refresh the insight digest (dreams/insight-digest.md) from the
+    /// latest insights, ignoring the 3h cooldown. Applies resolutions.jsonl
+    /// filtering and live hook-inventory grounding, then prints the result.
+    InsightDigest,
+
     /// Run an LLM dream pass over every registered domain with fresh delta
     /// (docs/14 §3.5). Zero LLM cost when all domains are idle. Outputs
     /// land at each domain's insights.jsonl + rebuilds union views at

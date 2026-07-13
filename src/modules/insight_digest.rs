@@ -3,10 +3,17 @@
 //! Runs at most once every 3 hours. Reads the last 5 insight blocks from
 //! `dreams/insights.md`, calls Claude for a 2-3 sentence prose synthesis,
 //! and writes the result to `dreams/insight-digest.md` for the widget to display.
+//!
+//! Two grounding mechanisms keep the digest honest against a changing tree:
+//! `dreams/resolutions.jsonl` excludes insight blocks whose claims reality has
+//! since overtaken, and a live inventory of `~/.claude/scripts/hooks/` is fed
+//! to the synthesis prompt so "no mechanical gate exists" claims can't outlive
+//! the gate that ships.
 
 use crate::api::ClaudeClient;
 use crate::config::Config;
 use crate::modules::Module;
+use crate::modules::grounding;
 use crate::store::Store;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -82,7 +89,28 @@ impl<'a> Module for InsightDigestModule<'a> {
         let insights_path = self.store.path(INSIGHTS_PATH);
         let insights_raw = std::fs::read_to_string(&insights_path)?;
 
-        let excerpt = extract_last_n_insights(&insights_raw, MAX_INSIGHT_BLOCKS);
+        let resolutions = grounding::load_resolutions(self.store);
+        let blocks = split_insight_blocks(&insights_raw);
+
+        // Partition: blocks whose claim is resolved are excluded from the
+        // synthesis window; their reasons feed the prompt as ground truth.
+        let mut resolved_reasons: Vec<String> = Vec::new();
+        let kept: Vec<&String> = blocks
+            .iter()
+            .filter(|block| {
+                if let Some(res) = grounding::matching_resolution(block, &resolutions) {
+                    if !resolved_reasons.contains(&res.reason) {
+                        resolved_reasons.push(res.reason.clone());
+                    }
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        let start = kept.len().saturating_sub(MAX_INSIGHT_BLOCKS);
+        let excerpt: String = kept[start..].iter().map(|s| s.as_str()).collect();
         if excerpt.trim().is_empty() {
             return Ok(0);
         }
@@ -92,9 +120,11 @@ impl<'a> Module for InsightDigestModule<'a> {
             the system's dream phases. Be precise and impersonal — write about \"the user\", \
             not \"you\". Respond ONLY with a JSON object, no markdown fences.";
 
+        let ground = ground_truth_section(&resolved_reasons, &hooks_inventory());
+
         let prompt = format!(
             "Here are the {MAX_INSIGHT_BLOCKS} most recent high-confidence insights from recent \
-            dream cycles:\n\n{excerpt}\n\n\
+            dream cycles:\n\n{excerpt}{ground}\n\
             Respond with a JSON object with exactly two fields:\n\
             - \"summary\": a 2-3 sentence synthesis in flowing prose — what do these insights \
               collectively reveal about this user's working patterns and what Claude should keep \
@@ -149,68 +179,131 @@ impl<'a> Module for InsightDigestModule<'a> {
     }
 }
 
-/// Extract the last `n` `### Insight` blocks from `insights.md`.
-/// Returns a string containing exactly those blocks.
-fn extract_last_n_insights(content: &str, n: usize) -> String {
-    // Split on "### Insight" — each element after the first is one block.
+/// Split `insights.md` into its `### Insight` blocks, each including the
+/// `### Insight` header line it starts with.
+fn split_insight_blocks(content: &str) -> Vec<String> {
     let parts: Vec<&str> = content.splitn(usize::MAX, "### Insight").collect();
     if parts.len() <= 1 {
-        return String::new();
+        return Vec::new();
     }
-
-    // parts[0] is the header before any insight, parts[1..] are the blocks.
-    let blocks = &parts[1..];
-    let start = blocks.len().saturating_sub(n);
-    blocks[start..]
+    parts[1..]
         .iter()
         .map(|b| format!("### Insight{b}"))
-        .collect::<Vec<_>>()
-        .join("")
+        .collect()
+}
+
+/// Live inventory of enforcement hooks, so synthesis can ground "no mechanical
+/// gate exists" claims against what actually ships today. Best-effort: an
+/// unreadable directory yields an empty list, never an error.
+fn hooks_inventory() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(home.join(".claude/scripts/hooks")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".sh"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Ground-truth text appended to the synthesis prompt: resolved-claim notes
+/// plus the live hook inventory. Empty string when there is nothing to say.
+fn ground_truth_section(resolved_reasons: &[String], hooks: &[String]) -> String {
+    let mut out = String::new();
+    if !resolved_reasons.is_empty() {
+        out.push_str(
+            "\nGround truth — claims from past insights that reality has since RESOLVED. \
+             Treat these as closed history, not current problems; do not restate them as \
+             open gaps:\n",
+        );
+        for reason in resolved_reasons {
+            out.push_str(&format!("- {reason}\n"));
+        }
+    }
+    if !hooks.is_empty() {
+        out.push_str(&format!(
+            "\nLive enforcement-hook inventory (~/.claude/scripts/hooks): {}.\n\
+             If an insight claims a mechanical gate/hook/guard is missing, check this \
+             inventory first — a claim it contradicts describes history, not a current gap.\n",
+            hooks.join(", ")
+        ));
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn extract_returns_empty_when_no_insights() {
-        let content = "# Dream Insights\n_no data yet_\n";
-        assert!(extract_last_n_insights(content, 5).is_empty());
+    fn last_n_joined(content: &str, n: usize) -> String {
+        let blocks = split_insight_blocks(content);
+        let start = blocks.len().saturating_sub(n);
+        blocks[start..].concat()
     }
 
     #[test]
-    fn extract_returns_all_when_fewer_than_n() {
+    fn split_returns_empty_when_no_insights() {
+        let content = "# Dream Insights\n_no data yet_\n";
+        assert!(split_insight_blocks(content).is_empty());
+    }
+
+    #[test]
+    fn split_returns_all_when_fewer_than_n() {
         let content = "# Header\n### Insight (conf=0.8)\n> Hypothesis 1\n---\n\
                        ### Insight (conf=0.9)\n> Hypothesis 2\n---\n";
-        let result = extract_last_n_insights(content, 5);
+        let result = last_n_joined(content, 5);
         assert!(result.contains("Hypothesis 1"));
         assert!(result.contains("Hypothesis 2"));
     }
 
     #[test]
-    fn extract_returns_last_n_when_more_than_n() {
+    fn window_keeps_last_n_when_more_than_n() {
         let mut content = "# Header\n".to_string();
         for i in 1..=8 {
             content.push_str(&format!("### Insight (conf=0.8)\n> Hypothesis {i}\n---\n"));
         }
-        let result = extract_last_n_insights(&content, 3);
-        assert!(
-            !result.contains("Hypothesis 1"),
-            "should not include early blocks"
-        );
-        assert!(!result.contains("Hypothesis 2"));
-        assert!(!result.contains("Hypothesis 3"));
-        assert!(!result.contains("Hypothesis 4"));
-        assert!(!result.contains("Hypothesis 5"));
-        assert!(result.contains("Hypothesis 6"), "should include last 3");
-        assert!(result.contains("Hypothesis 7"));
-        assert!(result.contains("Hypothesis 8"));
+        let result = last_n_joined(&content, 3);
+        for i in 1..=5 {
+            assert!(
+                !result.contains(&format!("Hypothesis {i}")),
+                "should not include early block {i}"
+            );
+        }
+        for i in 6..=8 {
+            assert!(
+                result.contains(&format!("Hypothesis {i}")),
+                "should include last-3 block {i}"
+            );
+        }
     }
 
     #[test]
-    fn extract_preserves_block_header_prefix() {
+    fn split_preserves_block_header_prefix() {
         let content = "# Header\n### Insight (conf=0.82)\n> Some text\n---\n";
-        let result = extract_last_n_insights(content, 5);
-        assert!(result.starts_with("### Insight"));
+        let blocks = split_insight_blocks(content);
+        assert!(blocks[0].starts_with("### Insight"));
+    }
+
+    #[test]
+    fn ground_truth_empty_when_nothing_to_say() {
+        assert_eq!(ground_truth_section(&[], &[]), "");
+    }
+
+    #[test]
+    fn ground_truth_lists_reasons_and_hooks() {
+        let reasons = vec!["gate shipped 2026-07-05".to_string()];
+        let hooks = vec!["guard-git-push.sh".to_string()];
+        let out = ground_truth_section(&reasons, &hooks);
+        assert!(out.contains("gate shipped 2026-07-05"));
+        assert!(out.contains("guard-git-push.sh"));
+        assert!(out.contains("RESOLVED"));
     }
 }

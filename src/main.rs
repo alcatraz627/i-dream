@@ -169,6 +169,18 @@ async fn main() -> Result<()> {
             eprintln!("\n[digest written: {}]", path.display());
         }
 
+        Command::InsightDigest => {
+            use modules::Module as _;
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir())?;
+            let client = api::ClaudeClient::for_config(&config)?;
+            let module = modules::insight_digest::InsightDigestModule::new(&config, &store);
+            let tokens = module.run(&client, 512).await?;
+            let content = std::fs::read_to_string(store.path("dreams/insight-digest.md"))?;
+            print!("{content}");
+            eprintln!("\n[insight digest refreshed, {tokens} tokens]");
+        }
+
         Command::Cron { action } => {
             cron::handle(action)?;
         }

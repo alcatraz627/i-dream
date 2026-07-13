@@ -27,6 +27,7 @@
 use crate::api::ClaudeClient;
 use crate::config::Config;
 use crate::modules::dreaming::{Association, ExtractedPattern};
+use crate::modules::grounding;
 use crate::store::Store;
 
 use anyhow::{Context, Result};
@@ -111,11 +112,16 @@ impl<'a> ProjectBriefsModule<'a> {
         let top_patterns: Vec<&&ExtractedPattern> = matched.iter().take(20).collect();
 
         // Promoted (and not dismissed) associations whose linked patterns
-        // include any from this project's set. Cheap union check.
+        // include any from this project's set. Cheap union check. Resolved
+        // claims (dreams/resolutions.jsonl) are excluded — briefs are injected
+        // into live sessions, so a stale claim here misleads exactly like the
+        // insight digest did.
+        let resolutions = grounding::load_resolutions(self.store);
         let project_pattern_ids: HashSet<&str> = matched.iter().map(|p| p.id.as_str()).collect();
         let promoted_assocs: Vec<&Association> = associations
             .iter()
             .filter(|a| a.promoted && !a.dismissed)
+            .filter(|a| !grounding::is_resolved(&a.hypothesis, &resolutions))
             .filter(|a| {
                 a.patterns_linked
                     .iter()
