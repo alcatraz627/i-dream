@@ -19,7 +19,7 @@
 use crate::api::ClaudeClient;
 use crate::cli::AuditAction;
 use crate::config::Config;
-use crate::consolidation::views::rank_matches;
+use crate::consolidation::views::{rank_matches, token_set};
 use crate::modules::dreaming::{Association, ExtractedPattern};
 use crate::modules::parse_json_codeblock;
 use crate::store::Store;
@@ -27,7 +27,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -55,6 +55,17 @@ const GRADUATION_SIM_MIN: f64 = 0.09;
 /// An applied proposal up-votes at most this many associations, so one broad
 /// graduation can't blanket-reactivate half the store.
 const GRADUATION_MAX_LINKS: usize = 3;
+/// Rejection-memory similarity floor (docs/25 item 13) — the NEAR-VERBATIM
+/// tier only. The corrected replay against genuinely-prior memory showed no
+/// similarity threshold can separate a true reworded zombie (0.332) from a
+/// false positive (0.330, different lesson sharing section vocabulary): the
+/// discriminating signal is a shared kebab compound ("cli-gating"), which
+/// `matching_rejection` checks first. Similarity alone therefore only
+/// catches near-verbatim rewordings, floored high on purpose.
+const REJECTION_TOPIC_SIM_MIN: f64 = 0.50;
+/// Atone slugs shorter than this can't unlock a rejection via substring
+/// matching — too likely to appear in unrelated prose.
+const UNLOCK_SLUG_MIN_LEN: usize = 8;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Proposal {
@@ -136,7 +147,12 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
 
     println!("  {} proposals returned by LLM", proposals.len());
 
-    // Filter by rejection fingerprint.
+    // Pre-surface filters: the exact fingerprint (verbatim repeats), then the
+    // rejection memory (docs/25 item 13 — reworded repeats by target + intent
+    // class, sticking until new atone evidence reopens them), then the
+    // already-exists stat check.
+    let memory = load_all_rejections();
+    let atone_latest = load_atone_slug_index();
     let filtered: Vec<Proposal> = proposals
         .into_iter()
         .filter(|p| {
@@ -149,6 +165,29 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
                 );
             }
             !rejected
+        })
+        .filter(|p| {
+            if let Some(r) = rejection_memory_blocks(p, &memory, &atone_latest) {
+                println!(
+                    "  ⊘ rejection memory: {} → {} (rejected {}: {})",
+                    p.target_file,
+                    p.intent,
+                    r.rejected_ts.chars().take(10).collect::<String>(),
+                    r.reason
+                );
+                return false;
+            }
+            true
+        })
+        .filter(|p| {
+            if already_exists_on_disk(p) {
+                println!(
+                    "  ⊘ already exists on disk: {} → {}",
+                    p.target_file, p.intent
+                );
+                return false;
+            }
+            true
         })
         .filter(|p| p.confidence >= PROPOSAL_CONFIDENCE_FLOOR)
         .take(MAX_PROPOSALS_TOTAL)
@@ -333,8 +372,20 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
         println!("  ⚠ review-outcome recording failed: {e:#}");
     }
 
-    // Persist rejections.
+    // Persist rejections — and surface the item-13 health metric: a rejection
+    // of something already rejected before means the memory failed to filter
+    // it (or an unlocked item came back and was declined again). Target: 0
+    // within two reviews of shipping.
     if !rejected_this_run.is_empty() {
+        let re_rejections = rejected_this_run
+            .iter()
+            .filter(|(p, _)| matching_rejection(p, &memory).is_some())
+            .count();
+        if re_rejections > 0 {
+            println!(
+                "  ⚠ {re_rejections} re-rejection(s) this review (item-13 health metric; target 0)"
+            );
+        }
         append_rejections(&rejected_this_run)?;
     }
 
@@ -839,6 +890,198 @@ fn apply_edit(target: &Path, edit: &RenderedEdit, current: &str) -> Result<()> {
     Ok(())
 }
 
+// ── rejection memory (docs/25 item 13) ──────────────────────────────────────
+
+/// The FULL rejection history: the live ledger plus the TTL-expired archive.
+/// Item 13's memory has no TTL — a rejection sticks until new atone evidence
+/// reopens it — so the live file's 28-day pruning must not amputate the
+/// memory. Tolerant per-line read: a bad line costs only itself.
+fn load_all_rejections() -> Vec<Rejection> {
+    match audit_dir() {
+        Ok(dir) => load_all_rejections_from(&dir),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Directory-parameterized core of `load_all_rejections`, split out so the
+/// archive-survival claim is testable against a temp dir (the no-TTL memory
+/// had zero coverage of its own point — validation 2026-07-13).
+fn load_all_rejections_from(dir: &Path) -> Vec<Rejection> {
+    let mut out = Vec::new();
+    for path in [
+        dir.join("_rejections.jsonl"),
+        dir.join("_archived/rejections-expired.jsonl"),
+    ] {
+        let Ok(body) = fs::read_to_string(&path) else {
+            continue;
+        };
+        out.extend(
+            body.lines()
+                .filter_map(|l| serde_json::from_str::<Rejection>(l.trim()).ok()),
+        );
+    }
+    out
+}
+
+/// Latest atone event per slug — the unlock evidence. Tolerant read of the
+/// kernel-append-only atone ledger.
+fn load_atone_slug_index() -> HashMap<String, DateTime<Utc>> {
+    let path = home().join(".claude/atone/events.jsonl");
+    let Ok(body) = fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let mut latest: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for line in body.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (Some(slug), Some(ts)) = (
+            v.get("slug").and_then(|s| s.as_str()),
+            v.get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok()),
+        ) else {
+            continue;
+        };
+        let ts = ts.with_timezone(&Utc);
+        latest
+            .entry(slug.to_string())
+            .and_modify(|t| {
+                if ts > *t {
+                    *t = ts;
+                }
+            })
+            .or_insert(ts);
+    }
+    latest
+}
+
+/// Kebab compounds (hyphen-joined words, ≥ UNLOCK_SLUG_MIN_LEN chars) in a
+/// text — slugs, hook names, rule names. These are what actually distinguish
+/// "same thread reworded" from "different lesson, same section vocabulary":
+/// `token_set` splits on '-', fragmenting two DIFFERENT slugs into
+/// deceptively-overlapping words (the 0.330-scoring false positive in the
+/// replay owed its whole score to fragments of unrelated slugs).
+fn kebab_compounds(text: &str) -> HashSet<String> {
+    let lowered = text.to_lowercase();
+    let mut out = HashSet::new();
+    let mut push = |cur: &str| {
+        let t = cur.trim_matches('-');
+        if t.len() >= UNLOCK_SLUG_MIN_LEN && t.contains('-') {
+            out.insert(t.to_string());
+        }
+    };
+    let mut cur = String::new();
+    for c in lowered.chars() {
+        if c.is_alphanumeric() || (c == '-' && !cur.is_empty()) {
+            cur.push(c);
+        } else {
+            push(&cur);
+            cur.clear();
+        }
+    }
+    push(&cur);
+    out
+}
+
+/// The prior rejection this proposal is a reworded repeat of, if any — same
+/// expanded target, plus either (a) a shared kebab compound (the same slug /
+/// hook / rule named in both intents: the signal that survives real
+/// paraphrase diversity), or (b) near-verbatim IDF similarity. This is also
+/// the re-rejection health metric's definition, independent of unlocking.
+fn matching_rejection<'r>(p: &Proposal, memory: &'r [Rejection]) -> Option<&'r Rejection> {
+    if memory.is_empty() {
+        return None;
+    }
+    let target = expand_path(&p.target_file);
+    let slugs = kebab_compounds(&p.intent);
+    let corpus: Vec<&str> = memory.iter().map(|r| r.intent.as_str()).collect();
+    let score: HashMap<usize, f64> = rank_matches(&p.intent, &corpus, 0.0)
+        .into_iter()
+        .collect();
+    memory
+        .iter()
+        .enumerate()
+        .find(|(i, r)| {
+            expand_path(&r.target) == target
+                && (!slugs.is_disjoint(&kebab_compounds(&r.intent))
+                    || score.get(i).copied().unwrap_or(0.0) >= REJECTION_TOPIC_SIM_MIN)
+        })
+        .map(|(_, r)| r)
+}
+
+/// Whether `slug` appears in `text_lower` as a whole hyphenated word — the
+/// neighbors of the match must not be alphanumeric or '-'. Bare `contains`
+/// let evidence on a base slug reopen a rejection about its `-v2` sibling
+/// (a real pair in the live atone ledger; validation 2026-07-13).
+fn mentions_slug(text_lower: &str, slug: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = text_lower[start..].find(slug) {
+        let abs = start + pos;
+        let end = abs + slug.len();
+        let before_ok = abs == 0
+            || text_lower[..abs]
+                .chars()
+                .last()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '-'));
+        let after_ok = end >= text_lower.len()
+            || text_lower[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| !(c.is_alphanumeric() || c == '-'));
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// New mistake evidence reopens a rejection: any atone slug named as a whole
+/// word in the rejection's intent with an event STRICTLY newer than the
+/// rejection means the mistake recurred after the human said no — the ground
+/// truth changed. An undated rejection can't be ordered and stays filtering.
+fn unlocked(r: &Rejection, atone_latest: &HashMap<String, DateTime<Utc>>) -> bool {
+    let Ok(rejected) = DateTime::parse_from_rfc3339(&r.rejected_ts) else {
+        return false;
+    };
+    let rejected = rejected.with_timezone(&Utc);
+    let intent = r.intent.to_lowercase();
+    atone_latest.iter().any(|(slug, latest)| {
+        slug.len() >= UNLOCK_SLUG_MIN_LEN && mentions_slug(&intent, slug) && *latest > rejected
+    })
+}
+
+/// Whether the rejection memory drops this proposal pre-surface: a reworded
+/// repeat of a prior rejection that no new atone evidence has reopened.
+fn rejection_memory_blocks<'r>(
+    p: &Proposal,
+    memory: &'r [Rejection],
+    atone_latest: &HashMap<String, DateTime<Utc>>,
+) -> Option<&'r Rejection> {
+    matching_rejection(p, memory).filter(|r| !unlocked(r, atone_latest))
+}
+
+/// Item 13's stat check: a proposal to create the target file when it already
+/// exists on disk is dropped outright. Scoped to intents that name the target
+/// file itself, so "create a subsection" inside an existing file passes.
+fn already_exists_on_disk(p: &Proposal) -> bool {
+    let lowered = p.intent.trim().to_lowercase();
+    if !lowered.starts_with("create") {
+        return false;
+    }
+    let target = expand_path(&p.target_file);
+    // A directory target (a real ledger shape: "~/.claude/scripts/hooks/")
+    // must never stat-drop — the proposal creates a new file INSIDE it.
+    if !target.is_file() {
+        return false;
+    }
+    target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| lowered.contains(&n.to_lowercase()))
+}
+
 // ── graduation feedback ─────────────────────────────────────────────────────
 
 /// Record each applied proposal as positive feedback on the dream insights
@@ -1136,6 +1379,309 @@ mod tests {
                 println!("  {s:.3}  {id_head}  {txt}");
             }
         }
+    }
+
+    fn test_rejection(target: &str, intent: &str, ts: &str) -> Rejection {
+        Rejection {
+            fp: String::new(),
+            target: target.into(),
+            intent: intent.into(),
+            reason: "declined".into(),
+            rejected_ts: ts.into(),
+        }
+    }
+
+    /// A memory of several rejections so the IDF weights have a real corpus:
+    /// distinctive tokens (cli-gating, allowlist) are rare, filler is common.
+    fn cli_gating_memory() -> Vec<Rejection> {
+        vec![
+            test_rejection(
+                "~/.claude/rules/shell.md",
+                "Add a read-only allowlist rule for cli-gating verbs",
+                "2026-07-01T00:00:00+00:00",
+            ),
+            test_rejection(
+                "~/.claude/rules/testing.md",
+                "Add a render-before-judge reminder to the testing rule",
+                "2026-07-01T00:00:00+00:00",
+            ),
+            test_rejection(
+                "~/.claude/rules/git.md",
+                "Add a commit cadence note to the git rule",
+                "2026-07-01T00:00:00+00:00",
+            ),
+            test_rejection(
+                "~/.claude/CLAUDE.md",
+                "Tighten the compaction section wording in the core rule",
+                "2026-07-01T00:00:00+00:00",
+            ),
+        ]
+    }
+
+    #[test]
+    fn rejection_memory_blocks_reworded_repeats_only() {
+        let memory = cli_gating_memory();
+        let atone = HashMap::new();
+
+        // Reworded with a DIFFERENT verb (the real paraphrase shape that
+        // killed the first-word class gate), same target + topic → blocked.
+        let reworded = Proposal {
+            target_file: "~/.claude/rules/shell.md".into(),
+            ..test_proposal(
+                "Resolve the cli-gating allowlist question for read-only verbs",
+                "",
+            )
+        };
+        assert!(rejection_memory_blocks(&reworded, &memory, &atone).is_some());
+
+        // Same target, unrelated topic → passes.
+        let unrelated = Proposal {
+            target_file: "~/.claude/rules/shell.md".into(),
+            ..test_proposal("Add a note about symlinked find start points", "")
+        };
+        assert!(rejection_memory_blocks(&unrelated, &memory, &atone).is_none());
+
+        // Same idea, different target → passes.
+        let other_target = Proposal {
+            target_file: "~/.claude/rules/git.md".into(),
+            ..test_proposal("Add a read-only allowlist rule for cli-gating verbs", "")
+        };
+        assert!(rejection_memory_blocks(&other_target, &memory, &atone).is_none());
+    }
+
+    #[test]
+    fn shared_slug_blocks_even_at_low_text_overlap() {
+        // The real zombie shape: a heavily reworded intent whose ONLY link to
+        // the prior rejection is the shared kebab compound. Text similarity
+        // sits far under the near-verbatim floor, so this guard dies if the
+        // slug clause is removed (the mutation the first fixture missed).
+        let memory = cli_gating_memory();
+        let p = Proposal {
+            target_file: "~/.claude/rules/shell.md".into(),
+            ..test_proposal("Escalate the cli-gating noise into a tracked fix", "")
+        };
+        assert!(
+            rejection_memory_blocks(&p, &memory, &HashMap::new()).is_some(),
+            "a shared slug on the same target is a match regardless of wording"
+        );
+    }
+
+    #[test]
+    fn shared_section_vocabulary_is_not_a_match() {
+        // The replay's calibration false positive (scored 0.330, just 0.002
+        // under the true zombie): different lessons sharing section names
+        // and fragments of DIFFERENT kebab slugs must pass through.
+        let memory = vec![test_rejection(
+            "~/.claude/rules/communication.md",
+            "Add 'tuning ≠ disabling' clause to Scope Control section based on over-corrected-tuning-request-into-disable atone event",
+            "2026-05-29T18:31:05+00:00",
+        )];
+        let p = Proposal {
+            target_file: "~/.claude/rules/communication.md".into(),
+            ..test_proposal(
+                "Graduate literal-request-over-intent into a named clause under Scope Control",
+                "",
+            )
+        };
+        assert!(
+            rejection_memory_blocks(&p, &memory, &HashMap::new()).is_none(),
+            "different lessons on one file must not cross-block"
+        );
+    }
+
+    #[test]
+    fn slug_mentions_require_word_boundaries() {
+        // Evidence on a base slug must not reopen a rejection about its -v2
+        // sibling (a real pair in the live atone ledger).
+        assert!(mentions_slug(
+            "flag ascii-art-tables-instead-gum-tools recurrence",
+            "ascii-art-tables-instead-gum-tools"
+        ));
+        assert!(!mentions_slug(
+            "flag ascii-art-tables-instead-gum-tools-v2 recurrence",
+            "ascii-art-tables-instead-gum-tools"
+        ));
+        assert!(!mentions_slug("prefix-cli-gating suffix", "cli-gating"));
+        assert!(mentions_slug("about cli-gating.", "cli-gating"));
+    }
+
+    #[test]
+    fn unlock_requires_strictly_newer_evidence() {
+        let memory = vec![test_rejection(
+            "~/.claude/rules/shell.md",
+            "Add a read-only allowlist rule for cli-gating verbs",
+            "2026-07-01T00:00:00+00:00",
+        )];
+        let exact_ts: HashMap<String, DateTime<Utc>> = [(
+            "cli-gating".to_string(),
+            DateTime::parse_from_rfc3339("2026-07-01T00:00:00+00:00")
+                .unwrap()
+                .with_timezone(&Utc),
+        )]
+        .into();
+        // Evidence at EXACTLY the rejection instant does not reopen it.
+        assert!(!unlocked(&memory[0], &exact_ts));
+    }
+
+    #[test]
+    fn rejection_memory_survives_the_ttl_archive() {
+        // The no-TTL claim itself: a rejection moved to the expired archive
+        // still feeds the memory.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("_archived")).unwrap();
+        fs::write(
+            dir.path().join("_rejections.jsonl"),
+            "{\"fp\":\"a\",\"target\":\"~/x.md\",\"intent\":\"live one\",\"reason\":\"r\",\"rejected_ts\":\"2026-07-01T00:00:00+00:00\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("_archived/rejections-expired.jsonl"),
+            "{\"fp\":\"b\",\"target\":\"~/y.md\",\"intent\":\"archived one\",\"reason\":\"r\",\"rejected_ts\":\"2026-05-01T00:00:00+00:00\"}\n",
+        )
+        .unwrap();
+        let all = load_all_rejections_from(dir.path());
+        assert_eq!(all.len(), 2, "archived rejections must survive the prune");
+        assert!(all.iter().any(|r| r.intent == "archived one"));
+    }
+
+    #[test]
+    fn new_atone_evidence_unlocks_a_rejection() {
+        let memory = vec![test_rejection(
+            "~/.claude/rules/shell.md",
+            "Add a read-only allowlist rule for cli-gating verbs",
+            "2026-07-01T00:00:00+00:00",
+        )];
+        let p = Proposal {
+            target_file: "~/.claude/rules/shell.md".into(),
+            ..test_proposal("Add an allowlist rule for read-only cli-gating verbs", "")
+        };
+
+        // The slug recurred AFTER the rejection → reopened, passes through.
+        let after: HashMap<String, DateTime<Utc>> = [(
+            "cli-gating".to_string(),
+            DateTime::parse_from_rfc3339("2026-07-10T00:00:00+00:00")
+                .unwrap()
+                .with_timezone(&Utc),
+        )]
+        .into();
+        assert!(rejection_memory_blocks(&p, &memory, &after).is_none());
+
+        // Evidence predating the rejection changes nothing → still blocked.
+        let before: HashMap<String, DateTime<Utc>> = [(
+            "cli-gating".to_string(),
+            DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00")
+                .unwrap()
+                .with_timezone(&Utc),
+        )]
+        .into();
+        assert!(rejection_memory_blocks(&p, &memory, &before).is_some());
+    }
+
+    #[test]
+    fn stat_check_drops_create_of_existing_target_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("scope-creep.md");
+        fs::write(&existing, "# rule").unwrap();
+        let existing_str = existing.to_string_lossy().to_string();
+
+        let create_existing = Proposal {
+            target_file: existing_str.clone(),
+            ..test_proposal("Create scope-creep.md codifying the pattern", "")
+        };
+        assert!(already_exists_on_disk(&create_existing));
+
+        // Creating content INSIDE an existing file is not a stat-check drop.
+        let create_section = Proposal {
+            target_file: existing_str.clone(),
+            ..test_proposal("Create a new subsection on locking discipline", "")
+        };
+        assert!(!already_exists_on_disk(&create_section));
+
+        // Creating a genuinely absent file passes.
+        let create_missing = Proposal {
+            target_file: dir.path().join("absent.md").to_string_lossy().to_string(),
+            ..test_proposal("Create absent.md for the new rule", "")
+        };
+        assert!(!already_exists_on_disk(&create_missing));
+
+        // A DIRECTORY target never stat-drops: the proposal creates a new
+        // file inside it (real ledger shape "~/.claude/scripts/hooks/").
+        let hooks_dir = dir.path().join("hooks");
+        fs::create_dir_all(&hooks_dir).unwrap();
+        let create_in_dir = Proposal {
+            target_file: hooks_dir.to_string_lossy().to_string(),
+            ..test_proposal("Create a new hooks/export-guard.sh script", "")
+        };
+        assert!(!already_exists_on_disk(&create_in_dir));
+    }
+
+    /// Acceptance replay (read-only, docs/25 item 13): run the 2026-07-10
+    /// staged batch through the rejection memory against the LIVE ledger +
+    /// atone index and print what drops, for hand-verification against the
+    /// docs/24 re-rejection claim.
+    /// Run: cargo test rejection_memory_replay_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn rejection_memory_replay_probe() {
+        let body = fs::read_to_string(
+            home().join(".claude/i-dream/audits/2026-07-10.md"),
+        )
+        .unwrap();
+        // Only rejections that existed BEFORE the batch's own review wrote
+        // its records at 2026-07-09T23:24:32Z — a date-only cutoff admitted
+        // that write event and made the replay tautological (each proposal
+        // "matched" its own rejection at 1.0; validation 2026-07-13). The
+        // acceptance question is what genuinely-prior memory would have
+        // dropped at surface time.
+        let memory: Vec<Rejection> = load_all_rejections()
+            .into_iter()
+            .filter(|r| r.rejected_ts.as_str() < "2026-07-09T23:24:32")
+            .collect();
+        let atone = load_atone_slug_index();
+        println!(
+            "memory (pre-2026-07-10): {} rejections · atone slugs: {}",
+            memory.len(),
+            atone.len()
+        );
+
+        let mut target: Option<String> = None;
+        let mut dropped = 0;
+        let mut total = 0;
+        for line in body.lines() {
+            let l = line.trim();
+            if let Some(t) = l.strip_prefix("- Target:") {
+                // The staged markdown wraps targets in backticks; production
+                // proposals (LLM JSON) do not.
+                target = Some(t.trim().trim_matches('`').to_string());
+            } else if let Some(i) = l.strip_prefix("- Intent:") {
+                let Some(t) = target.take() else { continue };
+                total += 1;
+                let p = Proposal {
+                    target_file: t.clone(),
+                    ..test_proposal(i.trim(), "")
+                };
+                // Best target-matching score at floor 0.0: the printout
+                // doubles as the calibration data the floor is set from.
+                let corpus: Vec<&str> = memory.iter().map(|r| r.intent.as_str()).collect();
+                let best = rank_matches(&p.intent, &corpus, 0.0)
+                    .into_iter()
+                    .find(|(idx, _)| expand_path(&memory[*idx].target) == expand_path(&t));
+                if let Some(r) = rejection_memory_blocks(&p, &memory, &atone) {
+                    dropped += 1;
+                    let ts: String = r.rejected_ts.chars().take(10).collect();
+                    println!("  ⊘ {} → {}\n     matched rejection ({ts}): {}", t, i.trim(), r.intent);
+                } else if already_exists_on_disk(&p) {
+                    dropped += 1;
+                    println!("  ⊘ [stat] {} → {}", t, i.trim());
+                } else if let Some((idx, s)) = best {
+                    let head: String = memory[idx].intent.chars().take(60).collect();
+                    println!("  · near-miss {s:.3}  {} → {}\n     vs ({}): {head}",
+                        t, i.trim(),
+                        memory[idx].rejected_ts.chars().take(10).collect::<String>());
+                }
+            }
+        }
+        println!("replay: {dropped}/{total} dropped (docs/24 expectation: ~5)");
     }
 
     fn test_pattern(id: &str, text: &str) -> ExtractedPattern {

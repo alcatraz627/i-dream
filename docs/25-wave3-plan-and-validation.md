@@ -118,6 +118,28 @@ item (new atone evidence exists) stays filtered and never resurfaces.
 **Kill.** Re-rejection count does not fall toward 0 across two reviews → the
 target+intent key is wrong; revisit the matching, do not widen the filter blindly.
 
+**Shipped 2026-07-13** (validation:
+`.claude/output/20260713-item13-validation/findings.md`, ISSUES-FOUND →
+method reworked). The gate caught the parent session's own acceptance replay
+being **tautological** (a date-only cutoff admitted the batch's own rejection
+records, written 2026-07-09T23:24:32Z), and the corrected replay killed the
+verb-class + plain-Jaccard design: real paraphrases scored 0.17–0.33 while a
+false positive scored 0.330 vs the true zombie's 0.332 — inseparable, because
+hyphen-splitting tokenization fragments different slugs into shared words.
+**Final mechanism:** same expanded target + (shared kebab compound ≥8 chars —
+the signal that survives paraphrase diversity — OR IDF similarity ≥0.50,
+near-verbatim only); unlock = atone slug named as a whole word in the
+rejection with a strictly-newer event; stat check requires a FILE target.
+Corrected acceptance: **1/20 of the 07-10 batch drops against genuinely-prior
+memory, and it is exactly the documented cli-gating zombie (#18, "rejected a
+third time"), with zero false positives** (the 0.330 FP pair is a regression
+test). docs/24's "~5" was contaminated counting — the other zombies' "prior"
+rejections were written by the same review event; they are in the ledger now
+and match at 1.0 going forward. **Deferred honestly:** cross-domain unlock
+(cli-gating's recurrence evidence lives in the claude-audit ledger, not
+atone — the contract says atone; revisit when domain ledgers unify);
+multi-line intent parsing in the replay probe (fine on the file that exists).
+
 ---
 
 ## Item 14 — Graduation-yield SLO
