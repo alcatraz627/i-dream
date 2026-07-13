@@ -45,10 +45,12 @@ const MAX_PROPOSALS_TOTAL: usize = 30;
 /// Similarity floor for tracing an applied proposal back to the patterns
 /// that motivated it. Deliberately conservative: a false link reactivates an
 /// unrelated pattern, while a missed link just leaves the up-vote unrecorded
-/// (and says so out loud). Calibrated against the 2026-07-12 applied set —
-/// right matches scored 0.09–0.15 in pattern space, wrong ones 0.06–0.086
-/// (see the `graduation_match_probe` ignored test; association space had no
-/// usable separation at all).
+/// (and says so out loud). Calibrated against the 2026-07-12 applied set
+/// (see the `graduation_match_probe` ignored test): the three genuine
+/// rule-graduations' right matches scored 0.09–0.15 in pattern space with
+/// wrong candidates at 0.06–0.086; the fourth query — a gap-analysis note,
+/// not a rule graduation — correctly cleared nothing. Association space had
+/// no usable separation at all.
 const GRADUATION_SIM_MIN: f64 = 0.09;
 /// An applied proposal up-votes at most this many associations, so one broad
 /// graduation can't blanket-reactivate half the store.
@@ -839,10 +841,26 @@ fn record_graduation_upvotes(config: &Config, applied: &[(Proposal, String)]) ->
     if applied.is_empty() {
         return Ok(0);
     }
-    let store = Store::new(config.data_dir())?;
-    let patterns: Vec<ExtractedPattern> = store
-        .read_json("dreams/patterns.json")
-        .unwrap_or_default();
+    record_graduation_upvotes_in(&Store::new(config.data_dir())?, applied)
+}
+
+/// Store-parameterized core of `record_graduation_upvotes`, split out so the
+/// write path is testable against a temp store (validation 2026-07-13 —
+/// `Config::data_dir()` has no override, which left this path uncovered).
+fn record_graduation_upvotes_in(store: &Store, applied: &[(Proposal, String)]) -> Result<usize> {
+    // A corrupted store must not masquerade as an empty one: parse failure is
+    // reported and records nothing, same net effect but a different message.
+    let patterns: Vec<ExtractedPattern> = if store.exists("dreams/patterns.json") {
+        match store.read_json("dreams/patterns.json") {
+            Ok(p) => p,
+            Err(e) => {
+                println!("  ⚠ pattern store unreadable ({e:#}) — no graduation up-votes recorded");
+                return Ok(0);
+            }
+        }
+    } else {
+        Vec::new()
+    };
     if patterns.is_empty() {
         println!("  (pattern store empty — no graduation up-votes recorded)");
         return Ok(0);
@@ -875,10 +893,8 @@ fn record_graduation_upvotes(config: &Config, applied: &[(Proposal, String)]) ->
             )?;
             written += 1;
             let head: String = pat.pattern.chars().take(60).collect();
-            println!(
-                "  ▲ up-vote → {} ({score:.2}) {head}",
-                &pat.id[..8.min(pat.id.len())]
-            );
+            let id_head: String = pat.id.chars().take(8).collect();
+            println!("  ▲ up-vote → {id_head} ({score:.2}) {head}");
         }
     }
     Ok(written)
@@ -1085,21 +1101,136 @@ mod tests {
             for (i, s) in rank_matches(q, &corpus, 0.0).iter().take(3) {
                 let a = &associations[*i];
                 let hyp: String = a.hypothesis.chars().take(70).collect();
-                println!("  {s:.3}  {}  {hyp}", &a.id[..8]);
+                let id_head: String = a.id.chars().take(8).collect();
+                println!("  {s:.3}  {id_head}  {hyp}");
             }
             println!(" vs patterns ({}):", pattern_corpus.len());
             for (i, s) in rank_matches(q, &pattern_corpus, 0.0).iter().take(3) {
                 let p = &patterns[*i];
                 let txt: String = p.pattern.chars().take(70).collect();
-                println!("  {s:.3}  {}  {txt}", &p.id[..8.min(p.id.len())]);
+                let id_head: String = p.id.chars().take(8).collect();
+                println!("  {s:.3}  {id_head}  {txt}");
             }
             println!(" vs schemas ({}):", schema_corpus.len());
             for (i, s) in rank_matches(q, &schema_corpus, 0.0).iter().take(3) {
                 let sc = &schemas[*i];
                 let txt: String = sc.text.chars().take(70).collect();
-                println!("  {s:.3}  {}  {txt}", &sc.id[..8.min(sc.id.len())]);
+                let id_head: String = sc.id.chars().take(8).collect();
+                println!("  {s:.3}  {id_head}  {txt}");
             }
         }
+    }
+
+    fn test_pattern(id: &str, text: &str) -> ExtractedPattern {
+        ExtractedPattern {
+            id: id.into(),
+            pattern: text.into(),
+            valence: "negative".into(),
+            confidence: 0.8,
+            category: "approach".into(),
+            source_sessions: vec![],
+            source_projects: vec![],
+            occurrences: 1,
+            first_seen: "2026-07-01".into(),
+            last_seen: "2026-07-01".into(),
+            occurrence_history: vec![],
+            strength: 0.5,
+            ease: 2.5,
+            reactivations: 0,
+        }
+    }
+
+    fn test_proposal(intent: &str, rationale: &str) -> Proposal {
+        Proposal {
+            sub_agent: "test".into(),
+            target_file: "~/.claude/rules/test.md".into(),
+            intent: intent.into(),
+            rationale: rationale.into(),
+            draft_diff: None,
+            challenger_note: None,
+            confidence: 0.7,
+        }
+    }
+
+    fn temp_store_with_patterns(patterns: &[ExtractedPattern]) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+        store.write_json("dreams/patterns.json", &patterns).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn graduation_upvotes_written_for_matching_pattern() {
+        let (_dir, store) = temp_store_with_patterns(&[
+            test_pattern(
+                "aaa",
+                "never claim a suite passed without running the failing test path",
+            ),
+            test_pattern("bbb", "render numeric values in the browser before judging"),
+            test_pattern("ccc", "cache invalidation must be event driven not ttl based"),
+        ]);
+        let applied = vec![(
+            test_proposal(
+                "Add rule: never claim a suite passed without running the failing test path",
+                "recurring declared-ready pattern across sessions",
+            ),
+            String::new(),
+        )];
+        let written = record_graduation_upvotes_in(&store, &applied).unwrap();
+        assert!(written >= 1, "the near-verbatim pattern must match");
+        let body =
+            fs::read_to_string(store.path("dreams/insight-feedback.jsonl")).unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(body.lines().next().unwrap()).unwrap();
+        assert_eq!(first["pattern_id"], "aaa");
+        assert_eq!(first["rating"], "up");
+        assert_eq!(first["source"], "graduation");
+    }
+
+    #[test]
+    fn graduation_upvotes_capped_and_silent_on_no_match() {
+        // Five identical-text patterns all match; the cap holds the line.
+        let same = "always verify the deploy artifact hash before promoting";
+        let (_dir, store) = temp_store_with_patterns(&[
+            test_pattern("p1", same),
+            test_pattern("p2", same),
+            test_pattern("p3", same),
+            test_pattern("p4", same),
+            test_pattern("p5", same),
+        ]);
+        let applied = vec![(
+            test_proposal(
+                "Add rule: always verify the deploy artifact hash before promoting",
+                "",
+            ),
+            String::new(),
+        )];
+        let written = record_graduation_upvotes_in(&store, &applied).unwrap();
+        assert_eq!(written, GRADUATION_MAX_LINKS, "cap must bound the fan-out");
+
+        // A no-match proposal records nothing at all.
+        let (_dir2, store2) = temp_store_with_patterns(&[test_pattern("zzz", same)]);
+        let applied = vec![(
+            test_proposal("zyzzyva quokka umbrellabird", "entirely unrelated"),
+            String::new(),
+        )];
+        assert_eq!(record_graduation_upvotes_in(&store2, &applied).unwrap(), 0);
+        assert!(
+            !store2.path("dreams/insight-feedback.jsonl").exists(),
+            "no-match must not create the ledger"
+        );
+    }
+
+    #[test]
+    fn graduation_upvotes_survive_corrupt_pattern_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+        fs::write(store.path("dreams/patterns.json"), "{not json").unwrap();
+        let applied = vec![(test_proposal("anything", ""), String::new())];
+        // Reported, recorded nothing, and did not panic or error the audit.
+        assert_eq!(record_graduation_upvotes_in(&store, &applied).unwrap(), 0);
     }
 
     #[test]

@@ -329,7 +329,10 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         })
         .cloned()
         .collect();
-    // Advance the watermark past every event we can date.
+    // Advance the watermark past every event we can date. Undated events can
+    // never advance it, so an all-undated ledger would replay each cycle —
+    // accepted as latent (every real writer stamps ts; a durable fix needs
+    // persistent per-event dedup; validation 2026-07-13).
     let max_ts = all_events.iter().filter_map(|e| e.ts).max();
     if let Some(m) = max_ts {
         state.feedback_watermark = Some(state.feedback_watermark.map_or(m, |w| w.max(m)));
@@ -439,20 +442,41 @@ fn read_feedback(store: &Store) -> Vec<FeedbackEvent> {
     out
 }
 
-/// Pattern ids carrying a graduation mark: an up event whose source starts
-/// with "graduation" (apply-time, manual, or backfill). These are the insights
-/// the human shipped as rules — institutionalized, not merely observed.
-fn graduation_marked(events: &[FeedbackEvent]) -> HashSet<String> {
-    events
-        .iter()
-        .filter(|e| e.honored)
-        .filter(|e| {
-            e.source
-                .as_deref()
-                .is_some_and(|s| s.starts_with("graduation"))
-        })
-        .map(|e| e.insight_id.clone())
-        .collect()
+/// The exact feedback sources that mark a graduation. An allowlist, not a
+/// prefix match: a typo'd or future source like "graduation-oops" must not
+/// silently immunize a pattern's down-votes (validation finding 2026-07-13).
+const GRADUATION_SOURCES: [&str; 3] = ["graduation", "graduation-manual", "graduation-backfill"];
+
+/// Pattern ids carrying a graduation mark, each with the EARLIEST time it was
+/// graduated. These are the insights the human shipped as rules —
+/// institutionalized, not merely observed. The timestamp matters: a down-vote
+/// is only exonerated by a graduation that PRECEDED it, so pre-graduation
+/// history keeps its honest penalty on catch-up replays. An undated
+/// graduation event can't be ordered against anything and grants no mark.
+fn graduation_marked(events: &[FeedbackEvent]) -> HashMap<String, DateTime<Utc>> {
+    let mut marked: HashMap<String, DateTime<Utc>> = HashMap::new();
+    for e in events {
+        if !e.honored {
+            continue;
+        }
+        if !e
+            .source
+            .as_deref()
+            .is_some_and(|s| GRADUATION_SOURCES.contains(&s))
+        {
+            continue;
+        }
+        let Some(ts) = e.ts else { continue };
+        marked
+            .entry(e.insight_id.clone())
+            .and_modify(|t| {
+                if ts < *t {
+                    *t = ts;
+                }
+            })
+            .or_insert(ts);
+    }
+    marked
 }
 
 /// Attach the routed reason to each fresh down-vote (docs/25 item 16): a down
@@ -465,7 +489,7 @@ fn classify_downvotes(
     patterns: &[ExtractedPattern],
     associations: &[Association],
     resolutions: &[Resolution],
-    graduated: &HashSet<String>,
+    graduated: &HashMap<String, DateTime<Utc>>,
 ) {
     let assoc_by_id: HashMap<&str, &Association> =
         associations.iter().map(|a| (a.id.as_str(), a)).collect();
@@ -507,7 +531,13 @@ fn classify_downvotes(
                 .any(|t| grounding::is_resolved(t, resolutions))
             {
                 DownReason::Stale
-            } else if linked.iter().any(|id| graduated.contains(*id)) {
+            } else if ev.ts.is_some_and(|down_ts| {
+                // Known only when the graduation PRECEDED this down-vote —
+                // an undated down can't be ordered, so it takes the penalty.
+                linked
+                    .iter()
+                    .any(|id| graduated.get(*id).is_some_and(|g| *g <= down_ts))
+            }) {
                 DownReason::Known
             } else {
                 DownReason::Wrong
@@ -537,6 +567,12 @@ pub struct ReinforceReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    /// A fixed July-2026 day, for ordering graduations against down-votes.
+    fn day(d: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 7, d, 0, 0, 0).unwrap()
+    }
 
     fn pat(id: &str, conf: f64, strength: f64, ease: f64, reacts: u32) -> ExtractedPattern {
         ExtractedPattern {
@@ -682,7 +718,7 @@ mod tests {
             &ps,
             &assocs,
             &[res("hyp i1")],
-            &HashSet::new(),
+            &HashMap::new(),
         );
         assert_eq!(evs[0].reason, Some(DownReason::Stale));
 
@@ -693,7 +729,7 @@ mod tests {
             &ps,
             &[],
             &[res("lesson p1")],
-            &HashSet::new(),
+            &HashMap::new(),
         );
         assert_eq!(evs[0].reason, Some(DownReason::Stale));
     }
@@ -701,46 +737,81 @@ mod tests {
     #[test]
     fn classify_marks_graduated_down_known_and_prefers_stale() {
         let ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
-        let graduated: HashSet<String> = ["p1".to_string()].into();
+        let graduated: HashMap<String, DateTime<Utc>> =
+            [("p1".to_string(), day(10))].into();
 
-        let mut evs = vec![ev("p1", false)];
+        // Down on day 12, graduated day 10 → Known.
+        let mut evs = vec![FeedbackEvent {
+            ts: Some(day(12)),
+            ..ev("p1", false)
+        }];
         classify_downvotes(&mut evs, &ps, &[], &[], &graduated);
         assert_eq!(evs[0].reason, Some(DownReason::Known));
 
         // Both signals present → Stale wins (the claim is leaving the store
         // regardless of its institutional status).
-        let mut evs = vec![ev("p1", false)];
+        let mut evs = vec![FeedbackEvent {
+            ts: Some(day(12)),
+            ..ev("p1", false)
+        }];
         classify_downvotes(&mut evs, &ps, &[], &[res("lesson p1")], &graduated);
         assert_eq!(evs[0].reason, Some(DownReason::Stale));
+    }
+
+    #[test]
+    fn pre_graduation_down_is_not_exonerated() {
+        // The validator's attack (2026-07-13): a down that fired BEFORE its
+        // pattern graduated must keep its honest penalty on catch-up replays.
+        let ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
+        let graduated: HashMap<String, DateTime<Utc>> =
+            [("p1".to_string(), day(10))].into();
+
+        // Down on day 6, graduation on day 10 → Wrong, not Known.
+        let mut evs = vec![FeedbackEvent {
+            ts: Some(day(6)),
+            ..ev("p1", false)
+        }];
+        classify_downvotes(&mut evs, &ps, &[], &[], &graduated);
+        assert_eq!(evs[0].reason, Some(DownReason::Wrong));
+
+        // An undated down can't be ordered → penalty, not immunity.
+        let mut evs = vec![ev("p1", false)];
+        classify_downvotes(&mut evs, &ps, &[], &[], &graduated);
+        assert_eq!(evs[0].reason, Some(DownReason::Wrong));
     }
 
     #[test]
     fn classify_defaults_wrong_and_leaves_ups_alone() {
         let ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
         let mut evs = vec![ev("p1", false), ev("p1", true)];
-        classify_downvotes(&mut evs, &ps, &[], &[], &HashSet::new());
+        classify_downvotes(&mut evs, &ps, &[], &[], &HashMap::new());
         assert_eq!(evs[0].reason, Some(DownReason::Wrong));
         assert_eq!(evs[1].reason, None, "up-votes are never classified");
     }
 
     #[test]
-    fn graduation_marked_collects_graduation_sources_only() {
-        let mk = |id: &str, honored: bool, source: Option<&str>| FeedbackEvent {
-            source: source.map(str::to_string),
-            ..ev(id, honored)
+    fn graduation_marked_collects_allowlisted_sources_with_earliest_ts() {
+        let mk = |id: &str, honored: bool, source: Option<&str>, ts: Option<DateTime<Utc>>| {
+            FeedbackEvent {
+                source: source.map(str::to_string),
+                ts,
+                ..ev(id, honored)
+            }
         };
         let events = vec![
-            mk("a", true, Some("graduation")),
-            mk("b", true, Some("graduation-backfill")),
-            mk("c", true, Some("graduation-manual")),
-            mk("d", true, Some("widget")),
-            mk("e", true, None),
-            mk("f", false, Some("graduation")), // a down never marks
+            mk("a", true, Some("graduation"), Some(day(12))),
+            mk("a", true, Some("graduation-manual"), Some(day(9))), // earlier wins
+            mk("b", true, Some("graduation-backfill"), Some(day(13))),
+            mk("d", true, Some("widget"), Some(day(13))),
+            mk("e", true, None, Some(day(13))),
+            mk("f", false, Some("graduation"), Some(day(13))), // a down never marks
+            mk("g", true, Some("graduation-oops-not-really"), Some(day(13))), // prefix abuse
+            mk("h", true, Some("graduation"), None), // undated grants nothing
         ];
         let marked = graduation_marked(&events);
         assert_eq!(
             marked,
-            ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
+            [("a".to_string(), day(9)), ("b".to_string(), day(13))].into()
         );
     }
 

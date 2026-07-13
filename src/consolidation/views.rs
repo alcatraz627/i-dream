@@ -303,9 +303,15 @@ pub(crate) fn rank_matches(query: &str, corpus: &[&str], min_sim: f64) -> Vec<(u
             *doc_freq.entry(t.clone()).or_default() += 1;
         }
     }
+    // Add-one smoothing: with plain ln(n/df), a token present in every
+    // document weighs exactly 0 — trivially true for ALL tokens at corpus
+    // size 1, which made a single-document corpus unmatchable (validation
+    // finding 2026-07-13). ln((n+1)/df) keeps such tokens faintly alive;
+    // at real corpus sizes (hundreds) the shift is negligible, so the
+    // calibrated GRADUATION_SIM_MIN floor is unaffected.
     let weight: std::collections::HashMap<String, f64> = doc_freq
         .into_iter()
-        .map(|(t, df)| (t, (n as f64 / df as f64).ln()))
+        .map(|(t, df)| (t, ((n + 1) as f64 / df as f64).ln()))
         .collect();
 
     let q = token_set(query);
