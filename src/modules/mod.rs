@@ -6,6 +6,7 @@
 
 pub mod dreaming;
 pub mod external_domain;
+pub mod grounding;
 pub mod insight_digest;
 pub mod introspection;
 pub mod intuition;
