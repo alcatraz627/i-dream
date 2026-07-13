@@ -59,6 +59,16 @@ pub struct PatternViewItem {
     pub valence: String,
     pub confidence: f64,
     pub occurrences: u64,
+    /// Reinforcement strength (Wave 2) — the importance signal the
+    /// query-conditioned injector ranks by (docs/25 item 15). Sentinel -1
+    /// means not yet seeded; consumers treat it as confidence.
+    pub strength: f64,
+    /// How many times feedback reactivated this lesson — proven-in-use beats
+    /// merely-extracted.
+    pub reactivations: u32,
+    /// Projects the pattern was observed in — the injector's cwd-relevance
+    /// signal.
+    pub source_projects: Vec<String>,
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
     pub days_since_first_seen: Option<i64>,
@@ -138,6 +148,9 @@ fn write_patterns_view(store: &Store, dir: &PathBuf, now: DateTime<Utc>) -> Resu
                 valence: p.valence.clone(),
                 confidence: p.confidence,
                 occurrences: p.occurrences,
+                strength: p.strength,
+                reactivations: p.reactivations,
+                source_projects: p.source_projects.clone(),
                 first_seen: first,
                 last_seen: last,
                 days_since_first_seen: first.map(|t| (now - t).num_days()),
