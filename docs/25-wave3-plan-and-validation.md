@@ -242,6 +242,21 @@ the apply path is missing), so reactivation stays at 0 even after graduations.
 rate it is meant to lift. If reactivation stays flat after backfill + a few
 graduations, the wiring is broken.
 
+**Shipped 2026-07-13** (commits 250c912, 4bc3d4d + gate fixes; validation:
+`.claude/output/20260713-item16-validation/findings.md`, PASS-WITH-NOTES).
+Built: apply-time up-votes via deterministic pattern-space matching (floor
+0.09, calibrated); direct pattern-id feedback in reinforcement; manual-apply
+path via the review seeded prompt; 11 hand-verified backfill ups across 6
+graduated rules — acceptance met (live-copy probe reactivated=14, 12 patterns
+off the 0% baseline); down-vote routing stale/known/wrong at consumption time
+(stale → forgetting's removal, known → graduation-protected, wrong → demotion),
+timestamp-aware so pre-graduation downs keep their penalty. **Deferred
+honestly:** the `noise` reason (no writer has context to assert it — revisit
+when an explicit widget down-vote ships); digest `valid_until` honoring (item
+11's parallel-owned side); undated-event watermark replay (latent, commented in
+run_cycle). Known repo gap owned elsewhere: `grounding.rs`/`mod.rs` uncommitted
+(parallel-owned) — clean checkouts don't build; ipc-notified msg-c5072d74.
+
 ---
 
 ## Standing health metrics (the running-system dashboard)
