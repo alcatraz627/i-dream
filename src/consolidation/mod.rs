@@ -12,3 +12,4 @@ pub mod l2_digest;
 pub mod reinforce;
 pub mod schemas;
 pub mod views;
+pub mod yield_slo;

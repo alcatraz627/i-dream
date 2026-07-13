@@ -316,6 +316,19 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
         }
     };
 
+    // Feed the graduation-yield SLO (docs/25 item 14): this interactive run
+    // IS a review — every surfaced candidate met an apply/reject decision.
+    if let Ok(store) = Store::new(config.data_dir())
+        && let Err(e) = crate::consolidation::yield_slo::record_review_outcome(
+            &store,
+            filtered.len(),
+            applied.len(),
+            "audit-run",
+        )
+    {
+        println!("  ⚠ review-outcome recording failed: {e:#}");
+    }
+
     // Persist rejections.
     if !rejected_this_run.is_empty() {
         append_rejections(&rejected_this_run)?;

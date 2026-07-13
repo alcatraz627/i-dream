@@ -98,6 +98,11 @@ pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
                   fp = sha256(expanded_target + newline + lowercased \
                   whitespace-collapsed intent) and a dated reason — verify the fp \
                   recipe by reproducing an existing ledger line first. When done, \
+                  append ONE review-outcome line to \
+                  ~/.claude/subconscious/dreams/review-outcomes.jsonl with keys \
+                  ts (current UTC ISO), surfaced (total proposals in the staged \
+                  audit), applied (count you applied), and source set to \
+                  manual-review — this feeds the graduation-yield SLO. Then \
                   update the audit file header with Reviewed counts and remove the \
                   ~/.claude/i-dream/.review-pending flag (trash, not rm). Start by \
                   summarizing what is pending.";

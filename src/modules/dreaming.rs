@@ -1510,11 +1510,36 @@ Output ONLY a JSON array. No commentary."#;
             )?;
         }
 
+        // Graduation-yield SLO (docs/25 item 14): when the last two judged
+        // reviews both yielded under the floor, WAKE stops generating new
+        // candidates and only lets bypass-confidence ones through — the
+        // system spends less while yield is low, rather than more. The
+        // verdict is recomputed from the outcome ledger every cycle, so a
+        // recovering review clears it with no separate exit path.
+        let yield_state = crate::consolidation::yield_slo::evaluate(self.store);
+        if yield_state.maintenance {
+            info!(
+                "Wake: MAINTENANCE mode — graduation yield {:?} under {} for {} reviews; only ≥{} confidence promotes",
+                yield_state.judged_window,
+                crate::consolidation::yield_slo::YIELD_FLOOR,
+                yield_state.judged_window.len(),
+                crate::consolidation::yield_slo::MAINTENANCE_BYPASS_CONFIDENCE,
+            );
+            tracer.note(
+                TracePhase::Wake,
+                EventKind::PhaseStart,
+                format!(
+                    "maintenance mode: yield window {:?} under SLO floor",
+                    yield_state.judged_window
+                ),
+            )?;
+        }
+
         // Collect candidates by cloning so we can mutate all_assocs afterward
         // without fighting the borrow checker. D3 v1: filter dismissed too.
         let candidates: Vec<Association> = all_assocs
             .iter()
-            .filter(|a| !a.promoted && !a.dismissed && a.actionable && a.confidence >= threshold)
+            .filter(|a| promotable(a, threshold, yield_state.maintenance))
             .cloned()
             .collect();
 
@@ -1932,6 +1957,20 @@ impl<'a> Module for DreamingModule<'a> {
     }
 }
 
+/// Whether an association may be promoted to insights.md this cycle. Normal
+/// mode admits any unpromoted, undismissed, actionable association at or
+/// above the confidence threshold. Maintenance mode (graduation yield under
+/// the SLO floor two judged reviews running — docs/25 item 14) additionally
+/// requires bypass confidence, so a clear, evidence-backed correction still
+/// gets through while ordinary candidate generation pauses.
+pub fn promotable(a: &Association, threshold: f64, maintenance: bool) -> bool {
+    if a.promoted || a.dismissed || !a.actionable || a.confidence < threshold {
+        return false;
+    }
+    !maintenance
+        || a.confidence >= crate::consolidation::yield_slo::MAINTENANCE_BYPASS_CONFIDENCE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2255,9 +2294,10 @@ mod tests {
             make_assoc(0.6, true, false),  // should promote
         ];
 
+        // Exercise the production predicate, not a re-typed copy of it.
         let candidates: Vec<&Association> = assocs
             .iter()
-            .filter(|a| !a.promoted && a.actionable && a.confidence >= THRESHOLD)
+            .filter(|a| promotable(a, THRESHOLD, false))
             .collect();
 
         assert_eq!(candidates.len(), 2);
@@ -2273,9 +2313,28 @@ mod tests {
 
         let candidates: Vec<&Association> = assocs
             .iter()
-            .filter(|a| !a.promoted && a.actionable && a.confidence >= THRESHOLD)
+            .filter(|a| promotable(a, THRESHOLD, false))
             .collect();
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn maintenance_mode_blocks_ordinary_candidates_but_not_bypass() {
+        // docs/25 item 14 acceptance: in maintenance mode ordinary candidates
+        // stop promoting; a high-confidence, evidence-backed one gets through.
+        const THRESHOLD: f64 = 0.5;
+        let ordinary = make_assoc(0.7, true, false);
+        let strong = make_assoc(0.95, true, false);
+
+        assert!(promotable(&ordinary, THRESHOLD, false), "normal mode admits");
+        assert!(
+            !promotable(&ordinary, THRESHOLD, true),
+            "maintenance blocks sub-bypass confidence"
+        );
+        assert!(
+            promotable(&strong, THRESHOLD, true),
+            "bypass confidence still promotes in maintenance"
+        );
     }
 }
