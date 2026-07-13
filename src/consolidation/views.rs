@@ -282,6 +282,43 @@ fn weighted_sim(
     if union == 0.0 { 0.0 } else { inter / union }
 }
 
+/// Rank how strongly a piece of prose relates to each entry in a text corpus.
+/// This is how an applied graduation gets traced back to the dream insights
+/// that motivated it: audit proposals are generated from prose digests that
+/// carry no insight ids, so the link has to be recovered by similarity.
+///
+/// Returns `(corpus index, score)` for every entry scoring at or above
+/// `min_sim`, strongest first. IDF weights are built from the corpus alone,
+/// so a query token the corpus has never seen contributes nothing — a query
+/// can only match on vocabulary the corpus actually uses.
+pub(crate) fn rank_matches(query: &str, corpus: &[&str], min_sim: f64) -> Vec<(usize, f64)> {
+    let keys: Vec<HashSet<String>> = corpus.iter().map(|t| token_set(t)).collect();
+    let n = keys.len();
+    if n == 0 {
+        return vec![];
+    }
+    let mut doc_freq: std::collections::HashMap<String, usize> = Default::default();
+    for set in &keys {
+        for t in set {
+            *doc_freq.entry(t.clone()).or_default() += 1;
+        }
+    }
+    let weight: std::collections::HashMap<String, f64> = doc_freq
+        .into_iter()
+        .map(|(t, df)| (t, (n as f64 / df as f64).ln()))
+        .collect();
+
+    let q = token_set(query);
+    let mut out: Vec<(usize, f64)> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (i, weighted_sim(&q, k, &weight)))
+        .filter(|&(_, s)| s >= min_sim)
+        .collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    out
+}
+
 /// Single-link union-find clustering over IDF-weighted similarity. Chaining
 /// is deliberate: re-wordings of one lesson rarely all clear the threshold
 /// pairwise, but each links to a near neighbor and the family connects

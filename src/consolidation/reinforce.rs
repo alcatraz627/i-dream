@@ -142,8 +142,15 @@ pub fn apply_feedback(
 
     let mut moves = Vec::new();
     for ev in feedback {
-        let Some(linked) = assoc_patterns.get(ev.insight_id.as_str()) else {
-            continue;
+        // An event names either an association (the usual insight shape) or a
+        // pattern directly (graduation up-votes and widget pattern votes write
+        // `pattern_id`). Associations resolve to their source patterns; a
+        // direct pattern id passes through as itself. Unknown ids skip.
+        let direct = [ev.insight_id.clone()];
+        let linked: &[String] = match assoc_patterns.get(ev.insight_id.as_str()) {
+            Some(v) => v.as_slice(),
+            None if by_id.contains_key(ev.insight_id.as_str()) => &direct,
+            None => continue,
         };
         for pid in linked.iter() {
             let Some(&idx) = by_id.get(pid) else {
@@ -452,6 +459,25 @@ mod tests {
         assert!(ps[0].strength > 0.4 && ps[1].strength > 0.4, "strength rises");
         assert_eq!(ps[0].reactivations, 1, "reactivation counted");
         assert!(ps[0].ease > 2.5, "ease rises");
+    }
+
+    #[test]
+    fn direct_pattern_id_feedback_reactivates_without_association() {
+        let mut ps = vec![pat("p1", 0.6, 0.4, 2.5, 0)];
+        // No association involved: the event names the pattern itself, the
+        // shape graduation up-votes and widget pattern votes use.
+        let moves = apply_feedback(&mut ps, &[], &[ev("p1", true)]);
+        assert_eq!(moves.len(), 1);
+        assert_eq!(ps[0].reactivations, 1, "direct pattern vote lands");
+        assert!(ps[0].strength > 0.4, "strength rises");
+    }
+
+    #[test]
+    fn unknown_feedback_id_is_skipped() {
+        let mut ps = vec![pat("p1", 0.6, 0.4, 2.5, 0)];
+        let moves = apply_feedback(&mut ps, &[], &[ev("nonexistent", true)]);
+        assert!(moves.is_empty());
+        assert_eq!(ps[0].reactivations, 0, "unknown id changes nothing");
     }
 
     #[test]

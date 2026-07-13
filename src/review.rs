@@ -84,7 +84,16 @@ pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
                   proposal with your recommendation. Apply the ones I approve by \
                   editing the target files directly — do NOT apply via \
                   `i-dream audit run`; it regenerates a fresh proposal set instead \
-                  of resuming the staged one. Record each rejection as a line in \
+                  of resuming the staged one. For each APPLIED proposal that ships \
+                  a rule or hook from an insight, also record the graduation \
+                  up-vote: find the 1-3 entries in \
+                  ~/.claude/subconscious/dreams/patterns.json whose pattern text \
+                  states the same lesson (read them — never guess ids), and append \
+                  one JSON line per match to \
+                  ~/.claude/subconscious/dreams/insight-feedback.jsonl with keys \
+                  ts (current UTC ISO), pattern_id, rating set to up, source set \
+                  to graduation-manual, and proposal_intent. If no pattern states \
+                  the lesson, record nothing and say so. Record each rejection as a line in \
                   ~/.claude/i-dream/audits/_rejections.jsonl with \
                   fp = sha256(expanded_target + newline + lowercased \
                   whitespace-collapsed intent) and a dated reason — verify the fp \

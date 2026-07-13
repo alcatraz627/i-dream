@@ -19,7 +19,10 @@
 use crate::api::ClaudeClient;
 use crate::cli::AuditAction;
 use crate::config::Config;
+use crate::consolidation::views::rank_matches;
+use crate::modules::dreaming::{Association, ExtractedPattern};
 use crate::modules::parse_json_codeblock;
+use crate::store::Store;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,17 @@ const REJECTION_TTL_DAYS: i64 = 28;
 const PROPOSAL_CONFIDENCE_FLOOR: f64 = 0.5;
 const MAX_PROPOSALS_PER_LENS: usize = 6;
 const MAX_PROPOSALS_TOTAL: usize = 30;
+/// Similarity floor for tracing an applied proposal back to the patterns
+/// that motivated it. Deliberately conservative: a false link reactivates an
+/// unrelated pattern, while a missed link just leaves the up-vote unrecorded
+/// (and says so out loud). Calibrated against the 2026-07-12 applied set —
+/// right matches scored 0.09–0.15 in pattern space, wrong ones 0.06–0.086
+/// (see the `graduation_match_probe` ignored test; association space had no
+/// usable separation at all).
+const GRADUATION_SIM_MIN: f64 = 0.09;
+/// An applied proposal up-votes at most this many associations, so one broad
+/// graduation can't blanket-reactivate half the store.
+const GRADUATION_MAX_LINKS: usize = 3;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Proposal {
@@ -290,6 +304,16 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
         }
     }
 
+    // Applying a graduation is the strongest up-vote the feedback lane gets;
+    // trace each applied proposal to its source insights and record them.
+    let inferred_ups = match record_graduation_upvotes(config, &applied) {
+        Ok(n) => n,
+        Err(e) => {
+            println!("  ⚠ graduation up-vote recording failed: {e:#}");
+            0
+        }
+    };
+
     // Persist rejections.
     if !rejected_this_run.is_empty() {
         append_rejections(&rejected_this_run)?;
@@ -305,6 +329,7 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
     println!("  Surfaced:  {}", filtered.len());
     println!("  Approved:  {}", approved.len());
     println!("  Applied:   {}", applied.len());
+    println!("  Inferred ups: {inferred_ups}");
     println!("  Rejected:  {}", rejected_this_run.len());
     println!(
         "  Skipped:   {}",
@@ -795,6 +820,70 @@ fn apply_edit(target: &Path, edit: &RenderedEdit, current: &str) -> Result<()> {
     Ok(())
 }
 
+// ── graduation feedback ─────────────────────────────────────────────────────
+
+/// Record each applied proposal as positive feedback on the dream insights
+/// behind it. Shipping a rule from an insight is the strongest up-vote the
+/// system ever gets, and the positive channel is otherwise starved (a handful
+/// of ups against ~1200 downs), leaving reinforcement nothing to strengthen
+/// (docs/25 item 16).
+///
+/// The link is recovered by deterministic text similarity against the
+/// episodic pattern store — pattern texts are short behavioral lessons, the
+/// same register as a proposal's intent, which is what makes the match
+/// separable (association hypotheses are narrative prose and do not separate;
+/// see `graduation_match_probe`). Asking the LLM to name ids instead would be
+/// unverifiable. When no pattern clears the floor, no event is written and
+/// that is said out loud rather than silently skipped.
+fn record_graduation_upvotes(config: &Config, applied: &[(Proposal, String)]) -> Result<usize> {
+    if applied.is_empty() {
+        return Ok(0);
+    }
+    let store = Store::new(config.data_dir())?;
+    let patterns: Vec<ExtractedPattern> = store
+        .read_json("dreams/patterns.json")
+        .unwrap_or_default();
+    if patterns.is_empty() {
+        println!("  (pattern store empty — no graduation up-votes recorded)");
+        return Ok(0);
+    }
+    let corpus: Vec<&str> = patterns.iter().map(|p| p.pattern.as_str()).collect();
+
+    let mut written = 0usize;
+    for (p, _) in applied {
+        let query = format!("{} {}", p.intent, p.rationale);
+        let matches = rank_matches(&query, &corpus, GRADUATION_SIM_MIN);
+        if matches.is_empty() {
+            println!(
+                "  ○ no pattern matched \"{}\" — no up-vote recorded",
+                p.intent
+            );
+            continue;
+        }
+        for &(i, score) in matches.iter().take(GRADUATION_MAX_LINKS) {
+            let pat = &patterns[i];
+            store.append_jsonl(
+                "dreams/insight-feedback.jsonl",
+                &serde_json::json!({
+                    "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "pattern_id": pat.id,
+                    "rating": "up",
+                    "source": "graduation",
+                    "match_score": (score * 1000.0).round() / 1000.0,
+                    "proposal_intent": p.intent,
+                }),
+            )?;
+            written += 1;
+            let head: String = pat.pattern.chars().take(60).collect();
+            println!(
+                "  ▲ up-vote → {} ({score:.2}) {head}",
+                &pat.id[..8.min(pat.id.len())]
+            );
+        }
+    }
+    Ok(written)
+}
+
 // ── persistence ─────────────────────────────────────────────────────────────
 
 fn append_rejections(rejected: &[(Proposal, String)]) -> Result<()> {
@@ -952,6 +1041,65 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         let b = fingerprint(&format!("{home}/.claude/rules/testing.md"), "x");
         assert_eq!(a, b);
+    }
+
+    /// Calibration probe (read-only): score the proposals the 2026-07-12
+    /// weekly review applied against the live association store, so
+    /// GRADUATION_SIM_MIN is set from real score distributions instead of
+    /// guessed. Prints the top 5 candidates per query with scores.
+    /// Run: cargo test graduation_match_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn graduation_match_probe() {
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        let store = Store::new(home.join(".claude/subconscious")).unwrap();
+        let associations: Vec<Association> =
+            store.read_json("dreams/associations.json").unwrap();
+        let corpus: Vec<&str> = associations.iter().map(|a| a.hypothesis.as_str()).collect();
+        // The four proposals applied in the 2026-07-12 review
+        // (audits/2026-07-12.md), paraphrased as intent+rationale queries.
+        let applied_intents = [
+            "Create rules/unprompted-infra-scope-creep.md — never add CI workflows, \
+             git hooks, cron jobs, or automation infrastructure the user did not \
+             explicitly request; a feasibility question is not a build order",
+            "Add pushback face-3 affirm lineage to rules/pushback-and-self-criticism.md — \
+             contradict a false premise with evidence before complying; \
+             intelligent-disobedience affirmed across distinct contexts",
+            "Add process-completion claims sub-section to \
+             rules/structural-claim-without-reading-code.md — before writing that a \
+             migration ran or a deploy succeeded, name the artifact that proves it",
+            "declared-ready-stop.sh gap analysis — theme-state misses are Swift \
+             surfaces exiting silent via the RAN branch before any multi-state \
+             reminder fires",
+        ];
+        let patterns: Vec<crate::modules::dreaming::ExtractedPattern> =
+            store.read_json("dreams/patterns.json").unwrap();
+        let pattern_corpus: Vec<&str> = patterns.iter().map(|p| p.pattern.as_str()).collect();
+        let schemas = crate::consolidation::schemas::load_schemas(&store);
+        let schema_corpus: Vec<&str> = schemas.iter().map(|s| s.text.as_str()).collect();
+
+        for q in applied_intents {
+            let head: String = q.chars().take(60).collect();
+            println!("\nQUERY: {head}…");
+            println!(" vs associations ({}):", corpus.len());
+            for (i, s) in rank_matches(q, &corpus, 0.0).iter().take(3) {
+                let a = &associations[*i];
+                let hyp: String = a.hypothesis.chars().take(70).collect();
+                println!("  {s:.3}  {}  {hyp}", &a.id[..8]);
+            }
+            println!(" vs patterns ({}):", pattern_corpus.len());
+            for (i, s) in rank_matches(q, &pattern_corpus, 0.0).iter().take(3) {
+                let p = &patterns[*i];
+                let txt: String = p.pattern.chars().take(70).collect();
+                println!("  {s:.3}  {}  {txt}", &p.id[..8.min(p.id.len())]);
+            }
+            println!(" vs schemas ({}):", schema_corpus.len());
+            for (i, s) in rank_matches(q, &schema_corpus, 0.0).iter().take(3) {
+                let sc = &schemas[*i];
+                let txt: String = sc.text.chars().take(70).collect();
+                println!("  {s:.3}  {}  {txt}", &sc.id[..8.min(sc.id.len())]);
+            }
+        }
     }
 
     #[test]
