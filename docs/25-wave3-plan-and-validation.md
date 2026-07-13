@@ -296,7 +296,9 @@ real data: query-distinct sets, enforced-slug absence, escalation+dedupe.
 UserPromptSubmit lane; cwd-only today); full env-override testability for the
 script's remaining fixed paths; the dream half stays behind .inject-on —
 entropy/recurrence health signals accrue via injections.jsonl either way.
-Kill-criteria clock starts when .inject-on is enabled.
+Kill-criteria clock starts when .inject-on is enabled — **flipped 2026-07-13**
+(user decision); review by **2026-07-27**: prompt-entropy up and pattern
+recurrence down, or the dream half goes back off.
 
 ---
 
