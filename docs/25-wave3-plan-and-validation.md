@@ -292,13 +292,28 @@ emit a deduped hook proposal instead of repeating the failed advisory — the
 dedupe consults the backlog AND both rejection ledgers (live proof: it
 declined to re-file infra-before-grep, rejected 05-29). Acceptance 3/3 on
 real data: query-distinct sets, enforced-slug absence, escalation+dedupe.
-**Deferred honestly:** first-prompt + tool-signature query terms (needs a
-UserPromptSubmit lane; cwd-only today); full env-override testability for the
-script's remaining fixed paths; the dream half stays behind .inject-on —
+**Deferred honestly:** tool-signature query terms (needs a different event
+lane; value unproven); full env-override testability for the script's
+remaining fixed paths; the dream half stays behind .inject-on —
 entropy/recurrence health signals accrue via injections.jsonl either way.
 Kill-criteria clock starts when .inject-on is enabled — **flipped 2026-07-13**
 (user decision); review by **2026-07-27**: prompt-entropy up and pattern
 recurrence down, or the dream half goes back off.
+**First-prompt tail shipped 2026-07-14** (validation:
+`.claude/output/20260714-item15-lane-validation/findings.md`, ISSUES-FOUND →
+all six findings fixed): `dream-insights-prompt.sh`, a synchronous
+UserPromptSubmit hook (async output never reaches the session), re-ranks the
+patterns view ONCE per session with the first substantive prompt's own words
+(`INJECT_PART=ranked` engine mode) and injects only the re-ranked section —
+staying silent when the set matches what SessionStart already delivered to
+THIS session (dedupe is sid-scoped; `sessionstart-inject.sh` now exports
+INJECT_SID so SessionStart records carry it — the gate proved a global-last
+dedupe silently starves concurrent sessions). Trivial and numeric-only
+prompts don't spend the session's one shot; the once-per-session marker is an
+atomic noclobber create (5-way race → exactly one fire); a path-structured
+session_id is refused; ledger records from this lane are
+`kind: dream-ranked-prompt` + sid, feeding the same entropy/recurrence
+health signals and the same 2026-07-27 review.
 
 ---
 
