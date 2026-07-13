@@ -159,6 +159,21 @@ maintenance mode fires but the underlying yield does not recover over a month,
 the problem is upstream (extraction/merge/retrieval), not the SLO. Do not tune
 the SLO threshold to hide a yield problem.
 
+**Shipped 2026-07-13** (commits 5d0d450 + gate fixes; validation:
+`.claude/output/20260713-item14-validation/findings.md`, PASS-WITH-NOTES —
+the HIGH finding, one malformed manual line wiping the whole yield ledger,
+is fixed with a tolerant per-line reader + regression test). Built: the
+review-outcome ledger (interactive audit + manual-review seeded prompt), the
+recomputed-every-WAKE yield verdict in `dreams/yield-state.json`, maintenance
+mode through a named `promotable()` predicate (bypass = confidence ≥ 0.9),
+and the dream-metrics.json merge (gcc script side). All three docs/25
+acceptance cases are tests: two-lows→flip, bypass-through, recovery→resume.
+**Deferred honestly:** digest-header yield/mode surfacing (insight_digest.rs
+parallel-owned); atone-domain-specific bypass (associations carry no source
+domain — confidence-based v1); yield semantics note — "consecutive" means the
+last two JUDGED reviews (zero-surfaced reviews carry no signal and do not
+break a low streak).
+
 ---
 
 ## Item 15 — Query-conditioned injection

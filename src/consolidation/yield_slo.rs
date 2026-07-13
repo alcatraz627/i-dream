@@ -44,15 +44,34 @@ pub struct ReviewOutcome {
 }
 
 impl ReviewOutcome {
-    /// applied / surfaced. Only meaningful when the review surfaced anything;
-    /// callers filter zero-surfaced outcomes out before judging yield.
+    /// applied / surfaced, clamped to 1.0. Only meaningful when the review
+    /// surfaced anything; callers filter zero-surfaced outcomes out before
+    /// judging yield. The clamp bounds a free-hand manual line that claims
+    /// more applied than surfaced — a writer error that shouldn't be able to
+    /// inflate the recovery signal past "everything landed".
     pub fn yield_fraction(&self) -> f64 {
         if self.surfaced == 0 {
             0.0
         } else {
-            self.applied as f64 / self.surfaced as f64
+            (self.applied as f64 / self.surfaced as f64).min(1.0)
         }
     }
+}
+
+/// Read the outcome ledger tolerantly, line by line: a malformed line (a
+/// hand-written manual-review entry with a bad ts, a torn write) costs only
+/// itself, never the history around it. `Store::read_jsonl` propagates the
+/// FIRST parse error and would silently zero the whole ledger through
+/// `unwrap_or_default` — which reads as "no history" and clears maintenance
+/// mode on data corruption (validation finding 2026-07-13, HIGH). Mirrors
+/// `reinforce::read_feedback`'s tolerant style.
+fn read_outcomes(store: &Store) -> Vec<ReviewOutcome> {
+    let Ok(body) = std::fs::read_to_string(store.path(OUTCOMES_PATH)) else {
+        return Vec::new();
+    };
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<ReviewOutcome>(l.trim()).ok())
+        .collect()
 }
 
 /// The current SLO verdict, persisted for dashboards and the metrics hook.
@@ -95,7 +114,7 @@ pub fn record_review_outcome(
 /// `CONSECUTIVE_LOW` judged reviews can never trip maintenance — the SLO
 /// starts pessimism only once it has enough history to mean something.
 pub fn evaluate(store: &Store) -> YieldState {
-    let outcomes: Vec<ReviewOutcome> = store.read_jsonl(OUTCOMES_PATH).unwrap_or_default();
+    let outcomes = read_outcomes(store);
     let judged: Vec<&ReviewOutcome> = outcomes.iter().filter(|o| o.surfaced > 0).collect();
 
     let window: Vec<f64> = judged
@@ -167,6 +186,36 @@ mod tests {
         let state = evaluate(&store);
         assert!(state.maintenance);
         assert_eq!(state.reviews_counted, 2);
+    }
+
+    #[test]
+    fn malformed_ledger_line_does_not_wipe_history() {
+        // The validator's HIGH repro (2026-07-13): two genuine low reviews,
+        // then one hand-written line with a date-only ts and one garbage
+        // line. The bad lines must cost only themselves — maintenance holds.
+        let (_d, store) = store_with_outcomes(&[(20, 2), (22, 1)]);
+        let path = store.path("dreams/review-outcomes.jsonl");
+        let mut body = std::fs::read_to_string(&path).unwrap();
+        body.push_str(
+            "{\"ts\":\"2026-07-13\",\"surfaced\":20,\"applied\":19,\"source\":\"manual-review\"}\n",
+        );
+        body.push_str("not json at all\n");
+        std::fs::write(&path, body).unwrap();
+
+        let state = evaluate(&store);
+        assert!(state.maintenance, "corruption must not clear maintenance");
+        assert_eq!(state.reviews_counted, 2, "bad lines cost only themselves");
+    }
+
+    #[test]
+    fn manual_overcount_clamps_to_full_yield() {
+        let o = ReviewOutcome {
+            ts: Utc::now(),
+            surfaced: 2,
+            applied: 5,
+            source: "manual-review".into(),
+        };
+        assert_eq!(o.yield_fraction(), 1.0);
     }
 
     #[test]

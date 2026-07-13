@@ -318,7 +318,11 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
 
     // Feed the graduation-yield SLO (docs/25 item 14): this interactive run
     // IS a review — every surfaced candidate met an apply/reject decision.
-    if let Ok(store) = Store::new(config.data_dir())
+    // Guarded on dry_run explicitly (not just incidentally via the empty
+    // proposal list) so a future dry-run that renders real proposals can
+    // never record a simulated zero-yield review.
+    if !dry_run
+        && let Ok(store) = Store::new(config.data_dir())
         && let Err(e) = crate::consolidation::yield_slo::record_review_outcome(
             &store,
             filtered.len(),

@@ -99,10 +99,13 @@ pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
                   whitespace-collapsed intent) and a dated reason — verify the fp \
                   recipe by reproducing an existing ledger line first. When done, \
                   append ONE review-outcome line to \
-                  ~/.claude/subconscious/dreams/review-outcomes.jsonl with keys \
-                  ts (current UTC ISO), surfaced (total proposals in the staged \
-                  audit), applied (count you applied), and source set to \
-                  manual-review — this feeds the graduation-yield SLO. Then \
+                  ~/.claude/subconscious/dreams/review-outcomes.jsonl shaped \
+                  exactly like {\"ts\":\"2026-07-13T09:00:00Z\",\"surfaced\":20,\
+                  \"applied\":3,\"source\":\"manual-review\"} — ts MUST be full \
+                  RFC3339 with time, surfaced = total proposals in the staged \
+                  audit, applied = count you applied. Verify your line parses \
+                  by reading it back with jq before moving on — this feeds the \
+                  graduation-yield SLO. Then \
                   update the audit file header with Reviewed counts and remove the \
                   ~/.claude/i-dream/.review-pending flag (trash, not rm). Start by \
                   summarizing what is pending.";
