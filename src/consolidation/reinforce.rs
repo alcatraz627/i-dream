@@ -25,11 +25,12 @@
 //! per-vote steps that must accumulate, plus anchor protection.
 
 use crate::modules::dreaming::{Association, ExtractedPattern};
+use crate::modules::grounding::{self, Resolution};
 use crate::store::Store;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Patterns kept in the episodic store. Eviction trims to this by strength.
 pub const MAX_PATTERNS: usize = 500;
@@ -105,12 +106,37 @@ pub struct Reinforcement {
     pub reactivations: u32,
 }
 
+/// Why a down-vote is treated the way it is — the coarse routed reason from
+/// docs/25 item 16, inferred from consolidation-time context and never asked
+/// of the human. `Noise` is deliberately absent: no writer has the context to
+/// assert it yet (every live down-vote today is a D3 auto-correction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DownReason {
+    /// The insight's claim is already resolved by reality (a grounding
+    /// resolution matches its text). Removal is forgetting's job; demoting
+    /// first would only pollute the strength distribution.
+    Stale,
+    /// The insight already ships as a graduated rule. A correction firing
+    /// despite the rule indicts the rule's enforcement, not the insight —
+    /// eroding the pattern would undo its own graduation evidence.
+    Known,
+    /// No exonerating context — the ordinary demotion path.
+    Wrong,
+}
+
 /// One classified feedback event: which insight, honored or not, and when.
 #[derive(Debug, Clone)]
 pub struct FeedbackEvent {
     pub insight_id: String,
     pub honored: bool,
     pub ts: Option<DateTime<Utc>>,
+    /// The writer's `source` tag, verbatim from the ledger — how graduation
+    /// marks are recognized.
+    pub source: Option<String>,
+    /// Routed reason for down-votes, set by `classify_downvotes`. `None`
+    /// (unclassified) routes as `Wrong` so an unclassified event keeps the
+    /// pre-item-16 demotion behavior.
+    pub reason: Option<DownReason>,
 }
 
 /// Propagate the feedback lane onto source patterns.
@@ -171,6 +197,26 @@ pub fn apply_feedback(
                     reactivations: p.reactivations,
                 });
             } else {
+                // Routed down-vote (docs/25 item 16): stale and known downs
+                // carry exonerating context, so they are recorded but do not
+                // demote. Wrong — and unclassified, to keep pre-item-16
+                // behavior for legacy callers — takes the penalty.
+                match ev.reason {
+                    Some(DownReason::Stale) | Some(DownReason::Known) => {
+                        moves.push(Reinforcement {
+                            pattern_id: p.id.clone(),
+                            direction: if ev.reason == Some(DownReason::Stale) {
+                                "skip-stale"
+                            } else {
+                                "skip-known"
+                            },
+                            strength: p.strength,
+                            reactivations: p.reactivations,
+                        });
+                        continue;
+                    }
+                    Some(DownReason::Wrong) | None => {}
+                }
                 p.strength = (p.strength - REJECT_PENALTY).clamp(0.0, 1.0);
                 p.ease = (p.ease - EASE_DOWN).max(EASE_MIN);
                 moves.push(Reinforcement {
@@ -274,7 +320,7 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
     };
     let all_events = read_feedback(store);
     let watermark = state.feedback_watermark;
-    let fresh: Vec<FeedbackEvent> = all_events
+    let mut fresh: Vec<FeedbackEvent> = all_events
         .iter()
         .filter(|e| match (watermark, e.ts) {
             (Some(w), Some(t)) => t > w,
@@ -289,16 +335,30 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         state.feedback_watermark = Some(state.feedback_watermark.map_or(m, |w| w.max(m)));
     }
 
+    // Route each fresh down-vote before applying (docs/25 item 16). The
+    // resolution list is grounding's; graduation marks come from the ledger
+    // itself, so the whole history (not just fresh events) supplies them.
+    let resolutions = crate::modules::grounding::load_resolutions(store);
+    let graduated = graduation_marked(&all_events);
+    classify_downvotes(
+        &mut fresh,
+        &patterns,
+        &associations,
+        &resolutions,
+        &graduated,
+    );
+
     decay_cycle(&mut patterns);
     let moves = apply_feedback(&mut patterns, &associations, &fresh);
     let reactivated = moves.iter().filter(|m| m.direction == "reactivate").count();
     let weakened = moves.iter().filter(|m| m.direction == "weaken").count();
+    let stale_skipped = moves.iter().filter(|m| m.direction == "skip-stale").count();
+    let known_skipped = moves.iter().filter(|m| m.direction == "skip-known").count();
 
     // Governed forgetting (item 11): drop lessons reality has overtaken before
     // capacity-eviction runs, so a resolved claim leaves even if it was an
     // anchor. grounding owns the resolution list; forgetting is the single
     // writer of the forgotten ledger.
-    let resolutions = crate::modules::grounding::load_resolutions(store);
     let forgotten = super::forgetting::govern(&mut patterns, &resolutions, Utc::now());
     for f in &forgotten {
         store.append_jsonl("dreams/forgotten.jsonl", f)?;
@@ -319,6 +379,8 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         surviving: patterns.len(),
         reactivated,
         weakened,
+        stale_skipped,
+        known_skipped,
         evicted: evicted.len(),
         forgotten: forgotten.len(),
     })
@@ -362,13 +424,96 @@ fn read_feedback(store: &Store) -> Vec<FeedbackEvent> {
             .and_then(|t| t.as_str())
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|t| t.with_timezone(&Utc));
+        let source = v
+            .get("source")
+            .and_then(|s| s.as_str())
+            .map(str::to_string);
         out.push(FeedbackEvent {
             insight_id: id.to_string(),
             honored,
             ts,
+            source,
+            reason: None,
         });
     }
     out
+}
+
+/// Pattern ids carrying a graduation mark: an up event whose source starts
+/// with "graduation" (apply-time, manual, or backfill). These are the insights
+/// the human shipped as rules — institutionalized, not merely observed.
+fn graduation_marked(events: &[FeedbackEvent]) -> HashSet<String> {
+    events
+        .iter()
+        .filter(|e| e.honored)
+        .filter(|e| {
+            e.source
+                .as_deref()
+                .is_some_and(|s| s.starts_with("graduation"))
+        })
+        .map(|e| e.insight_id.clone())
+        .collect()
+}
+
+/// Attach the routed reason to each fresh down-vote (docs/25 item 16): a down
+/// whose insight text reality has already resolved is `Stale`; one whose
+/// patterns graduated into rules is `Known`; everything else is `Wrong`.
+/// Stale wins over Known — a resolved claim is leaving the store regardless
+/// of its institutional status. Up-votes pass through untouched.
+fn classify_downvotes(
+    events: &mut [FeedbackEvent],
+    patterns: &[ExtractedPattern],
+    associations: &[Association],
+    resolutions: &[Resolution],
+    graduated: &HashSet<String>,
+) {
+    let assoc_by_id: HashMap<&str, &Association> =
+        associations.iter().map(|a| (a.id.as_str(), a)).collect();
+    let pattern_text: HashMap<&str, &str> = patterns
+        .iter()
+        .map(|p| (p.id.as_str(), p.pattern.as_str()))
+        .collect();
+    for ev in events.iter_mut() {
+        if ev.honored {
+            continue;
+        }
+        // The texts this event stands on (association hypothesis + linked
+        // pattern texts, or the pattern's own text for a direct id), and the
+        // pattern ids it would demote.
+        let (texts, linked): (Vec<&str>, Vec<&str>) =
+            match assoc_by_id.get(ev.insight_id.as_str()) {
+                Some(a) => (
+                    std::iter::once(a.hypothesis.as_str())
+                        .chain(
+                            a.patterns_linked
+                                .iter()
+                                .filter_map(|pid| pattern_text.get(pid.as_str()).copied()),
+                        )
+                        .collect(),
+                    a.patterns_linked.iter().map(|s| s.as_str()).collect(),
+                ),
+                None => (
+                    pattern_text
+                        .get(ev.insight_id.as_str())
+                        .copied()
+                        .into_iter()
+                        .collect(),
+                    vec![ev.insight_id.as_str()],
+                ),
+            };
+        ev.reason = Some(
+            if texts
+                .iter()
+                .any(|t| grounding::is_resolved(t, resolutions))
+            {
+                DownReason::Stale
+            } else if linked.iter().any(|id| graduated.contains(*id)) {
+                DownReason::Known
+            } else {
+                DownReason::Wrong
+            },
+        );
+    }
 }
 
 /// What one reinforcement pass did — reported to the daemon log and, in time,
@@ -378,6 +523,12 @@ pub struct ReinforceReport {
     pub surviving: usize,
     pub reactivated: usize,
     pub weakened: usize,
+    /// Down-votes recorded but not demoted because reality already resolved
+    /// the claim (item 16 routing: stale → forgetting's to remove).
+    pub stale_skipped: usize,
+    /// Down-votes recorded but not demoted because the insight already ships
+    /// as a graduated rule (item 16 routing: known → enforcement problem).
+    pub known_skipped: usize,
     pub evicted: usize,
     /// Patterns dropped because a resolution overtook their claim (item 11).
     pub forgotten: usize,
@@ -411,6 +562,22 @@ mod tests {
             insight_id: insight_id.into(),
             honored,
             ts: None,
+            source: None,
+            reason: None,
+        }
+    }
+
+    fn ev_down(insight_id: &str, reason: DownReason) -> FeedbackEvent {
+        FeedbackEvent {
+            reason: Some(reason),
+            ..ev(insight_id, false)
+        }
+    }
+
+    fn res(pattern: &str) -> Resolution {
+        Resolution {
+            pattern: pattern.to_string(),
+            reason: "test".to_string(),
         }
     }
 
@@ -470,6 +637,111 @@ mod tests {
         assert_eq!(moves.len(), 1);
         assert_eq!(ps[0].reactivations, 1, "direct pattern vote lands");
         assert!(ps[0].strength > 0.4, "strength rises");
+    }
+
+    #[test]
+    fn stale_down_records_but_does_not_demote() {
+        let mut ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
+        let moves = apply_feedback(&mut ps, &[], &[ev_down("p1", DownReason::Stale)]);
+        assert_eq!(moves.len(), 1);
+        assert_eq!(moves[0].direction, "skip-stale");
+        assert_eq!(ps[0].strength, 0.5, "stale down must not demote");
+        assert_eq!(ps[0].ease, 2.5, "stale down must not touch ease");
+    }
+
+    #[test]
+    fn known_down_records_but_does_not_demote() {
+        let mut ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
+        let moves = apply_feedback(&mut ps, &[], &[ev_down("p1", DownReason::Known)]);
+        assert_eq!(moves[0].direction, "skip-known");
+        assert_eq!(ps[0].strength, 0.5, "known down must not demote");
+    }
+
+    #[test]
+    fn wrong_and_unclassified_downs_still_weaken() {
+        // Wrong (explicit) and None (legacy caller) both take the penalty —
+        // the pre-item-16 behavior is the default, not a special case.
+        let mut ps = vec![pat("p1", 0.6, 0.5, 2.5, 0), pat("p2", 0.6, 0.5, 2.5, 0)];
+        apply_feedback(
+            &mut ps,
+            &[],
+            &[ev_down("p1", DownReason::Wrong), ev("p2", false)],
+        );
+        assert!(ps[0].strength < 0.5, "wrong down demotes");
+        assert!(ps[1].strength < 0.5, "unclassified down demotes");
+    }
+
+    #[test]
+    fn classify_marks_resolution_matched_down_stale() {
+        // Association-linked: the hypothesis text carries the resolved claim.
+        let ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
+        let assocs = vec![assoc("i1", &["p1"])];
+        let mut evs = vec![ev("i1", false)];
+        classify_downvotes(
+            &mut evs,
+            &ps,
+            &assocs,
+            &[res("hyp i1")],
+            &HashSet::new(),
+        );
+        assert_eq!(evs[0].reason, Some(DownReason::Stale));
+
+        // Direct pattern id: the pattern's own text matches the resolution.
+        let mut evs = vec![ev("p1", false)];
+        classify_downvotes(
+            &mut evs,
+            &ps,
+            &[],
+            &[res("lesson p1")],
+            &HashSet::new(),
+        );
+        assert_eq!(evs[0].reason, Some(DownReason::Stale));
+    }
+
+    #[test]
+    fn classify_marks_graduated_down_known_and_prefers_stale() {
+        let ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
+        let graduated: HashSet<String> = ["p1".to_string()].into();
+
+        let mut evs = vec![ev("p1", false)];
+        classify_downvotes(&mut evs, &ps, &[], &[], &graduated);
+        assert_eq!(evs[0].reason, Some(DownReason::Known));
+
+        // Both signals present → Stale wins (the claim is leaving the store
+        // regardless of its institutional status).
+        let mut evs = vec![ev("p1", false)];
+        classify_downvotes(&mut evs, &ps, &[], &[res("lesson p1")], &graduated);
+        assert_eq!(evs[0].reason, Some(DownReason::Stale));
+    }
+
+    #[test]
+    fn classify_defaults_wrong_and_leaves_ups_alone() {
+        let ps = vec![pat("p1", 0.6, 0.5, 2.5, 0)];
+        let mut evs = vec![ev("p1", false), ev("p1", true)];
+        classify_downvotes(&mut evs, &ps, &[], &[], &HashSet::new());
+        assert_eq!(evs[0].reason, Some(DownReason::Wrong));
+        assert_eq!(evs[1].reason, None, "up-votes are never classified");
+    }
+
+    #[test]
+    fn graduation_marked_collects_graduation_sources_only() {
+        let mk = |id: &str, honored: bool, source: Option<&str>| FeedbackEvent {
+            source: source.map(str::to_string),
+            ..ev(id, honored)
+        };
+        let events = vec![
+            mk("a", true, Some("graduation")),
+            mk("b", true, Some("graduation-backfill")),
+            mk("c", true, Some("graduation-manual")),
+            mk("d", true, Some("widget")),
+            mk("e", true, None),
+            mk("f", false, Some("graduation")), // a down never marks
+        ];
+        let marked = graduation_marked(&events);
+        assert_eq!(
+            marked,
+            ["a", "b", "c"].iter().map(|s| s.to_string()).collect()
+        );
     }
 
     #[test]
@@ -553,6 +825,7 @@ mod tests {
             "dreams/patterns.json",
             "dreams/associations.json",
             "dreams/insight-feedback.jsonl",
+            "dreams/resolutions.jsonl",
         ] {
             let src = live.join(f);
             if src.exists() {
@@ -570,12 +843,14 @@ mod tests {
         let median = strengths[strengths.len() / 2];
         println!(
             "\nreinforce first cycle: {} patterns → {} surviving\n  \
-             reactivated={} weakened={} evicted={}\n  \
+             reactivated={} weakened={} stale-skipped={} known-skipped={} evicted={}\n  \
              strength: min {:.3}, median {:.3}, max {:.3}; {} patterns with reactivations>0",
             before.len(),
             report.surviving,
             report.reactivated,
             report.weakened,
+            report.stale_skipped,
+            report.known_skipped,
             report.evicted,
             strengths.first().unwrap(),
             median,
