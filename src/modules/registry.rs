@@ -475,6 +475,26 @@ fn is_bookkeeping_entry(entry: &std::fs::DirEntry) -> bool {
         .unwrap_or(false)
 }
 
+/// Arrival time of one queue entry. Queue files are named
+/// `<YYYY-MM-DDTHHMMSSZ>-<slug>.json` by the checkpoint ingest script, and that
+/// stamp survives what mtime does not: a bulk copy or restore re-stamps every
+/// file's mtime at once (the 2026-07-11 restore did exactly that, and the lane
+/// under-read a 9-day backlog as 4 days). Prefer the name; fall back to mtime
+/// when the name carries no stamp.
+fn entry_arrival_time(entry: &std::fs::DirEntry) -> Option<SystemTime> {
+    if let Some(t) = entry.file_name().to_str().and_then(filename_timestamp) {
+        return Some(t);
+    }
+    entry.metadata().and_then(|m| m.modified()).ok()
+}
+
+/// Parse the leading compact-UTC stamp (`2026-07-07T180713Z`) off a filename.
+fn filename_timestamp(name: &str) -> Option<SystemTime> {
+    let stamp = name.get(..18)?;
+    let naive = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H%M%SZ").ok()?;
+    Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc).into())
+}
+
 /// Age of the OLDEST child of a directory (the head of a queue), or None if the
 /// directory is missing or empty.
 fn oldest_child_age(dir: &Path) -> Option<Duration> {
@@ -483,10 +503,10 @@ fn oldest_child_age(dir: &Path) -> Option<Duration> {
         if is_bookkeeping_entry(&entry) {
             continue;
         }
-        if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+        if let Some(arrived) = entry_arrival_time(&entry) {
             oldest = Some(match oldest {
-                Some(o) if o <= mtime => o,
-                _ => mtime,
+                Some(o) if o <= arrived => o,
+                _ => arrived,
             });
         }
     }
@@ -1056,6 +1076,32 @@ mod lane_health_tests {
         assert_eq!(classify_bound(100, 300, 800), LaneStatus::Green);
         assert_eq!(classify_bound(400, 300, 800), LaneStatus::Yellow);
         assert_eq!(classify_bound(900, 300, 800), LaneStatus::Red);
+    }
+
+    #[test]
+    fn backlog_age_prefers_filename_stamp_over_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Fresh mtime (just written), but the name says it arrived decades ago
+        // — the restore-clobbered-mtime case.
+        std::fs::write(root.join("2000-01-01T000000Z-old.json"), "{}").unwrap();
+        let age = oldest_child_age(root).unwrap();
+        assert!(
+            age > Duration::from_secs(24 * 3600),
+            "filename stamp must win over fresh mtime, got {age:?}"
+        );
+    }
+
+    #[test]
+    fn backlog_age_falls_back_to_mtime_without_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("no-stamp.json"), "{}").unwrap();
+        let age = oldest_child_age(root).unwrap();
+        assert!(
+            age < Duration::from_secs(3600),
+            "unstamped file ages by mtime, got {age:?}"
+        );
     }
 
     #[test]
