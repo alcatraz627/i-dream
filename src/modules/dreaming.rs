@@ -144,6 +144,24 @@ pub struct DreamEntry {
 }
 
 impl DreamEntry {
+    /// The entry a just-finished run appended, if any: the journal's last
+    /// entry, when its id differs from the last id seen BEFORE the run.
+    /// Identity-based on purpose — a concurrent `prune` trims the journal
+    /// from the oldest end, so a length comparison can shrink below the
+    /// pre-run count and misreport "nothing happened" on a real write
+    /// (Batch B+C gate finding); the tail id survives pruning.
+    pub fn appended_since<'a>(
+        entries: &'a [DreamEntry],
+        last_id_before: Option<&str>,
+    ) -> Option<&'a DreamEntry> {
+        let last = entries.last()?;
+        if Some(last.id.as_str()) != last_id_before {
+            Some(last)
+        } else {
+            None
+        }
+    }
+
     /// One-line cycle receipt for the CLI: what went in, what came out,
     /// what it cost.
     pub fn summary_line(&self, cycle: Option<u64>, elapsed_secs: u64) -> String {
@@ -2044,6 +2062,47 @@ mod tests {
         );
         // Unknown cycle number degrades to a label, not a fabricated 0.
         assert!(entry.summary_line(None, 34).starts_with("[dream] cycle: 5 sessions"));
+    }
+
+    #[test]
+    fn appended_since_detects_by_identity_not_count() {
+        let e = |id: &str| DreamEntry {
+            id: id.into(),
+            timestamp: Utc::now(),
+            phase: "all".into(),
+            sessions_analyzed: 0,
+            patterns_extracted: 0,
+            associations_found: 0,
+            insights_promoted: 0,
+            tokens_used: 0,
+            cycle_id: String::new(),
+        };
+
+        // Nothing written → None, regardless of prior state.
+        assert!(DreamEntry::appended_since(&[], None).is_none());
+        assert!(DreamEntry::appended_since(&[], Some("a")).is_none());
+
+        // Same tail id as before the run → nothing new.
+        let unchanged = [e("a"), e("b")];
+        assert!(DreamEntry::appended_since(&unchanged, Some("b")).is_none());
+
+        // Fresh tail id → the new entry, including first-ever writes.
+        let grew = [e("a"), e("b"), e("c")];
+        assert_eq!(DreamEntry::appended_since(&grew, Some("b")).unwrap().id, "c");
+        let first = [e("a")];
+        assert_eq!(DreamEntry::appended_since(&first, None).unwrap().id, "a");
+
+        // The gate's race: before = [a, b] (len 2); a concurrent prune kept
+        // the last 2 AFTER this run appended c → [b, c], len 2 again. A
+        // count comparison (len > before) says "nothing happened"; identity
+        // finds c.
+        let pruned_after_append = [e("b"), e("c")];
+        assert_eq!(
+            DreamEntry::appended_since(&pruned_after_append, Some("b"))
+                .unwrap()
+                .id,
+            "c"
+        );
     }
 
     // ── cycle_id correlation (Wave 0 item 3) ────────────────────────────────

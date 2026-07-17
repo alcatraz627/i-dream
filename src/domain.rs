@@ -23,8 +23,10 @@ struct DomainListEntry {
     cadence: String,
     /// Events sitting past this domain's cursor right now — what the next
     /// dream-pass would consume. Always 0 for natives (they dream in the
-    /// nightly cycle, not the per-domain pass).
-    pending: usize,
+    /// nightly cycle, not the per-domain pass). None means the delta read
+    /// FAILED (broken stream/extractor) — rendered as "?", never as a
+    /// reassuring 0.
+    pending: Option<usize>,
     /// Timestamp the domain's cursor last advanced through (None = never
     /// consumed).
     last_pass: Option<chrono::DateTime<chrono::Utc>>,
@@ -86,8 +88,16 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
         .map(|d| {
             let m = d.manifest();
             let cursor = d.current_cursor().unwrap_or_default();
-            // Same delta read the dream-pass makes — file reads, no LLM.
-            let pending = d.delta(&cursor).map(|v| v.len()).unwrap_or(0);
+            // Same delta read the dream-pass makes — file reads, no LLM. A
+            // failed read must not masquerade as "0 pending / all caught
+            // up": surface it (mirrors dream_pass's warn on the same call).
+            let pending = match d.delta(&cursor) {
+                Ok(v) => Some(v.len()),
+                Err(e) => {
+                    tracing::warn!("domain '{}' delta read failed: {e:#}", d.name());
+                    None
+                }
+            };
             let insights = m
                 .dream
                 .insights_path
@@ -126,19 +136,26 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
         let now = chrono::Utc::now();
         for e in &entries {
             let last_pass = match e.last_pass {
+                // A cursor stamped in the future means clock skew or a
+                // hand-edited file — look suspicious, not reassuring.
+                Some(ts) if ts > now => "future ts?".to_string(),
                 Some(ts) => {
                     let age = (now - ts).to_std().unwrap_or_default();
                     format!("{} ago", crate::modules::registry::fmt_age(age))
                 }
                 None => "never".to_string(),
             };
+            let pending = e
+                .pending
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string());
             let insights = e
                 .insights
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "—".to_string());
             println!(
                 "{:<18} {:<10} {:<13} {:>7}  {:<10} {:>8}  {}",
-                e.name, e.kind, e.cadence, e.pending, last_pass, insights, e.description
+                e.name, e.kind, e.cadence, pending, last_pass, insights, e.description
             );
         }
         // The pass itself is delta-driven; the cron fire is the only real

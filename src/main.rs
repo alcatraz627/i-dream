@@ -129,23 +129,26 @@ async fn main() -> Result<()> {
 
             info!("Running manual dream cycle (phase: {phase:?})");
             let summary_store = store::Store::new(config.data_dir())?;
-            let journal_before = summary_store
-                .count_jsonl("dreams/journal.jsonl")
-                .unwrap_or(0);
+            let last_id_before = summary_store
+                .read_jsonl::<modules::dreaming::DreamEntry>("dreams/journal.jsonl")
+                .ok()
+                .and_then(|v| v.last().map(|e| e.id.clone()));
             let started = std::time::Instant::now();
             let daemon = daemon::Daemon::new(config).await?;
             daemon.run_dream(phase.clone()).await?;
             let elapsed = started.elapsed().as_secs();
 
             // Cycle receipt: full cycles append a journal entry — read it
-            // back. Phase-only runs (sws/rem/wake) don't journal; say so
-            // instead of fabricating counts.
+            // back (by identity, not count — see DreamEntry::appended_since).
+            // Phase-only runs (sws/rem/wake) don't journal; say so instead
+            // of fabricating counts.
             let entries: Vec<modules::dreaming::DreamEntry> = summary_store
                 .read_jsonl("dreams/journal.jsonl")
                 .unwrap_or_default();
-            if entries.len() > journal_before
-                && let Some(entry) = entries.last()
-            {
+            if let Some(entry) = modules::dreaming::DreamEntry::appended_since(
+                &entries,
+                last_id_before.as_deref(),
+            ) {
                 let cycle = summary_store
                     .read_json::<daemon::DaemonState>("state.json")
                     .ok()

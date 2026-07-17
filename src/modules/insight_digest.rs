@@ -22,6 +22,11 @@ use tracing::info;
 
 const COOLDOWN_HOURS: f64 = 3.0;
 const MAX_INSIGHT_BLOCKS: usize = 5;
+
+/// Smallest budget worth spending: below this the model can't finish the
+/// JSON envelope, and a truncated fragment must never replace the digest.
+/// Half the module's own 512 design cap.
+const MIN_DIGEST_BUDGET: u64 = 256;
 const DIGEST_META_PATH: &str = "dreams/digest-meta.json";
 const INSIGHTS_PATH: &str = "dreams/insights.md";
 const DIGEST_PATH: &str = "dreams/insight-digest.md";
@@ -86,6 +91,16 @@ impl<'a> Module for InsightDigestModule<'a> {
     }
 
     async fn run(&self, client: &ClaudeClient, budget_tokens: u64) -> Result<u64> {
+        // A starved budget near-guarantees a mid-JSON truncation, and the
+        // prose fallback below would overwrite a good digest with the
+        // fragment (Batch B+C gate finding). Skip instead — the cooldown
+        // isn't touched, so a later cycle with headroom picks it up.
+        if budget_tokens < MIN_DIGEST_BUDGET {
+            tracing::info!(
+                "insight digest skipped: budget {budget_tokens} below floor {MIN_DIGEST_BUDGET}"
+            );
+            return Ok(0);
+        }
         let insights_path = self.store.path(INSIGHTS_PATH);
         let insights_raw = std::fs::read_to_string(&insights_path)?;
 
@@ -143,7 +158,10 @@ impl<'a> Module for InsightDigestModule<'a> {
             .await?;
 
         // Parse JSON response; fall back gracefully to treating the whole content
-        // as prose with neutral sentiment if parsing fails.
+        // as prose with neutral sentiment if parsing fails. Exception: a parse
+        // failure that ALSO ran into the token cap is almost certainly a
+        // truncated fragment, not prose — never overwrite the last good
+        // digest with it.
         let (prose, sentiment) = {
             let raw = response
                 .content
@@ -154,6 +172,12 @@ impl<'a> Module for InsightDigestModule<'a> {
                 .trim();
             if let Ok(dr) = serde_json::from_str::<DigestResponse>(raw) {
                 (dr.summary, dr.sentiment)
+            } else if response.tokens_used >= max_tokens as u64 {
+                tracing::warn!(
+                    "insight digest: response unparseable and at the {max_tokens}-token cap — \
+                     likely truncated; keeping the previous digest"
+                );
+                return Ok(response.tokens_used);
             } else {
                 (raw.to_string(), Sentiment::Neutral)
             }
