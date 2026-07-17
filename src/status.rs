@@ -438,7 +438,13 @@ fn freshness_verdicts(
     newest_source_change: Option<DateTime<Utc>>,
 ) -> (Option<bool>, Option<bool>) {
     let daemon_stale = match (daemon_started, daemon_exe_modified) {
-        (Some(started), Some(built)) if daemon_exe_is_idream => Some(started < built),
+        // `ps lstart` is second-granular while mtimes are not, so a daemon
+        // respawned within the same second its binary landed (every
+        // install.sh run) would read as stale. Require the binary to be a
+        // full second newer than the start before calling it that.
+        (Some(started), Some(built)) if daemon_exe_is_idream => {
+            Some(built > started + chrono::Duration::seconds(1))
+        }
         _ => None,
     };
     // The deployed binary: the daemon's exe when a real daemon runs, else
@@ -845,6 +851,29 @@ mod tests {
             Some(t(0)),   // status binary older — must be ignored
             None,
         );
+        assert_eq!(verdict.0, Some(true));
+    }
+
+    #[test]
+    fn same_second_deploy_is_not_stale() {
+        // install.sh replaces the binary and respawns the daemon inside one
+        // second; ps lstart truncates to the second, so the start can read
+        // as (sub-second) earlier than the mtime. That must not be STALE —
+        // caught live on the first deploy of this feature (2026-07-17).
+        let started = DateTime::<Utc>::from_timestamp(1_700_000_100, 0).unwrap();
+        let built_same_second = DateTime::<Utc>::from_timestamp(1_700_000_100, 272_000_000).unwrap();
+        let verdict = freshness_verdicts(
+            Some(started),
+            true,
+            Some(built_same_second),
+            None,
+            None,
+        );
+        assert_eq!(verdict.0, Some(false));
+
+        // A binary a full second+ newer is genuinely a replacement.
+        let built_later = DateTime::<Utc>::from_timestamp(1_700_000_102, 0).unwrap();
+        let verdict = freshness_verdicts(Some(started), true, Some(built_later), None, None);
         assert_eq!(verdict.0, Some(true));
     }
 
