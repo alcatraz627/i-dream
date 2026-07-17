@@ -1,9 +1,31 @@
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Help styling per the house CLI convention (cli-help-design): headers bold
+/// yellow, commands and flags cyan, value placeholders green. anstream gates
+/// it — plain when piped, under NO_COLOR, or on TERM=dumb. clap has one
+/// `literal` style for commands AND flags, so both take the cyan; green goes
+/// to placeholders instead of flags.
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().bold())
+    .usage(AnsiColor::Yellow.on_default().bold())
+    .literal(AnsiColor::Cyan.on_default().bold())
+    .placeholder(AnsiColor::Green.on_default());
+
+const EXAMPLES: &str = "\
+Examples:
+  i-dream status                # daemon health + module state
+  i-dream dream-pass            # LLM pass over domains with fresh delta
+  i-dream insight-digest        # force-refresh the digest (skips 3h cooldown)
+  i-dream snapshot-diff         # what did the last dream cycle change?
+  i-dream audit                 # weekly self-audit -> staged proposals
+  i-dream review                # adjudicate staged proposals interactively
+";
+
 /// i-dream: A subconsciousness layer for Claude Code
 #[derive(Parser)]
-#[command(name = "i-dream", version, about)]
+#[command(name = "i-dream", version, about, styles = HELP_STYLES, after_help = EXAMPLES)]
 pub struct Cli {
     /// Path to config file
     #[arg(short, long, default_value = "~/.claude/subconscious/config.toml")]
