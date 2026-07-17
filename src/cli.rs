@@ -52,7 +52,15 @@ pub enum Command {
     Stop,
 
     /// Show daemon status and module health
-    Status,
+    Status {
+        /// Deep diagnosis: full lane table, scheduled-job fires, log
+        /// noise counts, and binary/daemon freshness checks.
+        #[arg(short, long)]
+        verbose: bool,
+        /// Emit the full report (verbose sections included) as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Manually trigger a dream cycle
     Dream {

@@ -712,10 +712,9 @@ fn collect_summary(
 
 /// Derive daemon liveness from the PID file in the data dir.
 ///
-/// We intentionally reimplement the check instead of calling
-/// `Daemon::status()` because that's an async fn on a fully-constructed
-/// daemon, and the dashboard doesn't need to spin up tokio just to read
-/// a four-byte file.
+/// We intentionally reimplement the check instead of reusing the
+/// `status` module's gatherer, because the dashboard doesn't need a
+/// full report just to read a four-byte file.
 fn collect_daemon_state(data_dir: &Path) -> DaemonState {
     let pid_path = data_dir.join("daemon.pid");
 

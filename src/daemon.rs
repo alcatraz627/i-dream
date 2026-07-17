@@ -1260,80 +1260,12 @@ impl Daemon {
         Ok(())
     }
 
-    /// Get daemon status.
-    ///
-    /// Distinguishes three cases for the PID file:
-    ///   - no file → "stopped"
-    ///   - file exists and PID is alive → "running"
-    ///   - file exists but PID is dead → "stopped (stale PID file)",
-    ///     so operators can see something is wrong without having to
-    ///     `ps` themselves.
-    pub async fn status() -> Result<String> {
-        let pid_path = pid_file_path();
-        let data_dir = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".claude/subconscious");
-
-        let mut out = String::new();
-
-        // Daemon status — verify liveness, don't trust the file alone.
-        match read_pid_file(&pid_path) {
-            Some(pid) if is_process_alive(pid) => {
-                out.push_str(&format!("Daemon: running (PID {pid})\n"));
-            }
-            Some(pid) => {
-                out.push_str(&format!(
-                    "Daemon: stopped (stale PID file at {}, PID {pid} is not alive)\n",
-                    pid_path.display()
-                ));
-            }
-            None => {
-                out.push_str("Daemon: stopped\n");
-            }
-        }
-
-        // State
-        let state_path = data_dir.join("state.json");
-        if state_path.exists() {
-            let content = std::fs::read_to_string(&state_path)?;
-            let state: DaemonState = serde_json::from_str(&content)?;
-            if let Some(last) = state.last_consolidation {
-                out.push_str(&format!("Last consolidation: {last}\n"));
-            }
-            if let Some(activity) = state.last_activity {
-                out.push_str(&format!("Last activity: {activity}\n"));
-            }
-            out.push_str(&format!("Total cycles: {}\n", state.total_cycles));
-            out.push_str(&format!("Total tokens used: {}\n", state.total_tokens_used));
-        }
-
-        // Module health
-        let modules = [
-            "dreams",
-            "metacog",
-            "valence",
-            "introspection",
-            "intentions",
-        ];
-        out.push_str("\nModules:\n");
-        for module in &modules {
-            let dir = data_dir.join(module);
-            let status = if dir.exists() {
-                "initialized"
-            } else {
-                "not initialized"
-            };
-            out.push_str(&format!("  {module}: {status}\n"));
-        }
-
-        Ok(out)
-    }
 }
 
 /// Read and parse the daemon PID file, returning `None` if the file
 /// doesn't exist or the contents are unparseable. Broken contents get
 /// logged but produce `None` so callers can treat it as "no daemon".
-fn read_pid_file(path: &Path) -> Option<i32> {
+pub(crate) fn read_pid_file(path: &Path) -> Option<i32> {
     let content = std::fs::read_to_string(path).ok()?;
     match content.trim().parse::<i32>() {
         Ok(pid) => Some(pid),
@@ -1364,7 +1296,7 @@ fn write_pid_file(path: &Path, pid: u32) -> Result<()> {
 /// permission and existence checks without actually delivering a
 /// signal. Returns `true` iff the process exists. This is the portable
 /// Unix idiom and is exactly what `systemctl` / `docker` do.
-fn is_process_alive(pid: i32) -> bool {
+pub(crate) fn is_process_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
     }
@@ -1473,7 +1405,7 @@ async fn wait_for_exit(pid: i32, attempts: u32, interval: Duration) -> bool {
     !is_process_alive(pid)
 }
 
-fn pid_file_path() -> PathBuf {
+pub(crate) fn pid_file_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
         .join(".claude/subconscious/daemon.pid")

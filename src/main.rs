@@ -19,6 +19,7 @@ mod pin;
 mod reflect;
 mod review;
 mod service;
+mod status;
 mod store;
 mod thread;
 mod transcript;
@@ -71,9 +72,13 @@ async fn main() -> Result<()> {
             daemon::Daemon::stop().await?;
         }
 
-        Command::Status => {
-            let status = daemon::Daemon::status().await?;
-            println!("{status}");
+        Command::Status { verbose, json } => {
+            let report = status::gather(verbose || json)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", status::render_text(&report, verbose));
+            }
         }
 
         Command::Dream {

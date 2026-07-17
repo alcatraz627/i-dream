@@ -497,7 +497,7 @@ fn filename_timestamp(name: &str) -> Option<SystemTime> {
 
 /// Age of the OLDEST child of a directory (the head of a queue), or None if the
 /// directory is missing or empty.
-fn oldest_child_age(dir: &Path) -> Option<Duration> {
+pub(crate) fn oldest_child_age(dir: &Path) -> Option<Duration> {
     let mut oldest: Option<SystemTime> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         if is_bookkeeping_entry(&entry) {
@@ -545,7 +545,7 @@ fn measure_bound(metric: BoundMetric, path: &Path) -> u64 {
 }
 
 /// Compact human age: "56d", "3h", "12m", "just now".
-fn fmt_age(age: Duration) -> String {
+pub(crate) fn fmt_age(age: Duration) -> String {
     let secs = age.as_secs();
     if secs >= 86_400 {
         format!("{}d", secs / 86_400)

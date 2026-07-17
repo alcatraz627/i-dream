@@ -12,22 +12,80 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// When a job fires. `weekday` follows launchd's convention: 0 = Sunday.
-enum Schedule {
+pub(crate) enum Schedule {
     Daily { hour: u8, minute: u8 },
     Weekly { weekday: u8, hour: u8, minute: u8 },
 }
 
-struct CronJob {
-    label: &'static str,
+impl Schedule {
+    /// Compact human phrase for status surfaces: "daily 02:45" / "Sun 02:30".
+    pub(crate) fn human(&self) -> String {
+        match self {
+            Schedule::Daily { hour, minute } => format!("daily {hour:02}:{minute:02}"),
+            Schedule::Weekly {
+                weekday,
+                hour,
+                minute,
+            } => {
+                let day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+                    .get(*weekday as usize)
+                    .copied()
+                    .unwrap_or("?");
+                format!("{day} {hour:02}:{minute:02}")
+            }
+        }
+    }
+
+    /// The next wall-clock instant this schedule fires strictly after `now`,
+    /// mirroring launchd's local-time StartCalendarInterval semantics. Returns
+    /// None only for a time that doesn't exist on the target day (DST skip).
+    pub(crate) fn next_fire_after(
+        &self,
+        now: chrono::DateTime<chrono::Local>,
+    ) -> Option<chrono::DateTime<chrono::Local>> {
+        use chrono::{Datelike, Duration as CDuration, TimeZone};
+        let (hour, minute, want_weekday) = match self {
+            Schedule::Daily { hour, minute } => (*hour, *minute, None),
+            Schedule::Weekly {
+                weekday,
+                hour,
+                minute,
+            } => (*hour, *minute, Some(*weekday as u32)),
+        };
+        // Walk day by day (≤8 iterations) instead of doing modular weekday
+        // arithmetic — slower by nanoseconds, immune to off-by-one bugs.
+        for offset in 0..=7 {
+            let day = now.date_naive() + CDuration::days(offset);
+            if let Some(w) = want_weekday
+                && day.weekday().num_days_from_sunday() != w
+            {
+                continue;
+            }
+            let Some(naive) = day.and_hms_opt(hour as u32, minute as u32, 0) else {
+                continue;
+            };
+            let Some(candidate) = chrono::Local.from_local_datetime(&naive).earliest() else {
+                continue;
+            };
+            if candidate > now {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+}
+
+pub(crate) struct CronJob {
+    pub(crate) label: &'static str,
     args: &'static [&'static str],
-    schedule: Schedule,
-    desc: &'static str,
+    pub(crate) schedule: Schedule,
+    pub(crate) desc: &'static str,
 }
 
 /// The scheduled jobs, in fire order. dream-pass first (populates the union
 /// views), then the digest reads them; the weekly audit runs non-interactively
 /// to stage proposals the user later reviews + applies.
-const JOBS: &[CronJob] = &[
+pub(crate) const JOBS: &[CronJob] = &[
     CronJob {
         label: "com.alcatraz.i-dream-dreampass",
         args: &["dream-pass"],
@@ -75,7 +133,7 @@ fn launch_agents_dir() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join("Library/LaunchAgents"))
 }
 
-fn plist_path(label: &str) -> Result<PathBuf> {
+pub(crate) fn plist_path(label: &str) -> Result<PathBuf> {
     Ok(launch_agents_dir()?.join(format!("{label}.plist")))
 }
 
@@ -276,5 +334,75 @@ mod tests {
         for job in JOBS {
             assert!(seen.insert(job.label), "duplicate job label: {}", job.label);
         }
+    }
+
+    // ── next_fire_after ──────────────────────────────────────────────
+    // Fixed local timestamps; the walk is pure calendar arithmetic, so
+    // each case pins one boundary the status surface depends on.
+
+    use chrono::{Local, TimeZone};
+
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<Local> {
+        Local.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
+    }
+
+    #[test]
+    fn daily_before_fire_time_fires_same_day() {
+        let s = Schedule::Daily { hour: 2, minute: 45 };
+        // 2026-07-17 is a Friday; 01:00 is before 02:45.
+        let next = s.next_fire_after(local(2026, 7, 17, 1, 0)).unwrap();
+        assert_eq!(next, local(2026, 7, 17, 2, 45));
+    }
+
+    #[test]
+    fn daily_after_fire_time_rolls_to_tomorrow() {
+        let s = Schedule::Daily { hour: 2, minute: 45 };
+        let next = s.next_fire_after(local(2026, 7, 17, 12, 0)).unwrap();
+        assert_eq!(next, local(2026, 7, 18, 2, 45));
+    }
+
+    #[test]
+    fn daily_exactly_at_fire_time_is_strictly_after() {
+        let s = Schedule::Daily { hour: 2, minute: 45 };
+        let next = s.next_fire_after(local(2026, 7, 17, 2, 45)).unwrap();
+        assert_eq!(next, local(2026, 7, 18, 2, 45));
+    }
+
+    #[test]
+    fn weekly_wraps_to_next_week_when_day_passed() {
+        // Sunday 02:30 audit; asked on Friday → the coming Sunday.
+        let s = Schedule::Weekly {
+            weekday: 0,
+            hour: 2,
+            minute: 30,
+        };
+        let next = s.next_fire_after(local(2026, 7, 17, 12, 0)).unwrap();
+        assert_eq!(next, local(2026, 7, 19, 2, 30));
+    }
+
+    #[test]
+    fn weekly_same_day_but_past_time_wraps_a_full_week() {
+        // 2026-07-19 is a Sunday; at 03:00 the 02:30 fire is gone.
+        let s = Schedule::Weekly {
+            weekday: 0,
+            hour: 2,
+            minute: 30,
+        };
+        let next = s.next_fire_after(local(2026, 7, 19, 3, 0)).unwrap();
+        assert_eq!(next, local(2026, 7, 26, 2, 30));
+    }
+
+    #[test]
+    fn schedule_human_phrases() {
+        assert_eq!(Schedule::Daily { hour: 3, minute: 0 }.human(), "daily 03:00");
+        assert_eq!(
+            Schedule::Weekly {
+                weekday: 1,
+                hour: 9,
+                minute: 0
+            }
+            .human(),
+            "Mon 09:00"
+        );
     }
 }

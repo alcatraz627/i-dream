@@ -102,7 +102,7 @@ fn unknown_subcommand_errors() {
 // This is the most-touched read-only command and exercises the
 // PID-file + state.json reconciliation from Task #7. The three
 // interesting cases — no file, live PID, stale PID — map directly to
-// the three branches of `Daemon::status()`.
+// the three daemon branches in `status::gather()`.
 
 #[test]
 fn status_without_daemon_reports_stopped() {
@@ -159,6 +159,57 @@ fn status_reports_module_dirs() {
         .stdout(predicate::str::contains("valence:"))
         .stdout(predicate::str::contains("introspection:"))
         .stdout(predicate::str::contains("intentions:"));
+}
+
+#[test]
+fn status_shows_lane_health_summary() {
+    // The base `status` output must carry the one-line lane verdict.
+    // In a fresh sandbox most lanes are red (their stores don't exist),
+    // so the line must name at least one red lane with its reason.
+    let (dir, _) = sandbox();
+
+    cmd_in(dir.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Lanes:"))
+        .stdout(predicate::str::contains("red"));
+}
+
+#[test]
+fn status_json_emits_parseable_report() {
+    let (dir, _) = sandbox();
+
+    let out = cmd_in(dir.path())
+        .args(["status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out).expect("status --json must emit valid JSON");
+    assert_eq!(v["daemon"]["status"], "stopped");
+    assert!(v["lanes"]["lanes"].is_array(), "lanes array present");
+    assert!(v["lanes"]["red"].is_u64(), "lane counts present");
+    // JSON implies the deep sections; jobs is always a list.
+    assert!(v["jobs"].is_array(), "scheduled jobs present in JSON mode");
+}
+
+#[test]
+fn status_verbose_shows_lane_table_and_jobs() {
+    let (dir, _) = sandbox();
+
+    cmd_in(dir.path())
+        .args(["status", "-v"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Lanes ("))
+        .stdout(predicate::str::contains("Scheduled jobs:"))
+        // Sandbox has no LaunchAgents — jobs must be honest about it.
+        .stdout(predicate::str::contains("NOT INSTALLED"))
+        .stdout(predicate::str::contains("Build: v"));
 }
 
 // ── `stop` command ────────────────────────────────────────────
