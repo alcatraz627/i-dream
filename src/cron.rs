@@ -37,13 +37,14 @@ impl Schedule {
     }
 
     /// The next wall-clock instant this schedule fires strictly after `now`,
-    /// mirroring launchd's local-time StartCalendarInterval semantics. Returns
-    /// None only for a time that doesn't exist on the target day (DST skip).
-    pub(crate) fn next_fire_after(
+    /// mirroring launchd's local-time StartCalendarInterval semantics.
+    /// Generic over the timezone so DST behavior is testable with fixed
+    /// zones; production callers pass `Local::now()`.
+    pub(crate) fn next_fire_after<Tz: chrono::TimeZone>(
         &self,
-        now: chrono::DateTime<chrono::Local>,
-    ) -> Option<chrono::DateTime<chrono::Local>> {
-        use chrono::{Datelike, Duration as CDuration, TimeZone};
+        now: chrono::DateTime<Tz>,
+    ) -> Option<chrono::DateTime<Tz>> {
+        use chrono::{Datelike, Duration as CDuration};
         let (hour, minute, want_weekday) = match self {
             Schedule::Daily { hour, minute } => (*hour, *minute, None),
             Schedule::Weekly {
@@ -52,9 +53,13 @@ impl Schedule {
                 minute,
             } => (*hour, *minute, Some(*weekday as u32)),
         };
-        // Walk day by day (≤8 iterations) instead of doing modular weekday
-        // arithmetic — slower by nanoseconds, immune to off-by-one bugs.
-        for offset in 0..=7 {
+        // Walk day by day instead of doing modular weekday arithmetic —
+        // slower by nanoseconds, immune to off-by-one bugs. The window is
+        // TWO weeks: a weekly schedule has one matching day per week, and
+        // if that day's local fire time doesn't exist (DST spring-forward
+        // gap — e.g. Sun 02:30 on the US transition day), the fire must
+        // roll to next week's occurrence, not report "no fire at all".
+        for offset in 0..=14 {
             let day = now.date_naive() + CDuration::days(offset);
             if let Some(w) = want_weekday
                 && day.weekday().num_days_from_sunday() != w
@@ -64,7 +69,7 @@ impl Schedule {
             let Some(naive) = day.and_hms_opt(hour as u32, minute as u32, 0) else {
                 continue;
             };
-            let Some(candidate) = chrono::Local.from_local_datetime(&naive).earliest() else {
+            let Some(candidate) = now.timezone().from_local_datetime(&naive).earliest() else {
                 continue;
             };
             if candidate > now {
@@ -394,6 +399,38 @@ mod tests {
         };
         let next = s.next_fire_after(local(2026, 7, 19, 3, 0)).unwrap();
         assert_eq!(next, local(2026, 7, 26, 2, 30));
+    }
+
+    #[test]
+    fn weekly_fire_in_dst_gap_rolls_to_next_week_not_none() {
+        // US DST starts 2026-03-08 (2nd Sunday of March): 02:00-03:00 does
+        // not exist in America/New_York, which swallows the audit job's
+        // Sun 02:30 fire. The next fire must be the FOLLOWING Sunday, not
+        // None — validator finding, Batch A gate 2026-07-17.
+        use chrono_tz::America::New_York;
+        let now = New_York.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
+        let s = Schedule::Weekly {
+            weekday: 0,
+            hour: 2,
+            minute: 30,
+        };
+        let next = s.next_fire_after(now).expect("must roll to next week, not None");
+        assert_eq!(
+            next,
+            New_York.with_ymd_and_hms(2026, 3, 15, 2, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn daily_fire_in_dst_gap_rolls_to_next_day() {
+        use chrono_tz::America::New_York;
+        let now = New_York.with_ymd_and_hms(2026, 3, 7, 23, 0, 0).unwrap();
+        let s = Schedule::Daily { hour: 2, minute: 30 };
+        let next = s.next_fire_after(now).expect("must roll past the gap day");
+        assert_eq!(
+            next,
+            New_York.with_ymd_and_hms(2026, 3, 9, 2, 30, 0).unwrap()
+        );
     }
 
     #[test]

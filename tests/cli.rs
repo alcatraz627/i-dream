@@ -134,7 +134,9 @@ fn status_with_stale_pid_file_reports_stale() {
         .arg("status")
         .assert()
         .success()
-        .stdout(predicate::str::contains("stale PID file"))
+        // The message must NAME the file to clean, not just diagnose.
+        .stdout(predicate::str::contains("stale PID file at"))
+        .stdout(predicate::str::contains("daemon.pid"))
         .stdout(predicate::str::contains(i32::MAX.to_string()));
 
     // Status is read-only: it reports the stale file but does NOT

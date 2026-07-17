@@ -46,6 +46,9 @@ pub struct DaemonSection {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<i32>,
+    /// Present on a stale-pid-file verdict — names the file to clean.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid_file: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -83,6 +86,12 @@ pub struct JobStatus {
     pub pid: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<i64>,
+    /// The binary launchd reports for this label. launchd is global per
+    /// user, so under a sandboxed $HOME a planted plist with a live label
+    /// reads the REAL session's job — this field makes such a collision
+    /// visible instead of silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -106,6 +115,11 @@ pub struct BuildSection {
     /// from `binary` when status runs from a dev build.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_exe: Option<String>,
+    /// False when the PID in the pid file resolves to a process that is
+    /// not i-dream at all (stale or reused PID) — freshness verdicts are
+    /// withheld in that case rather than confidently wrong.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daemon_is_i_dream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub daemon_exe_modified: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,14 +148,17 @@ pub fn gather(deep: bool) -> Result<StatusReport> {
         Some(pid) if is_process_alive(pid) => DaemonSection {
             status: "running".into(),
             pid: Some(pid),
+            pid_file: None,
         },
         Some(pid) => DaemonSection {
             status: "stale-pid-file".into(),
             pid: Some(pid),
+            pid_file: Some(pid_path.display().to_string()),
         },
         None => DaemonSection {
             status: "stopped".into(),
             pid: None,
+            pid_file: None,
         },
     };
 
@@ -245,9 +262,12 @@ fn lane_word(s: LaneStatus) -> &'static str {
 
 // ── deep gatherers ───────────────────────────────────────────────────────────
 
-/// Scheduled-job rows: schedule + next local fire, and launchd's view when
-/// the plist is installed. Hermetic under a sandboxed $HOME: launchctl is
-/// only queried for plists that exist there.
+/// Scheduled-job rows: schedule + next local fire, plus launchd's view when
+/// the plist is installed under this $HOME. Caveat: launchd itself is
+/// global per user — it does not key by $HOME. The plist-existence gate
+/// keeps a fresh sandbox from querying it at all, but a sandbox that plants
+/// a plist whose label is live in the real session will read the REAL job's
+/// state; the `program` field is carried so that collision is visible.
 fn gather_jobs() -> Vec<JobStatus> {
     let now = Local::now();
     crate::cron::JOBS
@@ -256,20 +276,20 @@ fn gather_jobs() -> Vec<JobStatus> {
             let installed = crate::cron::plist_path(job.label)
                 .map(|p| p.exists())
                 .unwrap_or(false);
-            let (loaded, pid, last_exit) = if installed {
+            let (loaded, pid, last_exit, program) = if installed {
                 match std::process::Command::new("launchctl")
                     .args(["list", job.label])
                     .output()
                 {
                     Ok(out) if out.status.success() => {
-                        let (pid, last_exit) =
+                        let (pid, last_exit, program) =
                             parse_launchctl_list(&String::from_utf8_lossy(&out.stdout));
-                        (true, pid, last_exit)
+                        (true, pid, last_exit, program)
                     }
-                    _ => (false, None, None),
+                    _ => (false, None, None, None),
                 }
             } else {
-                (false, None, None)
+                (false, None, None, None)
             };
             JobStatus {
                 label: job.label,
@@ -283,21 +303,29 @@ fn gather_jobs() -> Vec<JobStatus> {
                 loaded,
                 pid,
                 last_exit,
+                program,
             }
         })
         .collect()
 }
 
-/// Extract `"PID" = N;` and `"LastExitStatus" = N;` from `launchctl list
-/// <label>` output. A missing PID just means the job isn't running right now.
-fn parse_launchctl_list(out: &str) -> (Option<i64>, Option<i64>) {
-    let grab = |key: &str| {
+/// Extract `"PID" = N;`, `"LastExitStatus" = N;`, and `"Program" = "...";`
+/// from `launchctl list <label>` output. A missing PID just means the job
+/// isn't running right now. PIDs are real process ids — non-positive values
+/// are treated as absent rather than passed through.
+fn parse_launchctl_list(out: &str) -> (Option<i64>, Option<i64>, Option<String>) {
+    let line_value = |key: &str| {
         out.lines()
             .find(|l| l.contains(&format!("\"{key}\"")))
             .and_then(|l| l.split('=').nth(1))
-            .and_then(|v| v.trim().trim_end_matches(';').trim().parse::<i64>().ok())
+            .map(|v| v.trim().trim_end_matches(';').trim().to_string())
     };
-    (grab("PID"), grab("LastExitStatus"))
+    let grab_int = |key: &str| line_value(key).and_then(|v| v.parse::<i64>().ok());
+    (
+        grab_int("PID").filter(|pid| *pid > 0),
+        grab_int("LastExitStatus"),
+        line_value("Program").map(|v| v.trim_matches('"').to_string()),
+    )
 }
 
 /// Count WARN/ERROR lines in the newest rolling log file. Daily files stay
@@ -359,38 +387,72 @@ fn gather_build(daemon_pid: Option<i32>) -> BuildSection {
 
     let daemon_exe = daemon_pid.and_then(process_exe_path);
     let daemon_exe_modified = daemon_exe.as_deref().and_then(mtime_utc);
+    // Liveness (kill -0) says nothing about identity: a recycled PID can
+    // belong to any process. If the exe isn't i-dream, say so and withhold
+    // freshness verdicts instead of judging a stranger's binary.
+    let daemon_is_i_dream = daemon_exe
+        .as_deref()
+        .map(|p| p.file_name().is_some_and(|n| n == "i-dream"));
 
     let daemon_started = daemon_pid
         .and_then(process_start_time)
         .map(|t| t.with_timezone(&Utc));
-    let daemon_stale = match (daemon_started, daemon_exe_modified) {
-        (Some(started), Some(built)) => Some(started < built),
-        _ => None,
-    };
-
-    // The deployed binary: what the daemon runs, else this process.
-    let deployed_modified = daemon_exe_modified.or(binary_modified);
 
     // CARGO_MANIFEST_DIR is baked at compile time — valid on the machine
     // the binary was built on, silently absent anywhere else.
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let newest_source_change = newest_rs_mtime(&src_dir).map(DateTime::<Utc>::from);
-    let binary_behind_source = match (newest_source_change, deployed_modified) {
-        (Some(src), Some(bin)) => Some(src > bin),
-        _ => None,
-    };
+
+    let (daemon_stale, binary_behind_source) = freshness_verdicts(
+        daemon_started,
+        daemon_is_i_dream.unwrap_or(false),
+        daemon_exe_modified,
+        binary_modified,
+        newest_source_change,
+    );
 
     BuildSection {
         version: env!("CARGO_PKG_VERSION"),
         binary: binary_path.map(|p| p.display().to_string()),
         binary_modified,
         daemon_exe: daemon_exe.map(|p| p.display().to_string()),
+        daemon_is_i_dream,
         daemon_exe_modified,
         daemon_started,
         daemon_stale,
         newest_source_change,
         binary_behind_source,
     }
+}
+
+/// Pure freshness comparison, split from the gatherers so tests can pin
+/// each verdict's SOURCE: staleness compares the daemon's own exe (never
+/// the status process's binary — they differ under a dev build), and a
+/// PID that isn't running i-dream gets no verdict at all rather than a
+/// confident wrong one. Returns (daemon_stale, binary_behind_source).
+fn freshness_verdicts(
+    daemon_started: Option<DateTime<Utc>>,
+    daemon_exe_is_idream: bool,
+    daemon_exe_modified: Option<DateTime<Utc>>,
+    binary_modified: Option<DateTime<Utc>>,
+    newest_source_change: Option<DateTime<Utc>>,
+) -> (Option<bool>, Option<bool>) {
+    let daemon_stale = match (daemon_started, daemon_exe_modified) {
+        (Some(started), Some(built)) if daemon_exe_is_idream => Some(started < built),
+        _ => None,
+    };
+    // The deployed binary: the daemon's exe when a real daemon runs, else
+    // whatever binary answered this call.
+    let deployed_modified = if daemon_exe_is_idream {
+        daemon_exe_modified.or(binary_modified)
+    } else {
+        binary_modified
+    };
+    let binary_behind_source = match (newest_source_change, deployed_modified) {
+        (Some(src), Some(bin)) => Some(src > bin),
+        _ => None,
+    };
+    (daemon_stale, binary_behind_source)
 }
 
 /// Executable path of a live process via `ps -o comm=`. On macOS this is
@@ -466,9 +528,17 @@ pub fn render_text(r: &StatusReport, verbose: bool) -> String {
 
     match (&r.daemon.status[..], r.daemon.pid) {
         ("running", Some(pid)) => out.push_str(&format!("Daemon: running (PID {pid})\n")),
-        ("stale-pid-file", Some(pid)) => out.push_str(&format!(
-            "Daemon: stopped (stale PID file, PID {pid} is not alive)\n"
-        )),
+        ("stale-pid-file", Some(pid)) => {
+            let at = r
+                .daemon
+                .pid_file
+                .as_deref()
+                .map(|p| format!(" at {p}"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "Daemon: stopped (stale PID file{at}, PID {pid} is not alive)\n"
+            ));
+        }
         _ => out.push_str("Daemon: stopped\n"),
     }
 
@@ -598,6 +668,11 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
                 .unwrap_or_default();
             out.push_str(&format!("  daemon binary {exe}{modified}\n"));
         }
+        if b.daemon_is_i_dream == Some(false) {
+            out.push_str(
+                "  ⚠ the PID in the pid file is not an i-dream process (stale or reused PID) — freshness verdicts withheld\n",
+            );
+        }
         if let Some(started) = &b.daemon_started {
             let verdict = match b.daemon_stale {
                 Some(true) => " — STALE: its binary was replaced after it started",
@@ -712,7 +787,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_launchctl_list_extracts_pid_and_exit() {
+    fn parse_launchctl_list_extracts_pid_exit_and_program() {
         let out = r#"{
 	"LimitLoadToSessionType" = "Aqua";
 	"Label" = "com.alcatraz.i-dream-daily";
@@ -720,13 +795,88 @@ mod tests {
 	"PID" = 4242;
 	"Program" = "/usr/local/bin/i-dream";
 };"#;
-        assert_eq!(parse_launchctl_list(out), (Some(4242), Some(0)));
+        assert_eq!(
+            parse_launchctl_list(out),
+            (Some(4242), Some(0), Some("/usr/local/bin/i-dream".to_string()))
+        );
     }
 
     #[test]
     fn parse_launchctl_list_tolerates_missing_pid() {
         let out = "\t\"LastExitStatus\" = 78;\n";
-        assert_eq!(parse_launchctl_list(out), (None, Some(78)));
+        assert_eq!(parse_launchctl_list(out), (None, Some(78), None));
+    }
+
+    #[test]
+    fn parse_launchctl_list_drops_non_positive_pids() {
+        // Real launchctl never emits these; a hostile or corrupt line must
+        // read as "not running", not as PID -5.
+        assert_eq!(parse_launchctl_list("\t\"PID\" = -5;\n").0, None);
+        assert_eq!(parse_launchctl_list("\t\"PID\" = 0;\n").0, None);
+    }
+
+    // ── freshness_verdicts — pins each verdict's SOURCE ──────────────
+    // The Batch A gate proved a mutation swapping daemon_exe_modified for
+    // binary_modified stayed green across 492 tests. These pin it red.
+
+    fn t(secs: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_700_000_000 + secs, 0).unwrap()
+    }
+
+    #[test]
+    fn daemon_stale_compares_the_daemons_exe_not_this_binary() {
+        // Daemon started AFTER its own exe was built (fresh), but THIS
+        // process's binary is newer than the daemon's start (a dev build).
+        // Using binary_modified here would wrongly report stale.
+        let verdict = freshness_verdicts(
+            Some(t(100)), // daemon started
+            true,
+            Some(t(50)),  // daemon exe built before start → fresh
+            Some(t(200)), // status binary newer than start → must be ignored
+            None,
+        );
+        assert_eq!(verdict.0, Some(false));
+
+        // And the true-stale direction still reads from the daemon's exe.
+        let verdict = freshness_verdicts(
+            Some(t(100)),
+            true,
+            Some(t(150)), // exe replaced after start → stale
+            Some(t(0)),   // status binary older — must be ignored
+            None,
+        );
+        assert_eq!(verdict.0, Some(true));
+    }
+
+    #[test]
+    fn non_idream_pid_gets_no_freshness_verdicts() {
+        // A recycled PID pointing at some other process: judging its
+        // binary's mtime would be confidently wrong — verdicts withheld.
+        let verdict = freshness_verdicts(
+            Some(t(100)),
+            false,
+            Some(t(150)),
+            Some(t(200)),
+            Some(t(300)),
+        );
+        assert_eq!(verdict.0, None);
+        // behind-source falls back to this process's binary (t=200) vs
+        // source (t=300) — still answerable without trusting the stranger.
+        assert_eq!(verdict.1, Some(true));
+    }
+
+    #[test]
+    fn behind_source_uses_the_daemons_exe_when_daemon_runs() {
+        // Source newer than the daemon's deployed exe but older than this
+        // (dev) binary: deployed is what matters → behind.
+        let verdict = freshness_verdicts(
+            Some(t(100)),
+            true,
+            Some(t(50)),  // deployed exe
+            Some(t(400)), // dev binary — must be ignored
+            Some(t(300)), // source change
+        );
+        assert_eq!(verdict.1, Some(true));
     }
 
     #[test]
@@ -735,6 +885,7 @@ mod tests {
             daemon: DaemonSection {
                 status: "stopped".into(),
                 pid: None,
+                pid_file: None,
             },
             state: None,
             state_error: None,
@@ -768,6 +919,7 @@ mod tests {
             daemon: DaemonSection {
                 status: "stopped".into(),
                 pid: None,
+                pid_file: None,
             },
             state: None,
             state_error: None,
@@ -798,6 +950,7 @@ mod tests {
             daemon: DaemonSection {
                 status: "stopped".into(),
                 pid: None,
+                pid_file: None,
             },
             state: None,
             state_error: None,

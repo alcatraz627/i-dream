@@ -68,6 +68,9 @@ libc = "0.2"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+# Fixed-zone DST regression tests for Schedule::next_fire_after — the local
+# zone is machine-dependent, so tests pin America/New_York explicitly.
+chrono-tz = "0.10"
 
 [profile.release]
 opt-level = 3
