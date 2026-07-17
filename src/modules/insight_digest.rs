@@ -85,7 +85,7 @@ impl<'a> Module for InsightDigestModule<'a> {
         Ok(true)
     }
 
-    async fn run(&self, client: &ClaudeClient, _budget_tokens: u64) -> Result<u64> {
+    async fn run(&self, client: &ClaudeClient, budget_tokens: u64) -> Result<u64> {
         let insights_path = self.store.path(INSIGHTS_PATH);
         let insights_raw = std::fs::read_to_string(&insights_path)?;
 
@@ -134,8 +134,12 @@ impl<'a> Module for InsightDigestModule<'a> {
             Example: {{\"summary\": \"The user...\", \"sentiment\": \"positive\"}}"
         );
 
+        // Honor the caller's budget, under this module's own 512 ceiling
+        // (the digest is deliberately small). Previously the parameter was
+        // silently ignored and 512 was always requested.
+        let max_tokens = budget_tokens.min(512) as u32;
         let response = client
-            .analyze(system, &prompt, &self.config.budget.model, 512, 0.3)
+            .analyze(system, &prompt, &self.config.budget.model, max_tokens, 0.3)
             .await?;
 
         // Parse JSON response; fall back gracefully to treating the whole content

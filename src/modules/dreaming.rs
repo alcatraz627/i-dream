@@ -143,6 +143,26 @@ pub struct DreamEntry {
     pub cycle_id: String,
 }
 
+impl DreamEntry {
+    /// One-line cycle receipt for the CLI: what went in, what came out,
+    /// what it cost.
+    pub fn summary_line(&self, cycle: Option<u64>, elapsed_secs: u64) -> String {
+        let cycle_label = match cycle {
+            Some(c) => format!("cycle {c}"),
+            None => "cycle".to_string(),
+        };
+        format!(
+            "[dream] {cycle_label}: {} sessions · {} patterns · {} associations · {} insights promoted · {} tok · {}s",
+            self.sessions_analyzed,
+            self.patterns_extracted,
+            self.associations_found,
+            self.insights_promoted,
+            self.tokens_used,
+            elapsed_secs,
+        )
+    }
+}
+
 /// Per-turn summary used to build the SWS consolidation prompt.
 ///
 /// **D1 (2026-05-01):** previously this carried only `prompt_preview =
@@ -2004,6 +2024,27 @@ pub fn promotable(a: &Association, threshold: f64, maintenance: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dream_entry_summary_line_reads_like_a_receipt() {
+        let entry = DreamEntry {
+            id: "x".into(),
+            timestamp: Utc::now(),
+            phase: "all".into(),
+            sessions_analyzed: 5,
+            patterns_extracted: 3,
+            associations_found: 2,
+            insights_promoted: 1,
+            tokens_used: 8452,
+            cycle_id: "c".into(),
+        };
+        assert_eq!(
+            entry.summary_line(Some(1312), 34),
+            "[dream] cycle 1312: 5 sessions · 3 patterns · 2 associations · 1 insights promoted · 8452 tok · 34s"
+        );
+        // Unknown cycle number degrades to a label, not a fabricated 0.
+        assert!(entry.summary_line(None, 34).starts_with("[dream] cycle: 5 sessions"));
+    }
 
     // ── cycle_id correlation (Wave 0 item 3) ────────────────────────────────
 

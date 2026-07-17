@@ -96,7 +96,9 @@ pub struct AssociationViewItem {
 }
 
 /// Rebuild every view file. Returns the paths written.
-pub fn rebuild_views(store: &Store) -> Result<Vec<PathBuf>> {
+/// Rebuild every derived view, returning `(path, item count)` per file so
+/// callers can print an honest receipt without re-reading what they wrote.
+pub fn rebuild_views(store: &Store) -> Result<Vec<(PathBuf, usize)>> {
     let now = Utc::now();
     let dir = views_dir()?;
     fs::create_dir_all(&dir).with_context(|| format!("Cannot create {}", dir.display()))?;
@@ -107,7 +109,11 @@ pub fn rebuild_views(store: &Store) -> Result<Vec<PathBuf>> {
     Ok(written)
 }
 
-fn write_patterns_view(store: &Store, dir: &PathBuf, now: DateTime<Utc>) -> Result<PathBuf> {
+fn write_patterns_view(
+    store: &Store,
+    dir: &PathBuf,
+    now: DateTime<Utc>,
+) -> Result<(PathBuf, usize)> {
     let patterns: Vec<ExtractedPattern> = store.read_json("dreams/patterns.json").unwrap_or_default();
 
     // No category gate: the same lesson gets labeled user-preference by one
@@ -163,22 +169,28 @@ fn write_patterns_view(store: &Store, dir: &PathBuf, now: DateTime<Utc>) -> Resu
         .collect();
 
     let cluster_count = items.iter().filter(|i| i.is_representative).count();
-    write_view(
+    let total = items.len();
+    let path = write_view(
         dir.join("patterns.json"),
         ViewFile {
             kind: "patterns-view",
             schema_version: 1,
             generated_at: now,
-            total: items.len(),
+            total,
             cluster_count,
             truncated_at: None,
             has_more: false,
             items,
         },
-    )
+    )?;
+    Ok((path, total))
 }
 
-fn write_associations_view(store: &Store, dir: &PathBuf, now: DateTime<Utc>) -> Result<PathBuf> {
+fn write_associations_view(
+    store: &Store,
+    dir: &PathBuf,
+    now: DateTime<Utc>,
+) -> Result<(PathBuf, usize)> {
     let assocs: Vec<Association> = store
         .read_json("dreams/associations.json")
         .unwrap_or_default();
@@ -220,19 +232,21 @@ fn write_associations_view(store: &Store, dir: &PathBuf, now: DateTime<Utc>) -> 
         .collect();
 
     let cluster_count = items.iter().filter(|i| i.is_representative).count();
-    write_view(
+    let total = items.len();
+    let path = write_view(
         dir.join("associations.json"),
         ViewFile {
             kind: "associations-view",
             schema_version: 1,
             generated_at: now,
-            total: items.len(),
+            total,
             cluster_count,
             truncated_at: None,
             has_more: false,
             items,
         },
-    )
+    )?;
+    Ok((path, total))
 }
 
 fn write_view<T: Serialize>(path: PathBuf, view: ViewFile<T>) -> Result<PathBuf> {

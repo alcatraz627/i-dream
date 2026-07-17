@@ -71,6 +71,37 @@ pub enum PassStatus {
     Ok,
 }
 
+impl DreamPassReport {
+    /// Human receipt for the terminal/cron log. The JSON on stdout stays the
+    /// machine contract; this names what each domain cost and produced.
+    pub fn render_human(&self, model: &str, per_domain_budget: u32) -> String {
+        let mut out = format!(
+            "[dream-pass] {} domains · {} with output · {} tok · {:.1}s · model {model} · budget {per_domain_budget}/domain\n",
+            self.domains_attempted,
+            self.domains_with_output,
+            self.total_tokens,
+            self.elapsed_ms as f64 / 1000.0,
+        );
+        for d in &self.per_domain {
+            let detail = match &d.status {
+                PassStatus::Ok => format!(
+                    "{} delta → {} insights · {} tok",
+                    d.delta_count, d.insight_count, d.tokens
+                ),
+                PassStatus::NoDelta => "no delta — skipped (no LLM call)".to_string(),
+                PassStatus::OptedOut => "opted out via manifest".to_string(),
+                PassStatus::NoPrompt => "prompt template missing".to_string(),
+                PassStatus::Failed(e) => format!("FAILED: {e}"),
+            };
+            out.push_str(&format!("  [{}] {detail}\n", d.domain));
+        }
+        if self.cross_domain_ran {
+            out.push_str("  [cross-domain] join pass ran\n");
+        }
+        out
+    }
+}
+
 pub async fn run_dream_pass(
     registry: &DomainRegistry<'_>,
     client: &ClaudeClient,
@@ -475,6 +506,55 @@ fn derived_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_human_names_every_domain_outcome_and_the_budget() {
+        let report = DreamPassReport {
+            domains_attempted: 3,
+            domains_with_output: 1,
+            total_tokens: 1832,
+            cross_domain_ran: true,
+            elapsed_ms: 41_200,
+            per_domain: vec![
+                DomainPassResult {
+                    domain: "atone".into(),
+                    delta_count: 12,
+                    status: PassStatus::Ok,
+                    tokens: 1832,
+                    insight_count: 4,
+                },
+                DomainPassResult {
+                    domain: "ipc".into(),
+                    delta_count: 0,
+                    status: PassStatus::NoDelta,
+                    tokens: 0,
+                    insight_count: 0,
+                },
+                DomainPassResult {
+                    domain: "sessions".into(),
+                    delta_count: 7,
+                    status: PassStatus::Failed("boom".into()),
+                    tokens: 0,
+                    insight_count: 0,
+                },
+            ],
+        };
+        let text = report.render_human("claude-test-model", 4000);
+        assert!(text.contains("3 domains · 1 with output · 1832 tok · 41.2s"));
+        assert!(text.contains("model claude-test-model · budget 4000/domain"));
+        assert!(text.contains("[atone] 12 delta → 4 insights · 1832 tok"));
+        assert!(text.contains("[ipc] no delta — skipped (no LLM call)"));
+        assert!(text.contains("[sessions] FAILED: boom"));
+        assert!(text.contains("[cross-domain] join pass ran"));
+    }
+
+    #[test]
+    fn render_human_empty_report_is_one_honest_line() {
+        let report = DreamPassReport::default();
+        let text = report.render_human("m", 4000);
+        assert!(text.starts_with("[dream-pass] 0 domains · 0 with output · 0 tok"));
+        assert!(!text.contains("[cross-domain]"));
+    }
 
     #[test]
     fn insight_slug_extracts_correctly_per_variant() {

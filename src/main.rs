@@ -128,8 +128,34 @@ async fn main() -> Result<()> {
             }
 
             info!("Running manual dream cycle (phase: {phase:?})");
+            let summary_store = store::Store::new(config.data_dir())?;
+            let journal_before = summary_store
+                .count_jsonl("dreams/journal.jsonl")
+                .unwrap_or(0);
+            let started = std::time::Instant::now();
             let daemon = daemon::Daemon::new(config).await?;
-            daemon.run_dream(phase).await?;
+            daemon.run_dream(phase.clone()).await?;
+            let elapsed = started.elapsed().as_secs();
+
+            // Cycle receipt: full cycles append a journal entry — read it
+            // back. Phase-only runs (sws/rem/wake) don't journal; say so
+            // instead of fabricating counts.
+            let entries: Vec<modules::dreaming::DreamEntry> = summary_store
+                .read_jsonl("dreams/journal.jsonl")
+                .unwrap_or_default();
+            if entries.len() > journal_before
+                && let Some(entry) = entries.last()
+            {
+                let cycle = summary_store
+                    .read_json::<daemon::DaemonState>("state.json")
+                    .ok()
+                    .map(|s| s.total_cycles);
+                eprintln!("{}", entry.summary_line(cycle, elapsed));
+            } else {
+                eprintln!(
+                    "[dream] phase {phase:?} complete in {elapsed}s (phase-only run — no journal entry)"
+                );
+            }
         }
 
         Command::Inspect { module } => {
@@ -180,10 +206,16 @@ async fn main() -> Result<()> {
             let store = store::Store::new(config.data_dir())?;
             let client = api::ClaudeClient::for_config(&config)?;
             let module = modules::insight_digest::InsightDigestModule::new(&config, &store);
-            let tokens = module.run(&client, 512).await?;
-            let content = std::fs::read_to_string(store.path("dreams/insight-digest.md"))?;
+            let budget: u64 = 512;
+            let tokens = module.run(&client, budget).await?;
+            let digest_path = store.path("dreams/insight-digest.md");
+            let content = std::fs::read_to_string(&digest_path)?;
             print!("{content}");
-            eprintln!("\n[insight digest refreshed, {tokens} tokens]");
+            eprintln!(
+                "\n[insight digest → {} · {tokens} tokens (budget {budget}) · model {}]",
+                digest_path.display(),
+                config.budget.model
+            );
         }
 
         Command::Cron { action } => {
@@ -237,22 +269,23 @@ async fn main() -> Result<()> {
             // Views feed the digest + widget from the stores the pass just
             // updated — rebuild them in the same nightly slot.
             match consolidation::views::rebuild_views(&store) {
-                Ok(paths) => {
-                    for p in &paths {
-                        eprintln!("[view rebuilt: {}]", p.display());
+                Ok(receipts) => {
+                    for (path, items) in &receipts {
+                        eprintln!("[view rebuilt: {} ({items} items)]", path.display());
                     }
                 }
                 Err(e) => eprintln!("[view rebuild failed: {e:#}]"),
             }
+            eprint!("{}", report.render_human(&config.budget.model, budget));
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
 
         Command::Views => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir())?;
-            let paths = consolidation::views::rebuild_views(&store)?;
-            for p in &paths {
-                println!("{}", p.display());
+            let receipts = consolidation::views::rebuild_views(&store)?;
+            for (path, items) in &receipts {
+                println!("→ wrote {} ({items} items)", path.display());
             }
         }
 
@@ -325,12 +358,16 @@ async fn main() -> Result<()> {
                 let project_id = modules::project_briefs::ProjectBriefsModule::encode_cwd(&c);
                 let (tokens, path) = pbm.generate_for_project(&client, &project_id).await?;
                 println!(
-                    "✓ Brief written to {}\n  Tokens used: {tokens}",
-                    path.display()
+                    "✓ Brief written to {}\n  Tokens used: {tokens} · model {}",
+                    path.display(),
+                    config.budget.model
                 );
             } else {
                 let (count, total_tokens) = pbm.generate_all(&client).await?;
-                println!("✓ Generated briefs for {count} projects\n  Total tokens: {total_tokens}");
+                println!(
+                    "✓ Generated briefs for {count} projects\n  Total tokens: {total_tokens} · model {}",
+                    config.budget.model
+                );
             }
         }
 
@@ -347,8 +384,9 @@ async fn main() -> Result<()> {
             match result {
                 Some((tokens, path)) => {
                     println!(
-                        "✓ Weekly briefing written to {}\n  Tokens used: {tokens}",
-                        path.display()
+                        "✓ Weekly briefing written to {}\n  Tokens used: {tokens} · model {}",
+                        path.display(),
+                        config.budget.model
                     );
                 }
                 None => {
