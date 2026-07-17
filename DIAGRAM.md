@@ -28,14 +28,14 @@ flowchart TD
     ED -->|"extract-events.sh writes events.jsonl"| DR
 
     subgraph S3["③ Dream cycle — dreaming.rs"]
-        SWS["SWS ✦ :769<br/>compress sessions + checkpoints"]
-        REM["REM ✦ :1236, :1294<br/>explore associations"]
+        SWS["SWS ✦ :807<br/>compress sessions + checkpoints"]
+        REM["REM ✦ :1274, :1332<br/>explore associations"]
         PRU["prune :1418<br/>decay + forget (mechanical)"]
         SWS --> REM --> PRU
     end
 
     subgraph S4["④ Domain dream passes"]
-        DP["dream_pass ✦ :207, :313<br/>one per manifest<br/>(cadence + token budget)"]
+        DP["dream_pass ✦ :241, :347<br/>one per manifest<br/>(cadence + token budget)"]
     end
 
     subgraph S5["⑤ Sibling modules — per idle tick"]
@@ -61,7 +61,7 @@ flowchart TD
     ST --> GR
 
     subgraph S7["⑦ Synthesis — every box is LLM ✦"]
-        DG["insight_digest ✦ :138<br/>~3h · digest + TL;DR"]
+        DG["insight_digest ✦ :157<br/>~3h · digest + TL;DR"]
         PB["project_briefs ✦ :195<br/>per project"]
         WB["weekly_briefing ✦ :257"]
     end
@@ -124,10 +124,10 @@ flowchart TD
                       ▼                                    ▼
 ─────────── ③ DREAM CYCLE (dreaming.rs) ────────  ④ DOMAIN DREAM PASSES ─
 ┌───────────────────────────────────────────┐  ┌────────────────────────┐
-│ SWS  ✦ :769   compress sessions +         │  │ dream_pass.rs ✦        │
-│  │            checkpoints into learnings  │  │ :207,313               │
+│ SWS  ✦ :807   compress sessions +         │  │ dream_pass.rs ✦        │
+│  │            checkpoints into learnings  │  │ :241,347               │
 │  ▼            → patterns.json · journal   │  │ one per domain         │
-│ REM  ✦ :1236,1294  explore associations   │  │ manifest (cadence +    │
+│ REM  ✦ :1274,1332  explore associations   │  │ manifest (cadence +    │
 │  │            → association edges         │  │ token budget, e.g.     │
 │  ▼                                        │  │ ipc: 3000 tok / 2d)    │
 │ prune (mech, :1418)  decay + forget       │  │ → <dom>-insights.jsonl │
@@ -152,7 +152,7 @@ flowchart TD
 ──────────────── ⑦ SYNTHESIS (every box here is LLM ✦) ──────────────────
 ┌────────────────────┐ ┌─────────────────────┐ ┌────────────────────────┐
 │ insight_digest     │ │ project_briefs      │ │ weekly_briefing        │
-│ ✦ :138 · ~3h       │ │ ✦ :195 · per proj   │ │ ✦ :257 · weekly        │
+│ ✦ :157 · ~3h       │ │ ✦ :195 · per proj   │ │ ✦ :257 · weekly        │
 │ → insight-digest.md│ │ → project-briefs/   │ │ → briefing doc         │
 │ → derived/_tldr.txt│ │   <proj>.md         │ │                        │
 └─────────┬──────────┘ └──────────┬──────────┘ └───────────┬────────────┘
@@ -189,14 +189,14 @@ flowchart TD
 
 | # | Call site | What the model does | Budget |
 |---|-----------|---------------------|--------|
-| 1 | `dreaming.rs:769` | SWS: compress new transcripts + drained checkpoints into structured learnings | per-cycle |
-| 2 | `dreaming.rs:1236`, `:1294` | REM: explore creative associations across patterns | per-cycle |
+| 1 | `dreaming.rs:807` | SWS: compress new transcripts + drained checkpoints into structured learnings | per-cycle |
+| 2 | `dreaming.rs:1274`, `:1332` | REM: explore creative associations across patterns | per-cycle |
 | 3 | `metacog.rs:522` | metacognition audit of agent behavior | per-cycle |
 | 4 | `introspection.rs:675` | introspection pass | 4096 tok |
-| 5 | `insight_digest.rs:138` | ~3h digest TL;DR + sentiment | 512 tok |
+| 5 | `insight_digest.rs:157` | ~3h digest TL;DR + sentiment | 512 tok |
 | 6 | `project_briefs.rs:195` | per-project briefs | 1024 tok |
 | 7 | `weekly_briefing.rs:257` | weekly briefing | 4000 tok |
-| 8 | `consolidation/dream_pass.rs:207`, `:313` | external-domain dream passes | per manifest |
+| 8 | `consolidation/dream_pass.rs:241`, `:347` | external-domain dream passes | per manifest |
 | 9 | `audit.rs:734`, `:842` | weekly self-audit: analyst pass + render pass | audit budget |
 
 ## Deliberately LLM-free
