@@ -98,6 +98,9 @@ impl DreamPassReport {
         if self.cross_domain_ran {
             out.push_str("  [cross-domain] join pass ran\n");
         }
+        if self.domains_with_output > 0 {
+            out.push_str("  next: i-dream snapshot-diff · i-dream insight-digest · i-dream board\n");
+        }
         out
     }
 }
@@ -546,6 +549,8 @@ mod tests {
         assert!(text.contains("[ipc] no delta — skipped (no LLM call)"));
         assert!(text.contains("[sessions] FAILED: boom"));
         assert!(text.contains("[cross-domain] join pass ran"));
+        // Output happened → point at the verbs that inspect it.
+        assert!(text.contains("next: i-dream snapshot-diff"));
     }
 
     #[test]
@@ -554,6 +559,8 @@ mod tests {
         let text = report.render_human("m", 4000);
         assert!(text.starts_with("[dream-pass] 0 domains · 0 with output · 0 tok"));
         assert!(!text.contains("[cross-domain]"));
+        // Nothing was produced → no next-step noise.
+        assert!(!text.contains("next:"));
     }
 
     #[test]

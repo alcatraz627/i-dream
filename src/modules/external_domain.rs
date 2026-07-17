@@ -434,7 +434,7 @@ fn render_field_value(val: &Value, max_chars: usize) -> Option<String> {
 /// `config::expand_tilde` (single source of truth — there used to be three
 /// divergent tilde-expansion impls; this is one of them collapsed). `{root}`
 /// substitution is separate and lives in `substitute_placeholders`.
-fn expand_path(p: &Path) -> PathBuf {
+pub(crate) fn expand_path(p: &Path) -> PathBuf {
     crate::config::expand_tilde(p)
 }
 

@@ -1,6 +1,7 @@
 //! `i-dream domain <subcommand>` — first user-visible surface of the
-//! dream-domain plugin system (docs/14-dreaming-plugins.md). Stage 1
-//! ships only `list`; further subcommands (info, enable, install, run,
+//! dream-domain plugin system (docs/14-dreaming-plugins.md). Ships
+//! `list` (enriched with per-domain pending/last-pass/insights),
+//! `enable`, and `disable`; further subcommands (info, install, run,
 //! …) land with Stage 2+.
 
 use crate::cli::DomainAction;
@@ -20,6 +21,16 @@ struct DomainListEntry {
     /// Native modules carry the synthetic `"manifest"` placeholder until
     /// per-domain runtime overrides land (Stage 2 of docs/16).
     cadence: String,
+    /// Events sitting past this domain's cursor right now — what the next
+    /// dream-pass would consume. Always 0 for natives (they dream in the
+    /// nightly cycle, not the per-domain pass).
+    pending: usize,
+    /// Timestamp the domain's cursor last advanced through (None = never
+    /// consumed).
+    last_pass: Option<chrono::DateTime<chrono::Utc>>,
+    /// Lines in the domain's dream/insights.jsonl (None = no insights
+    /// store declared or not yet created).
+    insights: Option<usize>,
 }
 
 pub fn handle(action: DomainAction, config: &Config) -> Result<()> {
@@ -74,6 +85,17 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
         .iter()
         .map(|d| {
             let m = d.manifest();
+            let cursor = d.current_cursor().unwrap_or_default();
+            // Same delta read the dream-pass makes — file reads, no LLM.
+            let pending = d.delta(&cursor).map(|v| v.len()).unwrap_or(0);
+            let insights = m
+                .dream
+                .insights_path
+                .as_ref()
+                .map(|p| crate::modules::external_domain::expand_path(p))
+                .filter(|p| p.exists())
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count());
             DomainListEntry {
                 name: d.name().to_string(),
                 kind: if m.consolidation.kind == "native" {
@@ -83,6 +105,9 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
                 },
                 description: m.domain.description.clone(),
                 cadence: m.consolidation.cadence.clone(),
+                pending,
+                last_pass: cursor.last_ts,
+                insights,
             }
         })
         .collect();
@@ -95,14 +120,35 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
             return Ok(());
         }
         println!(
-            "{:<18} {:<10} {:<10} DESCRIPTION",
-            "NAME", "KIND", "CADENCE"
+            "{:<18} {:<10} {:<13} {:>7}  {:<10} {:>8}  DESCRIPTION",
+            "NAME", "KIND", "CADENCE", "PENDING", "LAST PASS", "INSIGHTS"
         );
+        let now = chrono::Utc::now();
         for e in &entries {
+            let last_pass = match e.last_pass {
+                Some(ts) => {
+                    let age = (now - ts).to_std().unwrap_or_default();
+                    format!("{} ago", crate::modules::registry::fmt_age(age))
+                }
+                None => "never".to_string(),
+            };
+            let insights = e
+                .insights
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "—".to_string());
             println!(
-                "{:<18} {:<10} {:<10} {}",
-                e.name, e.kind, e.cadence, e.description
+                "{:<18} {:<10} {:<13} {:>7}  {:<10} {:>8}  {}",
+                e.name, e.kind, e.cadence, e.pending, last_pass, insights, e.description
             );
+        }
+        // The pass itself is delta-driven; the cron fire is the only real
+        // per-domain "next chance to run".
+        if let Some(next) = crate::cron::JOBS
+            .iter()
+            .find(|j| j.label.ends_with("dreampass"))
+            .and_then(|j| j.schedule.next_fire_after(chrono::Local::now()))
+        {
+            println!("\nnext dream-pass: {} (cron)", next.format("%Y-%m-%d %H:%M"));
         }
     }
     Ok(())

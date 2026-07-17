@@ -151,6 +151,7 @@ async fn main() -> Result<()> {
                     .ok()
                     .map(|s| s.total_cycles);
                 eprintln!("{}", entry.summary_line(cycle, elapsed));
+                eprintln!("next: i-dream snapshot-diff (what changed) · i-dream board");
             } else {
                 eprintln!(
                     "[dream] phase {phase:?} complete in {elapsed}s (phase-only run — no journal entry)"
@@ -216,6 +217,7 @@ async fn main() -> Result<()> {
                 digest_path.display(),
                 config.budget.model
             );
+            eprintln!("next: i-dream board · i-dream reflect");
         }
 
         Command::Cron { action } => {

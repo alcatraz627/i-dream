@@ -198,9 +198,13 @@ fn uninstall_all() -> Result<()> {
 }
 
 fn status_all() -> Result<()> {
+    let now = chrono::Local::now();
     for job in JOBS {
         let path = plist_path(job.label)?;
         println!("{} — {}", job.label, job.desc);
+        if let Some(next) = job.schedule.next_fire_after(now) {
+            println!("  next fire: {} ({})", next.format("%Y-%m-%d %H:%M"), job.schedule.human());
+        }
         if !path.exists() {
             println!("  NOT INSTALLED (run `i-dream cron install`)");
             continue;

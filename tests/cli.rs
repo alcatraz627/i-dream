@@ -212,6 +212,47 @@ fn status_verbose_shows_lane_table_and_jobs() {
         .stdout(predicate::str::contains("Build: v"));
 }
 
+// ── `domain list` ─────────────────────────────────────────────
+
+#[test]
+fn domain_list_shows_enrichment_columns() {
+    let (dir, _) = sandbox();
+
+    let assert = cmd_in(dir.path()).args(["domain", "list"]).assert().success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    // Either a populated table with the enrichment columns, or an honest
+    // empty message — never a bare old-style table.
+    assert!(
+        (out.contains("PENDING") && out.contains("LAST PASS") && out.contains("INSIGHTS"))
+            || out.contains("(no domains registered)"),
+        "unexpected domain list output: {out}"
+    );
+}
+
+#[test]
+fn domain_list_json_is_an_array_with_enrichment_fields() {
+    let (dir, _) = sandbox();
+
+    let out = cmd_in(dir.path())
+        .args(["domain", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out).expect("domain list --json must emit valid JSON");
+    let arr = v.as_array().expect("top level must be an array");
+    if let Some(first) = arr.first() {
+        // Additive contract: old consumers keep name/kind/cadence, new
+        // fields ride alongside.
+        assert!(first.get("name").is_some());
+        assert!(first.get("cadence").is_some());
+        assert!(first.get("pending").is_some());
+        assert!(first.get("insights").is_some());
+    }
+}
+
 // ── `stop` command ────────────────────────────────────────────
 // Task #7 hardened this: it must never signal a stale PID, and must
 // clean stale files instead. These tests lock that contract at the

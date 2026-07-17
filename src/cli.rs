@@ -158,9 +158,9 @@ pub enum Command {
     },
 
     /// Inspect registered dream-domains (native modules + external plugins).
-    /// First user-visible surface of the docs/14 plugin system — Stage 1 ships
-    /// `list` only; further subcommands (info, enable, install, …) land with
-    /// Stage 2+.
+    /// First user-visible surface of the docs/14 plugin system — ships
+    /// `list` (with per-domain pending/last-pass/insights), `enable`, and
+    /// `disable`; further subcommands (info, install, …) land with Stage 2+.
     Domain {
         #[command(subcommand)]
         action: DomainAction,
