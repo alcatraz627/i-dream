@@ -236,6 +236,30 @@ fn stop_refuses_to_signal_a_recycled_pid() {
     );
 }
 
+#[test]
+fn stop_fails_closed_when_identity_cannot_be_verified() {
+    // With ps unreachable (empty PATH), identity is unknowable — stop
+    // must refuse to signal AND leave the pid file alone (it may well be
+    // the real daemon). Gate finding A1: the first guard shape failed
+    // OPEN here and killed a live foreign process in the repro.
+    let (dir, data_dir) = sandbox();
+    let pid_path = data_dir.join("daemon.pid");
+    std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+
+    cmd_in(dir.path())
+        .env("PATH", "")
+        .arg("stop")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Cannot verify"))
+        .stdout(predicate::str::contains("refusing to signal"));
+
+    assert!(
+        pid_path.exists(),
+        "an unverifiable PID file must NOT be deleted"
+    );
+}
+
 // ── `domain list` ─────────────────────────────────────────────
 
 #[test]

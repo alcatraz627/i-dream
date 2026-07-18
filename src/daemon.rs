@@ -1293,17 +1293,29 @@ impl Daemon {
 
         // Liveness is not identity: a recycled PID can belong to any
         // process, and signaling a stranger is the one unrecoverable
-        // mistake here. Only signal a process that is actually i-dream.
-        if let Some(exe) = crate::status::process_exe_path(pid)
-            && exe.file_name().is_none_or(|n| n != "i-dream")
-        {
-            println!(
-                "PID file points at PID {pid}, but that process is {} — \
-                 not signaling it. Cleaning up the stale PID file.",
-                exe.display()
-            );
-            let _ = std::fs::remove_file(&pid_path);
-            return Ok(());
+        // mistake here. Only signal a process VERIFIED to be i-dream —
+        // identity-unknown (ps unavailable) fails CLOSED, mirroring the
+        // start guard; not stopping is recoverable, a killed stranger
+        // is not (gate finding A1, 2026-07-18).
+        match crate::status::process_exe_path(pid) {
+            Some(exe) if exe.file_name().is_some_and(|n| n == "i-dream") => {}
+            Some(exe) => {
+                println!(
+                    "PID file points at PID {pid}, but that process is {} — \
+                     not signaling it. Cleaning up the stale PID file.",
+                    exe.display()
+                );
+                let _ = std::fs::remove_file(&pid_path);
+                return Ok(());
+            }
+            None => {
+                println!(
+                    "Cannot verify PID {pid}'s identity (ps unavailable) — refusing to \
+                     signal it. If you're sure it's stale, remove {} yourself.",
+                    pid_path.display()
+                );
+                return Ok(());
+            }
         }
 
         // Send SIGTERM. Safety: we verified the PID is alive and the
