@@ -25,12 +25,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tracing::warn;
 
-/// The native subconscious modules registered via `Module` trait. Ordering
-/// is the daemon's tick-evaluation order — change deliberately. One holdout
-/// (`project_briefs`) deliberately stays unregistered: its per-project
-/// regeneration loop doesn't fit the per-cycle `Module::run` contract
-/// without contorting either side. Stage 2+ may grow a companion trait
-/// (e.g. `PerProjectDomain`) for shapes like that.
+/// The native module names `boot` registers, in tick order. Test-only:
+/// the boot test asserts registration against this list.
+#[cfg(test)]
 pub const NATIVE_MODULE_NAMES: &[&str] = &[
     "dreaming",
     "metacog",
@@ -50,7 +47,10 @@ pub struct DomainRegistry<'a> {
 
 impl<'a> DomainRegistry<'a> {
     /// Construct a registry holding `NativeAdapter`-wrapped instances of
-    /// every native module. External plugin discovery lands in Stage 2.
+    /// every native module, in the daemon's tick-evaluation order — change
+    /// deliberately. One holdout (`project_briefs`) stays unregistered: its
+    /// per-project regeneration loop doesn't fit the per-cycle
+    /// `Module::run` contract without contorting either side.
     pub fn boot(config: &'a Config, store: &'a Store) -> Self {
         let mut domains: Vec<Box<dyn DreamDomain + 'a>> = vec![
             Box::new(NativeAdapter::new(
@@ -117,7 +117,9 @@ impl<'a> DomainRegistry<'a> {
         Self { domains }
     }
 
-    /// Build a registry from pre-constructed adapters. Useful for tests.
+    /// Build a registry from pre-constructed adapters. Test-only: prod
+    /// registries always come from `boot`.
+    #[cfg(test)]
     pub fn from_domains(domains: Vec<Box<dyn DreamDomain + 'a>>) -> Self {
         Self { domains }
     }
@@ -134,9 +136,11 @@ impl<'a> DomainRegistry<'a> {
         self.domains.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.domains.is_empty()
     }
+
 }
 
 /// Discover external plugin manifests from the canonical centralized dir
@@ -147,13 +151,12 @@ fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
     let mut out = vec![];
     let mut seen: HashSet<String> = HashSet::new();
 
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return out,
+    let Some(home) = dirs::home_dir() else {
+        return out;
     };
 
     // 1) Centralized: ~/.claude/i-dream/domains/*.toml
-    let central_dir = PathBuf::from(&home).join(".claude/i-dream/domains");
+    let central_dir = home.join(".claude/i-dream/domains");
     if let Ok(entries) = std::fs::read_dir(&central_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -173,11 +176,11 @@ fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
 
     // 2) Sibling inline manifests at well-known roots.
     let sibling_roots = [
-        PathBuf::from(&home).join(".claude/atone"),
-        PathBuf::from(&home).join(".claude/affirm"),
-        PathBuf::from(&home).join(".claude/memory-domain"),
-        PathBuf::from(&home).join(".claude/sessions-domain"),
-        PathBuf::from(&home).join(".claude/pinned"),
+        home.join(".claude/atone"),
+        home.join(".claude/affirm"),
+        home.join(".claude/memory-domain"),
+        home.join(".claude/sessions-domain"),
+        home.join(".claude/pinned"),
     ];
     for root in &sibling_roots {
         let p = root.join(".i-dream-domain.toml");
@@ -648,7 +651,7 @@ pub fn compute_lane_health(home: &Path) -> Vec<LaneHealth> {
 /// keeping the file bounded so the health log never becomes the rot it
 /// measures. Called once per dream cycle.
 pub fn write_lane_health(store: &Store, cycle: u64) -> Result<()> {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = dirs::home_dir().unwrap_or_default();
     let lanes = compute_lane_health(&home);
     let mut red = 0;
     let mut yellow = 0;

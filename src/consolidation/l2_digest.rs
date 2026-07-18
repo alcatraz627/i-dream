@@ -44,8 +44,6 @@ pub enum SourceKind {
     CogitateTopic,
     SkillReport,
     DreamCycle,
-    Rca,
-    Other,
 }
 
 impl SourceKind {
@@ -54,8 +52,6 @@ impl SourceKind {
             Self::CogitateTopic => "topic",
             Self::SkillReport => "report",
             Self::DreamCycle => "dream",
-            Self::Rca => "rca",
-            Self::Other => "other",
         }
     }
 }

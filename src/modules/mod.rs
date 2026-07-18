@@ -544,6 +544,9 @@ pub trait DreamDomain: Send + Sync {
 pub struct NativeAdapter<M: Module> {
     name: String,
     manifest: DomainManifest,
+    /// Held for Stage 2+ of docs/14, when native modules dream through the
+    /// per-domain pass; today the adapter only carries name + manifest.
+    #[allow(dead_code)]
     module: M,
 }
 
@@ -556,10 +559,6 @@ impl<M: Module> NativeAdapter<M> {
             manifest,
             module,
         }
-    }
-
-    pub fn inner(&self) -> &M {
-        &self.module
     }
 
     fn synth_manifest(name: &str) -> DomainManifest {

@@ -95,7 +95,6 @@ pub struct AssociationViewItem {
     pub is_representative: bool,
 }
 
-/// Rebuild every view file. Returns the paths written.
 /// Rebuild every derived view, returning `(path, item count)` per file so
 /// callers can print an honest receipt without re-reading what they wrote.
 pub fn rebuild_views(store: &Store) -> Result<Vec<(PathBuf, usize)>> {
@@ -259,8 +258,8 @@ fn write_view<T: Serialize>(path: PathBuf, view: ViewFile<T>) -> Result<PathBuf>
 }
 
 fn views_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME unset")?;
-    Ok(PathBuf::from(home).join(".claude/i-dream/derived/views"))
+    let home = dirs::home_dir().context("cannot resolve home dir")?;
+    Ok(home.join(".claude/i-dream/derived/views"))
 }
 
 /// Identity that survives store rewrites: sha256 of the lowercased,

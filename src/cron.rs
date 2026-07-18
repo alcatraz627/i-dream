@@ -134,8 +134,8 @@ pub fn handle(action: CronAction) -> Result<()> {
 }
 
 fn launch_agents_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME unset")?;
-    Ok(PathBuf::from(home).join("Library/LaunchAgents"))
+    let home = dirs::home_dir().context("cannot resolve home dir")?;
+    Ok(home.join("Library/LaunchAgents"))
 }
 
 pub(crate) fn plist_path(label: &str) -> Result<PathBuf> {
@@ -144,8 +144,8 @@ pub(crate) fn plist_path(label: &str) -> Result<PathBuf> {
 
 fn install_all() -> Result<()> {
     let binary = resolve_binary()?;
-    let home = std::env::var("HOME").context("HOME unset")?;
-    let logs_dir = PathBuf::from(&home).join(".claude/i-dream/logs");
+    let home = dirs::home_dir().context("cannot resolve home dir")?;
+    let logs_dir = home.join(".claude/i-dream/logs");
     fs::create_dir_all(&logs_dir)?;
     let agents = launch_agents_dir()?;
     fs::create_dir_all(&agents)?;
@@ -298,16 +298,15 @@ fn resolve_binary() -> Result<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         return Ok(exe);
     }
-    let home = std::env::var("HOME").context("HOME unset")?;
+    let home = dirs::home_dir().context("cannot resolve home dir")?;
     for candidate in [
-        format!("{home}/.cargo/bin/i-dream"),
-        format!("{home}/.local/bin/i-dream"),
-        "/usr/local/bin/i-dream".to_string(),
-        "/opt/homebrew/bin/i-dream".to_string(),
+        home.join(".cargo/bin/i-dream"),
+        home.join(".local/bin/i-dream"),
+        PathBuf::from("/usr/local/bin/i-dream"),
+        PathBuf::from("/opt/homebrew/bin/i-dream"),
     ] {
-        let p = PathBuf::from(&candidate);
-        if p.exists() {
-            return Ok(p);
+        if candidate.exists() {
+            return Ok(candidate);
         }
     }
     bail!("Cannot resolve i-dream binary path for plist Program field");

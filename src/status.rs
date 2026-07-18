@@ -464,7 +464,7 @@ fn freshness_verdicts(
 /// Executable path of a live process via `ps -o comm=`. On macOS this is
 /// the full path launchd/exec recorded, which is exactly what we want to
 /// stat for replaced-after-start detection.
-fn process_exe_path(pid: i32) -> Option<PathBuf> {
+pub(crate) fn process_exe_path(pid: i32) -> Option<PathBuf> {
     let out = std::process::Command::new("ps")
         .args(["-o", "comm=", "-p", &pid.to_string()])
         .output()

@@ -30,7 +30,7 @@ use crate::store::Store;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Patterns kept in the episodic store. Eviction trims to this by strength.
 pub const MAX_PATTERNS: usize = 500;

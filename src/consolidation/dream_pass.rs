@@ -33,7 +33,6 @@ use tracing::{info, warn};
 /// association by how serious the linked patterns are.
 type SeverityMap = HashMap<String, String>;
 
-const DEFAULT_PER_DOMAIN_BUDGET: u32 = 4000;
 const DEFAULT_CROSS_BUDGET: u32 = 2000;
 const DREAM_TEMPERATURE: f64 = 0.4;
 
@@ -115,19 +114,34 @@ pub async fn run_dream_pass(
     let mut report = DreamPassReport::default();
 
     // Collect per-domain deltas first so we can decide budget allocation
-    // + skip cleanly when everyone is idle.
+    // + skip cleanly when everyone is idle. Idle and broken domains get
+    // report rows too — a skipped domain that leaves no trace is
+    // indistinguishable from one that was never considered, and a failed
+    // delta read must never masquerade as "no delta".
     let mut work: Vec<(&dyn DreamDomain, Vec<crate::modules::DomainEvent>)> = vec![];
     for d in registry.iter() {
         let cursor = d.current_cursor().unwrap_or_default();
-        let delta = match d.delta(&cursor) {
-            Ok(v) => v,
+        match d.delta(&cursor) {
+            Ok(delta) if delta.is_empty() => {
+                report.per_domain.push(DomainPassResult {
+                    domain: d.name().to_string(),
+                    delta_count: 0,
+                    status: PassStatus::NoDelta,
+                    tokens: 0,
+                    insight_count: 0,
+                });
+            }
+            Ok(delta) => work.push((d, delta)),
             Err(e) => {
                 warn!("[dream-pass] domain '{}' delta failed: {e:#}", d.name());
-                vec![]
+                report.per_domain.push(DomainPassResult {
+                    domain: d.name().to_string(),
+                    delta_count: 0,
+                    status: PassStatus::Failed(format!("delta read failed: {e:#}")),
+                    tokens: 0,
+                    insight_count: 0,
+                });
             }
-        };
-        if !delta.is_empty() {
-            work.push((d, delta));
         }
     }
     report.domains_attempted = work.len();

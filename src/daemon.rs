@@ -226,7 +226,14 @@ impl Daemon {
         // ── PID file ─────────────────────────────────────────────
         let pid_path = self.config.data_dir().join("daemon.pid");
         match read_pid_file(&pid_path) {
-            Some(existing) if is_process_alive(existing) => {
+            Some(existing)
+                if is_process_alive(existing)
+                    && crate::status::process_exe_path(existing)
+                        .is_none_or(|exe| exe.file_name().is_some_and(|n| n == "i-dream")) =>
+            {
+                // Identity-checked: a recycled PID belonging to some other
+                // process must not block startup forever (ps lookup failure
+                // conservatively counts as "could be us").
                 anyhow::bail!(
                     "Daemon already running (PID {existing}). \
                      Run `i-dream stop` first, or remove {} if you're sure it's stale.",
@@ -235,7 +242,7 @@ impl Daemon {
             }
             Some(existing) => {
                 warn!(
-                    "Removing stale PID file at {} (PID {existing} is not alive)",
+                    "Removing stale PID file at {} (PID {existing} is not a live i-dream process)",
                     pid_path.display()
                 );
                 let _ = std::fs::remove_file(&pid_path);
@@ -1264,6 +1271,21 @@ impl Daemon {
 
         if !is_process_alive(pid) {
             println!("Stale PID file (PID {pid} is not alive), cleaning up");
+            let _ = std::fs::remove_file(&pid_path);
+            return Ok(());
+        }
+
+        // Liveness is not identity: a recycled PID can belong to any
+        // process, and signaling a stranger is the one unrecoverable
+        // mistake here. Only signal a process that is actually i-dream.
+        if let Some(exe) = crate::status::process_exe_path(pid)
+            && exe.file_name().is_none_or(|n| n != "i-dream")
+        {
+            println!(
+                "PID file points at PID {pid}, but that process is {} — \
+                 not signaling it. Cleaning up the stale PID file.",
+                exe.display()
+            );
             let _ = std::fs::remove_file(&pid_path);
             return Ok(());
         }

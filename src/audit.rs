@@ -19,8 +19,8 @@
 use crate::api::ClaudeClient;
 use crate::cli::AuditAction;
 use crate::config::Config;
-use crate::consolidation::views::{rank_matches, token_set};
-use crate::modules::dreaming::{Association, ExtractedPattern};
+use crate::consolidation::views::rank_matches;
+use crate::modules::dreaming::ExtractedPattern;
 use crate::modules::parse_json_codeblock;
 use crate::store::Store;
 use anyhow::{Context, Result, bail};
@@ -1266,6 +1266,7 @@ fn audit_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::dreaming::Association;
 
     #[test]
     fn parse_proposals_coerces_null_descriptive_fields() {

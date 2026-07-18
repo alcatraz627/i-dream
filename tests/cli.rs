@@ -214,6 +214,28 @@ fn status_verbose_shows_lane_table_and_jobs() {
         .stdout(predicate::str::contains("Build: v"));
 }
 
+#[test]
+fn stop_refuses_to_signal_a_recycled_pid() {
+    // The PID file names a LIVE process that is not i-dream — this test
+    // binary itself. stop must refuse to signal it (if this guard ever
+    // regresses, the suite SIGTERMs itself — the assertion is survival),
+    // and must clean up the stale file.
+    let (dir, data_dir) = sandbox();
+    let pid_path = data_dir.join("daemon.pid");
+    std::fs::write(&pid_path, std::process::id().to_string()).unwrap();
+
+    cmd_in(dir.path())
+        .arg("stop")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not signaling"));
+
+    assert!(
+        !pid_path.exists(),
+        "stale wrong-identity PID file must be cleaned up"
+    );
+}
+
 // ── `domain list` ─────────────────────────────────────────────
 
 #[test]
