@@ -73,6 +73,29 @@ pub struct DaemonState {
     pub usage: Option<UsageLimitStatus>,
 }
 
+impl DaemonState {
+    /// Adopt whichever side has made more progress, field by field. The
+    /// counters and timestamps here are all monotonic in intent, so "more
+    /// progress" is simply the larger value; `usage` keeps the in-memory
+    /// side when present (it is refreshed often and never regresses in a
+    /// way that matters).
+    pub fn merge_newer(&mut self, disk: DaemonState) {
+        self.total_cycles = self.total_cycles.max(disk.total_cycles);
+        self.total_tokens_used = self.total_tokens_used.max(disk.total_tokens_used);
+        self.last_consolidation = match (self.last_consolidation, disk.last_consolidation) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        self.last_activity = match (self.last_activity, disk.last_activity) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        if self.usage.is_none() {
+            self.usage = disk.usage;
+        }
+    }
+}
+
 /// Rolling-window Claude Code token usage measured from session transcripts.
 /// Written to state.json so the menubar widget can display it without
 /// re-scanning transcripts on every refresh.
@@ -146,6 +169,13 @@ impl Daemon {
     /// Mutate the in-memory state and persist the new snapshot to
     /// `state.json`. Callers pass a closure so the mutation and the
     /// write are paired — nothing updates `state` without flushing.
+    ///
+    /// Before applying the mutation, any progress a sibling writer landed
+    /// on disk is adopted (`merge_newer`). Daemon generations overlap: a
+    /// SIGTERM'd daemon's in-flight cycle can finish and write AFTER its
+    /// successor booted, and the successor's eventual shutdown flush would
+    /// otherwise clobber that cycle back off the record (the 1311→1310
+    /// step-back, root-caused 2026-07-18).
     fn update_state<F>(&self, f: F) -> Result<()>
     where
         F: FnOnce(&mut DaemonState),
@@ -155,6 +185,9 @@ impl Daemon {
                 .state
                 .lock()
                 .map_err(|e| anyhow::anyhow!("daemon state mutex poisoned: {e}"))?;
+            if let Ok(disk) = self.store.read_json::<DaemonState>("state.json") {
+                state.merge_newer(disk);
+            }
             f(&mut state);
             serde_json::to_value(&*state)?
         };
@@ -1459,9 +1492,23 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    // Read a single line — the hook scripts send exactly one JSON object.
+    // Read a single line — the hook scripts send exactly one JSON object,
+    // newline-terminated. The timeout bounds a client that connects and
+    // then neither terminates its line nor closes (each such connection
+    // would otherwise pin a task indefinitely).
     let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line).await?;
+    let bytes_read = match tokio::time::timeout(
+        Duration::from_secs(10),
+        reader.read_line(&mut line),
+    )
+    .await
+    {
+        Ok(read) => read?,
+        Err(_) => {
+            debug!("Hook connection sent no complete line within 10s, dropping");
+            return Ok(());
+        }
+    };
     if bytes_read == 0 {
         debug!("Empty hook connection, ignoring");
         return Ok(());
@@ -1516,6 +1563,7 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // SessionStart is the only event that gets a non-empty response —
     // the hook script echoes whatever we write back into Claude's context.
     // For all other events we just ack with an empty body.
+    let build_started = std::time::Instant::now();
     let response = match &event {
         HookEvent::SessionStart { cwd, .. } => {
             let (text, intention_ids, has_introspection) =
@@ -1537,8 +1585,26 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
         _ => String::new(),
     };
     if !response.is_empty() {
-        writer.write_all(response.as_bytes()).await?;
-        writer.shutdown().await?;
+        // A hung-up client (its recv timeout beat our build) is a delivery
+        // miss, not a malfunction — log it as such, with the latency that
+        // caused it, instead of the generic handler-failed warn.
+        let write_result = async {
+            writer.write_all(response.as_bytes()).await?;
+            writer.shutdown().await
+        }
+        .await;
+        if let Err(e) = write_result {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                debug!(
+                    "SessionStart briefing undeliverable — client hung up first \
+                     (briefing {} bytes, built in {}ms)",
+                    response.len(),
+                    build_started.elapsed().as_millis()
+                );
+                return Ok(());
+            }
+            return Err(e.into());
+        }
     }
 
     Ok(())
@@ -2690,6 +2756,64 @@ timeout = "10s"
             client: None,
             cycle_in_progress: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn update_state_adopts_disk_progress_before_writing() {
+        // The 1311→1310 step-back class: a sibling daemon generation's
+        // in-flight cycle wrote newer values to disk; this instance's
+        // stale in-memory snapshot (here: the default zeros) must adopt
+        // that progress instead of clobbering it — even on a no-op flush
+        // like the SIGTERM shutdown's update_state(|_| {}).
+        let (dir, store) = mk_store();
+        let sibling_write = DaemonState {
+            total_cycles: 1311,
+            total_tokens_used: 999,
+            last_consolidation: Some(Utc::now()),
+            last_activity: None,
+            usage: None,
+        };
+        store.write_json("state.json", &sibling_write).unwrap();
+        let daemon = mk_daemon_with_store(store);
+
+        // The shutdown-flush shape: mutate nothing, just persist.
+        daemon.update_state(|_| {}).unwrap();
+        let reloaded: DaemonState = daemon.store.read_json("state.json").unwrap();
+        assert_eq!(reloaded.total_cycles, 1311, "no-op flush must not step back");
+        assert_eq!(reloaded.total_tokens_used, 999);
+        assert!(reloaded.last_consolidation.is_some());
+
+        // And an increment lands ON TOP of the adopted progress, so the
+        // next cycle gets a fresh number instead of reusing 1311.
+        daemon.update_state(|s| s.total_cycles += 1).unwrap();
+        let reloaded: DaemonState = daemon.store.read_json("state.json").unwrap();
+        assert_eq!(reloaded.total_cycles, 1312);
+        drop(dir);
+    }
+
+    #[test]
+    fn merge_newer_takes_the_larger_of_each_field() {
+        let earlier = Utc::now() - chrono::Duration::hours(48);
+        let later = Utc::now();
+        let mut mem = DaemonState {
+            total_cycles: 1310,
+            total_tokens_used: 100,
+            last_consolidation: Some(earlier),
+            last_activity: Some(later),
+            usage: None,
+        };
+        let disk = DaemonState {
+            total_cycles: 1311,
+            total_tokens_used: 50,
+            last_consolidation: Some(later),
+            last_activity: Some(earlier),
+            usage: None,
+        };
+        mem.merge_newer(disk);
+        assert_eq!(mem.total_cycles, 1311, "disk was ahead on cycles");
+        assert_eq!(mem.total_tokens_used, 100, "memory was ahead on tokens");
+        assert_eq!(mem.last_consolidation, Some(later));
+        assert_eq!(mem.last_activity, Some(later));
     }
 
     #[test]

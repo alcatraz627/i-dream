@@ -172,10 +172,15 @@ impl<'a> Module for InsightDigestModule<'a> {
                 .trim();
             if let Ok(dr) = serde_json::from_str::<DigestResponse>(raw) {
                 (dr.summary, dr.sentiment)
-            } else if response.tokens_used >= max_tokens as u64 {
+            } else if (raw.len() / 4) as u64 >= max_tokens as u64 {
+                // Output-length estimate, NOT response.tokens_used — in
+                // subprocess mode tokens_used includes the (large) prompt,
+                // which would trip this gate on every legitimate prose
+                // fallback. chars/4 of the content alone approximates
+                // output tokens in both modes.
                 tracing::warn!(
-                    "insight digest: response unparseable and at the {max_tokens}-token cap — \
-                     likely truncated; keeping the previous digest"
+                    "insight digest: response unparseable and output is at the \
+                     {max_tokens}-token cap — likely truncated; keeping the previous digest"
                 );
                 return Ok(response.tokens_used);
             } else {

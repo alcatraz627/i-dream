@@ -216,7 +216,9 @@ impl ClaudeClient {
         temperature: f64,
     ) -> Result<AnalysisResponse> {
         if self.use_subprocess {
-            return self.analyze_subprocess(system, prompt, model).await;
+            return self
+                .analyze_subprocess(system, prompt, model, max_tokens)
+                .await;
         }
 
         let request = ApiRequest {
@@ -349,6 +351,7 @@ impl ClaudeClient {
         system: &str,
         prompt: &str,
         model: &str,
+        requested_max_tokens: u32,
     ) -> Result<AnalysisResponse> {
         use std::process::Stdio;
 
@@ -432,6 +435,17 @@ impl ClaudeClient {
 
         // Rough estimate — subprocess mode has no usage metadata
         let tokens_used = ((full_prompt.len() + content.len()) / 4) as u64;
+
+        // The claude CLI exposes no output-token cap, so `max_tokens` is
+        // accounting-only in this mode. Surface a blow-past so budget
+        // overruns are at least visible in the log.
+        let output_estimate = (content.len() / 4) as u64;
+        if output_estimate > requested_max_tokens as u64 {
+            tracing::debug!(
+                "claude CLI response ~{output_estimate} tok exceeds the requested \
+                 {requested_max_tokens}-token cap (subprocess mode has no enforcement)"
+            );
+        }
 
         Ok(AnalysisResponse {
             content,
