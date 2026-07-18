@@ -79,6 +79,12 @@ impl DaemonState {
     /// progress" is simply the larger value; `usage` keeps the in-memory
     /// side when present (it is refreshed often and never regresses in a
     /// way that matters).
+    ///
+    /// Known tradeoff: under genuinely CONCURRENT writers (not the
+    /// sequential generation-handoff this exists for), max() collapses
+    /// independent additions instead of summing them — one side's token
+    /// spend is undercounted. Strictly better than the full clobber it
+    /// replaced; a true additive ledger would need a delta log.
     pub fn merge_newer(&mut self, disk: DaemonState) {
         self.total_cycles = self.total_cycles.max(disk.total_cycles);
         self.total_tokens_used = self.total_tokens_used.max(disk.total_tokens_used);
@@ -185,8 +191,18 @@ impl Daemon {
                 .state
                 .lock()
                 .map_err(|e| anyhow::anyhow!("daemon state mutex poisoned: {e}"))?;
-            if let Ok(disk) = self.store.read_json::<DaemonState>("state.json") {
-                state.merge_newer(disk);
+            match self.store.read_json::<DaemonState>("state.json") {
+                Ok(disk) => state.merge_newer(disk),
+                // Missing file: first write ever, nothing to adopt. An
+                // EXISTING file we can't parse is different — skipping the
+                // merge silently would let this generation's stale memory
+                // clobber whatever a sibling was mid-writing (gate finding
+                // 2026-07-18); say so loudly before overwriting.
+                Err(e) if self.store.exists("state.json") => warn!(
+                    "state.json exists but is unreadable — writing without \
+                     adopting disk progress: {e:#}"
+                ),
+                Err(_) => {}
             }
             f(&mut state);
             serde_json::to_value(&*state)?

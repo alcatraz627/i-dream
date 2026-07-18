@@ -178,6 +178,13 @@ impl<'a> Module for InsightDigestModule<'a> {
                 // which would trip this gate on every legitimate prose
                 // fallback. chars/4 of the content alone approximates
                 // output tokens in both modes.
+                //
+                // Known residual holes (accepted, gate finding 2026-07-18):
+                // dense JSON can truncate at the real cap while measuring
+                // under this estimate, and a crash-truncated SHORT fragment
+                // is indistinguishable from legitimate prose — both publish
+                // via the fallback. The 256-token floor removes the
+                // dominant cause; a real tokenizer isn't worth the weight.
                 tracing::warn!(
                     "insight digest: response unparseable and output is at the \
                      {max_tokens}-token cap — likely truncated; keeping the previous digest"
@@ -275,6 +282,94 @@ fn ground_truth_section(resolved_reasons: &[String], hooks: &[String]) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::tests::{spawn_mock_server, test_client};
+
+    /// HTTP 200 whose content[0].text is exactly `text` — the digest
+    /// run() tests script the model's reply with this.
+    fn body_with_text(text: &str) -> Vec<u8> {
+        let body = serde_json::json!({
+            "content": [{"text": text}],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        })
+        .to_string();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn digest_fixture() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        std::fs::write(
+            store.path(INSIGHTS_PATH),
+            "### Insight (conf=0.9)\n> A pattern worth digesting.\n---\n",
+        )
+        .unwrap();
+        (dir, store)
+    }
+
+    #[tokio::test]
+    async fn run_publishes_a_valid_json_digest() {
+        let (_dir, store) = digest_fixture();
+        let config = Config::default();
+        let module = InsightDigestModule::new(&config, &store);
+        let (url, _) = spawn_mock_server(|_| {
+            body_with_text(r#"{"summary": "All signals healthy.", "sentiment": "positive"}"#)
+        })
+        .await;
+        module.run(&test_client(url), 512).await.unwrap();
+        let digest = std::fs::read_to_string(store.path(DIGEST_PATH)).unwrap();
+        assert!(digest.contains("All signals healthy."));
+    }
+
+    #[tokio::test]
+    async fn run_keeps_previous_digest_on_capped_truncation() {
+        // Pins the gate's SOURCE (output-length estimate, not
+        // tokens_used): the mock's usage is tiny (15 tokens), so a gate
+        // reading tokens_used would publish this garbage — only the
+        // content-length estimate refuses it. Mutation (d) goes red here.
+        let (_dir, store) = digest_fixture();
+        std::fs::write(store.path(DIGEST_PATH), "KNOWN GOOD DIGEST").unwrap();
+        let config = Config::default();
+        let module = InsightDigestModule::new(&config, &store);
+        let truncated = format!("{{\"summary\": \"{}", "a".repeat(2100));
+        let (url, _) = spawn_mock_server(move |_| body_with_text(&truncated)).await;
+        module.run(&test_client(url), 512).await.unwrap();
+        let digest = std::fs::read_to_string(store.path(DIGEST_PATH)).unwrap();
+        assert_eq!(digest, "KNOWN GOOD DIGEST", "truncated fragment must not overwrite");
+    }
+
+    #[tokio::test]
+    async fn run_publishes_short_prose_fallback() {
+        // The documented residual: short non-JSON is indistinguishable
+        // from a legitimate prose answer and publishes via the fallback.
+        let (_dir, store) = digest_fixture();
+        let config = Config::default();
+        let module = InsightDigestModule::new(&config, &store);
+        let (url, _) = spawn_mock_server(|_| body_with_text("A short prose synthesis.")).await;
+        module.run(&test_client(url), 512).await.unwrap();
+        let digest = std::fs::read_to_string(store.path(DIGEST_PATH)).unwrap();
+        assert!(digest.contains("A short prose synthesis."));
+    }
+
+    #[tokio::test]
+    async fn run_skips_below_the_budget_floor_without_calling() {
+        let (_dir, store) = digest_fixture();
+        let config = Config::default();
+        let module = InsightDigestModule::new(&config, &store);
+        let (url, counter) = spawn_mock_server(|_| body_with_text("unreachable")).await;
+        let spent = module.run(&test_client(url), 100).await.unwrap();
+        assert_eq!(spent, 0);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no LLM call below the floor"
+        );
+        assert!(!store.exists(DIGEST_PATH));
+    }
 
     fn last_n_joined(content: &str, n: usize) -> String {
         let blocks = split_insight_blocks(content);

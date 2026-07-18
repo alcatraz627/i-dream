@@ -426,6 +426,22 @@ fi
 mod tests {
     use super::*;
 
+    #[test]
+    fn session_start_hook_script_sends_newline_terminated_payload() {
+        // The daemon parses with read_line: without the trailing newline
+        // the briefing can only parse at client-timeout EOF, which killed
+        // every delivery as a broken pipe (the dead-lane bug, 2026-07-18).
+        // This pins the one character that fix lives in.
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        write_session_start_hook(dir.path(), &config).unwrap();
+        let script = std::fs::read_to_string(dir.path().join("session-start.sh")).unwrap();
+        assert!(
+            script.contains(r#"printf '%s\n' "$PAYLOAD""#),
+            "session-start client must newline-terminate its payload"
+        );
+    }
+
     // ── add_hook_entry: JSON manipulation ─────────────────────
     // This function modifies the user's ~/.claude/settings.json.
     // Getting the JSON structure wrong means Claude Code won't

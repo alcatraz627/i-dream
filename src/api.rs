@@ -532,7 +532,7 @@ fn backoff_delay(attempt: u32, config: &RetryConfig) -> Duration {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use reqwest::StatusCode;
 
@@ -717,7 +717,7 @@ mod tests {
     /// A tiny HTTP/1.1 server that runs `handler` on each incoming
     /// connection. Returns the base URL and a counter the test can
     /// read after the fact.
-    async fn spawn_mock_server<F>(handler: F) -> (String, Arc<AtomicU32>)
+    pub(crate) async fn spawn_mock_server<F>(handler: F) -> (String, Arc<AtomicU32>)
     where
         F: Fn(u32) -> Vec<u8> + Send + Sync + 'static,
     {
@@ -755,7 +755,7 @@ mod tests {
 
     /// Build a test client pointed at the given base URL with a tight
     /// retry config (100ms base, 200ms cap) so tests finish fast.
-    fn test_client(base_url: String) -> ClaudeClient {
+    pub(crate) fn test_client(base_url: String) -> ClaudeClient {
         ClaudeClient {
             api_key: "test-key".into(),
             base_url,
