@@ -24,6 +24,7 @@
 //! `resolutions.jsonl`); this pass earns "evidence, not raw votes" through small
 //! per-vote steps that must accumulate, plus anchor protection.
 
+use super::views::stable_id;
 use crate::modules::dreaming::{Association, ExtractedPattern};
 use crate::modules::grounding::{self, Resolution};
 use crate::store::Store;
@@ -165,23 +166,44 @@ pub fn apply_feedback(
         .enumerate()
         .map(|(i, p)| (p.id.clone(), i))
         .collect();
+    // Durable identity: the same lookups keyed by text-hash (views::stable_id).
+    // Store UUIDs remint on every re-extraction (~2 days measured 2026-07-22 —
+    // 95% of historical feedback targeted ids that no longer existed, and no
+    // pattern had ever been reactivated), so an event recorded against an
+    // earlier store generation can only land through the text identity.
+    let assoc_by_stable: HashMap<String, &Vec<String>> = associations
+        .iter()
+        .map(|a| (stable_id(&a.hypothesis), &a.patterns_linked))
+        .collect();
+    let pattern_by_stable: HashMap<String, usize> = patterns
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (stable_id(&p.pattern), i))
+        .collect();
 
     let mut moves = Vec::new();
     for ev in feedback {
-        // An event names either an association (the usual insight shape) or a
-        // pattern directly (graduation up-votes and widget pattern votes write
-        // `pattern_id`). Associations resolve to their source patterns; a
-        // direct pattern id passes through as itself. Unknown ids skip.
-        let direct = [ev.insight_id.clone()];
-        let linked: &[String] = match assoc_patterns.get(ev.insight_id.as_str()) {
-            Some(v) => v.as_slice(),
-            None if by_id.contains_key(ev.insight_id.as_str()) => &direct,
-            None => continue,
+        // An event names an association (the usual insight shape) or a pattern
+        // directly (graduation up-votes and widget pattern votes) — by store
+        // UUID from legacy writers, or by stable_id from injection-derived
+        // writers. UUIDs resolve first (exact-generation match), then the
+        // durable text identity. Unknown ids skip.
+        let idxs: Vec<usize> = if let Some(v) = assoc_patterns.get(ev.insight_id.as_str()) {
+            v.iter()
+                .filter_map(|pid| by_id.get(pid.as_str()).copied())
+                .collect()
+        } else if let Some(&i) = by_id.get(ev.insight_id.as_str()) {
+            vec![i]
+        } else if let Some(v) = assoc_by_stable.get(ev.insight_id.as_str()) {
+            v.iter()
+                .filter_map(|pid| by_id.get(pid.as_str()).copied())
+                .collect()
+        } else if let Some(&i) = pattern_by_stable.get(ev.insight_id.as_str()) {
+            vec![i]
+        } else {
+            continue;
         };
-        for pid in linked.iter() {
-            let Some(&idx) = by_id.get(pid) else {
-                continue;
-            };
+        for idx in idxs {
             let p = &mut patterns[idx];
             if p.strength < 0.0 {
                 p.strength = p.confidence;
@@ -519,9 +541,17 @@ fn classify_downvotes(
 ) {
     let assoc_by_id: HashMap<&str, &Association> =
         associations.iter().map(|a| (a.id.as_str(), a)).collect();
+    let assoc_by_stable: HashMap<String, &Association> = associations
+        .iter()
+        .map(|a| (stable_id(&a.hypothesis), a))
+        .collect();
     let pattern_text: HashMap<&str, &str> = patterns
         .iter()
         .map(|p| (p.id.as_str(), p.pattern.as_str()))
+        .collect();
+    let pattern_by_stable: HashMap<String, &ExtractedPattern> = patterns
+        .iter()
+        .map(|p| (stable_id(&p.pattern), p))
         .collect();
     for ev in events.iter_mut() {
         if ev.honored {
@@ -529,28 +559,36 @@ fn classify_downvotes(
         }
         // The texts this event stands on (association hypothesis + linked
         // pattern texts, or the pattern's own text for a direct id), and the
-        // pattern ids it would demote.
-        let (texts, linked): (Vec<&str>, Vec<&str>) =
-            match assoc_by_id.get(ev.insight_id.as_str()) {
-                Some(a) => (
-                    std::iter::once(a.hypothesis.as_str())
-                        .chain(
-                            a.patterns_linked
-                                .iter()
-                                .filter_map(|pid| pattern_text.get(pid.as_str()).copied()),
-                        )
-                        .collect(),
-                    a.patterns_linked.iter().map(|s| s.as_str()).collect(),
-                ),
-                None => (
-                    pattern_text
-                        .get(ev.insight_id.as_str())
-                        .copied()
-                        .into_iter()
-                        .collect(),
-                    vec![ev.insight_id.as_str()],
-                ),
-            };
+        // pattern ids it would demote. Resolution mirrors apply_feedback:
+        // store UUID first, then the durable text identity (A0).
+        let assoc = assoc_by_id
+            .get(ev.insight_id.as_str())
+            .copied()
+            .or_else(|| assoc_by_stable.get(ev.insight_id.as_str()).copied());
+        let (texts, linked): (Vec<&str>, Vec<&str>) = match assoc {
+            Some(a) => (
+                std::iter::once(a.hypothesis.as_str())
+                    .chain(
+                        a.patterns_linked
+                            .iter()
+                            .filter_map(|pid| pattern_text.get(pid.as_str()).copied()),
+                    )
+                    .collect(),
+                a.patterns_linked.iter().map(|s| s.as_str()).collect(),
+            ),
+            None => {
+                if let Some(t) = pattern_text.get(ev.insight_id.as_str()) {
+                    (vec![*t], vec![ev.insight_id.as_str()])
+                } else if let Some(p) = pattern_by_stable.get(ev.insight_id.as_str()) {
+                    // Stable-resolved direct pattern: canonicalize to the
+                    // current-generation UUID so the graduation lookup below
+                    // sees the same id space as apply_feedback.
+                    (vec![p.pattern.as_str()], vec![p.id.as_str()])
+                } else {
+                    (vec![], vec![])
+                }
+            }
+        };
         ev.reason = Some(
             if texts
                 .iter()
@@ -560,9 +598,15 @@ fn classify_downvotes(
             } else if ev.ts.is_some_and(|down_ts| {
                 // Known only when the graduation PRECEDED this down-vote —
                 // an undated down can't be ordered, so it takes the penalty.
-                linked
-                    .iter()
-                    .any(|id| graduated.get(*id).is_some_and(|g| *g <= down_ts))
+                // A graduation mark may be keyed by a UUID from an older store
+                // generation, so the pattern's text identity is checked too.
+                linked.iter().any(|id| {
+                    graduated.get(*id).is_some_and(|g| *g <= down_ts)
+                        || pattern_text
+                            .get(*id)
+                            .and_then(|t| graduated.get(&stable_id(t)))
+                            .is_some_and(|g| *g <= down_ts)
+                })
             }) {
                 DownReason::Known
             } else {
@@ -847,6 +891,130 @@ mod tests {
         let moves = apply_feedback(&mut ps, &[], &[ev("nonexistent", true)]);
         assert!(moves.is_empty());
         assert_eq!(ps[0].reactivations, 0, "unknown id changes nothing");
+    }
+
+    /// A pattern with a caller-chosen text — for churn tests where the UUID
+    /// changes but the lesson text (the durable identity) does not.
+    fn pat_named(id: &str, text: &str) -> ExtractedPattern {
+        ExtractedPattern {
+            pattern: text.into(),
+            ..pat(id, 0.6, 0.5, 2.5, 0)
+        }
+    }
+
+    #[test]
+    fn stable_keyed_pattern_feedback_lands_after_uuid_churn() {
+        // A0 keystone: an event keyed by the text-hash (what injections.jsonl
+        // carries) reinforces even though the store UUID it was born under no
+        // longer exists. Red before A0: unknown id → skipped.
+        let mut ps = vec![pat_named("gen2-uuid", "audit sibling pages first")];
+        let sid = stable_id("audit sibling pages first");
+        let moves = apply_feedback(&mut ps, &[], &[ev(&sid, true)]);
+        assert_eq!(moves.len(), 1, "stable-keyed vote resolves");
+        assert_eq!(ps[0].reactivations, 1);
+        assert!(ps[0].strength > 0.5);
+    }
+
+    #[test]
+    fn stable_keyed_association_feedback_reactivates_linked_patterns() {
+        let mut ps = vec![pat("p1", 0.6, 0.4, 2.5, 0)];
+        let a = assoc("assoc-gen2-uuid", &["p1"]);
+        let sid = stable_id(&a.hypothesis);
+        let moves = apply_feedback(&mut ps, &[a], &[ev(&sid, true)]);
+        assert_eq!(moves.len(), 1, "stable assoc id resolves to linked patterns");
+        assert_eq!(ps[0].reactivations, 1);
+    }
+
+    #[test]
+    fn uuid_resolution_wins_over_stable_when_both_exist() {
+        // A pathological store where one pattern's UUID equals another's
+        // stable_id must resolve by UUID (exact-generation match first).
+        let mut ps = vec![pat("p1", 0.6, 0.4, 2.5, 0)];
+        let collider = stable_id(&ps[0].pattern);
+        ps.push(pat_named(&collider, "a different lesson entirely"));
+        apply_feedback(&mut ps, &[], &[ev(&collider, true)]);
+        assert_eq!(ps[1].reactivations, 1, "UUID match takes the vote");
+        assert_eq!(ps[0].reactivations, 0, "stable fallback never consulted");
+    }
+
+    #[test]
+    fn classify_resolves_stable_ids_for_stale_routing() {
+        // A stable-keyed down on a reality-resolved lesson routes Stale (not
+        // Wrong) — classification must see through the text identity too.
+        let ps = vec![pat_named("gen9-uuid", "the gate blocks all pushes")];
+        let sid = stable_id("the gate blocks all pushes");
+        let mut evs = vec![ev(&sid, false)];
+        classify_downvotes(
+            &mut evs,
+            &ps,
+            &[],
+            &[res("the gate blocks all pushes")],
+            &HashMap::new(),
+        );
+        assert_eq!(evs[0].reason, Some(DownReason::Stale));
+    }
+
+    #[test]
+    fn graduation_mark_from_older_generation_still_exonerates() {
+        // The graduation was recorded under gen-1's UUID; the store has since
+        // reminted. A later down resolved to the gen-2 pattern must still
+        // route Known via the text identity.
+        let ps = vec![pat_named("gen2-uuid", "never push to main unasked")];
+        let graduated: HashMap<String, DateTime<Utc>> = [(
+            stable_id("never push to main unasked"),
+            day(10),
+        )]
+        .into();
+        let mut evs = vec![FeedbackEvent {
+            ts: Some(day(12)),
+            ..ev("gen2-uuid", false)
+        }];
+        classify_downvotes(&mut evs, &ps, &[], &[], &graduated);
+        assert_eq!(evs[0].reason, Some(DownReason::Known));
+    }
+
+    /// The A0 acceptance test: feedback recorded 8 days after its lesson
+    /// shipped — after a full store rewrite reminted every UUID — still
+    /// potentiates the pattern. This is the exact sequence the 2026-07-22
+    /// measurement showed losing 95% of all historical feedback.
+    #[test]
+    fn run_cycle_feedback_survives_store_rewrite_across_days() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+
+        let text = "exercise the changed path before declaring done";
+        store
+            .write_json("dreams/patterns.json", &vec![pat_named("gen1-uuid", text)])
+            .unwrap();
+        // A dated no-op event pins the watermark era so the later assertion
+        // exercises the fresh-events path, not the first-run backlog path.
+        store
+            .append_jsonl(
+                "dreams/insight-feedback.jsonl",
+                &serde_json::json!({"insight_id":"bootstrap-noop","rating":"up",
+                    "ts": day(1).to_rfc3339()}),
+            )
+            .unwrap();
+        run_cycle(&store).unwrap();
+
+        // The churn: same lesson text, brand-new UUID.
+        store
+            .write_json("dreams/patterns.json", &vec![pat_named("gen2-uuid", text)])
+            .unwrap();
+        // Eight days later, a stable-keyed honored use arrives.
+        store
+            .append_jsonl(
+                "dreams/insight-feedback.jsonl",
+                &serde_json::json!({"insight_id": stable_id(text), "rating":"up",
+                    "source":"fired", "ts": day(9).to_rfc3339()}),
+            )
+            .unwrap();
+        let r2 = run_cycle(&store).unwrap();
+        assert_eq!(r2.reactivated, 1, "late, churn-crossing feedback lands");
+        let after: Vec<ExtractedPattern> = store.read_json("dreams/patterns.json").unwrap();
+        assert_eq!(after[0].reactivations, 1);
+        assert!(is_anchor(&after[0]), "a reactivated lesson earns anchor status");
     }
 
     #[test]
