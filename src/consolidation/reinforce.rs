@@ -364,13 +364,18 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
     // resolution list is grounding's; graduation marks come from the ledger
     // itself, so the whole history (not just fresh events) supplies them.
     let resolutions = crate::modules::grounding::load_resolutions(store);
-    let graduated = graduation_marked(&all_events);
+    fold_graduation_marks(
+        &mut state.graduation_marks,
+        graduation_marked(&all_events),
+        &patterns,
+        &associations,
+    );
     classify_downvotes(
         &mut fresh,
         &patterns,
         &associations,
         &resolutions,
-        &graduated,
+        &state.graduation_marks,
     );
 
     decay_cycle(&mut patterns);
@@ -410,6 +415,12 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
     }
 
+    // Retention (A0): the ledger is re-read wholesale every cycle and grows
+    // fastest during exactly the absences the arc targets. Consumed state
+    // (watermark, graduation marks) lives in reinforce-state, so archiving
+    // old events loses nothing that still gates behavior.
+    let archived_feedback = rotate_feedback_ledger(store, Utc::now(), FEEDBACK_ROTATE_MIN)?;
+
     let evicted = evict_to_cap(&mut patterns, MAX_PATTERNS);
     for e in &evicted {
         store.append_jsonl("dreams/evicted.jsonl", e)?;
@@ -434,6 +445,7 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         known_skipped,
         evicted: evicted.len(),
         forgotten: forgotten.len(),
+        archived_feedback,
     })
 }
 
@@ -442,6 +454,127 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
 struct ReinforceState {
     #[serde(default)]
     feedback_watermark: Option<DateTime<Utc>>,
+    /// Graduation marks folded out of the ledger before retention archives
+    /// the events that carried them: insight/pattern id (UUID or stable) →
+    /// earliest graduation time. classify_downvotes exonerates from THIS
+    /// map, so a rotated ledger keeps its institutional memory.
+    #[serde(default)]
+    graduation_marks: HashMap<String, DateTime<Utc>>,
+}
+
+/// Days of feedback kept live in the ledger; older dated lines rotate to a
+/// monthly archive. Wide enough for every reader that joins against the
+/// current store generation (Brier, confidence-apply) — a line older than
+/// this references churned UUIDs or already-applied history.
+const FEEDBACK_RETAIN_DAYS: i64 = 30;
+/// Rotation is a wholesale rewrite, so it runs only once this many lines are
+/// archivable — rare enough that the (accepted, prune_jsonl-class) race with
+/// concurrent appenders stays negligible.
+const FEEDBACK_ROTATE_MIN: usize = 500;
+
+/// Partition raw ledger lines at a cutoff: dated lines strictly older go to
+/// per-month archive buckets; recent, undated, and unparseable lines are
+/// kept. Pure — hermetically testable.
+fn partition_feedback_lines<'a>(
+    lines: &[&'a str],
+    cutoff: DateTime<Utc>,
+) -> (Vec<&'a str>, HashMap<String, Vec<&'a str>>) {
+    let mut kept = Vec::new();
+    let mut archived: HashMap<String, Vec<&str>> = HashMap::new();
+    for l in lines {
+        let ts = serde_json::from_str::<serde_json::Value>(l).ok().and_then(|v| {
+            v.get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&Utc))
+        });
+        match ts {
+            Some(t) if t < cutoff => archived
+                .entry(t.format("%Y%m").to_string())
+                .or_default()
+                .push(*l),
+            _ => kept.push(*l),
+        }
+    }
+    (kept, archived)
+}
+
+/// Rotate old feedback lines to `dreams/_archived/insight-feedback-<YYYYMM>.jsonl`.
+/// Archives are appended before the live ledger is rewritten (tmp+rename), so
+/// a crash can duplicate a line but never lose one. `min` gates the rewrite;
+/// production passes FEEDBACK_ROTATE_MIN.
+fn rotate_feedback_ledger(store: &Store, now: DateTime<Utc>, min: usize) -> Result<usize> {
+    let path = store.path("dreams/insight-feedback.jsonl");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Ok(0);
+    };
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    let cutoff = now - chrono::Duration::days(FEEDBACK_RETAIN_DAYS);
+    let (kept, archived) = partition_feedback_lines(&lines, cutoff);
+    let n: usize = archived.values().map(Vec::len).sum();
+    if n < min.max(1) {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(store.path("dreams/_archived"))?;
+    for (month, ls) in &archived {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(
+            store.path(&format!("dreams/_archived/insight-feedback-{month}.jsonl")),
+        )?;
+        f.write_all((ls.join("\n") + "\n").as_bytes())?;
+    }
+    let tmp = path.with_extension("rotate.tmp");
+    let body = if kept.is_empty() {
+        String::new()
+    } else {
+        kept.join("\n") + "\n"
+    };
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(n)
+}
+
+/// Fold one read's ledger-derived graduation marks into the persistent map
+/// (earliest date wins), aliasing each mark to its lesson's durable text
+/// identity while the UUID can still be resolved against the live store.
+fn fold_graduation_marks(
+    state_marks: &mut HashMap<String, DateTime<Utc>>,
+    ledger_marks: HashMap<String, DateTime<Utc>>,
+    patterns: &[ExtractedPattern],
+    associations: &[Association],
+) {
+    let pattern_text: HashMap<&str, &str> = patterns
+        .iter()
+        .map(|p| (p.id.as_str(), p.pattern.as_str()))
+        .collect();
+    let assoc_text: HashMap<&str, &str> = associations
+        .iter()
+        .map(|a| (a.id.as_str(), a.hypothesis.as_str()))
+        .collect();
+    for (id, ts) in ledger_marks {
+        if let Some(t) = pattern_text
+            .get(id.as_str())
+            .or_else(|| assoc_text.get(id.as_str()))
+        {
+            let s = stable_id(t);
+            state_marks
+                .entry(s)
+                .and_modify(|e| {
+                    if ts < *e {
+                        *e = ts;
+                    }
+                })
+                .or_insert(ts);
+        }
+        state_marks
+            .entry(id)
+            .and_modify(|e| {
+                if ts < *e {
+                    *e = ts;
+                }
+            })
+            .or_insert(ts);
+    }
 }
 
 /// Read `insight-feedback.jsonl` and classify each row as honored (up) or not.
@@ -632,6 +765,8 @@ pub struct ReinforceReport {
     pub evicted: usize,
     /// Patterns dropped because a resolution overtook their claim (item 11).
     pub forgotten: usize,
+    /// Feedback lines rotated to the monthly archive this cycle (A0 retention).
+    pub archived_feedback: usize,
 }
 
 #[cfg(test)]
@@ -1015,6 +1150,97 @@ mod tests {
         let after: Vec<ExtractedPattern> = store.read_json("dreams/patterns.json").unwrap();
         assert_eq!(after[0].reactivations, 1);
         assert!(is_anchor(&after[0]), "a reactivated lesson earns anchor status");
+    }
+
+    #[test]
+    fn partition_keeps_recent_undated_and_malformed_lines() {
+        let old_june = r#"{"insight_id":"a","rating":"down","ts":"2026-06-01T00:00:00+00:00"}"#;
+        let old_may = r#"{"insight_id":"b","rating":"down","ts":"2026-05-15T00:00:00+00:00"}"#;
+        let recent = r#"{"insight_id":"c","rating":"up","ts":"2026-07-20T00:00:00+00:00"}"#;
+        let undated = r#"{"insight_id":"d","rating":"up"}"#;
+        let malformed = r#"not json at all"#;
+        let lines = vec![old_june, old_may, recent, undated, malformed];
+        let (kept, archived) = partition_feedback_lines(&lines, day(1));
+        assert_eq!(kept, vec![recent, undated, malformed]);
+        assert_eq!(archived.len(), 2, "one bucket per month");
+        assert_eq!(archived["202606"], vec![old_june]);
+        assert_eq!(archived["202605"], vec![old_may]);
+    }
+
+    #[test]
+    fn rotation_archives_by_month_and_preserves_every_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+        let mk = |id: &str, ts: &str| {
+            serde_json::json!({"insight_id": id, "rating": "down", "ts": ts})
+        };
+        for (id, ts) in [
+            ("a", "2026-05-15T00:00:00+00:00"),
+            ("b", "2026-06-01T00:00:00+00:00"),
+            ("c", "2026-07-20T00:00:00+00:00"),
+        ] {
+            store
+                .append_jsonl("dreams/insight-feedback.jsonl", &mk(id, ts))
+                .unwrap();
+        }
+        // Below the min threshold nothing moves.
+        assert_eq!(rotate_feedback_ledger(&store, day(21), 500).unwrap(), 0);
+        // At min=1 the two old lines rotate into their month files.
+        assert_eq!(rotate_feedback_ledger(&store, day(21), 1).unwrap(), 2);
+        let live =
+            std::fs::read_to_string(store.path("dreams/insight-feedback.jsonl")).unwrap();
+        assert!(live.contains(r#""c""#) && !live.contains(r#""a""#));
+        let may = std::fs::read_to_string(
+            store.path("dreams/_archived/insight-feedback-202605.jsonl"),
+        )
+        .unwrap();
+        let june = std::fs::read_to_string(
+            store.path("dreams/_archived/insight-feedback-202606.jsonl"),
+        )
+        .unwrap();
+        assert!(may.contains(r#""a""#) && june.contains(r#""b""#));
+        assert_eq!(
+            live.lines().count() + may.lines().count() + june.lines().count(),
+            3,
+            "every line survives somewhere"
+        );
+    }
+
+    /// Retention must not launder institutional memory: a graduation mark
+    /// folded into reinforce-state keeps exonerating down-votes even after
+    /// the ledger lines that carried it are gone entirely.
+    #[test]
+    fn graduation_mark_survives_ledger_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+        store
+            .write_json("dreams/patterns.json", &vec![pat("p1", 0.6, 0.5, 2.5, 0)])
+            .unwrap();
+        store
+            .append_jsonl(
+                "dreams/insight-feedback.jsonl",
+                &serde_json::json!({"insight_id":"p1","rating":"up",
+                    "source":"graduation-manual","ts": day(1).to_rfc3339()}),
+            )
+            .unwrap();
+        run_cycle(&store).unwrap();
+
+        // Simulate retention having archived everything the mark rode in on.
+        std::fs::remove_file(store.path("dreams/insight-feedback.jsonl")).unwrap();
+        store
+            .append_jsonl(
+                "dreams/insight-feedback.jsonl",
+                &serde_json::json!({"insight_id":"p1","rating":"down",
+                    "ts": day(20).to_rfc3339()}),
+            )
+            .unwrap();
+        let r2 = run_cycle(&store).unwrap();
+        assert_eq!(r2.known_skipped, 1, "mark exonerates from state, not ledger");
+        assert_eq!(r2.weakened, 0);
+        let after: Vec<ExtractedPattern> = store.read_json("dreams/patterns.json").unwrap();
+        assert_eq!(after[0].reactivations, 1, "the graduation up-vote itself landed");
     }
 
     #[test]
