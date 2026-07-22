@@ -38,23 +38,6 @@ const EVENTS_LOG: &str = "logs/events.jsonl";
 /// trends without filtering the general event stream.
 const SIGNALS_LOG: &str = "logs/signals.jsonl";
 
-/// Log of what was surfaced at each SessionStart — intention IDs and
-/// whether introspection patterns were included. The valence module
-/// reads this during consolidation to correlate session outcomes with
-/// the insights that were active, closing the implicit feedback loop.
-const SURFACED_LOG: &str = "valence/surfaced.jsonl";
-
-/// A record of what the daemon surfaced into a session's context.
-/// Written once per SessionStart that produces a non-empty briefing.
-#[derive(Debug, Serialize, Deserialize)]
-struct SurfacedBriefing {
-    /// Daemon-side timestamp when the briefing was composed.
-    ts: DateTime<Utc>,
-    /// IDs of intentions that were included in the briefing.
-    intention_ids: Vec<String>,
-    /// Whether the introspection self-awareness section was included.
-    has_introspection: bool,
-}
 
 /// Relative path of the metacog real-time tool-activity log. Written on
 /// each `ToolUse` hook event as a lightweight heartbeat — counterpart to
@@ -1616,20 +1599,14 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     let build_started = std::time::Instant::now();
     let response = match &event {
         HookEvent::SessionStart { cwd, .. } => {
-            let (text, intention_ids, has_introspection) =
+            // No surfaced-claim is recorded here (A4, 2026-07-22): this lane
+            // cannot prove its response ever reached a context — the client
+            // may read-and-discard — and the rows it used to write poisoned
+            // the valence correlation with briefings nobody saw. Delivery
+            // receipts belong to the file-based injector (injections.jsonl);
+            // valence/surfaced.jsonl keeps only its historical rows.
+            let (text, _intention_ids, _has_introspection) =
                 build_session_start_response(store, cwd.as_deref());
-            // Persist what was surfaced so the valence module can
-            // correlate session outcomes with active insights.
-            if !intention_ids.is_empty() || has_introspection {
-                let briefing = SurfacedBriefing {
-                    ts: Utc::now(),
-                    intention_ids,
-                    has_introspection,
-                };
-                if let Err(e) = store.append_jsonl(SURFACED_LOG, &briefing) {
-                    warn!("Failed to log surfaced briefing: {e:#}");
-                }
-            }
             text
         }
         _ => String::new(),
