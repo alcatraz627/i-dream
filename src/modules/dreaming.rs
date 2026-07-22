@@ -141,6 +141,10 @@ pub struct DreamEntry {
     /// rows written before this field existed.
     #[serde(default)]
     pub cycle_id: String,
+    /// The mechanical health panel over this cycle's output (felt-metabolism
+    /// D1). Absent on rows written before the assay existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assay: Option<crate::consolidation::assay::AssayPanel>,
 }
 
 impl DreamEntry {
@@ -1989,6 +1993,23 @@ impl<'a> Module for DreamingModule<'a> {
             )?;
         }
 
+        // D1 assay: a mechanical panel over what this cycle left behind.
+        // Store-read failures degrade to an empty panel — the assay never
+        // blocks the journal write it rides on.
+        let assay = {
+            let patterns: Vec<ExtractedPattern> = self
+                .store
+                .read_json("dreams/patterns.json")
+                .unwrap_or_default();
+            let mut panel =
+                crate::consolidation::assay::assay_patterns(&patterns, total_tokens, budget);
+            crate::consolidation::assay::assay_queue(
+                &mut panel,
+                &self.store.path("dreams/ingest-queue"),
+            );
+            panel
+        };
+
         // Record dream in journal with real counts.
         let entry = DreamEntry {
             id: Uuid::new_v4().to_string(),
@@ -2000,6 +2021,7 @@ impl<'a> Module for DreamingModule<'a> {
             insights_promoted,
             tokens_used: total_tokens,
             cycle_id: tracer.cycle_id().to_string(),
+            assay: Some(assay),
         };
         self.store.append_jsonl("dreams/journal.jsonl", &entry)?;
         let entry_json = serde_json::to_string_pretty(&entry).ok();
@@ -2055,6 +2077,7 @@ mod tests {
             insights_promoted: 1,
             tokens_used: 8452,
             cycle_id: "c".into(),
+            assay: None,
         };
         assert_eq!(
             entry.summary_line(Some(1312), 34),
@@ -2076,6 +2099,7 @@ mod tests {
             insights_promoted: 0,
             tokens_used: 0,
             cycle_id: String::new(),
+            assay: None,
         };
 
         // Nothing written → None, regardless of prior state.
@@ -2126,6 +2150,7 @@ mod tests {
             insights_promoted: 0,
             tokens_used: 0,
             cycle_id: tracer.cycle_id().to_string(),
+            assay: None,
         };
 
         assert!(!entry.cycle_id.is_empty());

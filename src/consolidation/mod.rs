@@ -6,6 +6,7 @@
 //! that need LLM input (Top signals, Cross-domain associations) carry a
 //! placeholder until then.
 
+pub mod assay;
 pub mod autonomous;
 pub mod dream_pass;
 pub mod forgetting;
