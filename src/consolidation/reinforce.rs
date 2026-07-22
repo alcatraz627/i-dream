@@ -418,8 +418,17 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
     // Retention (A0): the ledger is re-read wholesale every cycle and grows
     // fastest during exactly the absences the arc targets. Consumed state
     // (watermark, graduation marks) lives in reinforce-state, so archiving
-    // old events loses nothing that still gates behavior.
-    let archived_feedback = rotate_feedback_ledger(store, Utc::now(), FEEDBACK_ROTATE_MIN)?;
+    // old events loses nothing that still gates behavior. Rotation is
+    // housekeeping — a persistent I/O failure here (validation finding 8:
+    // _archived existing as a file) must degrade to a warning, never wedge
+    // decay/eviction/watermark for every future cycle.
+    let archived_feedback = match rotate_feedback_ledger(store, Utc::now(), FEEDBACK_ROTATE_MIN) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("feedback rotation skipped: {e:#}");
+            0
+        }
+    };
 
     let evicted = evict_to_cap(&mut patterns, MAX_PATTERNS);
     for e in &evicted {
@@ -574,6 +583,21 @@ fn fold_graduation_marks(
                 }
             })
             .or_insert(ts);
+    }
+    // The marks map is persistent and only ever grew (validation finding 6).
+    // Graduations are rare, so the cap is generous — when it overflows, the
+    // oldest marks (long-churned UUIDs whose aliases already exist) go first.
+    const GRADUATION_MARKS_CAP: usize = 2000;
+    if state_marks.len() > GRADUATION_MARKS_CAP {
+        let mut by_age: Vec<(String, DateTime<Utc>)> =
+            state_marks.iter().map(|(k, t)| (k.clone(), *t)).collect();
+        by_age.sort_by_key(|(_, t)| *t);
+        for (k, _) in by_age
+            .into_iter()
+            .take(state_marks.len() - GRADUATION_MARKS_CAP)
+        {
+            state_marks.remove(&k);
+        }
     }
 }
 

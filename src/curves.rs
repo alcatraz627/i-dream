@@ -68,6 +68,12 @@ fn parse_event_line(line: &str) -> Option<(String, NaiveDate)> {
     }
     let from_id = v.get("id").and_then(|i| i.as_str()).and_then(|id| {
         let digits = id.split('-').nth(1)?;
+        // Exactly 8 digits: chrono's parser is not width-fixed, so a 7-digit
+        // stamp would otherwise parse to a confidently WRONG date
+        // (validation finding 4: "2026071" → 2026-07-01).
+        if digits.len() != 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
         NaiveDate::parse_from_str(digits, "%Y%m%d").ok()
     });
     let date = from_id.or_else(|| {
@@ -90,9 +96,13 @@ fn compute_curves(events: &[(String, NaiveDate)], now: DateTime<Utc>) -> CurvesD
     let trend_split = (now - chrono::Duration::weeks(TREND_SPAN_WEEKS as i64)).date_naive();
     let trend_floor = (now - chrono::Duration::weeks(2 * TREND_SPAN_WEEKS as i64)).date_naive();
 
+    let today = now.date_naive();
     let mut by_slug: HashMap<&str, Vec<NaiveDate>> = HashMap::new();
     for (slug, d) in events {
-        if *d >= cutoff {
+        // Clamp both ends: a clock-skewed or hand-authored future line would
+        // otherwise inflate the recent span and fake a "rising" trend
+        // (validation finding 5).
+        if *d >= cutoff && *d <= today {
             by_slug.entry(slug.as_str()).or_default().push(*d);
         }
     }
@@ -202,6 +212,16 @@ mod tests {
         assert!(parse_event_line(undatable).is_none());
         assert!(parse_event_line(slugless).is_none());
         assert!(parse_event_line("not json").is_none());
+        // A 7-digit stamp must never guess a date (finding 4): it falls back
+        // to ts when present and is skipped when not.
+        let seven_no_ts = r#"{"id":"mist-2026071-000000-xx","slug":"seven"}"#;
+        assert!(parse_event_line(seven_no_ts).is_none());
+        let seven_with_ts =
+            r#"{"id":"mist-2026071-000000-xx","slug":"seven","ts":"2026-07-05T00:00:00+00:00"}"#;
+        assert_eq!(
+            parse_event_line(seven_with_ts).unwrap().1,
+            NaiveDate::from_ymd_opt(2026, 7, 5).unwrap()
+        );
     }
 
     #[test]
@@ -213,9 +233,11 @@ mod tests {
             ("busy".to_string(), d(7, 20)),
             ("quiet".to_string(), d(7, 1)),
             ("ancient".to_string(), d(1, 1)), // outside the 26-week window
+            ("future".to_string(), d(12, 25)), // clock-skew guard (finding 5)
         ];
         let doc = compute_curves(&events, now());
         assert_eq!(doc.events_in_window, 4);
+        assert!(doc.slugs.iter().all(|s| s.slug != "future"));
         assert_eq!(doc.slugs[0].slug, "busy");
         assert_eq!(doc.slugs[0].total, 3);
         // 07-13/14 share an ISO week; 07-20 starts the next.

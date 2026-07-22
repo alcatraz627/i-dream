@@ -42,11 +42,15 @@ struct InjectionRow {
     ts: Option<DateTime<Utc>>,
 }
 
-/// Which sessions have been scanned (or written off), and when.
+/// Which sessions have been scanned (or written off), and when — plus which
+/// ids each session already fired, so a re-scan after a resume can credit
+/// late echoes exactly once (validation finding 2).
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FiringsState {
     #[serde(default)]
     scanned: HashMap<String, DateTime<Utc>>,
+    #[serde(default)]
+    fired: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -145,15 +149,24 @@ pub fn scan_at(
     }
 
     for (sid, (last_ts, ids)) in by_sid {
-        if state.scanned.contains_key(&sid) {
-            continue;
-        }
         // An undated row can't be aged; treat it as fresh forever rather
         // than scanning a session that may still be running.
         let Some(last_ts) = last_ts else {
-            report.pending += 1;
+            if !state.scanned.contains_key(&sid) {
+                report.pending += 1;
+            }
             continue;
         };
+        // A resumed session re-injects under the same sid. Scanning once and
+        // marking forever would record its late echoes as present-unused
+        // (validation finding 2) — so a scan repeats when injections newer
+        // than the last scan exist, crediting only ids not already fired.
+        let prior_scan = state.scanned.get(&sid).copied();
+        if let Some(at) = prior_scan {
+            if last_ts <= at {
+                continue;
+            }
+        }
         if now - last_ts < Duration::hours(SETTLE_HOURS) {
             report.pending += 1;
             continue;
@@ -168,7 +181,11 @@ pub fn scan_at(
             continue;
         };
         let text = assistant_text(&transcript).unwrap_or_default();
+        let fired_before: Vec<String> = state.fired.get(&sid).cloned().unwrap_or_default();
         for id in &ids {
+            if fired_before.contains(id) {
+                continue; // credited on an earlier scan of this session
+            }
             if text.contains(&tag_for(id)) {
                 store.append_jsonl(
                     "dreams/insight-feedback.jsonl",
@@ -177,9 +194,12 @@ pub fn scan_at(
                         "sid": sid, "ts": now.to_rfc3339(),
                     }),
                 )?;
+                state.fired.entry(sid.clone()).or_default().push(id.clone());
                 report.fired += 1;
-            } else {
-                // No rating on purpose — assay-visible, vote-invisible.
+            } else if prior_scan.is_none() {
+                // First scan only — a re-scan repeating these would duplicate
+                // the row per resume. No rating on purpose: assay-visible,
+                // vote-invisible.
                 store.append_jsonl(
                     "dreams/insight-feedback.jsonl",
                     &serde_json::json!({
@@ -197,6 +217,8 @@ pub fn scan_at(
     state
         .scanned
         .retain(|_, ts| now - *ts < Duration::days(STATE_RETAIN_DAYS));
+    let FiringsState { scanned, fired } = &mut state;
+    fired.retain(|sid, _| scanned.contains_key(sid));
     if let Some(dir) = state_path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -324,6 +346,32 @@ mod tests {
         let rep2 = scan_at(&r.injections, &r.projects, &r.state, &r.store, now()).unwrap();
         assert_eq!(rep2.sessions_scanned, 0);
         assert_eq!(ledger(&r).len(), 2);
+    }
+
+    #[test]
+    fn rescan_on_new_injection_credits_late_fires_exactly_once() {
+        let r = rig();
+        let t0 = now() - Duration::hours(12);
+        write_injection(&r, "sid-r", &["aabbccddeeff0011"], t0);
+        write_transcript(&r, "sid-r", &["no tag yet"], &[]);
+        let rep1 = scan_at(&r.injections, &r.projects, &r.state, &r.store, now()).unwrap();
+        assert_eq!((rep1.fired, rep1.present_unused), (0, 1));
+
+        // The session resumes: a newer injection lands, and the transcript
+        // now carries the echo.
+        write_injection(&r, "sid-r", &["aabbccddeeff0011"], now() + Duration::hours(1));
+        write_transcript(&r, "sid-r", &["acting on [L:aabbccdd] now"], &[]);
+        let later = now() + Duration::hours(8);
+        let rep2 = scan_at(&r.injections, &r.projects, &r.state, &r.store, later).unwrap();
+        assert_eq!(rep2.fired, 1, "late echo credited on re-scan");
+        assert_eq!(rep2.present_unused, 0, "unused rows never duplicate");
+
+        // A third pass with nothing newer is a no-op; the fire stays single.
+        let rep3 = scan_at(&r.injections, &r.projects, &r.state, &r.store, later).unwrap();
+        assert_eq!((rep3.sessions_scanned, rep3.fired), (0, 0));
+        let rows = ledger(&r);
+        assert_eq!(rows.iter().filter(|v| v["source"] == "fired").count(), 1);
+        assert_eq!(rows.len(), 2, "one unused + one fired, ever");
     }
 
     #[test]
