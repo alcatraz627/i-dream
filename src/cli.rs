@@ -124,6 +124,12 @@ pub enum Command {
         snapshot: bool,
     },
 
+    /// Compute per-slug mistake recurrence curves from the atone ledger and
+    /// write ~/.claude/i-dream/derived/curves.json — the efficacy readout the
+    /// assay and the weekly receipt trend ("did the curve bend after the
+    /// insight shipped").
+    Curves,
+
     /// Generate per-project briefs (D6) for every project_id seen in
     /// patterns.json with ≥3 patterns. Each brief is a 4-section markdown
     /// auto-injected at SessionStart when Claude Code starts a session

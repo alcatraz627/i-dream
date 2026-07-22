@@ -10,6 +10,7 @@ mod dashboard;
 mod domain;
 mod dream_trace;
 mod events;
+mod curves;
 mod graph_metrics;
 mod hooks;
 mod idream_runtime;
@@ -352,6 +353,28 @@ async fn main() -> Result<()> {
                 let path = graph_metrics::snapshot_for_diff(&store)?;
                 println!("✓ Wrote snapshot {}", path.display());
             }
+        }
+
+        Command::Curves => {
+            let (doc, path) = curves::compute_and_persist()?;
+            let top: Vec<String> = doc
+                .slugs
+                .iter()
+                .take(3)
+                .map(|s| format!("{} ×{} ({})", s.slug, s.total, s.trend))
+                .collect();
+            println!(
+                "✓ Wrote {}\n  slugs: {} · events in {}w window: {}\n  top: {}",
+                path.display(),
+                doc.slugs.len(),
+                doc.window_weeks,
+                doc.events_in_window,
+                if top.is_empty() {
+                    "none".to_string()
+                } else {
+                    top.join(" · ")
+                }
+            );
         }
 
         Command::BriefProjects { cwd } => {
