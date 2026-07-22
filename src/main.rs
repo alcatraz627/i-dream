@@ -11,6 +11,7 @@ mod domain;
 mod dream_trace;
 mod events;
 mod curves;
+mod firings;
 mod graph_metrics;
 mod hooks;
 mod idream_runtime;
@@ -353,6 +354,16 @@ async fn main() -> Result<()> {
                 let path = graph_metrics::snapshot_for_diff(&store)?;
                 println!("✓ Wrote snapshot {}", path.display());
             }
+        }
+
+        Command::FiringsScan => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let rep = firings::scan(&store)?;
+            println!(
+                "✓ Firing scan\n  sessions scanned: {} · fired: {} · present-unused: {}\n  pending: {} · expired (no transcript): {}",
+                rep.sessions_scanned, rep.fired, rep.present_unused, rep.pending, rep.expired
+            );
         }
 
         Command::Curves => {

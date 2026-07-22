@@ -1207,6 +1207,29 @@ mod tests {
         );
     }
 
+    /// A1's present-unused rows carry no rating on purpose — they exist for
+    /// the assay, and the voting reader must skip them entirely.
+    #[test]
+    fn rating_less_rows_are_invisible_to_reinforce() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("subconscious")).unwrap();
+        store.init_dirs().unwrap();
+        store
+            .write_json("dreams/patterns.json", &vec![pat("p1", 0.6, 0.5, 2.5, 0)])
+            .unwrap();
+        store
+            .append_jsonl(
+                "dreams/insight-feedback.jsonl",
+                &serde_json::json!({"insight_id":"p1","source":"present-unused",
+                    "ts": day(2).to_rfc3339()}),
+            )
+            .unwrap();
+        let r = run_cycle(&store).unwrap();
+        assert_eq!(r.reactivated + r.weakened + r.stale_skipped + r.known_skipped, 0);
+        let after: Vec<ExtractedPattern> = store.read_json("dreams/patterns.json").unwrap();
+        assert_eq!(after[0].reactivations, 0);
+    }
+
     /// Retention must not launder institutional memory: a graduation mark
     /// folded into reinforce-state keeps exonerating down-votes even after
     /// the ledger lines that carried it are gone entirely.

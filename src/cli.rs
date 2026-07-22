@@ -130,6 +130,13 @@ pub enum Command {
     /// insight shipped").
     Curves,
 
+    /// Scan finished sessions' transcripts for [L:xxxxxxxx] lesson-tag echoes
+    /// (A1 firing detection). Injected-and-echoed ids become honored feedback
+    /// (source "fired"); injected-but-silent ids are logged rating-less as
+    /// "present-unused" for the assay. Each session is scanned once; the
+    /// daemon also runs this every cycle.
+    FiringsScan,
+
     /// Generate per-project briefs (D6) for every project_id seen in
     /// patterns.json with ≥3 patterns. Each brief is a 4-section markdown
     /// auto-injected at SessionStart when Claude Code starts a session

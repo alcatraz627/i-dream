@@ -752,6 +752,19 @@ impl Daemon {
             self.config.budget.max_tokens_per_cycle
         );
 
+        // A1 firing detection — join injection receipts against finished
+        // sessions' transcripts and turn tag echoes into honored feedback.
+        // Runs before reinforcement so a firing potentiates in the same
+        // cycle that detects it. Never fails the cycle.
+        match crate::firings::scan(&self.store) {
+            Ok(r) if r.sessions_scanned > 0 => info!(
+                "Firing scan: {} session(s) — {} fired, {} present-unused, {} expired",
+                r.sessions_scanned, r.fired, r.present_unused, r.expired
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("Firing scan failed: {e:#}"),
+        }
+
         // Wave 2 items 9+10 — reinforcement: fade every pattern a little, feed
         // this cycle's honored/rejected feedback back onto the source patterns,
         // and evict the weakest so the store keeps what it uses. Runs after
