@@ -25,6 +25,33 @@ done
 "$HOME/.local/bin/i-dream" --help >/dev/null
 echo "ok: installed binary executes"
 
+# felt-metabolism D2: the smell panel runs Sunday + Wednesday 15:00 local
+# (owner schedule 2026-07-22, verbatim: "Run on Sunday and Wednesday, 3PM").
+# Created here if absent so deploy remains the only install step; the reload
+# loop below picks it up by glob.
+SMELL_PLIST="$HOME/Library/LaunchAgents/com.alcatraz.i-dream-smell.plist"
+if [ ! -f "$SMELL_PLIST" ]; then
+    mkdir -p "$HOME/.claude/i-dream/logs"
+    cat > "$SMELL_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.alcatraz.i-dream-smell</string>
+  <key>ProgramArguments</key><array>
+    <string>$HOME/.local/bin/i-dream</string>
+    <string>smell</string>
+  </array>
+  <key>StartCalendarInterval</key><array>
+    <dict><key>Weekday</key><integer>0</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>15</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>StandardOutPath</key><string>$HOME/.claude/i-dream/logs/com.alcatraz.i-dream-smell.out.log</string>
+  <key>StandardErrorPath</key><string>$HOME/.claude/i-dream/logs/com.alcatraz.i-dream-smell.err.log</string>
+</dict></plist>
+PLIST
+    echo "created: $SMELL_PLIST (Sun+Wed 15:00)"
+fi
+
 # Reload the launchd services. A fresh inode alone is NOT enough: launchd
 # holds service-level validation state that survives binary replacement AND
 # `kickstart -k` — spawns keep dying (SIGKILL codesigning / 78 EX_CONFIG,

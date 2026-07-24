@@ -1575,12 +1575,22 @@ Output ONLY a JSON array. No commentary."#;
         }
         if !forgotten.is_empty() {
             self.store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
-            tracer.note(
-                TracePhase::Wake,
-                EventKind::InsightsPromoted,
-                format!("{} resolved gap-claims forgotten (governed)", forgotten.len()),
-            )?;
         }
+        // Grounding is only watchable if it reports the no-op case too — a
+        // filter that logs nothing when it forgets nothing is
+        // indistinguishable from one that never ran (the UNCONFIRMED caveat
+        // carried since 2026-07-16; this unconditional note is its closure
+        // path: one observed cycle proves live behavior either way).
+        tracer.note(
+            TracePhase::Wake,
+            EventKind::InsightsPromoted,
+            format!(
+                "grounding: {} association(s) checked against {} resolution(s), {} forgotten (governed)",
+                all_assocs.len() + forgotten.len(),
+                resolutions.len(),
+                forgotten.len()
+            ),
+        )?;
 
         // Graduation-yield SLO (docs/25 item 14): when the last two judged
         // reviews both yielded under the floor, WAKE stops generating new

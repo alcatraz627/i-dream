@@ -14,6 +14,7 @@ mod curves;
 mod firings;
 mod graph_metrics;
 mod interventions;
+mod smell;
 mod hooks;
 mod idream_runtime;
 mod logging;
@@ -364,6 +365,17 @@ async fn main() -> Result<()> {
             println!(
                 "✓ Compile pass\n  qualifying slugs: {} · already covered: {}\n  compiled new (shadow): {} · rejected by validation: {}",
                 r.qualifying_slugs, r.already_covered, r.compiled_new, r.rejected_by_validation
+            );
+        }
+
+        Command::Smell => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let client = api::ClaudeClient::for_config(&config)?;
+            let r = smell::run_smell(&client, &store).await?;
+            println!(
+                "✓ Smell pass ({})\n  candidates: {} · judged: {} · flagged: {} · invalid grades dropped: {}",
+                smell::SMELL_MODEL, r.candidates, r.judged, r.flagged, r.skipped_invalid
             );
         }
 

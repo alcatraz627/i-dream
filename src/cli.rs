@@ -142,6 +142,12 @@ pub enum Command {
     /// compile means no LLM call. The daemon also runs this each cycle.
     Compile,
 
+    /// Run the opus smell panel over newly-consolidated insights (D2):
+    /// specificity / actionability / novelty / grounding, graded harshly,
+    /// appended to derived/smell.jsonl. Delta-driven — nothing new means no
+    /// LLM call. Scheduled Sun+Wed 15:00 via com.alcatraz.i-dream-smell.
+    Smell,
+
     /// The non-interactive promotion surface: list shadow/candidate/live
     /// interventions with their would-fire evidence; flip one with
     /// --promote/--demote by id prefix. Hints auto-promote on the evidence
