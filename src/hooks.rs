@@ -33,6 +33,7 @@ fn install(config: &Config) -> Result<()> {
     write_post_tool_use_hook(&hooks_dir, config)?;
     write_stop_hook(&hooks_dir, config)?;
     write_user_prompt_submit_hook(&hooks_dir, config)?;
+    write_pre_tool_use_hook(&hooks_dir)?;
 
     // Update Claude Code settings.json
     let settings_path = expand_tilde(Path::new("~/.claude/settings.json"));
@@ -75,6 +76,9 @@ fn install(config: &Config) -> Result<()> {
             "UserPromptSubmit",
             &hooks_dir.join("user-prompt-submit.sh"),
         );
+    }
+    if config.hooks.pre_tool_use {
+        add_hook_entry(hooks_obj, "PreToolUse", &hooks_dir.join("pre-tool-use.sh"));
     }
 
     let content = serde_json::to_string_pretty(&settings)?;
@@ -135,7 +139,13 @@ fn status(config: &Config) -> Result<String> {
     let hooks_dir = config.data_dir().join("hooks");
     let prefix = hooks_dir.to_string_lossy().to_string();
 
-    let check_events = ["SessionStart", "PostToolUse", "Stop", "UserPromptSubmit"];
+    let check_events = [
+        "SessionStart",
+        "PostToolUse",
+        "Stop",
+        "UserPromptSubmit",
+        "PreToolUse",
+    ];
 
     for event in &check_events {
         let installed = settings
@@ -303,11 +313,14 @@ fn write_user_prompt_submit_hook(dir: &std::path::Path, config: &Config) -> Resu
     // i.e. Python dict literals and the {2,} regex quantifier.
     let script = format!(
         r#"#!/bin/bash
-# i-dream: UserPromptSubmit hook — captures conversational sentiment signals
-# NOTE: stdout is injected into the user message by Claude Code.
-#       This script MUST emit nothing to stdout.
+# i-dream: UserPromptSubmit hook — sentiment signals + compiled-intervention
+# hints (felt-metabolism Phase 2).
+# NOTE: stdout is injected into the user message by Claude Code. This script
+#       emits NOTHING to stdout except the interpreter's single
+#       additionalContext JSON for LIVE intervention hints.
+# No daemon-up guard here on purpose: the sentiment send needs the socket,
+# but the intervention interpreter is file-only and must run regardless.
 SOCKET="{socket}"
-if [ ! -S "$SOCKET" ]; then exit 0; fi
 
 # Save stdin before it is consumed; pass prompt and socket path to Python via env vars
 HOOK_INPUT=$(cat)
@@ -318,7 +331,7 @@ import sys, re, json, time, os, socket as _sock
 
 raw = os.environ.get("IDREAM_INPUT", "")
 sock_path = os.environ.get("IDREAM_SOCKET", "")
-if not raw or not sock_path:
+if not raw:
     sys.exit(0)
 try:
     data = json.loads(raw)
@@ -387,6 +400,53 @@ try:
     s.close()
 except Exception:
     pass
+
+# ── Compiled-intervention interpreter (felt-metabolism B1, prompt surface) ──
+# LIVE hints inject one additionalContext JSON (display capped at 2); every
+# match — shadow, candidate, AND live — is appended to the would-fire ledger,
+# because display caps must never gate telemetry. Patterns are re-validated
+# here with re.search inside try/except: a broken compiler-drafted pattern
+# skips silently rather than firing wrong (the point-of-use check).
+try:
+    import os.path as _p
+    ipath = _p.expanduser("~/.claude/i-dream/interventions.json")
+    if _p.exists(ipath):
+        items = json.load(open(ipath))
+        cwd = data.get("cwd", "") or ""
+        proj = _p.basename(cwd.rstrip("/")) if cwd else ""
+        sid = data.get("session_id", "") or ""
+        live_hits, shadow_hits = [], []
+        for it in items:
+            if it.get("form") != "hint":
+                continue
+            trg = it.get("trigger") or {{}}
+            tp = trg.get("project")
+            if tp and tp != proj:
+                continue
+            pat = trg.get("prompt_pattern")
+            if not pat:
+                continue
+            try:
+                if not re.search(pat, prompt, re.IGNORECASE):
+                    continue
+            except Exception:
+                continue
+            (live_hits if it.get("state") == "live" else shadow_hits).append(it)
+        if live_hits or shadow_hits:
+            try:
+                with open(_p.expanduser("~/.claude/i-dream/would-fire.jsonl"), "a") as f:
+                    for it in shadow_hits + live_hits:
+                        f.write(json.dumps({{"id": it.get("id", ""), "sid": sid,
+                            "state": it.get("state", ""), "surface": "prompt",
+                            "ts": int(time.time())}}) + "\n")
+            except Exception:
+                pass
+        if live_hits:
+            lines = ["[i-dream:%s] %s" % (str(it.get("id", ""))[:8], it.get("body", ""))
+                     for it in live_hits[:2]]
+            print(json.dumps({{"additionalContext": "\n".join(lines)}}))
+except Exception:
+    pass
 PYEOF
 # Touch activity signal (always, regardless of socket availability)
 touch "{activity}"
@@ -397,6 +457,98 @@ touch "{activity}"
     let path = dir.join("user-prompt-submit.sh");
     std::fs::write(&path, &script)?;
     // Mark executable so Claude Code can run it directly
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// The PreToolUse nudge interpreter (felt-metabolism B1, tool surface).
+/// File-only — no daemon dependency — and advisory-only by construction:
+/// it can emit additionalContext, never a permission decision. Shadow and
+/// candidate matches log would-fires; only LIVE nudges inject.
+fn write_pre_tool_use_hook(dir: &std::path::Path) -> Result<()> {
+    let script = r#"#!/bin/bash
+# i-dream: PreToolUse hook — compiled-intervention nudges (advisory only).
+# stdout carries at most one hookSpecificOutput/additionalContext JSON.
+HOOK_INPUT=$(cat)
+IDREAM_INPUT="$HOOK_INPUT" python3 << 'PYEOF' 2>/dev/null || true
+import sys, re, json, time, os
+import os.path as _p
+
+raw = os.environ.get("IDREAM_INPUT", "")
+if not raw:
+    sys.exit(0)
+try:
+    data = json.loads(raw)
+except Exception:
+    sys.exit(0)
+
+tool = data.get("tool_name", "") or ""
+ipath = _p.expanduser("~/.claude/i-dream/interventions.json")
+if not tool or not _p.exists(ipath):
+    sys.exit(0)
+try:
+    items = json.load(open(ipath))
+except Exception:
+    sys.exit(0)
+
+ti = data.get("tool_input") or {}
+target = ""
+for k in ("command", "file_path", "path", "url"):
+    v = ti.get(k)
+    if isinstance(v, str) and v:
+        target = v
+        break
+cwd = data.get("cwd", "") or ""
+proj = _p.basename(cwd.rstrip("/")) if cwd else ""
+sid = data.get("session_id", "") or ""
+
+live, shadow = [], []
+for it in items:
+    if it.get("form") != "nudge":
+        continue
+    trg = it.get("trigger") or {}
+    if trg.get("tool") != tool:
+        continue
+    tp = trg.get("project")
+    if tp and tp != proj:
+        continue
+    pat = trg.get("input_pattern")
+    if pat:
+        # Point-of-use validation: a broken compiler-drafted pattern skips
+        # silently rather than firing wrong.
+        try:
+            if not re.search(pat, target, re.IGNORECASE):
+                continue
+        except Exception:
+            continue
+    (live if it.get("state") == "live" else shadow).append(it)
+
+if not live and not shadow:
+    sys.exit(0)
+# Every match is ledgered (display caps never gate telemetry).
+try:
+    with open(_p.expanduser("~/.claude/i-dream/would-fire.jsonl"), "a") as f:
+        for it in shadow + live:
+            f.write(json.dumps({"id": it.get("id", ""), "sid": sid,
+                "state": it.get("state", ""), "surface": "tool",
+                "tool": tool, "ts": int(time.time())}) + "\n")
+except Exception:
+    pass
+if live:
+    lines = ["[i-dream:%s] %s" % (str(it.get("id", ""))[:8], it.get("body", ""))
+             for it in live[:2]]
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "additionalContext": "\n".join(lines)}}))
+PYEOF
+exit 0
+"#;
+    let path = dir.join("pre-tool-use.sh");
+    std::fs::write(&path, script)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -425,6 +577,129 @@ fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_hook_script(script: &std::path::Path, home: &std::path::Path, input: &str) -> String {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("bash")
+            .arg(script)
+            .env("HOME", home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("bash spawns");
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "hook script must always exit 0");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    fn intervention_fixture(home: &std::path::Path) {
+        let dir = home.join(".claude/i-dream");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("interventions.json"),
+            r#"[
+  {"id":"liveNudge1234567","slug":"rg-replace","source":"atone-precheck",
+   "form":"nudge","state":"live",
+   "trigger":{"tool":"Bash","input_pattern":"\\brg\\s+-[a-z]*r"},
+   "body":"rg -r is --replace; use rg -n alone.","created":"2026-07-24T00:00:00Z"},
+  {"id":"shadNudge1234567","slug":"other","source":"atone-precheck",
+   "form":"nudge","state":"shadow",
+   "trigger":{"tool":"Bash","input_pattern":"rg"},
+   "body":"shadow body","created":"2026-07-24T00:00:00Z"},
+  {"id":"liveHint12345678","slug":"deploy-hint","source":"atone-precheck",
+   "form":"hint","state":"live",
+   "trigger":{"prompt_pattern":"deploy"},
+   "body":"Deploys re-confirm per run.","created":"2026-07-24T00:00:00Z"},
+  {"id":"brokenPat1234567","slug":"broken","source":"atone-precheck",
+   "form":"nudge","state":"live",
+   "trigger":{"tool":"Bash","input_pattern":"([unclosed"},
+   "body":"never fires","created":"2026-07-24T00:00:00Z"}
+]"#,
+        )
+        .unwrap();
+    }
+
+    /// Exercise the generated PreToolUse script with real bash+python: the
+    /// live matching nudge injects, the shadow one only ledgers, and the
+    /// broken compiler pattern skips silently (point-of-use validation).
+    #[test]
+    fn pre_tool_use_script_injects_live_and_ledgers_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        write_pre_tool_use_hook(&hooks).unwrap();
+        let home = dir.path().join("home");
+        intervention_fixture(&home);
+
+        let input = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "rg -rn pattern src/"},
+            "cwd": "/x/proj", "session_id": "sid-test"
+        })
+        .to_string();
+        let stdout = run_hook_script(&hooks.join("pre-tool-use.sh"), &home, &input);
+
+        let v: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("stdout is one JSON object");
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("[i-dream:liveNudg]"), "live nudge injects: {ctx}");
+        assert!(ctx.contains("--replace"));
+        assert!(!ctx.contains("shadow body"), "shadow never injects");
+        assert!(!ctx.contains("never fires"), "broken pattern skips silently");
+
+        let wf =
+            std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap();
+        assert_eq!(wf.lines().count(), 2, "live + shadow ledgered; broken not");
+        assert!(wf.contains("liveNudge1234567") && wf.contains("shadNudge1234567"));
+        assert!(wf.contains(r#""sid": "sid-test""#), "ledger rows carry sid: {wf}");
+    }
+
+    /// The prompt-surface interpreter runs with NO daemon socket at all
+    /// (the old early-exit is gone) and injects a live hint.
+    #[test]
+    fn user_prompt_submit_script_injects_hint_without_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let config = Config::default();
+        write_user_prompt_submit_hook(&hooks, &config).unwrap();
+        let home = dir.path().join("home");
+        intervention_fixture(&home);
+
+        let input = serde_json::json!({
+            "prompt": "please deploy the daemon now",
+            "cwd": "/x/proj", "session_id": "sid-ups"
+        })
+        .to_string();
+        let stdout = run_hook_script(&hooks.join("user-prompt-submit.sh"), &home, &input);
+        let v: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("stdout is one JSON object");
+        let ctx = v["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("[i-dream:liveHint]"), "live hint injects: {ctx}");
+        assert!(ctx.contains("re-confirm per run"));
+
+        let wf =
+            std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap();
+        assert!(wf.contains(r#""surface": "prompt""#), "prompt-surface row: {wf}");
+
+        // A non-matching prompt emits NOTHING to stdout (the contract).
+        let quiet = run_hook_script(
+            &hooks.join("user-prompt-submit.sh"),
+            &home,
+            &serde_json::json!({"prompt": "unrelated words", "cwd": "/x/proj",
+                "session_id": "sid-ups"})
+            .to_string(),
+        );
+        assert!(quiet.trim().is_empty(), "no match → no stdout: {quiet}");
+    }
 
     #[test]
     fn session_start_hook_script_sends_newline_terminated_payload() {

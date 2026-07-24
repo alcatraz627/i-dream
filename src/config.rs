@@ -213,6 +213,11 @@ pub struct HooksConfig {
     /// corrections, positive feedback) on each user message.
     #[serde(default = "default_true")]
     pub user_prompt_submit: bool,
+    /// Install the PreToolUse hook that delivers compiled-intervention
+    /// nudges (advisory additionalContext only; shadow ones just log
+    /// would-fires). Felt-metabolism Phase 2.
+    #[serde(default = "default_true")]
+    pub pre_tool_use: bool,
 }
 
 fn default_true() -> bool {
@@ -327,6 +332,7 @@ impl Default for Config {
                 stop: true,
                 pre_compact: true,
                 user_prompt_submit: true,
+                pre_tool_use: true,
             },
             ingestion: IngestionConfig::default(),
             limits: LimitsConfig::default(),
