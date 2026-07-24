@@ -137,6 +137,24 @@ pub enum Command {
     /// daemon also runs this every cycle.
     FiringsScan,
 
+    /// Compile qualifying atone lessons (recurrence ≥2 with a precheck) into
+    /// shadow interventions via the opus seat. Delta-driven — nothing new to
+    /// compile means no LLM call. The daemon also runs this each cycle.
+    Compile,
+
+    /// The non-interactive promotion surface: list shadow/candidate/live
+    /// interventions with their would-fire evidence; flip one with
+    /// --promote/--demote by id prefix. Hints auto-promote on the evidence
+    /// bar (owner ladder 2026-07-22); nudges always wait for a flip here.
+    Promotions {
+        /// Promote an intervention to live by id (8-char prefix ok).
+        #[arg(long)]
+        promote: Option<String>,
+        /// Demote an intervention back to shadow by id (8-char prefix ok).
+        #[arg(long)]
+        demote: Option<String>,
+    },
+
     /// Generate per-project briefs (D6) for every project_id seen in
     /// patterns.json with ≥3 patterns. Each brief is a 4-section markdown
     /// auto-injected at SessionStart when Claude Code starts a session

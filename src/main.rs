@@ -13,6 +13,7 @@ mod events;
 mod curves;
 mod firings;
 mod graph_metrics;
+mod interventions;
 mod hooks;
 mod idream_runtime;
 mod logging;
@@ -353,6 +354,41 @@ async fn main() -> Result<()> {
             if snapshot {
                 let path = graph_metrics::snapshot_for_diff(&store)?;
                 println!("✓ Wrote snapshot {}", path.display());
+            }
+        }
+
+        Command::Compile => {
+            let config = config::Config::load(&cli.config)?;
+            let client = api::ClaudeClient::for_config(&config)?;
+            let r = interventions::run_compile(&client).await?;
+            println!(
+                "✓ Compile pass\n  qualifying slugs: {} · already covered: {}\n  compiled new (shadow): {} · rejected by validation: {}",
+                r.qualifying_slugs, r.already_covered, r.compiled_new, r.rejected_by_validation
+            );
+        }
+
+        Command::Promotions { promote, demote } => {
+            let (ipath, wfpath) = interventions::live_paths()?;
+            let mut items = interventions::load_interventions(&ipath);
+            let fires = interventions::would_fire_sessions(&wfpath);
+            if let Some(id) = promote.as_deref() {
+                if interventions::flip(&mut items, id, true, chrono::Utc::now()) {
+                    interventions::save_interventions(&ipath, &items)?;
+                    println!("✓ promoted {id} to live");
+                } else {
+                    println!("✗ no intervention matches id {id}");
+                }
+            } else if let Some(id) = demote.as_deref() {
+                if interventions::flip(&mut items, id, false, chrono::Utc::now()) {
+                    interventions::save_interventions(&ipath, &items)?;
+                    println!("✓ demoted {id} to shadow");
+                } else {
+                    println!("✗ no intervention matches id {id}");
+                }
+            } else if items.is_empty() {
+                println!("no interventions compiled yet — run: i-dream compile");
+            } else {
+                print!("{}", interventions::render_promotions(&items, &fires));
             }
         }
 

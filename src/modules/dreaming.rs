@@ -2023,6 +2023,40 @@ impl<'a> Module for DreamingModule<'a> {
             cycle_id: tracer.cycle_id().to_string(),
             assay: Some(assay),
         };
+        // Phase 2 compiler + evidence promotion (felt-metabolism B1-B3):
+        // lower newly-qualified atone lessons into shadow interventions and
+        // let hints that met the evidence bar go live (owner ladder
+        // 2026-07-22; nudges always wait for the flip surface). Delta-driven
+        // — no new qualifying slug means no LLM call. Never fails the cycle.
+        match crate::interventions::run_compile(client).await {
+            Ok(r) if r.compiled_new + r.rejected_by_validation > 0 => info!(
+                "Compiler: {} new shadow intervention(s), {} rejected ({} qualified, {} covered)",
+                r.compiled_new, r.rejected_by_validation, r.qualifying_slugs, r.already_covered
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("Compiler pass failed: {e:#}"),
+        }
+        if let Ok((ipath, wfpath)) = crate::interventions::live_paths() {
+            let mut items = crate::interventions::load_interventions(&ipath);
+            if !items.is_empty() {
+                let fires = crate::interventions::would_fire_sessions(&wfpath);
+                let changed = crate::interventions::promote_on_evidence(
+                    &mut items,
+                    &fires,
+                    Utc::now(),
+                    true,  // hints auto-promote on evidence (owner ladder)
+                    false, // nudges: only via flip until a missed-review counter exists
+                );
+                if changed > 0 {
+                    if let Err(e) = crate::interventions::save_interventions(&ipath, &items) {
+                        warn!("Promotion save failed: {e:#}");
+                    } else {
+                        info!("Promotions: {} intervention(s) advanced on evidence", changed);
+                    }
+                }
+            }
+        }
+
         self.store.append_jsonl("dreams/journal.jsonl", &entry)?;
         let entry_json = serde_json::to_string_pretty(&entry).ok();
         tracer.emit_with_payload(
