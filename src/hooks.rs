@@ -409,6 +409,7 @@ except Exception:
 # skips silently rather than firing wrong (the point-of-use check).
 try:
     import os.path as _p
+    import signal as _sig
     ipath = _p.expanduser("~/.claude/i-dream/interventions.json")
     if _p.exists(ipath):
         items = json.load(open(ipath))
@@ -416,6 +417,15 @@ try:
         proj = _p.basename(cwd.rstrip("/")) if cwd else ""
         sid = data.get("session_id", "") or ""
         live_hits, shadow_hits = [], []
+        # ReDoS guard (validation MAJOR-1): compiler-authored patterns get a
+        # hard 2s budget for the WHOLE match loop and a capped subject — a
+        # catastrophic pattern aborts to the silent-skip path (exit 0, no
+        # stdout) instead of stalling this blocking hook.
+        def _rex_abort(_s, _f):
+            raise TimeoutError()
+        _sig.signal(_sig.SIGALRM, _rex_abort)
+        _sig.alarm(2)
+        subject = prompt[:4000]
         for it in items:
             if it.get("form") != "hint":
                 continue
@@ -427,11 +437,14 @@ try:
             if not pat:
                 continue
             try:
-                if not re.search(pat, prompt, re.IGNORECASE):
+                if not re.search(pat, subject, re.IGNORECASE):
                     continue
+            except TimeoutError:
+                raise
             except Exception:
                 continue
             (live_hits if it.get("state") == "live" else shadow_hits).append(it)
+        _sig.alarm(0)
         if live_hits or shadow_hits:
             try:
                 with open(_p.expanduser("~/.claude/i-dream/would-fire.jsonl"), "a") as f:
@@ -507,25 +520,40 @@ proj = _p.basename(cwd.rstrip("/")) if cwd else ""
 sid = data.get("session_id", "") or ""
 
 live, shadow = [], []
-for it in items:
-    if it.get("form") != "nudge":
-        continue
-    trg = it.get("trigger") or {}
-    if trg.get("tool") != tool:
-        continue
-    tp = trg.get("project")
-    if tp and tp != proj:
-        continue
-    pat = trg.get("input_pattern")
-    if pat:
-        # Point-of-use validation: a broken compiler-drafted pattern skips
-        # silently rather than firing wrong.
-        try:
-            if not re.search(pat, target, re.IGNORECASE):
-                continue
-        except Exception:
+# ReDoS guard (validation MAJOR-1): a catastrophic compiler-authored pattern
+# aborts the whole match loop within 2s — silent exit 0, no stdout — instead
+# of stalling the tool call. Subject capped as the second belt.
+import signal as _sig
+def _rex_abort(_s, _f):
+    raise TimeoutError()
+_sig.signal(_sig.SIGALRM, _rex_abort)
+_sig.alarm(2)
+subject = target[:4000]
+try:
+    for it in items:
+        if it.get("form") != "nudge":
             continue
-    (live if it.get("state") == "live" else shadow).append(it)
+        trg = it.get("trigger") or {}
+        if trg.get("tool") != tool:
+            continue
+        tp = trg.get("project")
+        if tp and tp != proj:
+            continue
+        pat = trg.get("input_pattern")
+        if pat:
+            # Point-of-use validation: a broken compiler-drafted pattern
+            # skips silently rather than firing wrong.
+            try:
+                if not re.search(pat, subject, re.IGNORECASE):
+                    continue
+            except TimeoutError:
+                raise
+            except Exception:
+                continue
+        (live if it.get("state") == "live" else shadow).append(it)
+except TimeoutError:
+    sys.exit(0)
+_sig.alarm(0)
 
 if not live and not shadow:
     sys.exit(0)
@@ -660,6 +688,42 @@ mod tests {
         assert_eq!(wf.lines().count(), 2, "live + shadow ledgered; broken not");
         assert!(wf.contains("liveNudge1234567") && wf.contains("shadNudge1234567"));
         assert!(wf.contains(r#""sid": "sid-test""#), "ledger rows carry sid: {wf}");
+    }
+
+    /// The validator's exact ReDoS attack (MAJOR-1): a catastrophic
+    /// compiler-authored pattern must die at the 2s alarm — silent, exit 0 —
+    /// instead of hanging the blocking surface. Pre-fix this hung 12s+.
+    #[test]
+    fn redos_pattern_aborts_within_alarm_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        write_pre_tool_use_hook(&hooks).unwrap();
+        let home = dir.path().join("home");
+        let idir = home.join(".claude/i-dream");
+        std::fs::create_dir_all(&idir).unwrap();
+        std::fs::write(
+            idir.join("interventions.json"),
+            r#"[{"id":"redos12345678901","slug":"s","source":"atone-precheck",
+                "form":"nudge","state":"live",
+                "trigger":{"tool":"Bash","input_pattern":"(a+)+$"},
+                "body":"never printed","created":"2026-07-24T00:00:00Z"}]"#,
+        )
+        .unwrap();
+        let subject = format!("{}!", "a".repeat(40));
+        let input = serde_json::json!({
+            "tool_name": "Bash", "tool_input": {"command": subject},
+            "cwd": "/x/proj", "session_id": "sid-redos"
+        })
+        .to_string();
+        let started = std::time::Instant::now();
+        let stdout = run_hook_script(&hooks.join("pre-tool-use.sh"), &home, &input);
+        assert!(
+            started.elapsed().as_secs() < 6,
+            "alarm must bound the stall (took {:?})",
+            started.elapsed()
+        );
+        assert!(stdout.trim().is_empty(), "aborted match emits nothing: {stdout}");
     }
 
     /// The prompt-surface interpreter runs with NO daemon socket at all

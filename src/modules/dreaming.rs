@@ -1586,7 +1586,10 @@ Output ONLY a JSON array. No commentary."#;
             EventKind::InsightsPromoted,
             format!(
                 "grounding: {} association(s) checked against {} resolution(s), {} forgotten (governed)",
-                all_assocs.len() + forgotten.len(),
+                // govern_associations soft-retires IN PLACE (the slice keeps
+                // its rows), so the container length already counts the
+                // forgotten (validation MINOR-3: adding them double-counted).
+                all_assocs.len(),
                 resolutions.len(),
                 forgotten.len()
             ),

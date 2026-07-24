@@ -207,18 +207,21 @@ fn validate(v: &serde_json::Value) -> Option<(String, Trigger, String)> {
         return None;
     }
     let t = v.get("trigger")?;
-    let get = |k: &str| {
-        t.get(k)
-            .and_then(|x| x.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && s.len() <= PATTERN_MAX && !s.contains('\n'))
-            .map(str::to_string)
+    // A provided-but-invalid field rejects the whole record — silently
+    // nulling it would WIDEN the trigger (validation MINOR-4: a 161-char
+    // input_pattern degraded its nudge to fire on every Bash call).
+    let field = |k: &str| -> Option<Option<String>> {
+        match t.get(k).and_then(|x| x.as_str()).map(str::trim) {
+            None | Some("") => Some(None),
+            Some(s) if s.len() <= PATTERN_MAX && !s.contains('\n') => Some(Some(s.to_string())),
+            Some(_) => None,
+        }
     };
     let trigger = Trigger {
-        project: get("project"),
-        prompt_pattern: get("prompt_pattern"),
-        tool: get("tool"),
-        input_pattern: get("input_pattern"),
+        project: field("project")?,
+        prompt_pattern: field("prompt_pattern")?,
+        tool: field("tool")?,
+        input_pattern: field("input_pattern")?,
     };
     // A nudge is tool-scoped by definition; its tool must be allowlisted.
     // A hint must carry a prompt_pattern (a hint with no trigger would fire
@@ -263,6 +266,37 @@ fn compile_prompt(batch: &[QualifiedSlug]) -> String {
         ));
     }
     p
+}
+
+/// The one-attempt key: a slug is offered to the compiler once PER PRECHECK
+/// VERSION — a skipped or rejected lesson is not re-sent every cycle
+/// (validation MAJOR-2's forever-loop), while a refined precheck naturally
+/// re-qualifies its slug.
+pub fn attempt_key(q: &QualifiedSlug) -> String {
+    crate::consolidation::views::stable_id(&format!("{}|{}", q.slug, q.precheck))
+}
+
+/// Pick one pass's batch: uncovered slugs whose current precheck version has
+/// never been attempted. Pure — hermetically testable.
+pub fn select_batch(
+    qualified: Vec<QualifiedSlug>,
+    covered: &HashSet<String>,
+    attempted: &HashSet<String>,
+    max: usize,
+) -> Vec<QualifiedSlug> {
+    qualified
+        .into_iter()
+        .filter(|q| !covered.contains(&q.slug))
+        .filter(|q| !attempted.contains(&attempt_key(q)))
+        .take(max)
+        .collect()
+}
+
+/// The compiler's negative cache — attempt keys already offered to opus.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct CompileState {
+    #[serde(default)]
+    attempted: Vec<String>,
 }
 
 /// Parse + validate the compiler's response into interventions (shadow).
@@ -321,6 +355,12 @@ pub async fn run_compile(client: &ClaudeClient) -> Result<CompileReport> {
     let home = dirs::home_dir().context("cannot resolve home dir")?;
     let atone = home.join(".claude/atone/events.jsonl");
     let path = interventions_path()?;
+    let state_path = home.join(".claude/i-dream/derived/compile-state.json");
+    let mut cstate: CompileState = std::fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let attempted: HashSet<String> = cstate.attempted.iter().cloned().collect();
     let mut existing = load_interventions(&path);
     let covered: HashSet<String> = existing.iter().map(|i| i.slug.clone()).collect();
 
@@ -329,11 +369,7 @@ pub async fn run_compile(client: &ClaudeClient) -> Result<CompileReport> {
         qualifying_slugs: qualified.len(),
         ..Default::default()
     };
-    let batch: Vec<QualifiedSlug> = qualified
-        .into_iter()
-        .filter(|q| !covered.contains(&q.slug))
-        .take(10) // bound one pass; the next cycle picks up the rest
-        .collect();
+    let batch = select_batch(qualified, &covered, &attempted, 10);
     report.already_covered = report.qualifying_slugs - batch.len();
     if batch.is_empty() {
         return Ok(report);
@@ -354,6 +390,20 @@ pub async fn run_compile(client: &ClaudeClient) -> Result<CompileReport> {
     report.rejected_by_validation = rejected;
     existing.extend(new_items);
     save_interventions(&path, &existing)?;
+    // Every batched key is marked attempted — compiled, rejected, and
+    // compiler-skipped alike. This negative cache is what bounds the opus
+    // spend (an API error above returns early and correctly retries).
+    cstate.attempted.extend(batch.iter().map(attempt_key));
+    if cstate.attempted.len() > 1000 {
+        let drop = cstate.attempted.len() - 1000;
+        cstate.attempted.drain(..drop);
+    }
+    if let Some(dir) = state_path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = state_path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&cstate)?)?;
+    std::fs::rename(&tmp, &state_path)?;
     Ok(report)
 }
 
@@ -422,6 +472,15 @@ pub fn promote_on_evidence(
 /// Owner flip: promote or demote one intervention by id (the
 /// non-interactive surface `i-dream promotions --promote/--demote` uses).
 pub fn flip(items: &mut [Intervention], id: &str, to_live: bool, now: DateTime<Utc>) -> bool {
+    // Ambiguity is a refusal, not a guess (validation NIT-6): a prefix
+    // matching two records flips nothing.
+    let hits = items
+        .iter()
+        .filter(|it| it.id == id || it.id.starts_with(id))
+        .count();
+    if hits != 1 {
+        return false;
+    }
     for it in items.iter_mut() {
         if it.id == id || it.id.starts_with(id) {
             if to_live {
@@ -643,6 +702,115 @@ garbage
         assert_eq!(items[0].promoted_by.as_deref(), Some("owner-flip"));
         assert!(flip(&mut items, "abcdef12", false, now()));
         assert_eq!(items[0].state, "shadow");
+    }
+
+    /// Each validate() branch pinned with a UNIQUE slug so the slug-dedup
+    /// gate cannot mask a loosened validator (validation MINOR-5).
+    #[test]
+    fn validate_branches_reject_with_unique_slugs() {
+        let mk = |slug: &str| QualifiedSlug {
+            slug: slug.into(),
+            recurrences: 2,
+            severity: "S2".into(),
+            precheck: "p".into(),
+            what_not: "w".into(),
+        };
+        let batch = vec![mk("bad-tool"), mk("long-body"), mk("nl-body"), mk("long-pat")];
+        let long_body = "x".repeat(221);
+        let long_pat = "y".repeat(161);
+        let resp = serde_json::json!([
+            {"slug":"bad-tool","form":"nudge","trigger":{"tool":"EvilTool"},"body":"b"},
+            {"slug":"long-body","form":"nudge","trigger":{"tool":"Bash"},"body":long_body},
+            {"slug":"nl-body","form":"nudge","trigger":{"tool":"Bash"},"body":"line\nline"},
+            {"slug":"long-pat","form":"nudge","trigger":{"tool":"Bash","input_pattern":long_pat},"body":"b"}
+        ])
+        .to_string();
+        let (items, rejected) = parse_compiled(&resp, &batch, now());
+        assert!(
+            items.is_empty(),
+            "every violation rejects its whole record: {items:?}"
+        );
+        assert_eq!(rejected, 4);
+    }
+
+    #[test]
+    fn evidence_bar_boundary_four_fires_stays_shadow() {
+        let mut items = vec![Intervention {
+            id: "almost".into(),
+            slug: "s".into(),
+            source: "atone-precheck".into(),
+            form: "hint".into(),
+            state: "shadow".into(),
+            trigger: Trigger::default(),
+            body: "b".into(),
+            created: now(),
+            promoted: None,
+            promoted_by: None,
+        }];
+        let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
+        fires.insert(
+            "almost".into(),
+            (0..EVIDENCE_BAR_FIRES - 1).map(|i| format!("s{i}")).collect(),
+        );
+        let changed = promote_on_evidence(&mut items, &fires, now(), true, false);
+        assert_eq!(changed, 0);
+        assert_eq!(items[0].state, "shadow", "bar minus one is not the bar");
+    }
+
+    #[test]
+    fn select_batch_skips_attempted_until_precheck_changes() {
+        let q = |slug: &str, pre: &str| QualifiedSlug {
+            slug: slug.into(),
+            recurrences: 3,
+            severity: "S2".into(),
+            precheck: pre.into(),
+            what_not: "w".into(),
+        };
+        let covered: HashSet<String> = ["covered-slug".into()].into();
+        let attempted: HashSet<String> =
+            [attempt_key(&q("skipped-slug", "old precheck"))].into();
+
+        let batch = select_batch(
+            vec![
+                q("covered-slug", "x"),
+                q("skipped-slug", "old precheck"),
+                q("fresh-slug", "y"),
+            ],
+            &covered,
+            &attempted,
+            10,
+        );
+        assert_eq!(batch.len(), 1, "covered + attempted both excluded");
+        assert_eq!(batch[0].slug, "fresh-slug");
+
+        // The same slug with a REFINED precheck re-qualifies naturally.
+        let batch2 = select_batch(
+            vec![q("skipped-slug", "refined precheck")],
+            &covered,
+            &attempted,
+            10,
+        );
+        assert_eq!(batch2.len(), 1, "new precheck version = new attempt");
+    }
+
+    #[test]
+    fn flip_refuses_ambiguous_prefixes() {
+        let mk = |id: &str| Intervention {
+            id: id.into(),
+            slug: "s".into(),
+            source: "atone-precheck".into(),
+            form: "hint".into(),
+            state: "candidate".into(),
+            trigger: Trigger::default(),
+            body: "b".into(),
+            created: now(),
+            promoted: None,
+            promoted_by: None,
+        };
+        let mut items = vec![mk("abcd1111aaaaaaaa"), mk("abcd2222bbbbbbbb")];
+        assert!(!flip(&mut items, "abcd", true, now()), "ambiguous → refuse");
+        assert!(items.iter().all(|i| i.state == "candidate"), "nothing flipped");
+        assert!(flip(&mut items, "abcd1111", true, now()), "unique prefix works");
     }
 
     #[test]

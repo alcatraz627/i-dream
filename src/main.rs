@@ -388,14 +388,14 @@ async fn main() -> Result<()> {
                     interventions::save_interventions(&ipath, &items)?;
                     println!("✓ promoted {id} to live");
                 } else {
-                    println!("✗ no intervention matches id {id}");
+                    println!("✗ no unique intervention matches id {id} — list without flags to see full ids");
                 }
             } else if let Some(id) = demote.as_deref() {
                 if interventions::flip(&mut items, id, false, chrono::Utc::now()) {
                     interventions::save_interventions(&ipath, &items)?;
                     println!("✓ demoted {id} to shadow");
                 } else {
-                    println!("✗ no intervention matches id {id}");
+                    println!("✗ no unique intervention matches id {id} — list without flags to see full ids");
                 }
             } else if items.is_empty() {
                 println!("no interventions compiled yet — run: i-dream compile");
