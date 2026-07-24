@@ -770,6 +770,14 @@ pub const RETENTION: &[RetentionRule] = &[
         store: ".claude/subconscious/dreams/insight-feedback.jsonl",
         policy: RetentionPolicy::MaxLines(10_000),
     },
+    // The intervention interpreters append every match (display caps never
+    // gate telemetry), so this grows with prompt volume — bound it like its
+    // sibling ledgers. Evidence counting reads distinct sessions, which a
+    // tail-keep preserves for everything recent.
+    RetentionRule {
+        store: ".claude/i-dream/would-fire.jsonl",
+        policy: RetentionPolicy::MaxLines(20_000),
+    },
     // Process-audit additions (census 2026-07-12, unpaired-writes table).
     // `_rejections.jsonl` inside audits/ is underscore-prefixed, so directory
     // rules skip it — its TTL prune lives in audit.rs::load_active_rejections.

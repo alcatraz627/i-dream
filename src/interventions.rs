@@ -400,7 +400,12 @@ pub fn promote_on_evidence(
         if n < EVIDENCE_BAR_FIRES {
             continue;
         }
-        let may_auto = (it.form == "hint" && auto_hints) || (it.form == "nudge" && auto_nudges);
+        // An owner demotion is a standing veto: evidence may re-nominate the
+        // item as candidate, but never auto-revive it — only an explicit
+        // flip can (the flip surface outranks the ladder).
+        let vetoed = it.promoted_by.as_deref() == Some("owner-demoted");
+        let may_auto =
+            !vetoed && ((it.form == "hint" && auto_hints) || (it.form == "nudge" && auto_nudges));
         if may_auto {
             it.state = "live".into();
             it.promoted = Some(now);
@@ -426,7 +431,9 @@ pub fn flip(items: &mut [Intervention], id: &str, to_live: bool, now: DateTime<U
             } else {
                 it.state = "shadow".into();
                 it.promoted = None;
-                it.promoted_by = None;
+                // The latch promote_on_evidence honors: a demoted item never
+                // auto-revives, whatever its evidence.
+                it.promoted_by = Some("owner-demoted".into());
             }
             return true;
         }
@@ -583,6 +590,23 @@ mod tests {
         assert_eq!(items[0].promoted_by.as_deref(), Some("evidence-auto"));
         assert_eq!(items[1].state, "candidate", "hot nudge waits for the flip");
         assert_eq!(items[2].state, "shadow", "cold stays shadow");
+
+        // The owner demotes the hot hint: the veto must hold against the
+        // evidence pass forever, not for one cycle.
+        assert!(flip(&mut items, "hint-hot", false, now()));
+        let changed = promote_on_evidence(&mut items, &fires, now(), true, false);
+        assert_eq!(
+            items[0].state, "candidate",
+            "vetoed item may be re-nominated but never auto-revived"
+        );
+        assert!(changed >= 1);
+        let changed2 = promote_on_evidence(&mut items, &fires, now(), true, false);
+        assert_eq!(changed2, 0, "steady state after veto");
+        assert_eq!(items[0].state, "candidate");
+        // Only an explicit flip revives it.
+        assert!(flip(&mut items, "hint-hot", true, now()));
+        assert_eq!(items[0].state, "live");
+        assert_eq!(items[0].promoted_by.as_deref(), Some("owner-flip"));
     }
 
     #[test]
