@@ -28,4 +28,4 @@ _*.claude.md
 
 # Menubar widget — generated build artifacts
 tools/menubar/build-info.swift
-tools/menubar/.build-info
+tools/menubar/.build-info__pycache__

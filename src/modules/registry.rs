@@ -700,12 +700,9 @@ pub const KNOWN_ORPHANS: &[&str] = &[
     // ingest-queue and pins left this list when Wave 1 wired the SWS drain
     // and the engine cadence dispatch (2026-07-11); sustained green needs the
     // daemon running the new binary.
-    "ipc",             // registered domain, source events never written
-    // Both extractors' cursors have been frozen since May. Engine dispatch runs
-    // their consolidate scripts, which is not the same thing as advancing an
-    // extraction cursor — whether that alone revives them is still unproven.
-    "sessions-domain",
-    "memory-domain",
+    "ipc", // registered domain, source events never written
+           // sessions-domain and memory-domain removed: extract scripts now in
+           // scripts/domains/ and deployed by scripts/install.sh.
 ];
 
 /// The lanes whose consumer does not resolve against the tree at `home`. An

@@ -25,6 +25,28 @@ done
 "$HOME/.local/bin/i-dream" --help >/dev/null
 echo "ok: installed binary executes"
 
+# Deploy external domain manifests + extract scripts.  These live under
+# scripts/domains/<name>/ in the repo and are copied to ~/.claude/<name>/.
+# User-data files (events.jsonl, _seen.json, dream/cursor.json,
+# dream/insights.jsonl) are never touched if they already exist.
+deploy_domain() {
+    local src="$1"
+    local dest="$2"
+    local name
+    name="$(basename "$dest")"
+    mkdir -p "$dest/dream" "$dest/derived"
+    cp -f "$src/.i-dream-domain.toml" "$dest/.i-dream-domain.toml"
+    cp -f "$src/extract-events.py"    "$dest/extract-events.py"
+    chmod +x "$dest/extract-events.py"
+    # Prompt: overwrite on install so updates ship; user can re-customise.
+    cp -f "$src/dream/prompt.md" "$dest/dream/prompt.md"
+    echo "deployed: $name"
+}
+
+DOMAINS_SRC="$REPO_DIR/scripts/domains"
+deploy_domain "$DOMAINS_SRC/sessions-domain" "$HOME/.claude/sessions-domain"
+deploy_domain "$DOMAINS_SRC/memory-domain"   "$HOME/.claude/memory-domain"
+
 # felt-metabolism D2: the smell panel runs Sunday + Wednesday 15:00 local
 # (owner schedule 2026-07-22, verbatim: "Run on Sunday and Wednesday, 3PM").
 # Created here if absent so deploy remains the only install step; the reload

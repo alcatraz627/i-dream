@@ -1,0 +1,33 @@
+[domain]
+name        = "memory-domain"
+version     = "1.0"
+description = "CLAUDE.md memory files — one event per file per change"
+root        = "~/.claude/memory-domain"
+
+[event_stream]
+path      = "{root}/events.jsonl"
+format    = "jsonl"
+id_field  = "id"
+ts_field  = "ts"
+
+[consolidation]
+enabled = true
+type    = "external_script"
+script  = "{root}/extract-events.py"
+cadence = "daily"
+timeout = "60s"
+
+[dream]
+enabled               = true
+cadence               = "weekly"
+budget_tokens         = 2000
+prompt_path           = "{root}/dream/prompt.md"
+insights_path         = "{root}/dream/insights.jsonl"
+cursor_path           = "{root}/dream/cursor.json"
+prompt_fields         = ["filepath", "project", "word_count", "title"]
+prompt_field_max_chars = 150
+
+[hinter]
+tldr_path     = "{root}/derived/_tldr.txt"
+triggers_path = "{root}/derived/triggers.json"
+weight        = 0.6

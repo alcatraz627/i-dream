@@ -1,0 +1,33 @@
+[domain]
+name        = "sessions-domain"
+version     = "1.0"
+description = "Claude Code session transcript summaries — one event per session"
+root        = "~/.claude/sessions-domain"
+
+[event_stream]
+path      = "{root}/events.jsonl"
+format    = "jsonl"
+id_field  = "id"
+ts_field  = "ts"
+
+[consolidation]
+enabled = true
+type    = "external_script"
+script  = "{root}/extract-events.py"
+cadence = "daily"
+timeout = "120s"
+
+[dream]
+enabled               = true
+cadence               = "weekly"
+budget_tokens         = 3000
+prompt_path           = "{root}/dream/prompt.md"
+insights_path         = "{root}/dream/insights.jsonl"
+cursor_path           = "{root}/dream/cursor.json"
+prompt_fields         = ["project", "message_count", "user_turns", "time_span_minutes", "first_user_msg"]
+prompt_field_max_chars = 200
+
+[hinter]
+tldr_path     = "{root}/derived/_tldr.txt"
+triggers_path = "{root}/derived/triggers.json"
+weight        = 0.8
