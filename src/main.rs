@@ -379,11 +379,32 @@ async fn main() -> Result<()> {
             );
         }
 
-        Command::Promotions { promote, demote } => {
+        Command::Promotions {
+            promote,
+            demote,
+            html,
+        } => {
             let (ipath, wfpath) = interventions::live_paths()?;
             let mut items = interventions::load_interventions(&ipath);
             let fires = interventions::would_fire_sessions(&wfpath);
-            if let Some(id) = promote.as_deref() {
+            if html {
+                let totals = interventions::would_fire_totals(&wfpath);
+                let page = interventions::render_promotions_html(
+                    &items,
+                    &fires,
+                    &totals,
+                    chrono::Utc::now(),
+                );
+                let out = dirs::home_dir()
+                    .context("cannot resolve home dir")?
+                    .join(".claude/i-dream/derived/promotions.html");
+                if let Some(dir) = out.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(&out, page)?;
+                println!("✓ Wrote {}", out.display());
+                dashboard::open_in_browser(&out)?;
+            } else if let Some(id) = promote.as_deref() {
                 if interventions::flip(&mut items, id, true, chrono::Utc::now()) {
                     interventions::save_interventions(&ipath, &items)?;
                     println!("✓ promoted {id} to live");

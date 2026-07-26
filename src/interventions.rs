@@ -542,6 +542,197 @@ pub fn live_paths() -> Result<(PathBuf, PathBuf)> {
     Ok((interventions_path()?, would_fire_path()?))
 }
 
+/// Total would-fire rows per intervention id (raw volume, alongside the
+/// distinct-session evidence count).
+pub fn would_fire_totals(path: &Path) -> HashMap<String, usize> {
+    let mut out: HashMap<String, usize> = HashMap::new();
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    for line in body.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line)
+            && let Some(id) = v.get("id").and_then(|x| x.as_str())
+        {
+            *out.entry(id.to_string()).or_default() += 1;
+        }
+    }
+    out
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// The browsable promotions page (`i-dream promotions --html`): the same
+/// data as the terminal table, made for a human — dark default with a
+/// theme toggle (house convention), state/form filter chips, full bodies
+/// and trigger patterns visible, and each row's flip command one click
+/// from the clipboard.
+pub fn render_promotions_html(
+    items: &[Intervention],
+    fires: &HashMap<String, HashSet<String>>,
+    totals: &HashMap<String, usize>,
+    generated_at: DateTime<Utc>,
+) -> String {
+    let mut sorted: Vec<&Intervention> = items.iter().collect();
+    sorted.sort_by_key(|i| {
+        (
+            match i.state.as_str() {
+                "live" => 0,
+                "candidate" => 1,
+                _ => 2,
+            },
+            std::cmp::Reverse(fires.get(&i.id).map(|s| s.len()).unwrap_or(0)),
+        )
+    });
+    let mut rows = String::new();
+    for it in sorted {
+        let sessions = fires.get(&it.id).map(|s| s.len()).unwrap_or(0);
+        let total = totals.get(&it.id).copied().unwrap_or(0);
+        let id8: String = it.id.chars().take(8).collect();
+        let trigger = [
+            it.trigger.project.as_deref().map(|v| format!("project={v}")),
+            it.trigger
+                .prompt_pattern
+                .as_deref()
+                .map(|v| format!("prompt~/{v}/")),
+            it.trigger.tool.as_deref().map(|v| format!("tool={v}")),
+            it.trigger
+                .input_pattern
+                .as_deref()
+                .map(|v| format!("input~/{v}/")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        let flip = if it.state == "live" {
+            format!("i-dream promotions --demote {id8}")
+        } else {
+            format!("i-dream promotions --promote {id8}")
+        };
+        let promoted = it
+            .promoted
+            .map(|t| {
+                format!(
+                    " · promoted {} ({})",
+                    t.format("%b %d"),
+                    it.promoted_by.as_deref().unwrap_or("?")
+                )
+            })
+            .unwrap_or_default();
+        rows.push_str(&format!(
+            r#"<article class="card" data-state="{state}" data-form="{form}">
+  <header><span class="pill {state}">{state}</span><span class="pill form">{form}</span>
+    <span class="fires" title="{total} total match rows">{sessions} session{s_pl} · {total} fires</span>
+    <code class="id">{id8}</code></header>
+  <h3>{slug}</h3>
+  <p class="body">{body}</p>
+  <p class="trigger">{trigger}</p>
+  <footer><code class="flip" onclick="navigator.clipboard.writeText(this.textContent);this.classList.add('copied');setTimeout(()=>this.classList.remove('copied'),900)" title="click to copy">{flip}</code>
+    <span class="meta">born {born}{promoted}</span></footer>
+</article>
+"#,
+            state = html_escape(&it.state),
+            form = html_escape(&it.form),
+            sessions = sessions,
+            s_pl = if sessions == 1 { "" } else { "s" },
+            total = total,
+            id8 = html_escape(&id8),
+            slug = html_escape(&it.slug),
+            body = html_escape(&it.body),
+            trigger = html_escape(&trigger),
+            flip = html_escape(&flip),
+            born = it.created.format("%b %d"),
+            promoted = html_escape(&promoted),
+        ));
+    }
+
+    const PAGE: &str = r#"<!DOCTYPE html>
+<html lang="en" data-theme="dark"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>i-dream · interventions</title>
+<style>
+:root, :root[data-theme="dark"] {
+  --bg:#0d1117; --surface:#161b22; --text:#c9d1d9; --dim:#8b949e; --border:#30363d;
+  --live:#3fb950; --candidate:#d29922; --shadow:#8b949e;
+}
+:root[data-theme="light"] {
+  --bg:#f7f8fa; --surface:#ffffff; --text:#1f2328; --dim:#656d76; --border:#d0d7de;
+}
+* { box-sizing:border-box; margin:0; }
+body { background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,system-ui,sans-serif; padding:24px; max-width:880px; margin:0 auto; }
+h1 { font-size:18px; margin-bottom:4px; }
+.sub { color:var(--dim); font-size:12px; margin-bottom:16px; }
+.chips { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; }
+.chip { border:1px solid var(--border); background:var(--surface); color:var(--text); border-radius:16px; padding:4px 12px; font-size:12px; cursor:pointer; }
+.chip.on { border-color:var(--live); color:var(--live); }
+#theme { margin-left:auto; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin-bottom:12px; }
+.card header { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+.pill { font-size:11px; padding:2px 8px; border-radius:10px; border:1px solid var(--border); color:var(--dim); text-transform:uppercase; letter-spacing:.04em; }
+.pill.live { color:var(--live); border-color:var(--live); }
+.pill.candidate { color:var(--candidate); border-color:var(--candidate); }
+.fires { font-size:12px; color:var(--dim); }
+.id { margin-left:auto; color:var(--dim); font-size:11px; }
+h3 { font-size:13px; font-family:ui-monospace,Menlo,monospace; margin-bottom:6px; }
+.body { margin-bottom:8px; }
+.trigger { font-size:12px; color:var(--dim); font-family:ui-monospace,Menlo,monospace; overflow-x:auto; margin-bottom:10px; }
+.card footer { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.flip { font-size:12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:4px 8px; cursor:pointer; }
+.flip.copied { border-color:var(--live); color:var(--live); }
+.meta { font-size:11px; color:var(--dim); }
+</style></head><body>
+<h1>Compiled interventions</h1>
+<div class="sub">__SUB__</div>
+<div class="chips">
+  <button class="chip on" data-k="state" data-v="">all states</button>
+  <button class="chip" data-k="state" data-v="live">live</button>
+  <button class="chip" data-k="state" data-v="candidate">candidate</button>
+  <button class="chip" data-k="state" data-v="shadow">shadow</button>
+  <button class="chip on" data-k="form" data-v="">all forms</button>
+  <button class="chip" data-k="form" data-v="hint">hints</button>
+  <button class="chip" data-k="form" data-v="nudge">nudges</button>
+  <button class="chip" id="theme">☀︎/☾</button>
+</div>
+__ROWS__
+<script>
+const f = { state:"", form:"" };
+function apply() {
+  document.querySelectorAll(".card").forEach(c => {
+    const ok = (!f.state || c.dataset.state === f.state) && (!f.form || c.dataset.form === f.form);
+    c.style.display = ok ? "" : "none";
+  });
+}
+document.querySelectorAll(".chip[data-k]").forEach(ch => ch.onclick = () => {
+  f[ch.dataset.k] = ch.dataset.v;
+  document.querySelectorAll(`.chip[data-k="${ch.dataset.k}"]`).forEach(o => o.classList.toggle("on", o === ch));
+  apply();
+});
+const root = document.documentElement;
+document.getElementById("theme").onclick = () => {
+  const next = root.dataset.theme === "dark" ? "light" : "dark";
+  root.dataset.theme = next; localStorage.setItem("idream-theme", next);
+};
+const saved = localStorage.getItem("idream-theme"); if (saved) root.dataset.theme = saved;
+</script>
+</body></html>
+"#;
+    let live = items.iter().filter(|i| i.state == "live").count();
+    let cand = items.iter().filter(|i| i.state == "candidate").count();
+    let sub = format!(
+        "{} intervention(s) — {live} live · {cand} candidate · {} shadow · evidence bar {EVIDENCE_BAR_FIRES} distinct sessions · generated {}",
+        items.len(),
+        items.len() - live - cand,
+        generated_at.format("%Y-%m-%d %H:%M UTC")
+    );
+    PAGE.replace("__SUB__", &html_escape(&sub))
+        .replace("__ROWS__", &rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,6 +1002,43 @@ garbage
         assert!(!flip(&mut items, "abcd", true, now()), "ambiguous → refuse");
         assert!(items.iter().all(|i| i.state == "candidate"), "nothing flipped");
         assert!(flip(&mut items, "abcd1111", true, now()), "unique prefix works");
+    }
+
+    #[test]
+    fn promotions_html_has_themes_filters_and_escaped_rows() {
+        let mk = |id: &str, form: &str, state: &str, body: &str| Intervention {
+            id: id.into(),
+            slug: format!("slug-{id}"),
+            source: "atone-precheck".into(),
+            form: form.into(),
+            state: state.into(),
+            trigger: Trigger {
+                prompt_pattern: Some("audit".into()),
+                ..Default::default()
+            },
+            body: body.into(),
+            created: now(),
+            promoted: None,
+            promoted_by: None,
+        };
+        let items = vec![
+            mk("liveaaaa11111111", "hint", "live", "cite file:line <always>"),
+            mk("shadbbbb22222222", "nudge", "shadow", "plain body"),
+        ];
+        let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
+        fires.insert("liveaaaa11111111".into(), ["s1".into()].into());
+        let totals: HashMap<String, usize> = [("liveaaaa11111111".into(), 7)].into();
+        let html = render_promotions_html(&items, &fires, &totals, now());
+
+        assert!(html.contains(r#"data-theme="dark""#), "dark is the default");
+        assert!(html.contains(r#":root[data-theme="light"]"#), "light theme exists");
+        assert!(html.contains(r#"id="theme""#), "toggle button present");
+        assert!(html.contains("cite file:line &lt;always&gt;"), "bodies escaped");
+        assert!(!html.contains("<always>"), "no raw injection");
+        assert!(html.contains("--demote liveaaaa"), "live row offers demote");
+        assert!(html.contains("--promote shadbbbb"), "shadow row offers promote");
+        assert!(html.contains("1 session · 7 fires"), "distinct vs total shown");
+        assert!(html.contains(r#"data-v="shadow""#), "state filter chips");
     }
 
     #[test]

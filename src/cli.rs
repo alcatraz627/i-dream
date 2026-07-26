@@ -159,6 +159,10 @@ pub enum Command {
         /// Demote an intervention back to shadow by id (8-char prefix ok).
         #[arg(long)]
         demote: Option<String>,
+        /// Render the browsable HTML view (dark/light, filter chips,
+        /// click-to-copy flip commands) and open it in the browser.
+        #[arg(long)]
+        html: bool,
     },
 
     /// Generate per-project briefs (D6) for every project_id seen in
