@@ -4,54 +4,305 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ## [Unreleased]
 
-### Added — Insight-digest grounding against the live tree (truth-decay fix)
+---
+
+## [0.5.3] — 2026-07-24 Interventions Phase 2 — shadow→live promotion ladder
+
+Compiler-drafted interventions promoted through a four-rung ladder (shadow →
+candidate → live → retired) and delivered on two hook surfaces. 5 commits,
+14f2472..55176eb. 527 + 25 tests pass; 0 regressions.
+
+### Added
+
+- **Phase 2 compiler** (`src/interventions.rs`) — runs each cycle, delta-driven
+  (no LLM call when no new qualifying slugs). Qualifying criteria: atone slug
+  with recurrence ≥ 2 and a precheck in the ledger. An Opus seat drafts each
+  into `{form: hint|nudge, trigger: project/prompt_pattern/tool/input_pattern,
+  body ≤ 220 ch}`. Mechanical validation gates the output: tool allowlist, shape
+  caps, one entry per slug, only slugs it was asked about, deterministic
+  stable-id. Everything is born in **shadow** — never fires until promoted.
+- **Promotion ladder** (`i-dream promotions [--list|--promote <id>|--demote <id>]`)
+  — hints auto-promote to live at 5 distinct would-fire sessions; nudges advance
+  to candidate only and require the non-interactive CLI flip. Owner-demote veto
+  latch (MAJOR-2): once a human demotes an intervention, the compiler never
+  auto-re-promotes it.
+- **Intervention interpreters on both delivery surfaces** (`src/hooks.rs`) —
+  UserPromptSubmit (hints, prompt_pattern trigger) and PreToolUse (nudges,
+  tool+input_pattern triggers). Shadow/candidate entries log would-fires for
+  telemetry; only live entries inject. ReDoS guard: a hard 2s SIGALRM budget
+  across the whole match loop, abort → silent skip + exit 0, never hangs the
+  blocking hook surface. Broken compiler-drafted patterns caught at point-of-use
+  with `re.compile` inside `try/except` (not at compile time, so a bad pattern
+  doesn't block other slots).
+- **Opus smell panel** — scheduled Sun/Wed 15:00, runs a qualitative assessment
+  over the latest consolidation cycle and writes to `dreams/smell-panel.jsonl`.
+  Grounding watchability: the panel prompt now carries the current lane-health
+  digest header so it cannot call the system healthy while a lane is red.
+
+### Fixed
+
+- **Would-fire retention bound** — ledger capped at 5,000 lines (ring-buffer
+  trim on write); previously unbounded.
+- **Compile negative-cache** (`src/interventions.rs`) — a slug that compiled to
+  an invalid pattern no longer retries every cycle; the failure is cached for
+  24h.
+- **Count + validate tightening** — the compiler now counts the qualified slugs
+  before calling the LLM; zero qualified → skip LLM spend. Returned entries are
+  re-validated against the pre-call slug list (the MAJOR-1 gate finding).
+
+---
+
+## [0.5.2] — 2026-07-22 Felt-metabolism assay + curves + firings + reinforce hardening
+
+Five new capabilities building on the Wave 0-3 substrate: a per-cycle health
+panel baked into the journal, per-slug recurrence curves, firing detection from
+injection receipts, and two reinforcement correctness fixes. 7 commits,
+0fd7c1f..e791cd4. 516 + 22 tests pass; 0 regressions.
+
+### Added
+
+- **Mechanical per-cycle assay** (`src/consolidation/assay.rs`) — every
+  consolidation cycle now appends its own health panel to the journal entry.
+  Six deterministic metrics, no LLM, never blocks: `dup_rate` (cluster members
+  beyond representatives — malabsorption signal), `provenance_completeness`
+  (grounding signal), `budget_ratio` (spend signal), `queue_depth` / `oldest_age`
+  (motility signal), `reactivated_count` (uptake signal). Trend lines diagnose
+  different organs; old journal rows parse unchanged via `#[serde(default)]`.
+- **Per-slug recurrence curves** (`src/curves.rs`, `i-dream curves`) — writes
+  `derived/curves.json`: ISO-week recurrence series per mistake slug over 26
+  weeks, with a mechanical rising/flat/falling trend label (last 4 weeks vs
+  prior 4). First live run: 127 slugs, 194 events. Interventions overlay stays
+  empty until Phase 2 carries slugs — no fabricated joins.
+- **A1 firing detection** (`src/firings.rs`, `i-dream firings-scan`) — joins
+  `injections.jsonl` (sid → stable ids) against the session's own transcript,
+  matching only the `[L:xxxxxxxx]` tag in ASSISTANT text (uptake, not echo).
+  Honored ids become `up` feedback that reinforce potentiates; silent ids land
+  as `present-unused` (assay-visible, vote-invisible). Sessions scan once,
+  settle 6h, expire after 7d. First honest baseline: 707 sessions, 0 fired,
+  4799 present-unused.
+
+### Fixed
+
+- **Feedback by durable `stable_id`** (`src/consolidation/reinforce.rs`) —
+  reinforce previously matched feedback rows by store UUID; UUIDs rotate on
+  every merge pass. Now matches by `stable_id` (set at extraction, stable across
+  merges). Pre-fix: any post-merge reinforcement pass silently did nothing.
+- **Fold-first graduation marks** — the feedback ledger now records a
+  `graduation` marker at fold time, so the post-merge reinforce pass can
+  apply an immediate reactivation rather than waiting for the next cycle.
+- **Surfaced-claims socket lane** — daemon no longer records surfaced-claim
+  events that cannot be proven via the socket lane (was writing plausible-but-
+  unverified entries to `surfaced.jsonl`).
+
+---
+
+## [0.5.1] — 2026-07-17/18 CLI observability + daemon stability (Wave 0 surface)
+
+Lane-health visibility (Wave 0 of docs/24) lands on `i-dream status`. Colored
+help, per-command receipts, domain-list enrichment. Daemon runtime root causes
+fixed. 14 commits, 42eae64..64d6e5e. 503 + 22 tests pass; 0 regressions.
+
+### Added
+
+- **`i-dream status` — lane-health summary** (`src/cli.rs`, `src/status.rs`) —
+  reads `dreams/lane-health.jsonl` and renders a red/yellow/green row per lane
+  (transcripts, atone, affirm, ingest-queue, pins, valence, metacog, sessions,
+  memory, ipc, traces, snapshots, injections, feedback). `-v` gives a deep per-
+  lane diagnosis; `--json` emits the raw health object. This is the Wave 0
+  observability surface from docs/24 §W0.1 — pins and ipc flip red on first run
+  (known-dead lanes now visible rather than silently wrong).
+- **Colored help output** — `i-dream help` and each subcommand's `--help` render
+  section headers, flags, and examples with ANSI color. Root-level examples block
+  shows the five most common invocation patterns.
+- **Per-command receipts** — mutating verbs (`dream wake`, `digest`, `brief-
+  projects`, `briefing`, `auto-intentions`, `prune-patterns`, `dream-pass`) and
+  LLM verbs now print a one-line receipt on completion: cycle count, tokens
+  spent, store mutations. Provides a lightweight audit trail without forcing
+  `RUST_LOG=info`.
+- **Domain-list enrichment** — `i-dream domain list` now shows next-scheduled
+  cadence, last-cursor age, and whether the domain has an unread delta. `cron
+  next-fires` column added.
+
+### Fixed
+
+- **Daemon: state step-back** — the daemon was reading its own prior-cycle state
+  before writing the new one, causing it to repeat cycle work on each restart.
+  Root cause: `state.json` write path was conditional on a flag that defaulted
+  off. Unconditional write now.
+- **Dead briefing lane** — the weekly briefing writer was checking a stale
+  `state.json` flag that was never set by the new cadence path. The lane was
+  silently dead since W1.6 shipped.
+- **Advisory token budgets** — daemon-side LLM calls were using a hardcoded
+  advisory budget that ignored `config.toml` overrides. Now respects
+  `[model].max_tokens` correctly.
+- **Run-1 gate findings** — corrupt state warn on first-ever launch; digest gate
+  coverage (was skipping the gate on `--force`); newline pin on `state.json`
+  write.
+- **DST fire rollover** — `i-dream status` freshness verdict was pinning the
+  wrong hour on DST transitions, causing false "stale daemon" reports.
+- **Ingest-queue age from filename stamp** — the registry was computing lane age
+  from file `mtime`, which `mv`/restore operations clobber. Now parses the
+  ISO-timestamp prefix from the filename (the authoritative creation time).
+- **Same-second deploy not flagged stale** — status was reporting a freshly-
+  deployed daemon as stale if the deploy and the check landed in the same second.
+
+### Architecture
+
+- `docs/DIAGRAM.md` — new Mermaid architecture diagram + ASCII fallback. Maps
+  the nine LLM call-sites, all store paths, and the daemon's six cycle phases.
+
+---
+
+## [0.5.0] — 2026-07-14 Metabolism repair — Waves 0-3 (dead-lane fix + autonomy arc)
+
+Addresses the user's "rotting in several places" verdict (docs/24). Fixes the
+dead-input-lane, dead-letter-queue, trace-join, governed-forgetting, and
+injection-efficacy problems identified in the 2026-07-10 MAGI deliberation, then
+adds the autonomy arc (docs/25 items 12-16) so routine upkeep runs unattended.
+No breaking changes to any on-disk format — all schema additions use
+`#[serde(default)]`. 30 commits over 4 days, 18c9082..8b0c315. 314 → 489 tests
+pass; 0 regressions.
+
+### Added — Wave 1: reconnect and bound the flows (docs/24 items 5-7)
+
+- **Engine-driven domain cadence** (`src/daemon.rs`, `src/modules/registry.rs`)
+  — the engine now dispatches every registered domain's declared cadence from the
+  registry. Previously only the seven native modules were dispatched; external
+  domains (atone, affirm, pinned) depended on hand-written launchd plists that
+  were never reliably present. Pinned's `consolidate.sh` now runs on schedule
+  for the first time since registration.
+- **Queue drain + DLQ discipline** — the daemon reads `~/.claude/subconscious/
+  ingest-queue/*.json` each cycle: dedup by `session_id` + against
+  `dreams/processed.json`; empty-insight files archived to `_processed/trivial/`;
+  real payloads fed to SWS/association input; consumed entries archived to
+  `_processed/<date>/`. An andon fires when the oldest unconsumed entry exceeds
+  the SLA (7d). Backfilled 101 events stranded since 2026-05-15.
+- **Universal retention / reaper** (`src/retention.rs`) — per-store overflow
+  bound in the lane registry; the reaper archives excess entries to
+  `_archived/<date>/` before pruning. Generalizes the valence ring-buffer
+  pattern to every store: traces/ (30d), snapshots/ (10 newest), injections/
+  surfaced/feedback (10k lines each). Replaces the manual `prune-patterns` nag
+  as the steady-state mechanism.
+
+### Added — Wave 2: make it a memory (docs/24 items 8-11)
+
+- **Merge pass / schema dedup** (`src/consolidation/schemas.rs`) — per-cycle
+  pass collapses near-duplicate patterns using the pre-built cluster graph in
+  `derived/views/`. One representative text per cluster; `member_ids` union;
+  occurrences summed. Conservative threshold. First live run: 45 push-pattern
+  rewordings collapsed to ~10 schemas. REM/WAKE now read schemas; episodic
+  `patterns.json` retained for lineage.
+- **Importance-weighted forgetting** (`src/consolidation/reinforce.rs`) — each
+  `ExtractedPattern` gains `strength` (init = confidence), `ease`, and
+  `reactivations`. Strength decays per cycle; re-potentiates on reinforced
+  reactivation. Eviction targets lowest-strength, never graduated-rule anchors.
+  Eviction reasons logged to `dreams/forgotten.jsonl`
+  (`{id, reason, strength, ts}`).
+- **Retrieval write-back** — auto-correction down-votes mark the source insight
+  labile, weaken it, and route it to grounding for update. Honored injections
+  strengthen and reactivate. Per-cluster rejection feeds WAKE's promotion
+  threshold.
+- **Governed forgetting — single writer** (`src/consolidation/forgetting.rs`) —
+  `resolutions.jsonl` (supersession records) + pin age + Zep-style `valid_until`
+  windows feed a single decay module. Insight/brief/digest consumers honor
+  `valid_until` and `resolution` matches. Unifies the two prior dead decay models
+  (pins had their own path that was never scheduled).
+
+### Added — Wave 3: autonomy arc (docs/25 items 12-16, shipped 2026-07-13)
+
+- **Autonomous weekly janitor** (`src/consolidation/autonomous.rs`, `scripts/
+  revert-autonomous.sh`) — runs reversible, judgment-free upkeep: queue drain,
+  strength decay, merge, retention archive, suppression-fold. Every action
+  appends one record to `~/.claude/i-dream/audits/_autonomous.jsonl`
+  `{ts, action, target, diff, revert_token, source}`. `scripts/revert-
+  autonomous.sh restore/reinsert/restore-dir` is idempotent + self-auditing.
+  Live-gate: `record_if_live` checks `$HOME` via `dirs::home_dir()` (the shared
+  primitive) — temp-path probes stay out of the real audit trail. Pre-deferred:
+  per-item retention revert tokens (bucket-level only); decay/merge unrecorded
+  (pre-images recomputable).
+- **Rejection memory** (`src/consolidation/audit.rs`) — a pre-surface filter on
+  `audits/_rejections.jsonl` drops any candidate whose `target + intent-class`
+  matches a prior rejection. Matching by expanded target (shared kebab compound
+  ≥ 8 chars OR IDF similarity ≥ 0.50). Unlock: the atone slug recurs with a
+  strictly-newer event. Already-exists-on-disk stat check added. Validated: 1/20
+  of the 2026-07-10 audit batch filtered (the documented `cli-gating` zombie),
+  0 false positives.
+- **Graduation-yield SLO** (`src/consolidation/dreaming.rs`, `dreams/yield-
+  state.json`) — rolling `applied / surfaced` tracked per review. When yield is
+  < 15% for two consecutive judged reviews, WAKE enters **maintenance mode**:
+  stops generating new candidates, only gates existing ones + runs grounding
+  corrections + triage. High-confidence (≥ 0.9) atone graduations bypass the
+  gate. Baseline yield (dead zone June 2026): 0%; recent: 6/22, 2/20.
+- **Query-conditioned injection** (`~/.claude/scripts/dream/dream-insights.sh`
+  gcc-side) — replaces the static top-5 with importance × recency × relevance
+  ranking over `derived/views/patterns.json` (query = cwd tokens + first prompt
+  + `INJECT_QUERY`; keyword/path overlap; no embeddings). Slugs with both a rule
+  and a hook drop out of injection (mechanically enforced; re-injecting is
+  noise). Slugs recurring despite rule + injection emit a **hook proposal**
+  instead. Entropy log records `{kind: dream-ranked, ids}` per injection.
+  First-prompt tail (`dream-insights-prompt.sh`) re-ranks on the first
+  substantive prompt per session (synchronous UserPromptSubmit hook; sid-scoped
+  dedupe; atomic once-per-session marker; `kind: dream-ranked-prompt` in the
+  log). Kill-criteria clock started 2026-07-13: prompt-entropy up + recurrence
+  falling, or the dream half goes back off.
+- **Inferred positive signal** — applying a graduation auto-records an `up`
+  for the source insight's pattern (deterministic pattern-space matching, floor
+  0.09). Backfilled 11 ups across 6 graduated rules; first live copy showed
+  reactivated=14, lifting 12 patterns off the 0% reactivation baseline.
+  Down-votes gain a coarse routed reason at consumption time: `stale` → routes
+  to forgetting, `known` → graduation-protected, `wrong` → demotion.
+  Pre-deferred: `noise` reason (no context to infer it yet).
+
+### Added — Grounding: truth-decay guards (2026-07-14, docs/24 item 11 surface)
 
 - **`dreams/resolutions.jsonl`** — explicit supersession records for insight
-  claims that reality has overtaken. Each line is `{pattern, reason, ts?,
-  evidence?}`; insight blocks containing `pattern` (case-insensitive) are
-  excluded from digest synthesis and `reason` reaches the prompt as ground
-  truth. First use: the git-push cluster, whose "no mechanical gate exists"
-  claim outlived guard-git-push.sh / guard-user-commit.sh by days and kept
-  misleading every SessionStart via the injected digest.
-- **Live hook-inventory grounding** — the digest prompt now carries the current
-  `~/.claude/scripts/hooks/*.sh` listing with an instruction that claims
-  contradicted by it are history, not open gaps. Covers stale-claim phrasings
-  no resolution pattern anticipates.
+  claims reality has overtaken. `{pattern, reason, ts?, evidence?}`. Insight
+  blocks matching `pattern` (case-insensitive, ≥ 12 chars) are excluded from
+  digest synthesis; `reason` reaches the prompt as ground truth.
+- **Live hook-inventory grounding** — the digest prompt carries the current
+  `~/.claude/scripts/hooks/*.sh` listing; claims contradicted by it are treated
+  as history, not open gaps.
+- **`modules::grounding`** — shared resolutions loader applied to all three
+  LLM-synthesis surfaces: insight digest, project briefs, and weekly briefing.
 - **`i-dream insight-digest`** (CLI) — force-refresh the insight digest,
-  ignoring the 3h cooldown; prints the result. Exists so a resolution edit can
-  be exercised immediately instead of waiting for the next daemon pass.
-- **`modules::grounding`** (review follow-up, same day) — the resolutions
-  loader/matcher extracted to a shared module and applied to the OTHER two
-  LLM-synthesis surfaces: project briefs (session-injected, same harm class as
-  the digest) and the weekly briefing now drop promoted associations whose
-  hypothesis matches a resolution. Patterns shorter than 12 chars are refused
-  at load so a lazy substring can't swallow unrelated future insights.
+  ignoring the 3h cooldown.
+- **`[dream].prompt_fields`** (manifest) — external domains declare which event
+  payload fields the dream prompt surfaces per delta event. Fields render under
+  each event header, truncated by `prompt_field_max_chars` (default 300). Pre-
+  fix: the atone dream prompt received only event id + timestamp and was asked
+  to find patterns in content it never saw.
+- **`[dream].severity_field`** + severity-weighted cross-domain join — each
+  insight's max severity (via `evidence_event_ids` → delta) weights the cross-
+  domain association's confidence.
 
-### Added — Grounded external dream prompts + severity-aware cross-domain join
+### Schema changes (all additive, all `#[serde(default)]`)
 
-- **`[dream].prompt_fields`** (manifest) — external domains now declare which
-  event payload fields the dream prompt should surface per delta event (atone:
-  `slug`/`severity`/`issue`/`cause`/`fix`). Previously the prompt carried only
-  event id + timestamp, so the LLM was asked to find patterns in content it
-  never received; insights were plausible but ungrounded. Fields render under
-  each event header, truncated by `prompt_field_max_chars` (default 300).
-- **`[dream].severity_field`** (manifest) + cross-domain severity weighting —
-  the cross-domain join now looks up each insight's max severity (via its
-  `evidence_event_ids` → delta) and instructs the model to weight an
-  association's confidence by how serious the linked patterns are. This is the
-  one per-pass confidence surfaced in the daily digest.
-- Atone dream prompt now instructs the model to weight confidence + insight
-  selection by severity × recurrence (meaningful only now that severity reaches
-  the prompt).
+- `ExtractedPattern`: `strength: f32`, `ease: f32`, `reactivations: u32`,
+  `stable_id: String`
+- `Association`: `cluster_id: Option<String>`
+- `DreamingConfig`: `yield_slo_enabled: bool` (default true),
+  `maintenance_mode: bool` (default false)
+- `JournalEntry`: `cycle_id: String`, `assay: Option<CycleAssay>`
 
-### Notes
+### Tests
 
-- A deterministic per-domain confidence floor was considered and **dropped as
-  inert**: nothing downstream reads per-domain insight confidence (consumers
-  only line-count), so flooring it would have no effect.
-- Verified live: a dream pass over a 4-event atone delta produced insights
-  citing real delta event ids + slugs, replacing the prior run's synthetic
-  evidence. 9 new tests; 351 pass.
+314 → 489 tests pass. New coverage: autonomous ledger + revert (5 end-to-end
+script tests), rejection-memory filter (replay), yield-SLO transitions
+(two-lows→flip, bypass-through, recovery→resume), inferred positive + backfill,
+merge pass / redundancy ratio, retention reaper, queue drain dedup.
+
+### Known gaps carried forward
+
+- Memory + session transcript domain adapters still unbuilt (dead domains;
+  sessions cursor 05-03, memory cursor 05-06 — `docs/24` ground truth).
+- L3 weekly audit (`docs/16` Stages 5-6) — spec-complete, build pending.
+- Briefing shortlist surface: janitor output is computed but not yet wired
+  into `weekly_briefing.rs` (parallel-session coordination; `ipc msg-29a88b16`).
+- Digest-header yield/mode surfacing: `insight_digest.rs` parallel-owned.
+- `docs/21` hook-graduation ladder remains blocked on injection health (item
+  15 kill-criteria review due 2026-07-27).
+
+---
 
 ## [0.4.2] — 2026-05-17 Dream-domain plugin substrate + consolidation pipeline (partial)
 
@@ -254,7 +505,8 @@ A 10-feature batch covering both the dashboard (visual polish, exports, keyboard
 - **M9 polish — Community color dot per hub** in the Top hubs sidebar, using the same 15-color palette as the graph toggle so a hub's badge matches its node tint when "Color by community" is on. Hover shows community number.
 - **M11 — Standalone graph export.** New "⤓ Export" button in the patterns-graph toolbar downloads the full graph (data + libs + interactivity) as a single self-contained ~250KB HTML file. Works offline, no data dir required. Filename: `i-dream-patterns-graph-YYYY-MM-DD.html`.
 - **M14 — Pattern context menu.** Right-click a pattern node in the Swift dashboard's PatternGraphView opens an actions menu: "Export as CLAUDE.md guideline…" / "Export as hook scaffold…" / "Copy pattern text". Both file actions write to `~/.i-dream/exports/<ts>-<kind>-<slug>/` and reveal in Finder rather than auto-mutating CLAUDE.md / settings.json. Hook scaffolds default to UserPromptSubmit (safest event); each ships with a paste-ready `settings-snippet.json` using the wrapped schema we fixed in 0.3.1.
-- **M15 — Keyboard shortcut overlay.** Press `?` anywhere outside an input field to open a modal listing all dashboard hotkeys. Sections: Global / Patterns Graph / Tables. Esc or backdrop-click closes. Built lazily on first open.
+- **M15 — Keyboard shortcut overlay.** Press `?` anywhere outside an input field to open a modal listing all dashboard hotkeys. Sections: Global / Patterns Graph / Tables. Esc or backdrop-click closes. Built lazily on first open. (Note: Tables shortcuts are aspirational — NSTableView keyboard nav is not yet wired; the overlay labels them "coming soon".)
+- **M16 — Saved views** (localStorage). `+ Save view` persists the current graph state (focusedId, edgeMode, actionableOnly, colorByCommunity) under a user-chosen name. `▾ Saved views (N)` dropdown in the toolbar restores by setting state vars and calling `renderer.refresh()`. Storage key `i-dream-pg-views`. Survives reloads.
 - **D11 — 30-day pattern-extraction sparkline** in the patterns-graph toolbar. Buckets `pattern.first_seen` by UTC day; today's bar tinted green as a "you are here" anchor; other days blue, empty days dim. SVG `<title>` per bar gives hover tooltips with no JS event handlers. Aggregate "new patterns/day" because per-occurrence timestamps don't exist in the schema — answers "is dreaming productive lately?"
 
 ### Added — Dreaming pipeline

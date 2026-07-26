@@ -461,8 +461,8 @@ try:
 except Exception:
     pass
 PYEOF
-# Touch activity signal (always, regardless of socket availability)
-touch "{activity}"
+# Touch activity signal (best-effort — dir may not exist on first install)
+touch "{activity}" 2>/dev/null || true
 "#,
         socket = socket.display(),
         activity = expand_tilde(&config.idle.activity_signal).display(),
