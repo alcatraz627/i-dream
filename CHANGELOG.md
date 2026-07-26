@@ -165,6 +165,19 @@ pass; 0 regressions.
 
 ### Added — Wave 1: reconnect and bound the flows (docs/24 items 5-7)
 
+- **L3 weekly audit** (`src/audit.rs`, `src/review.rs`, `src/cron.rs`) —
+  coordinator gathers 7 daily digests + per-domain derived/ + rejection
+  fingerprints + current GCC content; single LLM call with multi-lens
+  prompt (atone-analyst, affirm-analyst, dreams-analyst, gcc-fitness-scorer,
+  graduation-curator, challenger voices); interactive [a]pprove / [r]eject /
+  [s]kip / [d]etail loop; approved proposals trigger a second LLM render
+  call + [y]es/[c]ancel; per-audit log at `~/.claude/i-dream/audits/YYYY-MM-DD.md`;
+  rejections fingerprinted + appended to `_rejections.jsonl` (28d TTL).
+  Cron: Sunday 02:30 non-interactive → stages proposals; Monday 09:00
+  `i-dream review --if-pending` opens Ghostty + seeds a fresh Claude session
+  to walk through staged proposals. `i-dream audit run` for on-demand.
+  (`Agent`-tool per-sub-agent dispatch is a V2 refinement; v1 ships as a
+  single LLM call with lens voices.)
 - **Engine-driven domain cadence** (`src/daemon.rs`, `src/modules/registry.rs`)
   — the engine now dispatches every registered domain's declared cadence from the
   registry. Previously only the seven native modules were dispatched; external
@@ -220,7 +233,7 @@ pass; 0 regressions.
   primitive) — temp-path probes stay out of the real audit trail. Pre-deferred:
   per-item retention revert tokens (bucket-level only); decay/merge unrecorded
   (pre-images recomputable).
-- **Rejection memory** (`src/consolidation/audit.rs`) — a pre-surface filter on
+- **Rejection memory** (`src/audit.rs`) — a pre-surface filter on
   `audits/_rejections.jsonl` drops any candidate whose `target + intent-class`
   matches a prior rejection. Matching by expanded target (shared kebab compound
   ≥ 8 chars OR IDF similarity ≥ 0.50). Unlock: the atone slug recurs with a
@@ -295,7 +308,6 @@ merge pass / redundancy ratio, retention reaper, queue drain dedup.
 
 - Memory + session transcript domain adapters still unbuilt (dead domains;
   sessions cursor 05-03, memory cursor 05-06 — `docs/24` ground truth).
-- L3 weekly audit (`docs/16` Stages 5-6) — spec-complete, build pending.
 - Briefing shortlist surface: janitor output is computed but not yet wired
   into `weekly_briefing.rs` (parallel-session coordination; `ipc msg-29a88b16`).
 - Digest-header yield/mode surfacing: `insight_digest.rs` parallel-owned.
