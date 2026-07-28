@@ -363,8 +363,8 @@ async fn main() -> Result<()> {
             let client = api::ClaudeClient::for_config(&config)?;
             let r = interventions::run_compile(&client).await?;
             println!(
-                "✓ Compile pass\n  qualifying slugs: {} · already covered: {}\n  compiled new (shadow): {} · rejected by validation: {}",
-                r.qualifying_slugs, r.already_covered, r.compiled_new, r.rejected_by_validation
+                "✓ Compile pass\n  qualifying slugs: {} · already covered: {} · deferred (batch cap): {}\n  compiled new (shadow): {} · rejected by validation: {}",
+                r.qualifying_slugs, r.already_covered, r.deferred_batch_cap, r.compiled_new, r.rejected_by_validation
             );
         }
 

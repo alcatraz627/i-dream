@@ -88,6 +88,36 @@ pub struct Intervention {
     /// How it was promoted: "owner-flip" | "evidence-auto" (hints only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promoted_by: Option<String>,
+    /// Strength in the shared decay economy (B3/C3) — recomputed each wake
+    /// pass as a pure function of fires+age, never incremented (replay-safe).
+    #[serde(default)]
+    pub strength: f64,
+}
+
+/// Compost window for never-fired shadows (B3). Measured from `created` even
+/// for demoted items — demotion clears `promoted`, so no demotion time survives.
+pub const DECAY_WINDOW_DAYS: i64 = 21;
+
+/// Birth strength of a shadow; the base never-fired decay starts from.
+pub const BIRTH_STRENGTH: f64 = 0.3;
+
+/// Fired items sit above the birth line and grow per distinct firing session;
+/// never-fired items decay linearly to 0.0 at the window edge.
+pub fn recompute_strength(
+    items: &mut [Intervention],
+    fires: &HashMap<String, HashSet<String>>,
+    now: DateTime<Utc>,
+) {
+    for it in items.iter_mut() {
+        let n = fires.get(&it.id).map(|s| s.len()).unwrap_or(0);
+        it.strength = if n > 0 {
+            (0.4 + 0.1 * n as f64).min(1.0)
+        } else {
+            let age_days = (now - it.created).num_days().max(0);
+            let remaining = 1.0 - age_days as f64 / DECAY_WINDOW_DAYS as f64;
+            (BIRTH_STRENGTH * remaining).max(0.0)
+        };
+    }
 }
 
 /// What one compile pass did — for the daemon log and the receipt.
@@ -96,7 +126,11 @@ pub struct CompileReport {
     pub qualifying_slugs: usize,
     pub compiled_new: usize,
     pub rejected_by_validation: usize,
+    /// Covered or negative-cached slugs only — batch-capped ones are
+    /// `deferred_batch_cap` (the two labels used to be conflated).
     pub already_covered: usize,
+    /// Eligible slugs that missed this pass only because the batch was full.
+    pub deferred_batch_cap: usize,
 }
 
 fn interventions_path() -> Result<PathBuf> {
@@ -277,19 +311,22 @@ pub fn attempt_key(q: &QualifiedSlug) -> String {
 }
 
 /// Pick one pass's batch: uncovered slugs whose current precheck version has
-/// never been attempted. Pure — hermetically testable.
+/// never been attempted. Returns (batch, batch-capped count) so the receipt
+/// can tell "covered" from "deferred". Pure — hermetically testable.
 pub fn select_batch(
     qualified: Vec<QualifiedSlug>,
     covered: &HashSet<String>,
     attempted: &HashSet<String>,
     max: usize,
-) -> Vec<QualifiedSlug> {
-    qualified
+) -> (Vec<QualifiedSlug>, usize) {
+    let eligible: Vec<QualifiedSlug> = qualified
         .into_iter()
         .filter(|q| !covered.contains(&q.slug))
         .filter(|q| !attempted.contains(&attempt_key(q)))
-        .take(max)
-        .collect()
+        .collect();
+    let capped = eligible.len().saturating_sub(max);
+    let batch = eligible.into_iter().take(max).collect();
+    (batch, capped)
 }
 
 /// The compiler's negative cache — attempt keys already offered to opus.
@@ -340,6 +377,7 @@ pub fn parse_compiled(
                 created: now,
                 promoted: None,
                 promoted_by: None,
+                strength: BIRTH_STRENGTH,
             }),
             None => rejected += 1,
         }
@@ -369,8 +407,9 @@ pub async fn run_compile(client: &ClaudeClient) -> Result<CompileReport> {
         qualifying_slugs: qualified.len(),
         ..Default::default()
     };
-    let batch = select_batch(qualified, &covered, &attempted, 10);
-    report.already_covered = report.qualifying_slugs - batch.len();
+    let (batch, capped) = select_batch(qualified, &covered, &attempted, 10);
+    report.deferred_batch_cap = capped;
+    report.already_covered = report.qualifying_slugs - batch.len() - capped;
     if batch.is_empty() {
         return Ok(report);
     }
@@ -825,6 +864,7 @@ mod tests {
             created: now(),
             promoted: None,
             promoted_by: None,
+            strength: 0.0,
         };
         let mut items = vec![mk("hint-hot", "hint"), mk("nudge-hot", "nudge"), mk("cold", "hint")];
         let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
@@ -887,6 +927,7 @@ garbage
             created: now(),
             promoted: None,
             promoted_by: None,
+            strength: 0.0,
         }];
         assert!(flip(&mut items, "abcdef12", true, now()), "prefix flip");
         assert_eq!(items[0].state, "live");
@@ -937,6 +978,7 @@ garbage
             created: now(),
             promoted: None,
             promoted_by: None,
+            strength: 0.0,
         }];
         let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
         fires.insert(
@@ -961,7 +1003,7 @@ garbage
         let attempted: HashSet<String> =
             [attempt_key(&q("skipped-slug", "old precheck"))].into();
 
-        let batch = select_batch(
+        let (batch, capped) = select_batch(
             vec![
                 q("covered-slug", "x"),
                 q("skipped-slug", "old precheck"),
@@ -973,15 +1015,68 @@ garbage
         );
         assert_eq!(batch.len(), 1, "covered + attempted both excluded");
         assert_eq!(batch[0].slug, "fresh-slug");
+        assert_eq!(capped, 0, "exclusions are not batch-cap deferrals");
 
         // The same slug with a REFINED precheck re-qualifies naturally.
-        let batch2 = select_batch(
+        let (batch2, _) = select_batch(
             vec![q("skipped-slug", "refined precheck")],
             &covered,
             &attempted,
             10,
         );
         assert_eq!(batch2.len(), 1, "new precheck version = new attempt");
+    }
+
+    #[test]
+    fn select_batch_counts_capped_separately_from_covered() {
+        let q = |slug: &str| QualifiedSlug {
+            slug: slug.into(),
+            recurrences: 3,
+            severity: "S2".into(),
+            precheck: "p".into(),
+            what_not: "w".into(),
+        };
+        let covered: HashSet<String> = ["covered".into()].into();
+        let (batch, capped) = select_batch(
+            vec![q("covered"), q("a"), q("b"), q("c")],
+            &covered,
+            &HashSet::new(),
+            2,
+        );
+        // 4 qualifying = 1 covered + 2 batched + 1 capped; the old label
+        // lumped the capped one into "already covered".
+        assert_eq!(batch.len(), 2);
+        assert_eq!(capped, 1);
+    }
+
+    #[test]
+    fn strength_recompute_is_idempotent_and_orders_fired_above_unfired() {
+        let mk = |id: &str, days_old: i64| Intervention {
+            id: id.into(),
+            slug: "s".into(),
+            source: "atone-precheck".into(),
+            form: "hint".into(),
+            state: "shadow".into(),
+            trigger: Trigger::default(),
+            body: "b".into(),
+            created: now() - chrono::Duration::days(days_old),
+            promoted: None,
+            promoted_by: None,
+            strength: 0.0,
+        };
+        let mut items = vec![mk("fired", 10), mk("young", 0), mk("expired", DECAY_WINDOW_DAYS + 1)];
+        let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
+        fires.insert("fired".into(), ["s1".into(), "s2".into()].into());
+
+        recompute_strength(&mut items, &fires, now());
+        let first: Vec<f64> = items.iter().map(|i| i.strength).collect();
+        recompute_strength(&mut items, &fires, now());
+        let second: Vec<f64> = items.iter().map(|i| i.strength).collect();
+
+        assert_eq!(first, second, "recompute is pure, not an accumulator");
+        assert!((items[0].strength - 0.6).abs() < 1e-9, "2 fire sessions → 0.4 + 0.2");
+        assert!((items[1].strength - BIRTH_STRENGTH).abs() < 1e-9, "newborn holds birth strength");
+        assert_eq!(items[2].strength, 0.0, "past the window with no fires → fully decayed");
     }
 
     #[test]
@@ -997,6 +1092,7 @@ garbage
             created: now(),
             promoted: None,
             promoted_by: None,
+            strength: 0.0,
         };
         let mut items = vec![mk("abcd1111aaaaaaaa"), mk("abcd2222bbbbbbbb")];
         assert!(!flip(&mut items, "abcd", true, now()), "ambiguous → refuse");
@@ -1020,6 +1116,7 @@ garbage
             created: now(),
             promoted: None,
             promoted_by: None,
+            strength: 0.0,
         };
         let items = vec![
             mk("liveaaaa11111111", "hint", "live", "cite file:line <always>"),
@@ -1060,6 +1157,7 @@ garbage
             created: now(),
             promoted: None,
             promoted_by: None,
+            strength: 0.0,
         }];
         save_interventions(&p, &items).unwrap();
         let back = load_interventions(&p);

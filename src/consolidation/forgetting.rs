@@ -23,10 +23,12 @@
 //! `valid_until` honoring live in parallel-owned files and are deferred; pin-age
 //! unification now rides the cadence dispatch (item 6), not this pass.
 
+use crate::interventions::{DECAY_WINDOW_DAYS, Intervention};
 use crate::modules::dreaming::{Association, ExtractedPattern};
 use crate::modules::grounding::{Resolution, matching_resolution};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 
 /// An append-only record of a lesson retired because reality resolved its claim.
 /// Kept so a forget is auditable and never silent (docs/24: archive before
@@ -115,6 +117,49 @@ pub fn govern_associations(
             });
         }
     }
+    forgotten
+}
+
+/// Compost expired-window shadows only: `undeliverable` (never fired) or
+/// `contradicted` (owner-demoted); `unabsorbed` is D3's call, not this pass's.
+pub fn govern_interventions(
+    items: &mut Vec<Intervention>,
+    fires: &HashMap<String, HashSet<String>>,
+    now: DateTime<Utc>,
+) -> Vec<Forgotten> {
+    let mut forgotten = Vec::new();
+    let mut survivors = Vec::with_capacity(items.len());
+    for it in items.drain(..) {
+        let n = fires.get(&it.id).map(|s| s.len()).unwrap_or(0);
+        let age_days = (now - it.created).num_days();
+        let past_window = age_days > DECAY_WINDOW_DAYS;
+        let demoted = it.promoted_by.as_deref() == Some("owner-demoted");
+        let reason = if it.state != "shadow" || !past_window {
+            None
+        } else if demoted {
+            Some(format!(
+                "autopsy: contradicted — owner-demoted; {n} firing session(s) at compost"
+            ))
+        } else if n == 0 {
+            Some(format!(
+                "autopsy: undeliverable — 0 firing sessions in {age_days}d (window {DECAY_WINDOW_DAYS}d)"
+            ))
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => forgotten.push(Forgotten {
+                kind: "intervention",
+                id: it.id.clone(),
+                text: format!("[{}] {}", it.slug, it.body),
+                reason,
+                ts: now,
+                valid_until: now,
+            }),
+            None => survivors.push(it),
+        }
+    }
+    *items = survivors;
     forgotten
 }
 
@@ -236,6 +281,92 @@ mod tests {
         for f in &forgotten {
             let t: String = f.text.chars().take(80).collect();
             println!("  {t}");
+        }
+    }
+
+    fn iv(id: &str, state: &str, days_old: i64, demoted: bool) -> Intervention {
+        Intervention {
+            id: id.into(),
+            slug: "some-slug".into(),
+            source: "atone-precheck".into(),
+            form: "nudge".into(),
+            state: state.into(),
+            trigger: Default::default(),
+            body: "do the check".into(),
+            created: now() - chrono::Duration::days(days_old),
+            promoted: None,
+            promoted_by: if demoted { Some("owner-demoted".into()) } else { None },
+            strength: 0.0,
+        }
+    }
+
+    #[test]
+    fn expired_never_fired_shadow_composts_as_undeliverable() {
+        let mut items = vec![iv("old", "shadow", 30, false), iv("young", "shadow", 3, false)];
+        let forgotten = govern_interventions(&mut items, &HashMap::new(), now());
+        assert_eq!(forgotten.len(), 1);
+        assert_eq!(forgotten[0].id, "old");
+        assert_eq!(forgotten[0].kind, "intervention");
+        assert!(forgotten[0].reason.contains("undeliverable"));
+        // The compost is a removal, so the next pass cannot re-write it.
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["young"]);
+    }
+
+    #[test]
+    fn fired_shadow_survives_the_window() {
+        let mut items = vec![iv("fired", "shadow", 30, false)];
+        let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
+        fires.insert("fired".into(), ["s1".into()].into());
+        assert!(govern_interventions(&mut items, &fires, now()).is_empty());
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn candidate_and_live_never_compost() {
+        let mut items = vec![iv("c", "candidate", 60, false), iv("l", "live", 60, false)];
+        assert!(govern_interventions(&mut items, &HashMap::new(), now()).is_empty());
+        assert_eq!(items.len(), 2, "non-shadow states carry evidence or owner backing");
+    }
+
+    #[test]
+    fn demoted_composts_as_contradicted_even_with_fires() {
+        let mut items = vec![iv("vetoed", "shadow", 30, true)];
+        let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
+        fires.insert("vetoed".into(), ["s1".into(), "s2".into()].into());
+        let forgotten = govern_interventions(&mut items, &fires, now());
+        assert_eq!(forgotten.len(), 1);
+        assert!(forgotten[0].reason.contains("contradicted"));
+        assert!(forgotten[0].reason.contains("2 firing"));
+        assert!(items.is_empty(), "the owner veto outranks fire evidence");
+    }
+
+    #[test]
+    fn demoted_inside_window_keeps_collecting_shadow_telemetry() {
+        let mut items = vec![iv("vetoed", "shadow", 5, true)];
+        assert!(govern_interventions(&mut items, &HashMap::new(), now()).is_empty());
+        assert_eq!(items.len(), 1);
+    }
+
+    /// Live: run the B3 pass over COPIES of the real interventions + fire
+    /// ledger, print strengths and would-be composts, write nothing.
+    /// Run: cargo test b3_live_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn b3_live_probe() {
+        let (ipath, wfpath) = crate::interventions::live_paths().unwrap();
+        let mut items = crate::interventions::load_interventions(&ipath);
+        let fires = crate::interventions::would_fire_sessions(&wfpath);
+        crate::interventions::recompute_strength(&mut items, &fires, Utc::now());
+        println!("\n{} interventions:", items.len());
+        for it in &items {
+            let n = fires.get(&it.id).map(|s| s.len()).unwrap_or(0);
+            println!("  {:.2}  {:9}  {:2} fire-sessions  {}", it.strength, it.state, n, it.slug);
+        }
+        let composted = govern_interventions(&mut items, &fires, Utc::now());
+        println!("would compost now: {}", composted.len());
+        for f in &composted {
+            println!("  {} — {}", f.id, f.reason);
         }
     }
 

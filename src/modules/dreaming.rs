@@ -1595,6 +1595,39 @@ Output ONLY a JSON array. No commentary."#;
             ),
         )?;
 
+        // B3: interventions ride the same wake governance. Compost records are
+        // appended BEFORE the save (archive-before-delete); a save failure can
+        // therefore duplicate a ledger line next cycle, never forget silently.
+        if let Ok((ipath, wf_path)) = crate::interventions::live_paths() {
+            let mut items = crate::interventions::load_interventions(&ipath);
+            if !items.is_empty() {
+                let ifires = crate::interventions::would_fire_sessions(&wf_path);
+                crate::interventions::recompute_strength(&mut items, &ifires, Utc::now());
+                let composted = crate::consolidation::forgetting::govern_interventions(
+                    &mut items,
+                    &ifires,
+                    Utc::now(),
+                );
+                for f in &composted {
+                    self.store.append_jsonl("dreams/forgotten.jsonl", f)?;
+                }
+                crate::interventions::save_interventions(&ipath, &items)?;
+                let count = |s: &str| items.iter().filter(|i| i.state == s).count();
+                tracer.note(
+                    TracePhase::Wake,
+                    EventKind::InsightsPromoted,
+                    format!(
+                        "interventions: {} in economy ({} live / {} candidate / {} shadow), {} composted",
+                        items.len(),
+                        count("live"),
+                        count("candidate"),
+                        count("shadow"),
+                        composted.len()
+                    ),
+                )?;
+            }
+        }
+
         // Graduation-yield SLO (docs/25 item 14): when the last two judged
         // reviews both yielded under the floor, WAKE stops generating new
         // candidates and only lets bypass-confidence ones through — the
@@ -2043,8 +2076,8 @@ impl<'a> Module for DreamingModule<'a> {
         // — no new qualifying slug means no LLM call. Never fails the cycle.
         match crate::interventions::run_compile(client).await {
             Ok(r) if r.compiled_new + r.rejected_by_validation > 0 => info!(
-                "Compiler: {} new shadow intervention(s), {} rejected ({} qualified, {} covered)",
-                r.compiled_new, r.rejected_by_validation, r.qualifying_slugs, r.already_covered
+                "Compiler: {} new shadow intervention(s), {} rejected ({} qualified, {} covered, {} batch-capped)",
+                r.compiled_new, r.rejected_by_validation, r.qualifying_slugs, r.already_covered, r.deferred_batch_cap
             ),
             Ok(_) => {}
             Err(e) => warn!("Compiler pass failed: {e:#}"),
