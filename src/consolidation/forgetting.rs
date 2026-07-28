@@ -35,9 +35,9 @@ use std::collections::{HashMap, HashSet};
 /// delete).
 #[derive(Debug, Serialize)]
 pub struct Forgotten {
-    /// Which store the forgotten item came from — "pattern" or "association".
-    /// Lets the kill-criterion audit (a forgotten lesson recurring in atone
-    /// within two weeks) filter without a join.
+    /// Which store the forgotten item came from — "pattern", "association",
+    /// or "intervention". Lets the kill-criterion audit (a forgotten lesson
+    /// recurring in atone within two weeks) filter without a join.
     pub kind: &'static str,
     /// Episodic id of the forgotten pattern or association.
     pub id: String,
@@ -120,8 +120,10 @@ pub fn govern_associations(
     forgotten
 }
 
-/// Compost expired-window shadows only: `undeliverable` (never fired) or
-/// `contradicted` (owner-demoted); `unabsorbed` is D3's call, not this pass's.
+/// Compost expired-window never-fired shadows as `undeliverable`. Demoted
+/// items are compost-EXEMPT tombstones: removal would erase the owner veto and
+/// un-cover the slug, letting a recompile resurrect the content-stable id with
+/// its pre-veto evidence (gate M2). `unabsorbed` is D3's call, not this pass's.
 pub fn govern_interventions(
     items: &mut Vec<Intervention>,
     fires: &HashMap<String, HashSet<String>>,
@@ -134,12 +136,8 @@ pub fn govern_interventions(
         let age_days = (now - it.created).num_days();
         let past_window = age_days > DECAY_WINDOW_DAYS;
         let demoted = it.promoted_by.as_deref() == Some("owner-demoted");
-        let reason = if it.state != "shadow" || !past_window {
+        let reason = if it.state != "shadow" || !past_window || demoted {
             None
-        } else if demoted {
-            Some(format!(
-                "autopsy: contradicted — owner-demoted; {n} firing session(s) at compost"
-            ))
         } else if n == 0 {
             Some(format!(
                 "autopsy: undeliverable — 0 firing sessions in {age_days}d (window {DECAY_WINDOW_DAYS}d)"
@@ -330,22 +328,16 @@ mod tests {
     }
 
     #[test]
-    fn demoted_composts_as_contradicted_even_with_fires() {
-        let mut items = vec![iv("vetoed", "shadow", 30, true)];
+    fn demoted_is_a_tombstone_and_never_composts() {
+        // Removal would erase the veto and un-cover the slug (gate M2): a
+        // recompiled same-slug-same-body item resurrects the content-stable id
+        // with its pre-veto would-fire evidence and can auto-go live.
+        let mut items = vec![iv("vetoed-old", "shadow", 400, true), iv("vetoed-young", "shadow", 5, true)];
         let mut fires: HashMap<String, HashSet<String>> = HashMap::new();
-        fires.insert("vetoed".into(), ["s1".into(), "s2".into()].into());
-        let forgotten = govern_interventions(&mut items, &fires, now());
-        assert_eq!(forgotten.len(), 1);
-        assert!(forgotten[0].reason.contains("contradicted"));
-        assert!(forgotten[0].reason.contains("2 firing"));
-        assert!(items.is_empty(), "the owner veto outranks fire evidence");
-    }
-
-    #[test]
-    fn demoted_inside_window_keeps_collecting_shadow_telemetry() {
-        let mut items = vec![iv("vetoed", "shadow", 5, true)];
-        assert!(govern_interventions(&mut items, &HashMap::new(), now()).is_empty());
-        assert_eq!(items.len(), 1);
+        fires.insert("vetoed-old".into(), ["s1".into(), "s2".into()].into());
+        assert!(govern_interventions(&mut items, &fires, now()).is_empty());
+        assert_eq!(items.len(), 2, "tombstones survive any age, fired or not");
+        assert!(items.iter().all(|i| i.promoted_by.as_deref() == Some("owner-demoted")));
     }
 
     /// Live: run the B3 pass over COPIES of the real interventions + fire
@@ -355,7 +347,7 @@ mod tests {
     #[ignore]
     fn b3_live_probe() {
         let (ipath, wfpath) = crate::interventions::live_paths().unwrap();
-        let mut items = crate::interventions::load_interventions(&ipath);
+        let mut items = crate::interventions::load_interventions(&ipath).expect("load");
         let fires = crate::interventions::would_fire_sessions(&wfpath);
         crate::interventions::recompute_strength(&mut items, &fires, Utc::now());
         println!("\n{} interventions:", items.len());

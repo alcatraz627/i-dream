@@ -90,8 +90,14 @@ pub struct Intervention {
     pub promoted_by: Option<String>,
     /// Strength in the shared decay economy (B3/C3) — recomputed each wake
     /// pass as a pure function of fires+age, never incremented (replay-safe).
-    #[serde(default)]
+    #[serde(default = "uninitialized_strength")]
     pub strength: f64,
+}
+
+/// Never-stamped sentinel, distinguishable from fully-decayed 0.0 — the
+/// sibling economy's convention (dreaming.rs uninitialized rows).
+fn uninitialized_strength() -> f64 {
+    -1.0
 }
 
 /// Compost window for never-fired shadows (B3). Measured from `created` even
@@ -133,6 +139,20 @@ pub struct CompileReport {
     pub deferred_batch_cap: usize,
 }
 
+impl CompileReport {
+    /// The receipt arithmetic in one testable seam: covered = qualifying −
+    /// (batched + capped), which cannot underflow because batched + capped is
+    /// exactly the eligible subset of qualifying.
+    pub fn with_batch(qualifying: usize, batched: usize, capped: usize) -> Self {
+        CompileReport {
+            qualifying_slugs: qualifying,
+            already_covered: qualifying - batched - capped,
+            deferred_batch_cap: capped,
+            ..Default::default()
+        }
+    }
+}
+
 fn interventions_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("cannot resolve home dir")?;
     Ok(home.join(".claude/i-dream/interventions.json"))
@@ -143,11 +163,19 @@ fn would_fire_path() -> Result<PathBuf> {
     Ok(home.join(".claude/i-dream/would-fire.jsonl"))
 }
 
-pub fn load_interventions(path: &Path) -> Vec<Intervention> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// Missing/empty file = empty store; an EXISTING file that fails to parse is
+/// an Err, never an empty vec (gate M4: silent-empty invited a compile
+/// rewrite that dropped every live record).
+pub fn load_interventions(path: &Path) -> Result<Vec<Intervention>> {
+    let body = match std::fs::read_to_string(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).context("reading interventions.json"),
+    };
+    if body.trim().is_empty() {
+        return Ok(vec![]);
+    }
+    serde_json::from_str(&body).context("parsing interventions.json")
 }
 
 pub fn save_interventions(path: &Path, items: &[Intervention]) -> Result<()> {
@@ -399,17 +427,15 @@ pub async fn run_compile(client: &ClaudeClient) -> Result<CompileReport> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     let attempted: HashSet<String> = cstate.attempted.iter().cloned().collect();
-    let mut existing = load_interventions(&path);
+    // A parse failure bails here — compiling over a store we could not read
+    // would rewrite the file without its live records (gate M4).
+    let mut existing = load_interventions(&path)?;
     let covered: HashSet<String> = existing.iter().map(|i| i.slug.clone()).collect();
 
     let qualified = qualified_slugs(&atone);
-    let mut report = CompileReport {
-        qualifying_slugs: qualified.len(),
-        ..Default::default()
-    };
+    let qualifying = qualified.len();
     let (batch, capped) = select_batch(qualified, &covered, &attempted, 10);
-    report.deferred_batch_cap = capped;
-    report.already_covered = report.qualifying_slugs - batch.len() - capped;
+    let mut report = CompileReport::with_batch(qualifying, batch.len(), capped);
     if batch.is_empty() {
         return Ok(report);
     }
@@ -1139,10 +1165,42 @@ garbage
     }
 
     #[test]
+    fn corrupt_store_is_an_error_never_an_empty_vec() {
+        // Gate M4: silent-empty invited a compile rewrite dropping live records.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("interventions.json");
+        std::fs::write(&p, "{ not json").unwrap();
+        assert!(load_interventions(&p).is_err(), "garbage must not read as empty");
+        std::fs::write(&p, "   \n").unwrap();
+        assert!(load_interventions(&p).unwrap().is_empty(), "whitespace file = empty store");
+    }
+
+    #[test]
+    fn legacy_rows_without_strength_read_as_uninitialized_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("interventions.json");
+        std::fs::write(
+            &p,
+            r#"[{"id":"x","slug":"s","source":"atone-precheck","form":"hint","state":"shadow","trigger":{},"body":"b","created":"2026-07-24T00:00:00Z"}]"#,
+        )
+        .unwrap();
+        let items = load_interventions(&p).unwrap();
+        assert_eq!(items[0].strength, -1.0, "never-stamped, distinguishable from decayed 0.0");
+    }
+
+    #[test]
+    fn receipt_arithmetic_splits_covered_from_capped() {
+        let r = CompileReport::with_batch(10, 2, 3);
+        assert_eq!(r.qualifying_slugs, 10);
+        assert_eq!(r.already_covered, 5, "10 qualifying − 2 batched − 3 capped");
+        assert_eq!(r.deferred_batch_cap, 3);
+    }
+
+    #[test]
     fn store_roundtrip_is_atomic_and_tolerant() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("nested/interventions.json");
-        assert!(load_interventions(&p).is_empty(), "missing file = empty");
+        assert!(load_interventions(&p).unwrap().is_empty(), "missing file = empty");
         let items = vec![Intervention {
             id: "x".into(),
             slug: "s".into(),
@@ -1160,7 +1218,7 @@ garbage
             strength: 0.0,
         }];
         save_interventions(&p, &items).unwrap();
-        let back = load_interventions(&p);
+        let back = load_interventions(&p).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].trigger.prompt_pattern.as_deref(), Some("deploy"));
         assert!(!p.with_extension("json.tmp").exists());

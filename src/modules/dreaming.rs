@@ -29,6 +29,42 @@ struct ProcessedState {
     sessions: HashMap<String, u64>,
 }
 
+/// B3 wake pass: recompute intervention strengths, compost expired shadows.
+/// Compost records land BEFORE the save (archive-before-delete): a save
+/// failure can duplicate a ledger line next cycle, never forget silently.
+pub fn govern_interventions_pass(store: &crate::store::Store) -> anyhow::Result<String> {
+    let (ipath, wf_path) = crate::interventions::live_paths()?;
+    let mut items = crate::interventions::load_interventions(&ipath)?;
+    let composted = if items.is_empty() {
+        vec![]
+    } else {
+        let ifires = crate::interventions::would_fire_sessions(&wf_path);
+        crate::interventions::recompute_strength(&mut items, &ifires, Utc::now());
+        let composted = crate::consolidation::forgetting::govern_interventions(
+            &mut items,
+            &ifires,
+            Utc::now(),
+        );
+        for f in &composted {
+            store.append_jsonl("dreams/forgotten.jsonl", f)?;
+        }
+        if !composted.is_empty() {
+            store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
+        }
+        crate::interventions::save_interventions(&ipath, &items)?;
+        composted
+    };
+    let count = |s: &str| items.iter().filter(|i| i.state == s).count();
+    Ok(format!(
+        "interventions: {} in economy ({} live / {} candidate / {} shadow), {} composted",
+        items.len(),
+        count("live"),
+        count("candidate"),
+        count("shadow"),
+        composted.len()
+    ))
+}
+
 /// A compressed learning extracted during SWS phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedPattern {
@@ -1595,38 +1631,16 @@ Output ONLY a JSON array. No commentary."#;
             ),
         )?;
 
-        // B3: interventions ride the same wake governance. Compost records are
-        // appended BEFORE the save (archive-before-delete); a save failure can
-        // therefore duplicate a ledger line next cycle, never forget silently.
-        if let Ok((ipath, wf_path)) = crate::interventions::live_paths() {
-            let mut items = crate::interventions::load_interventions(&ipath);
-            if !items.is_empty() {
-                let ifires = crate::interventions::would_fire_sessions(&wf_path);
-                crate::interventions::recompute_strength(&mut items, &ifires, Utc::now());
-                let composted = crate::consolidation::forgetting::govern_interventions(
-                    &mut items,
-                    &ifires,
-                    Utc::now(),
-                );
-                for f in &composted {
-                    self.store.append_jsonl("dreams/forgotten.jsonl", f)?;
-                }
-                crate::interventions::save_interventions(&ipath, &items)?;
-                let count = |s: &str| items.iter().filter(|i| i.state == s).count();
-                tracer.note(
-                    TracePhase::Wake,
-                    EventKind::InsightsPromoted,
-                    format!(
-                        "interventions: {} in economy ({} live / {} candidate / {} shadow), {} composted",
-                        items.len(),
-                        count("live"),
-                        count("candidate"),
-                        count("shadow"),
-                        composted.len()
-                    ),
-                )?;
+        // B3: interventions ride the same wake governance. Non-fatal (gate
+        // M3) and the note is unconditional either way (gate m4).
+        let b3_note = match govern_interventions_pass(&self.store) {
+            Ok(note) => note,
+            Err(e) => {
+                warn!("B3 interventions pass failed: {e:#}");
+                format!("interventions: pass FAILED ({e:#})")
             }
-        }
+        };
+        tracer.note(TracePhase::Wake, EventKind::InsightsPromoted, b3_note)?;
 
         // Graduation-yield SLO (docs/25 item 14): when the last two judged
         // reviews both yielded under the floor, WAKE stops generating new
@@ -2083,7 +2097,15 @@ impl<'a> Module for DreamingModule<'a> {
             Err(e) => warn!("Compiler pass failed: {e:#}"),
         }
         if let Ok((ipath, wfpath)) = crate::interventions::live_paths() {
-            let mut items = crate::interventions::load_interventions(&ipath);
+            // Parse failure warns and skips — never promote over an unreadable
+            // store, never fail the cycle (gate M3/M4 posture).
+            let mut items = match crate::interventions::load_interventions(&ipath) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Promotion pass skipped — interventions store unreadable: {e:#}");
+                    vec![]
+                }
+            };
             if !items.is_empty() {
                 let fires = crate::interventions::would_fire_sessions(&wfpath);
                 let changed = crate::interventions::promote_on_evidence(

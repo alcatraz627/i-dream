@@ -385,7 +385,7 @@ async fn main() -> Result<()> {
             html,
         } => {
             let (ipath, wfpath) = interventions::live_paths()?;
-            let mut items = interventions::load_interventions(&ipath);
+            let mut items = interventions::load_interventions(&ipath)?;
             let fires = interventions::would_fire_sessions(&wfpath);
             if html {
                 let totals = interventions::would_fire_totals(&wfpath);
