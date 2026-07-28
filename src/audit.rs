@@ -628,7 +628,11 @@ to the user's ~/.claude/ Global Claude Config (GCC) based on this week's signals
 3. **dreams-analyst** — read the daily digests. Surface cross-domain
    patterns the LLM found that warrant GCC encoding.
 4. **gcc-fitness-scorer** — propose structural GCC improvements (sections
-   that have grown too big, duplicate content, etc.).
+   that have grown too big, duplicate content, etc.). When reading hook
+   telemetry: `heeded=unknown` is NO-SIGNAL, never non-compliance — blocking
+   hooks imply compliance via the deny and never assert heedance; only
+   follow-up-tracking hooks write true/false. An unknown-only hook with zero
+   tracked heedances is a tracking-shape fact, not a dead hook.
 5. **graduation-curator** — propose specific slug→rule promotions when 3+
    atone or affirm events agree.
 6. **abandoned-threads** — flag pinned insights or daily-digest topics that
