@@ -2108,12 +2108,15 @@ impl<'a> Module for DreamingModule<'a> {
             };
             if !items.is_empty() {
                 let fires = crate::interventions::would_fire_sessions(&wfpath);
+                // Owner ladder: hints auto-promote on evidence; nudges only
+                // via review::auto_nudges_now (streak + currently-behind).
+                let auto_nudges = crate::review::auto_nudges_now();
                 let changed = crate::interventions::promote_on_evidence(
                     &mut items,
                     &fires,
                     Utc::now(),
-                    true,  // hints auto-promote on evidence (owner ladder)
-                    false, // nudges: only via flip until a missed-review counter exists
+                    true,
+                    auto_nudges,
                 );
                 if changed > 0 {
                     if let Err(e) = crate::interventions::save_interventions(&ipath, &items) {

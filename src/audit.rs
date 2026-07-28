@@ -204,6 +204,18 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
     // `i-dream audit run` interactively to approve/apply.
     if non_interactive {
         write_audit_log(&inputs.audit_date, &filtered, &[], &[])?;
+        // Miss check must read the flag BEFORE mark_pending rewrites it: a
+        // still-present flag means the prior staging was never walked. Never
+        // fatal — a counter write failure must not block the pending flag
+        // (gate MAJOR-5: the owner would never see the staged proposals).
+        let misses = crate::review::record_staging(&inputs.audit_date.to_string())
+            .unwrap_or_else(|e| {
+                println!("  (miss-counter write failed — treated as 0: {e:#})");
+                0
+            });
+        if misses > 0 {
+            println!("  ({misses} consecutive review(s) missed — nudge auto-promotion unlocks at {})", crate::review::NUDGE_UNLOCK_MISSES);
+        }
         // Flag that proposals await review so `i-dream review --if-pending`
         // (the Monday LaunchAgent) surfaces them; cleared when review opens.
         crate::review::mark_pending(&inputs.audit_date.to_string())?;
@@ -393,7 +405,10 @@ async fn run(config: &Config, dry_run: bool, week_days: u32, non_interactive: bo
 
     // An interactive run completing IS the review — clear the pending flag so
     // the Monday LaunchAgent stops re-surfacing these (set by --non-interactive).
-    let _ = crate::review::clear_pending();
+    // Never on dry-run: a simulated review must not eat a real pending flag.
+    if !dry_run {
+        let _ = crate::review::clear_pending();
+    }
 
     println!("\n─── audit complete ──────────────────────────────────────────────");
     println!("  Surfaced:  {}", filtered.len());

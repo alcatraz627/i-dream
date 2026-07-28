@@ -16,7 +16,7 @@ use std::process::Command;
 const GHOSTTY_APP: &str = "/Applications/Ghostty.app";
 
 fn home() -> Result<PathBuf> {
-    Ok(PathBuf::from(std::env::var("HOME").context("HOME unset")?))
+    dirs::home_dir().context("cannot resolve home dir")
 }
 
 fn flag_path() -> Result<PathBuf> {
@@ -32,6 +32,65 @@ pub fn mark_pending(audit_date: &str) -> Result<()> {
     }
     std::fs::write(&p, audit_date)?;
     Ok(())
+}
+
+fn misses_path() -> Result<PathBuf> {
+    Ok(home()?.join(".claude/i-dream/derived/review-misses.json"))
+}
+
+/// Nudges unlock for evidence-auto-promotion at this many consecutive missed
+/// reviews (owner ladder 2026-07-22).
+pub const NUDGE_UNLOCK_MISSES: usize = 2;
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct ReviewMisses {
+    consecutive: usize,
+    #[serde(default)]
+    last_staged: String,
+}
+
+/// 0 on absent/unreadable — fail-closed toward human gating.
+pub fn consecutive_missed_reviews() -> usize {
+    misses_path()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<ReviewMisses>(&s).ok())
+        .map(|m| m.consecutive)
+        .unwrap_or(0)
+}
+
+/// A miss = the prior staging's flag is STILL present when the next staging
+/// arrives (nobody walked or cleared it in between).
+pub fn bump_or_reset(prior: usize, missed: bool) -> usize {
+    if missed { prior + 1 } else { 0 }
+}
+
+/// Unlock = streak AND currently behind (gate MAJOR-4: without the flag term
+/// the latch stayed open after the owner caught up, and empty-staging weeks
+/// never reset it).
+pub fn nudges_unlocked(misses: usize, flag_present: bool) -> bool {
+    flag_present && misses >= NUDGE_UNLOCK_MISSES
+}
+
+/// The one composed read the promote block wires. Fail-closed everywhere.
+pub fn auto_nudges_now() -> bool {
+    let flag = flag_path().map(|p| p.exists()).unwrap_or(false);
+    nudges_unlocked(consecutive_missed_reviews(), flag)
+}
+
+/// Called at staging time, BEFORE `mark_pending` rewrites the flag.
+pub fn record_staging(audit_date: &str) -> Result<usize> {
+    let missed = flag_path()?.exists();
+    let n = bump_or_reset(consecutive_missed_reviews(), missed);
+    let p = misses_path()?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = p.with_extension("json.tmp");
+    let state = ReviewMisses { consecutive: n, last_staged: audit_date.into() };
+    std::fs::write(&tmp, serde_json::to_string_pretty(&state)?)?;
+    std::fs::rename(&tmp, &p)?;
+    Ok(n)
 }
 
 /// Clear the pending flag — called when an interactive `audit run` completes,
@@ -209,5 +268,39 @@ mod tests {
         // Don't assert the home prefix (varies by machine) — just the tail.
         let p = flag_path().unwrap();
         assert!(p.ends_with(".claude/i-dream/.review-pending"));
+    }
+
+    #[test]
+    fn misses_bump_on_missed_and_reset_on_walked() {
+        assert_eq!(bump_or_reset(0, true), 1);
+        assert_eq!(bump_or_reset(1, true), 2, "consecutive misses accumulate");
+        assert_eq!(bump_or_reset(5, false), 0, "one walked review resets the streak");
+    }
+
+    #[test]
+    fn unlock_requires_streak_and_currently_behind() {
+        assert!(!nudges_unlocked(2, false), "caught up = locked, whatever the streak");
+        assert!(!nudges_unlocked(9, false), "empty-staging weeks cannot hold it open");
+        assert!(!nudges_unlocked(1, true), "behind but no streak = locked");
+        assert!(nudges_unlocked(2, true));
+    }
+
+    #[test]
+    fn promote_block_wires_the_composed_unlock() {
+        // Reads the OTHER side (not a same-file drift guard): pins the exact
+        // hardwired-open mutation the gate ran against dreaming.rs.
+        let src = include_str!("modules/dreaming.rs");
+        assert!(
+            src.contains("crate::review::auto_nudges_now()"),
+            "the ladder's unlock must come from review::auto_nudges_now"
+        );
+        assert!(!src.contains("auto_nudges = true"), "hardwired-open forbidden");
+    }
+
+    #[test]
+    fn nudge_unlock_boundary_is_two_consecutive() {
+        assert!(bump_or_reset(0, true) < NUDGE_UNLOCK_MISSES, "one miss stays locked");
+        assert!(bump_or_reset(1, true) >= NUDGE_UNLOCK_MISSES, "second consecutive miss unlocks");
+        assert!(bump_or_reset(bump_or_reset(1, true), false) < NUDGE_UNLOCK_MISSES, "a walk re-locks");
     }
 }
