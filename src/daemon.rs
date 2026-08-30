@@ -962,6 +962,7 @@ impl Daemon {
                 e.1 += 1;
             }
         }
+        let mut drifted: Vec<(String, f64, f64, f64)> = Vec::new();
         for (cat, (sum_p, n_p)) in &prior {
             if *n_p < 3 {
                 continue;
@@ -983,9 +984,55 @@ impl Daemon {
                     n_recent = n_r,
                     "D19: category-level confidence drift detected (≥10% week-over-week drop)",
                 );
+                drifted.push((cat.to_string(), prior_avg, recent_avg, rel_drop));
             }
         }
+        Self::notify_drift(&drifted);
         Ok(())
+    }
+
+    /// Fire an osascript notification for D19 drift events. Batches multiple
+    /// drifted categories into one notification to avoid spamming the user.
+    /// Uses osascript instead of UNUserNotificationCenter — the latter crashes
+    /// for unbundled processes (no bundle ID). Errors are non-fatal.
+    fn notify_drift(drifted: &[(String, f64, f64, f64)]) {
+        if drifted.is_empty() {
+            return;
+        }
+        let body = if drifted.len() == 1 {
+            let (cat, prior_avg, recent_avg, rel_drop) = &drifted[0];
+            format!(
+                "{cat}: {:.0}% drop (prior {:.2}, recent {:.2})",
+                rel_drop * 100.0,
+                prior_avg,
+                recent_avg
+            )
+        } else {
+            let cats: Vec<&str> = drifted.iter().map(|(c, _, _, _)| c.as_str()).collect();
+            format!("{} categories drifted: {}", drifted.len(), cats.join(", "))
+        };
+        // Sanitize for embedding in an AppleScript string literal.
+        let body = body
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', " ")
+            .replace('\r', " ");
+        let script = format!(
+            "display notification \"{body}\" with title \"i-dream \u{2014} drift detected\" sound name \"Glass\""
+        );
+        match std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+        {
+            Ok(mut child) => {
+                if let Err(e) = child.wait() {
+                    tracing::warn!("D19: osascript wait failed: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("D19: osascript spawn failed: {e}");
+            }
+        }
     }
 
     /// D17 — runs at most once per ISO week. State tracked in
@@ -3049,5 +3096,11 @@ timeout = "10s"
             .unwrap_or_default()
             .len();
         assert_eq!(intentions_count_2, 1, "second call must not duplicate");
+    }
+
+    #[test]
+    fn d19_notify_drift_does_not_panic_on_zero_drift_categories() {
+        // Smoke-check: calling with an empty slice must be a no-op and not panic.
+        Daemon::notify_drift(&[]);
     }
 }
