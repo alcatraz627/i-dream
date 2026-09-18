@@ -83,9 +83,21 @@ snooze with a 30-day expiry and a renew line in the brief; the hook keeps its
 old check until the migration lands. Enabler sentinels (`.allow-*`) are not
 mutes and stay.
 
-### 3. `lifecycle` — every advisory hook declares how it will be judged
+### 3. `lifecycle` — the tune-able few declare how they will be judged
 
-Adds three frontmatter-style lines to each hook header, parsed by
+Owner ruling 2026-09-18, verbatim: "most hooks can be mechanical and simple and
+dumb, the self-correcting or tune-able hooks are just a small but critical
+fraction." So this is NOT a default for all 142 registrations. A mechanical
+guard (chain guard, safe-delete, secret read, rg-replace, cd-relative-path,
+zsh path var, credentials) stays dumb and carries no header. The contract
+applies only to hooks whose value depends on a judgment that can drift:
+advisory nudges with a heed question (persona-suggest, prefer-tmp-py,
+prefer-ripgrep, skill-lint, no-task-nudge, guard-env-access,
+guard-speculative-export), the register gates (prose-smell, reply-lede,
+dense-shapes), and the policy-driven ones (model-tier fable advisory,
+weekly-usage). About a dozen, named in the script, not discovered.
+
+Those add three frontmatter-style lines to the hook header, parsed by
 `ledger/hook-health.sh` (exists, reads warn-events):
 
 ```
@@ -115,7 +127,8 @@ table; nothing retires itself.
 2. `hook-snooze` plus `hook_snoozed`, the AskUserQuestion shape, the brief
    line. Migrate the five live sentinels. Closes prop-20260709-165847-a4. One
    session.
-3. Lifecycle headers on the 25 busiest hooks, hook-health table in the brief.
+3. Lifecycle headers on the dozen tune-able hooks named above, hook-health
+   table in the brief; mechanical guards untouched.
    First retire-if verdicts land two weeks later. Half a session plus the wait.
 
 ## Decisions this needs
