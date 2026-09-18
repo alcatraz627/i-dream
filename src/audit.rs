@@ -623,8 +623,12 @@ to the user's ~/.claude/ Global Claude Config (GCC) based on this week's signals
 
 1. **atone-analyst** — read atone TLDR. Surface patterns ripe for graduation
    from mistake-patterns.md into rules/*.md or a hook.
-2. **affirm-analyst** — read affirm TLDR. Surface affirmed behaviors worth
-   promoting to standing rules.
+2. **affirm-analyst** — read affirm TLDR. An /affirm entry is fire-and-forget:
+   it records that a habit was good IN THAT INSTANCE (owner ruling 2026-08-13).
+   It is never a signal to encourage the behavior generally, to add a standing
+   directive, or to weaken a halt-and-confirm rule. Propose ONLY when an
+   affirmed behavior exposes a contradiction in an existing rule (the rule
+   forbids what was affirmed); otherwise emit no proposal from this lens.
 3. **dreams-analyst** — read the daily digests. Surface cross-domain
    patterns the LLM found that warrant GCC encoding.
 4. **gcc-fitness-scorer** — propose structural GCC improvements (sections
@@ -634,7 +638,8 @@ to the user's ~/.claude/ Global Claude Config (GCC) based on this week's signals
    follow-up-tracking hooks write true/false. An unknown-only hook with zero
    tracked heedances is a tracking-shape fact, not a dead hook.
 5. **graduation-curator** — propose specific slug→rule promotions when 3+
-   atone or affirm events agree.
+   ATONE events share a slug. Affirm events never count toward graduation
+   (same 2026-08-13 ruling as lens 2).
 6. **abandoned-threads** — flag pinned insights or daily-digest topics that
    have appeared multiple weeks without action.
 7. **challenger** — for any proposal another lens makes, write a one-line

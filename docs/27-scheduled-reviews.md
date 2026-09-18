@@ -18,6 +18,26 @@ minimal weekly-sweep version) — it is never answered by adding a module.
 | 2 — one month | **2026-08-14 (Fri) 15:00** | `idream-health-review-1mo` | THE 4-week keep-criteria bar + standing-metrics sweep + a real revert drill |
 | 3 — two months | **2026-09-14 (Mon) 15:00** | `idream-health-review-2mo` | efficacy per token; keep/kill the dream half; retire or renew this doc |
 
+## Outcome log
+
+- **Review 1 (2026-07-27)** — schedule fired, no artifact produced. Its binding
+  item-15 kill check never ran. Treat as not held.
+- **Review 2 (2026-08-14)** — held. Keep-criteria MISSED on criterion 1 (two
+  write-only lanes); shrink parked to Review 3 by owner decision. `.inject-on`
+  flipped off as an experiment, atone TL;DR lane left live. Revert drill run for
+  real and verified. Record:
+  `~/Code/Claude/i-dream/.claude/output/20260814-1mo-health-review/review.md`
+- **Review 3 (scheduled 2026-09-14, held 2026-09-18)** — the schedule fired and
+  wrote nothing, the second review to do so. Held four days late inside the
+  combined 3-week weekly review. Item 7 decided WIDE (owner D8a): the dream
+  pass, daily digest, smell panel, audit generator and Monday review-opener
+  crons are retired; the nightly transcript sweep (residue-review, S3 only,
+  session-keyed) plus human review is what remains. Item 8 answered by the
+  atone ledger itself: 14,000 injections across the top four slugs and every
+  count rose, so injection was not the lever. Item 10 honoured by this record:
+  `~/Code/Claude/i-dream/.claude/output/20260918-3wk-review/report.md`
+  Item 11: this doc is retired with this entry; nothing binding remains.
+
 ## Where the evidence lives (all reviews)
 
 - `i-dream status` — daemon liveness, cycle count, cumulative tokens
@@ -130,7 +150,35 @@ the whole effort)?
    record in docs/25 item 12).
 6. **Structural debt.** Any new parallel-session uncommitted-module blockers;
    suite green; `cargo build` from a clean checkout.
-7. **Retire or renew this doc.** Fold whatever is still load-bearing into the
+7. **Inherited from Review 2 — the parked keep-criteria miss (BINDING, now
+   overdue).** Review 2 measured criterion 1 as failed: `derived/curves.json`
+   and `derived/smell-divergence.jsonl` are written and read by nothing. The
+   owner parked the shrink rather than applying it on 2026-08-14. That deferral
+   expires here. Decide narrow (retire both lanes) or wide (shrink the whole
+   metabolism to a weekly transcript sweep plus human review); parking a second
+   time means the bar is not binding and should be struck from docs/25 rather
+   than left standing as decoration.
+8. **Inherited from Review 2 — the injection-off experiment.** `.inject-on` was
+   flipped off 2026-08-14 ~09:51Z, with the atone TL;DR lane deliberately left
+   live. Compare per-slug recurrence for the off period against the
+   2026-07-13 → 2026-08-14 on period, using `i-dream reflect` and `i-dream
+   curves` over the same slugs. Note before reading them that the two
+   instruments disagreed at Review 2 (`declared-ready-without-runtime-exercise`
+   read worsening in reflect and falling in curves off the same 16 events);
+   reconcile them or pick one and say which. If recurrence is unchanged with
+   injection off, injection was not the causal lever and the dream half's
+   retrieval story is closed.
+9. **Dangling links (regression, opened at Review 2).** 90.1% of
+    `patterns_linked` references resolved to no pattern (904 of 1003), against a
+    34% baseline and a <5% target. Suspected cause is `prune-patterns` removing
+    patterns without cleaning their links. Re-measure; this is a repair to
+    shipped code, not a new module.
+10. **Every review writes an artifact.** Review 1 fired on schedule
+    (`~/.claude/logs/launchd/idream-health-review-2wk.out.log`) and left nothing
+    behind, so Review 2 had no numbers to trend against and item 15's binding
+    kill check silently never happened. A review that produces no file did not
+    happen. Write to `.claude/output/<YYYYMMDD>-<slug>/`.
+11. **Retire or renew this doc.** Fold whatever is still load-bearing into the
    standing weekly audit; `gcc-schedule doctor` to confirm the three one-shots
    self-retired; write a next-horizon doc ONLY if something binding remains —
    an expired review doc lying around reads as live process (doc-rot).
