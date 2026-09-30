@@ -1,6 +1,11 @@
+<p align="center">
+  <img src=".github/readme/banner.svg" alt="i-dream banner: House of five modules" width="100%">
+</p>
+
+# <img src=".github/readme/favicon.svg" alt="" width="32" height="32"> i-dream
+
 <div align="center">
 
-<img src="docs/banner.svg" alt="i-dream — a subconsciousness layer for Claude Code" width="100%"/>
 
 **Background memory consolidation, pattern extraction, intuition, metacognition, and introspective self-analysis — running silently while you work.**
 
@@ -35,6 +40,13 @@
 </div>
 
 ---
+
+<details>
+<summary>Riddle answer</summary>
+
+The dream cycle's three phases, in the dashboard's own colours: SWS (blue) extracts patterns, REM (purple) makes loose cross-session associations, and Wake (green) verifies them against the filesystem before promoting them to insights.md.
+
+</details>
 
 ## Top highlight insights — and how they got there
 
