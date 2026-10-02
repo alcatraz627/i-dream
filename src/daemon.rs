@@ -711,8 +711,10 @@ impl Daemon {
             }
         }
 
-        // Phase 5: Insight Digest (3h cooldown, capped at 512 tokens)
-        if budget > 0 {
+        // Phase 5: Insight Digest (3h cooldown, capped at 512 tokens). Its
+        // only reader is dream-insights.sh, gated by dreams/.inject-on, so
+        // without that flag the digest is written for nobody.
+        if budget > 0 && self.store.exists("dreams/.inject-on") {
             let module = InsightDigestModule::new(&self.config, &self.store);
             if module.should_run()? {
                 let digest_budget = budget.min(512);
