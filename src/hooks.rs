@@ -106,13 +106,7 @@ fn uninstall(config: &Config) -> Result<()> {
 
         for (_event, entries) in hooks.iter_mut() {
             if let Some(arr) = entries.as_array_mut() {
-                arr.retain(|entry| {
-                    entry
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|cmd| !cmd.contains(&prefix))
-                        .unwrap_or(true)
-                });
+                remove_commands_with_prefix(arr, &prefix);
             }
         }
     }
@@ -153,13 +147,8 @@ fn status(config: &Config) -> Result<String> {
             .and_then(|h| h.get(event))
             .and_then(|entries| entries.as_array())
             .map(|arr| {
-                arr.iter().any(|entry| {
-                    entry
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|cmd| cmd.contains(&prefix))
-                        .unwrap_or(false)
-                })
+                arr.iter()
+                    .any(|entry| entry_commands(entry).iter().any(|cmd| cmd.contains(&prefix)))
             })
             .unwrap_or(false);
 
@@ -172,6 +161,46 @@ fn status(config: &Config) -> Result<String> {
     }
 
     Ok(out)
+}
+
+/// Every command an event entry runs, in either settings shape: the current
+/// grouped `{hooks: [{type, command}]}` or the legacy bare `{type, command}`.
+fn entry_commands(entry: &Value) -> Vec<&str> {
+    let mut cmds: Vec<&str> = entry
+        .get("hooks")
+        .and_then(|h| h.as_array())
+        .map(|inner| inner.iter().filter_map(|h| h.get("command")?.as_str()).collect())
+        .unwrap_or_default();
+    if let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) {
+        cmds.push(cmd);
+    }
+    cmds
+}
+
+/// Remove our commands from one event's entries without touching anyone
+/// else's: a group shared with other tools keeps its other hooks, and only
+/// a group left empty is dropped.
+fn remove_commands_with_prefix(entries: &mut Vec<Value>, prefix: &str) {
+    for entry in entries.iter_mut() {
+        if let Some(inner) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            inner.retain(|h| {
+                h.get("command")
+                    .and_then(|c| c.as_str())
+                    .is_none_or(|cmd| !cmd.contains(prefix))
+            });
+        }
+    }
+    entries.retain(|entry| {
+        let bare_ours = entry
+            .get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|cmd| cmd.contains(prefix));
+        let emptied_group = entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|inner| inner.is_empty());
+        !bare_ours && !emptied_group
+    });
 }
 
 fn add_hook_entry(
@@ -605,6 +634,35 @@ fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OURS: &str = "/home/u/.claude/subconscious/hooks";
+
+    #[test]
+    fn entry_commands_reads_grouped_and_bare_shapes() {
+        let grouped = serde_json::json!({"hooks": [
+            {"type": "command", "command": "bash /other/a.sh"},
+            {"type": "command", "command": format!("bash {OURS}/stop.sh")}
+        ]});
+        let bare = serde_json::json!({"type": "command", "command": format!("bash {OURS}/stop.sh")});
+        assert!(entry_commands(&grouped).iter().any(|c| c.contains(OURS)));
+        assert!(entry_commands(&bare).iter().any(|c| c.contains(OURS)));
+    }
+
+    #[test]
+    fn uninstall_keeps_other_tools_hooks_in_a_shared_group() {
+        let mut entries = vec![
+            serde_json::json!({"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "bash /other/a.sh"},
+                {"type": "command", "command": format!("bash {OURS}/pre-tool-use.sh")}
+            ]}),
+            serde_json::json!({"hooks": [{"type": "command", "command": format!("bash {OURS}/stop.sh")}]}),
+            serde_json::json!({"type": "command", "command": format!("bash {OURS}/legacy.sh")}),
+        ];
+        remove_commands_with_prefix(&mut entries, OURS);
+        assert_eq!(entries.len(), 1, "our-only group and bare entry are dropped");
+        let left = entry_commands(&entries[0]);
+        assert_eq!(left, vec!["bash /other/a.sh"]);
+    }
 
     fn run_hook_script(script: &std::path::Path, home: &std::path::Path, input: &str) -> String {
         use std::io::Write;

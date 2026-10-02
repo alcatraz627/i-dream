@@ -413,6 +413,11 @@ impl Daemon {
                     self.cycle_in_progress.store(false, Ordering::SeqCst);
                     return;
                 }
+                if let Some(detail) = shared_usage_gate_closed() {
+                    warn!("Account usage gate closed ({detail}), skipping automatic consolidation cycle");
+                    self.cycle_in_progress.store(false, Ordering::SeqCst);
+                    return;
+                }
                 let result = self.run_consolidation().await;
                 self.cycle_in_progress.store(false, Ordering::SeqCst);
                 if let Err(e) = result {
@@ -446,6 +451,19 @@ impl Daemon {
         let settings = UserSettings::load(&self.config.data_dir());
         let threshold_hours = settings.effective_threshold_hours(self.config.idle.threshold_hours);
         let threshold_secs = (threshold_hours * 3600.0) as i64;
+
+        // One dream per idle period. Without this, a long idle stretch
+        // re-ran the cycle every check interval, and each run archived a
+        // fresh snapshot even when nothing new had happened.
+        let already_dreamt = self
+            .state
+            .lock()
+            .map(|s| s.last_consolidation.is_some_and(|t| t >= last_activity))
+            .unwrap_or(false);
+        if already_dreamt {
+            debug!("Already consolidated since the last activity, waiting for new work");
+            return Ok(false);
+        }
 
         let idle_secs = (Utc::now() - last_activity).num_seconds();
 
@@ -765,7 +783,7 @@ impl Daemon {
             Err(e) => warn!("Firing scan failed: {e:#}"),
         }
 
-        // Wave 2 items 9+10 — reinforcement: fade every pattern a little, feed
+        // Reinforcement: fade patterns once per elapsed day, feed
         // this cycle's honored/rejected feedback back onto the source patterns,
         // and evict the weakest so the store keeps what it uses. Runs after
         // dreaming (fresh patterns/associations) and intuition (fresh feedback),
@@ -852,7 +870,8 @@ impl Daemon {
 
         // M17 daemon-side — auto-snapshot. On by default. Lets
         // `snapshot-diff` answer "what changed last cycle?" without
-        // any manual snapshot command. Bounded to most-recent 30.
+        // any manual snapshot command. Older snapshots move to
+        // `_archived` (see cycle_auto_snapshot); nothing deletes them.
         if self.config.modules.dreaming.auto_snapshot_each_cycle
             && let Err(e) = Self::cycle_auto_snapshot(&self.store)
         {
@@ -1394,6 +1413,25 @@ const DOMAIN_CADENCE_STATE: &str = "dreams/domain-cadence.json";
 struct DomainCadenceState {
     #[serde(default)]
     last_run: std::collections::HashMap<String, DateTime<Utc>>,
+}
+
+/// Ask the account-wide usage gate whether background work may spend tokens.
+///
+/// The same gate the nightly residue review uses, so the daemon stands down
+/// when the owner's 5-hour or weekly window is nearly spent. Returns the gate's
+/// detail line when it is closed, `None` when open or when the gate script is
+/// missing or unreadable (a broken gate must not silently stop dreaming).
+fn shared_usage_gate_closed() -> Option<String> {
+    let script = crate::config::expand_tilde(Path::new("~/.claude/scripts/cron/usage-gate.sh"));
+    if !script.exists() {
+        return None;
+    }
+    let out = std::process::Command::new("bash").arg(&script).output().ok()?;
+    if out.status.code() == Some(1) {
+        let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        return Some(line.replace('\t', " "));
+    }
+    None
 }
 
 /// Parse a manifest cadence word into a period. Vocabulary in the wild:
@@ -2796,6 +2834,17 @@ timeout = "10s"
             client: None,
             cycle_in_progress: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn should_consolidate_runs_once_per_idle_period() {
+        // No activity file reads as "idle past the threshold", so only the
+        // once-per-idle-period latch can hold the cycle back here.
+        let (dir, store) = mk_store();
+        let mut d = mk_daemon_with_store(store);
+        d.config.idle.activity_signal = dir.path().join("no-such-activity");
+        d.state.lock().unwrap().last_consolidation = Some(Utc::now());
+        assert!(!d.should_consolidate().unwrap());
     }
 
     #[test]
