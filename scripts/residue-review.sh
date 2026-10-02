@@ -35,6 +35,8 @@ log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" | tee -a "$LOG"
 # 2026-08-21). By-design skip, not a failure — exit 0, unlike the loud AUTH-FAIL.
 gate=$(bash "$HOME/.claude/scripts/cron/usage-gate.sh" 2>/dev/null) || {
   log "GATED: usage window nearly spent (${gate#*	}) — standing down by design"
+  # Tell the scheduler this run did no work, so history does not read it as a review.
+  [ -n "${GCC_SCHED_META:-}" ] && printf 'outcome=ok\nreason=gated\nstage=gate\n' > "$GCC_SCHED_META"
   exit 0
 }
 
