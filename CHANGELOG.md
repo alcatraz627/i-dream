@@ -6,6 +6,30 @@ All notable changes to i-dream are documented in this file. Format follows [Keep
 
 ---
 
+## [0.5.4] — 2026-10-03 Audit fixes: stop the idle churn, record honestly
+
+From the October audit (`.claude/output/20261003-audit/`, `20261003-span-audit/`).
+The crate version had stayed at 0.4.2 through 0.5.0 to 0.5.3; it now matches.
+
+### Fixed
+
+- The daemon dreams once per idle period and stands down when the account usage
+  gate is closed; pattern strength fades per elapsed day, not per cycle, and
+  eviction ties fall to the less confident pattern.
+- A correction down-votes only the rules shown to its own session; session
+  start and user-signal events carry the session id.
+- Hints stop at candidate while no hook surface delivers them; the promotions
+  table marks live hints that reach nobody.
+- Project briefs are written only for ids a session can start in; introspection
+  skips headless (`sdk-cli`) transcripts.
+- `hooks status` and `hooks uninstall` read the grouped settings shape.
+- The weekly briefing, board and `domain list` stop presenting retired output
+  as current; `cron install` refuses to reinstate retired jobs without
+  `I_DREAM_CRON_REINSTATE=1`; the phase-5 digest runs only when its reader is on.
+- The sessions extractor runs under Python 3.9; daemon logs are kept 120 days.
+
+---
+
 ## [0.5.3] — 2026-07-24 Interventions Phase 2 — shadow→live promotion ladder
 
 Compiler-drafted interventions promoted through a four-rung ladder (shadow →

@@ -159,13 +159,16 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
             );
         }
         // The pass itself is delta-driven; the cron fire is the only real
-        // per-domain "next chance to run".
-        if let Some(next) = crate::cron::JOBS
-            .iter()
-            .find(|j| j.label.ends_with("dreampass"))
-            .and_then(|j| j.schedule.next_fire_after(chrono::Local::now()))
-        {
-            println!("\nnext dream-pass: {} (cron)", next.format("%Y-%m-%d %H:%M"));
+        // per-domain "next chance to run", and only when its job is installed.
+        let job = crate::cron::JOBS.iter().find(|j| j.label.ends_with("dreampass"));
+        let installed = job
+            .and_then(|j| crate::cron::plist_path(j.label).ok())
+            .is_some_and(|p| p.exists());
+        match job.and_then(|j| j.schedule.next_fire_after(chrono::Local::now())) {
+            Some(next) if installed => {
+                println!("\nnext dream-pass: {} (cron)", next.format("%Y-%m-%d %H:%M"));
+            }
+            _ => println!("\ndream-pass is not scheduled (retired 2026-09-18); `pending` only grows"),
         }
     }
     Ok(())

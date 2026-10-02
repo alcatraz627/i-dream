@@ -143,6 +143,14 @@ pub(crate) fn plist_path(label: &str) -> Result<PathBuf> {
 }
 
 fn install_all() -> Result<()> {
+    // These jobs were retired on 2026-09-18 (owner ruling D8a). Installing
+    // them again is a decision, not a side effect of running a setup step.
+    if std::env::var("I_DREAM_CRON_REINSTATE").as_deref() != Ok("1") {
+        anyhow::bail!(
+            "the scheduled dream jobs were retired on 2026-09-18; \
+             set I_DREAM_CRON_REINSTATE=1 to install them anyway"
+        );
+    }
     let binary = resolve_binary()?;
     let home = dirs::home_dir().context("cannot resolve home dir")?;
     let logs_dir = home.join(".claude/i-dream/logs");
