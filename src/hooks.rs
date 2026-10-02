@@ -43,6 +43,7 @@ fn install(config: &Config) -> Result<()> {
     } else {
         serde_json::json!({})
     };
+    let before = settings.clone();
 
     let hooks = settings
         .as_object_mut()
@@ -81,8 +82,12 @@ fn install(config: &Config) -> Result<()> {
         add_hook_entry(hooks_obj, "PreToolUse", &hooks_dir.join("pre-tool-use.sh"));
     }
 
-    let content = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(&settings_path, content)?;
+    // Rewriting re-sorts every key in the file, so only write when an entry
+    // was actually added; a re-run would otherwise churn the whole file.
+    if settings != before {
+        let content = serde_json::to_string_pretty(&settings)?;
+        std::fs::write(&settings_path, content)?;
+    }
 
     info!("Hooks installed successfully");
     println!("Hooks installed into {}", settings_path.display());
