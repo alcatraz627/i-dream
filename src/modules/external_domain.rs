@@ -137,7 +137,9 @@ impl DreamDomain for ExternalDomain {
                 } else if let Some(last_ts) = cursor.last_ts {
                     // Cursor id gone from the stream — position by timestamp
                     // so we don't silently drop everything after a rotation.
-                    tracing::warn!(
+                    // Debug, not warn: this is the designed recovery, and the
+                    // menubar re-reads every 30 s, so a warn floods the log.
+                    tracing::debug!(
                         "External domain '{}': cursor id '{}' not found; falling back to last_ts",
                         self.name(),
                         last_id

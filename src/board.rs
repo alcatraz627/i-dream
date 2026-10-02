@@ -18,7 +18,13 @@ pub fn render() -> Result<()> {
 
     let latest = fs::read_to_string(daily_dir.join("latest.md")).unwrap_or_default();
 
-    let today = pane("Today", &today_lines(&latest), PANE_W, PANE_H);
+    // The daily digest cron is retired, so the newest digest may be weeks
+    // old; title the pane with its date unless it really is today's.
+    let today_title = match latest_md_date(&daily_dir) {
+        Some(d) if d < Local::now().date_naive() => format!("Last digest {d}"),
+        _ => "Today".to_string(),
+    };
+    let today = pane(&today_title, &today_lines(&latest), PANE_W, PANE_H);
     let week = pane("Week", &week_lines(&daily_dir, &audits_dir), PANE_W, PANE_H);
     let sources = pane("Sources", &section(&latest, "Sources"), PANE_W, PANE_H);
     let fitness = pane("GCC fitness", &fitness_lines(&audits_dir), PANE_W, PANE_H);
@@ -71,16 +77,11 @@ fn week_lines(daily_dir: &PathBuf, audits_dir: &PathBuf) -> Vec<String> {
         Some(d) => {
             let age = (today - d).num_days();
             out.push(format!("Last audit: {d} ({age}d)"));
-            out.push(if age >= 7 {
-                "⚠ audit due (run weekly)".to_string()
-            } else {
-                "audit current".to_string()
-            });
         }
         None => out.push("No audit run yet".to_string()),
     }
     out.push("".to_string());
-    out.push("apply:  i-dream audit run".to_string());
+    out.push("weekly audit retired 2026-09-18".to_string());
     out
 }
 

@@ -9,6 +9,10 @@ most-recent sessions to avoid delivering a giant initial delta to the LLM.
 Exit 0 on success, non-zero on unrecoverable error.
 Stdout summary is captured by i-dream as the consolidation note.
 """
+# The daemon's PATH finds the system Python 3.9 first; this keeps the
+# `X | None` annotations below from being evaluated at import there.
+from __future__ import annotations
+
 import json
 import sys
 from datetime import datetime, timezone

@@ -47,12 +47,12 @@ DOMAINS_SRC="$REPO_DIR/scripts/domains"
 deploy_domain "$DOMAINS_SRC/sessions-domain" "$HOME/.claude/sessions-domain"
 deploy_domain "$DOMAINS_SRC/memory-domain"   "$HOME/.claude/memory-domain"
 
-# felt-metabolism D2: the smell panel runs Sunday + Wednesday 15:00 local
-# (owner schedule 2026-07-22, verbatim: "Run on Sunday and Wednesday, 3PM").
-# Created here if absent so deploy remains the only install step; the reload
-# loop below picks it up by glob.
+# The smell panel (Sunday + Wednesday 15:00) was retired with the other
+# scheduled dream jobs on 2026-09-18, so deploy no longer schedules it.
+# Set I_DREAM_INSTALL_SMELL=1 to bring it back; the reload loop below picks
+# the plist up by glob.
 SMELL_PLIST="$HOME/Library/LaunchAgents/com.alcatraz.i-dream-smell.plist"
-if [ ! -f "$SMELL_PLIST" ]; then
+if [ "${I_DREAM_INSTALL_SMELL:-0}" = "1" ] && [ ! -f "$SMELL_PLIST" ]; then
     mkdir -p "$HOME/.claude/i-dream/logs"
     cat > "$SMELL_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
