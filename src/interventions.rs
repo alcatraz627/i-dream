@@ -40,6 +40,10 @@ const QUALIFY_RECURRENCES: usize = 2;
 /// A shadow hint may auto-promote once it would have fired this many times
 /// across distinct sessions (the evidence bar; owner ladder 2026-07-22).
 pub const EVIDENCE_BAR_FIRES: usize = 5;
+/// Whether any hook surface delivers hint-form items. False since the
+/// 2026-09-05 ruling: the prompt hook runs async and prints nothing, and
+/// PreToolUse handles nudges only. Flip it when a delivering surface returns.
+pub const HINTS_DELIVERED: bool = false;
 /// Body length cap — an intervention is a nudge, not an essay.
 const BODY_MAX: usize = 220;
 /// Pattern length cap (consumer-side `re.compile` is the real validator;
@@ -519,8 +523,11 @@ pub fn promote_on_evidence(
         // item as candidate, but never auto-revive it — only an explicit
         // flip can (the flip surface outranks the ladder).
         let vetoed = it.promoted_by.as_deref() == Some("owner-demoted");
-        let may_auto =
-            !vetoed && ((it.form == "hint" && auto_hints) || (it.form == "nudge" && auto_nudges));
+        // Hints stop at candidate while HINTS_DELIVERED is false: going live
+        // would count fires for a hint no session ever sees.
+        let may_auto = !vetoed
+            && ((it.form == "hint" && auto_hints && HINTS_DELIVERED)
+                || (it.form == "nudge" && auto_nudges));
         if may_auto {
             it.state = "live".into();
             it.promoted = Some(now);
@@ -585,9 +592,15 @@ pub fn render_promotions(items: &[Intervention], fires: &HashMap<String, HashSet
     });
     for it in sorted {
         let n = fires.get(&it.id).map(|s| s.len()).unwrap_or(0);
+        // A live hint reaches nobody while hints have no delivering surface.
+        let state = if it.state == "live" && it.form == "hint" && !HINTS_DELIVERED {
+            "live*".to_string()
+        } else {
+            it.state.clone()
+        };
         out.push_str(&format!(
             "{:<9}  {:>5}  {:<5}  {}  {} — {}\n",
-            it.state,
+            state,
             n,
             it.form,
             &it.id[..8.min(it.id.len())],
@@ -599,6 +612,11 @@ pub fn render_promotions(items: &[Intervention], fires: &HashMap<String, HashSet
         "\npromote: i-dream promotions --promote <id8> · demote: --demote <id8>\n\
          evidence bar: {EVIDENCE_BAR_FIRES} distinct sessions\n"
     ));
+    if !HINTS_DELIVERED {
+        out.push_str(
+            "live* = live hint with no delivering surface (prompt hook is async since 2026-09-05)\n",
+        );
+    }
     out
 }
 
@@ -902,8 +920,10 @@ mod tests {
         }
         let changed = promote_on_evidence(&mut items, &fires, now(), true, false);
         assert_eq!(changed, 2);
-        assert_eq!(items[0].state, "live", "hot hint auto-promotes");
-        assert_eq!(items[0].promoted_by.as_deref(), Some("evidence-auto"));
+        assert_eq!(
+            items[0].state, "candidate",
+            "hot hint stops at candidate while no surface delivers hints"
+        );
         assert_eq!(items[1].state, "candidate", "hot nudge waits for the flip");
         assert_eq!(items[2].state, "shadow", "cold stays shadow");
 
