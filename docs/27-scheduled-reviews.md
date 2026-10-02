@@ -1,5 +1,7 @@
 # Scheduled reviews — i-dream health & efficacy (2026-07 → 2026-09)
 
+> **Status 2026-10-03.** The scheduled dream jobs (dream-pass, daily digest, weekly audit, weekly review, smell panel) were retired on 2026-09-18. The daemon still runs idle cycles, once per idle period and behind the account usage gate; the nightly residue review remains. Sections below that describe those jobs as live are historical. Current state: `.claude/output/20261003-audit/summary.md`.
+
 <!-- sessions: catch-agent-a7@2026-07-14 -->
 
 Written 2026-07-14, at the close of the Wave-3 arc (docs/25: items 12–16 all

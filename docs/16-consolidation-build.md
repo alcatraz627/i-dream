@@ -1,5 +1,7 @@
 # Three-layer consolidation — BUILD doc
 
+> **Status 2026-10-03.** The scheduled dream jobs (dream-pass, daily digest, weekly audit, weekly review, smell panel) were retired on 2026-09-18. The daemon still runs idle cycles, once per idle period and behind the account usage gate; the nightly residue review remains. Sections below that describe those jobs as live are historical. Current state: `.claude/output/20261003-audit/summary.md`.
+
 > **Status:** spec, ready to build · **Date:** 2026-05-15
 > **Author:** claude (spec session)
 > **Companions:**

@@ -1,5 +1,7 @@
 # `i-dream` widget — plugin system
 
+> **Status 2026-10-03.** Superseded: shelved by the felt-value pivot and the July rebuild. Kept as a record; line and file references below are out of date.
+
 > **Status:** design, not yet built · **Date:** 2026-05-15
 > **Author:** claude (design session)
 > **Scope:** This is the **secondary** pluggability axis — extending the

@@ -1,5 +1,7 @@
 # Widget audit + rebuild plan (macOS menu-bar / dashboard)
 
+> **Status 2026-10-03.** Superseded: shelved by the felt-value pivot and the July rebuild. Kept as a record; line and file references below are out of date.
+
 > **Status:** **SHIPPED 2026-05-31** (Tier 0+1+2, merged to master `fdc527d`).
 > Audited 2026-05-25, rebuilt + skeptical-reviewed + live-verified 2026-05-31.
 > The one deferred piece: the graph-view dedup (see Tier 4 / §"deferred" below).
