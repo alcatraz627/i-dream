@@ -285,10 +285,12 @@ pub fn evict_to_cap(patterns: &mut Vec<ExtractedPattern>, cap: usize) -> Vec<Evi
     let mut order: Vec<usize> = (0..patterns.len())
         .filter(|&i| !is_anchor(&patterns[i]))
         .collect();
+    // Strength near its floor is noise, so ties fall to the less confident
+    // pattern rather than to whichever happened to sort first.
     order.sort_by(|&a, &b| {
         effective_strength(&patterns[a])
-            .partial_cmp(&effective_strength(&patterns[b]))
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&effective_strength(&patterns[b]))
+            .then(patterns[a].confidence.total_cmp(&patterns[b].confidence))
     });
     let doomed: std::collections::HashSet<usize> = order.into_iter().take(to_evict).collect();
 
@@ -378,7 +380,14 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         &state.graduation_marks,
     );
 
-    decay_cycle(&mut patterns);
+    let now = Utc::now();
+    let steps = decay_steps_due(state.last_decay, now);
+    for _ in 0..steps {
+        decay_cycle(&mut patterns);
+    }
+    if steps > 0 {
+        state.last_decay = Some(state.last_decay.map_or(now, |t| t + chrono::Duration::days(steps)));
+    }
     let moves = apply_feedback(&mut patterns, &associations, &fresh);
     let reactivated = moves.iter().filter(|m| m.direction == "reactivate").count();
     let weakened = moves.iter().filter(|m| m.direction == "weaken").count();
@@ -469,6 +478,19 @@ struct ReinforceState {
     /// map, so a rotated ledger keeps its institutional memory.
     #[serde(default)]
     graduation_marks: HashMap<String, DateTime<Utc>>,
+    /// When strength last faded. Fading follows the calendar, not the cycle
+    /// count, so an idle daemon that cycles often cannot wear the store down.
+    #[serde(default)]
+    last_decay: Option<DateTime<Utc>>,
+}
+
+/// How many daily fades are owed since `last`, capped so a long absence
+/// cannot wipe the store in one go. First run counts as one.
+fn decay_steps_due(last: Option<DateTime<Utc>>, now: DateTime<Utc>) -> i64 {
+    match last {
+        None => 1,
+        Some(t) => (now - t).num_days().clamp(0, 7),
+    }
 }
 
 /// Days of feedback kept live in the ledger; older dated lines rotate to a
@@ -820,6 +842,23 @@ mod tests {
             ease,
             reactivations: reacts,
         }
+    }
+
+    #[test]
+    fn decay_follows_the_calendar_not_the_cycle_count() {
+        assert_eq!(decay_steps_due(None, day(10)), 1);
+        assert_eq!(decay_steps_due(Some(day(10)), day(10) + chrono::Duration::hours(23)), 0);
+        assert_eq!(decay_steps_due(Some(day(10)), day(12)), 2);
+        assert_eq!(decay_steps_due(Some(day(1)), day(30)), 7, "long absence is capped");
+    }
+
+    #[test]
+    fn eviction_breaks_strength_ties_on_confidence() {
+        let mut ps = vec![pat("sure", 0.9, 0.0, 2.5, 0), pat("unsure", 0.3, 0.0, 2.5, 0)];
+        let evicted = evict_to_cap(&mut ps, 1);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].id, "unsure");
+        assert_eq!(ps[0].id, "sure");
     }
 
     fn ev(insight_id: &str, honored: bool) -> FeedbackEvent {
@@ -1436,11 +1475,10 @@ mod tests {
         assert_eq!(r2.weakened, 0, "the same event never reinforces twice");
         let after2: Vec<ExtractedPattern> =
             store.read_json("dreams/patterns.json").unwrap();
-        // Strength still fell (decay always runs) but not by another reject step.
-        assert!(after2[0].strength < s1, "decay continues");
+        // Same day, so no fade is owed and no second rejection applies.
         assert!(
-            after2[0].strength > s1 - REJECT_PENALTY,
-            "no second rejection was applied"
+            (after2[0].strength - s1).abs() < 1e-12,
+            "a same-day cycle neither fades nor re-rejects"
         );
     }
 }
