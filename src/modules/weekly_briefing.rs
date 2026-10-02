@@ -238,7 +238,7 @@ The behaviors/workflows that moved positively. Cite specific positive patterns, 
 The most common friction this week. Be specific — name the behavior, not the project. Pull from negative patterns + atone-domain entries. 1 paragraph.
 
 ## Cross-domain patterns
-Associations the dream pass found spanning domains (e.g. a mistake-slug that correlates with a session shape, or an affirmation that's the inverse of a recurring mistake). One bullet per association with the takeaway. If no cross-domain signal in the input, write "No cross-domain associations yet — run `i-dream dream-pass` more regularly." and move on.
+Associations the dream pass found spanning domains (e.g. a mistake-slug that correlates with a session shape, or an affirmation that's the inverse of a recurring mistake). One bullet per association with the takeaway. If no cross-domain signal in the input, write "No cross-domain associations this week." and move on.
 
 ## Worth examining
 Pinned insights still active + graduation candidates (patterns mature enough to become rules). 2-4 bullets. If none, "Nothing flagged for examination."
@@ -337,9 +337,11 @@ fn gather_external_signal() -> String {
     let base = std::path::PathBuf::from(&home);
     let mut out = String::new();
 
-    // Union TLDR — top items across all domains.
+    // Union TLDR — top items across all domains. Both cross-domain files are
+    // written only by a dream pass; a copy older than a week would be
+    // reported as this week's news, so it is left out.
     let tldr = base.join(".claude/i-dream/derived/tldr.union.txt");
-    if let Ok(content) = std::fs::read_to_string(&tldr) {
+    if let Some(content) = read_if_fresh(&tldr) {
         let trimmed = content.trim();
         if !trimmed.is_empty() {
             out.push_str("  Top across domains:\n");
@@ -351,7 +353,7 @@ fn gather_external_signal() -> String {
 
     // Cross-domain associations — the highest-value output.
     let assoc = base.join(".claude/i-dream/derived/associations.cross.jsonl");
-    if let Ok(content) = std::fs::read_to_string(&assoc) {
+    if let Some(content) = read_if_fresh(&assoc) {
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
         if !lines.is_empty() {
             out.push_str("  Cross-domain associations:\n");
@@ -388,12 +390,25 @@ fn gather_external_signal() -> String {
     }
     if !counts.is_empty() {
         out.push_str(&format!(
-            "  Dream insights this period: {}\n",
+            "  Dream insights recorded to date: {}\n",
             counts.join(", ")
         ));
     }
 
     out
+}
+
+/// How old a cross-domain file may be and still count as current. A live
+/// dream pass rewrote these daily, so anything older means it stopped.
+const CROSS_DOMAIN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3 * 24 * 3600);
+
+/// The file's contents when it was written within `CROSS_DOMAIN_MAX_AGE`.
+fn read_if_fresh(path: &std::path::Path) -> Option<String> {
+    let age = std::fs::metadata(path).ok()?.modified().ok()?.elapsed().ok()?;
+    if age > CROSS_DOMAIN_MAX_AGE {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 /// Format a chrono Local time as ISO week, e.g. "2026-W18".
