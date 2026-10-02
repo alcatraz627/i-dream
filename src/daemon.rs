@@ -1102,6 +1102,9 @@ impl Daemon {
             crate::modules::project_briefs::ProjectBriefsModule::new(&self.config, &self.store);
         let mut regen = 0u32;
         for (proj, ts) in latest {
+            if !crate::modules::project_briefs::ProjectBriefsModule::brief_is_reachable(&proj) {
+                continue;
+            }
             let brief_path = self.store.path(&format!("dreams/project-briefs/{proj}.md"));
             // Regenerate if missing OR pattern activity is newer than the brief mtime.
             let needs = !brief_path.exists()

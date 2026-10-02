@@ -60,6 +60,19 @@ impl<'a> ProjectBriefsModule<'a> {
         }
     }
 
+    /// Whether a brief for this project id can ever be read. Session start
+    /// looks briefs up by the encoded cwd, so short-name ids (no leading
+    /// dash) are never injected, and temp dirs, worktrees and output folders
+    /// are not places a session settles in. Writing those wasted a model
+    /// call each.
+    pub fn brief_is_reachable(project_id: &str) -> bool {
+        project_id.starts_with('-')
+            && !project_id.starts_with("-private-tmp-")
+            && !project_id.starts_with("-private-var-folders-")
+            && !project_id.contains("--claude-worktrees-")
+            && !project_id.contains("--claude-output")
+    }
+
     /// Synchronous read for the SessionStart hook handler — returns the
     /// brief markdown if one exists for this cwd, else `None`. Cheap:
     /// one filesystem stat + one read.
@@ -189,6 +202,8 @@ Output a markdown brief with EXACTLY these four sections, no preamble:
 1-2 bullets noting recurring frustrations or unresolved tensions in this project's work. Optional — omit if no signal.
 
 Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length ≤ 1500 chars. If a section has no signal, write "_(no signal yet)_".
+
+Include only what is specific to this project. The reader already loads the account's general working rules (writing style, citation, verification, PR conventions), so do not restate those even if the patterns echo them.
 "#;
 
         let response = client
@@ -248,7 +263,7 @@ Tone: terse, imperative, agent-to-agent. No hedging. No preamble. Total length �
         }
         let projects: Vec<&String> = counts
             .iter()
-            .filter(|(_, c)| **c >= 3)
+            .filter(|(k, c)| **c >= 3 && Self::brief_is_reachable(k))
             .map(|(k, _)| k)
             .collect();
         info!(
@@ -343,6 +358,20 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn briefs_only_for_ids_a_session_can_start_in() {
+        // Real ids from ~/.claude/subconscious/dreams/project-briefs/.
+        let reach = ProjectBriefsModule::brief_is_reachable;
+        assert!(reach("-Users-alcatraz627-Code-Claude-i-dream"));
+        assert!(reach("-Users-alcatraz627--claude"));
+        assert!(!reach("sor"), "short-name twin is never looked up");
+        assert!(!reach("-private-tmp-sa-wt-digest2"));
+        assert!(!reach("-private-var-folders-t8-k-k3y4h95qqfmnhp3k3fgqkh0000gn-T"));
+        assert!(!reach(
+            "-Users-alcatraz627-Code-Versable-slack-automation--claude-worktrees-agent-a270273a1a585b42e"
+        ));
+    }
 
     #[test]
     fn encode_cwd_matches_d2_project_id_format() {
