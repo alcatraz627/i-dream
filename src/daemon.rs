@@ -1637,9 +1637,11 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // confidence dropping below 0.2 then marks the source association
     // dismissed permanently.
     if let HookEvent::UserSignal {
-        correction: true, ..
+        correction: true,
+        session_id,
+        ..
     } = &event
-        && let Err(e) = auto_downvote_recently_fired_intentions(store)
+        && let Err(e) = auto_downvote_recently_fired_intentions(store, session_id.as_deref())
     {
         warn!("D3 v2 auto-downvote failed: {e:#}");
     }
@@ -1649,7 +1651,7 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // For all other events we just ack with an empty body.
     let build_started = std::time::Instant::now();
     let response = match &event {
-        HookEvent::SessionStart { cwd, .. } => {
+        HookEvent::SessionStart { cwd, session_id, .. } => {
             // No surfaced-claim is recorded here (A4, 2026-07-22): this lane
             // cannot prove its response ever reached a context — the client
             // may read-and-discard — and the rows it used to write poisoned
@@ -1657,7 +1659,7 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
             // receipts belong to the file-based injector (injections.jsonl);
             // valence/surfaced.jsonl keeps only its historical rows.
             let (text, _intention_ids, _has_introspection) =
-                build_session_start_response(store, cwd.as_deref());
+                build_session_start_response_for(store, cwd.as_deref(), session_id.as_deref());
             text
         }
         _ => String::new(),
@@ -1688,19 +1690,22 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     Ok(())
 }
 
-/// D3 v2 helper: scan intentions/fired.jsonl for FiredRecord rows from
-/// the last 10 minutes; for each, look up the originating intention in
-/// intentions/registry.jsonl, parse its `action.source` for the
-/// "dream-wake:<assoc_id>" tag the Wake phase writes, and append an
-/// auto-downvote entry to dreams/insight-feedback.jsonl tagged
-/// `source: "auto-correction"`. Idempotent within a window — the same
-/// fire can produce multiple auto-downvotes if multiple corrections land
-/// in quick succession; that's accepted (the Wake handler caps confidence
-/// at 0.0 anyway).
-fn auto_downvote_recently_fired_intentions(store: &Store) -> Result<()> {
+/// When the user corrects Claude, mark the dream-made rules shown to that
+/// same session in the last 10 minutes as unhelpful.
+///
+/// Appends a `source: "auto-correction"` down-vote to
+/// dreams/insight-feedback.jsonl for each fired intention whose source is a
+/// "dream-wake:<assoc_id>" tag. Only fires recorded for `session_id` count:
+/// a correction in one session says nothing about rules shown in another,
+/// and blaming every concurrent session filled the ledger with 10,000
+/// down-votes. With no session id there is nothing safe to blame.
+fn auto_downvote_recently_fired_intentions(store: &Store, session_id: Option<&str>) -> Result<()> {
     use serde_json::json;
     const WINDOW_MIN: i64 = 10;
 
+    let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
     let fired: Vec<FiredRecord> = store
         .read_jsonl("intentions/fired.jsonl")
         .unwrap_or_default();
@@ -1708,7 +1713,10 @@ fn auto_downvote_recently_fired_intentions(store: &Store) -> Result<()> {
         return Ok(());
     }
     let cutoff = Utc::now() - chrono::Duration::minutes(WINDOW_MIN);
-    let recent: Vec<&FiredRecord> = fired.iter().filter(|r| r.fired_at >= cutoff).collect();
+    let recent: Vec<&FiredRecord> = fired
+        .iter()
+        .filter(|r| r.fired_at >= cutoff && r.session_id == session_id)
+        .collect();
     if recent.is_empty() {
         return Ok(());
     }
@@ -1769,7 +1777,18 @@ fn auto_downvote_recently_fired_intentions(store: &Store) -> Result<()> {
 /// Returns an empty string when nothing is worth surfacing. An empty
 /// body is the correct no-op signal for the shell hook — it writes
 /// nothing into Claude's context.
+#[cfg(test)]
 fn build_session_start_response(store: &Store, cwd: Option<&str>) -> (String, Vec<String>, bool) {
+    build_session_start_response_for(store, cwd, None)
+}
+
+/// The session-start briefing, recording which session the fired
+/// intentions were shown to.
+fn build_session_start_response_for(
+    store: &Store,
+    cwd: Option<&str>,
+    session_id: Option<&str>,
+) -> (String, Vec<String>, bool) {
     let mut sections: Vec<String> = Vec::new();
     let mut surfaced_ids: Vec<String> = Vec::new();
     let mut has_introspection = false;
@@ -1791,7 +1810,7 @@ fn build_session_start_response(store: &Store, cwd: Option<&str>) -> (String, Ve
     }
 
     // ── 1. Broadcast intentions ─────────────────────────────
-    if let Some((section, ids)) = broadcast_intentions_section(store) {
+    if let Some((section, ids)) = broadcast_intentions_section_for(store, session_id) {
         sections.push(section);
         surfaced_ids = ids;
     }
@@ -1822,7 +1841,16 @@ fn build_session_start_response(store: &Store, cwd: Option<&str>) -> (String, Ve
 ///
 /// Each surfaced intention gets its fire_count incremented and a
 /// FiredRecord logged so we can track engagement.
-fn broadcast_intentions_section(store: &Store) -> Option<(String, Vec<String>)> {
+/// Serializes the registry read-modify-write below. Each socket connection
+/// runs on its own task, so simultaneous session starts used to race on
+/// one shared tmp file and lose fire counts.
+static REGISTRY_REWRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn broadcast_intentions_section_for(
+    store: &Store,
+    session_id: Option<&str>,
+) -> Option<(String, Vec<String>)> {
+    let _guard = REGISTRY_REWRITE.lock().unwrap_or_else(|p| p.into_inner());
     let mut registry: Vec<Intention> = store
         .read_jsonl("intentions/registry.jsonl")
         .unwrap_or_default();
@@ -1877,7 +1905,7 @@ fn broadcast_intentions_section(store: &Store) -> Option<(String, Vec<String>)> 
         let record = FiredRecord {
             intention_id: id.clone(),
             fired_at: now,
-            session_id: String::new(), // SessionStart has no session ID
+            session_id: session_id.unwrap_or_default().to_string(),
             was_relevant: None,
         };
         let _ = store.append_jsonl("intentions/fired.jsonl", &record);
@@ -2149,7 +2177,7 @@ timeout = "10s"
         assert_eq!(records.len(), 1);
         assert_eq!(
             records[0].event,
-            HookEvent::SessionStart { ts: 42, cwd: None }
+            HookEvent::SessionStart { ts: 42, cwd: None, session_id: None }
         );
     }
 
@@ -2219,7 +2247,7 @@ timeout = "10s"
         assert_eq!(records.len(), 4);
         assert_eq!(
             records[0].event,
-            HookEvent::SessionStart { ts: 100, cwd: None }
+            HookEvent::SessionStart { ts: 100, cwd: None, session_id: None }
         );
         assert_eq!(
             records[1].event,
@@ -2631,6 +2659,28 @@ timeout = "10s"
         );
         assert!(out.contains("Weekly review"));
         assert!(out.contains("incremental verification"));
+    }
+
+    #[test]
+    fn correction_downvotes_only_its_own_sessions_rules() {
+        let (_dir, store) = mk_store();
+        let mut rule = broadcast_intention("dw-1", "Rule", Priority::High, chrono::Duration::hours(-1));
+        rule.action.source = "dream-wake:assoc-9".into();
+        store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+
+        // Session A and session B both start and see the rule.
+        build_session_start_response_for(&store, None, Some("sess-A"));
+        build_session_start_response_for(&store, None, Some("sess-B"));
+
+        auto_downvote_recently_fired_intentions(&store, Some("sess-A")).unwrap();
+        let fb = std::fs::read_to_string(store.path("dreams/insight-feedback.jsonl")).unwrap();
+        assert_eq!(fb.lines().count(), 1, "one down-vote, for session A's fire only: {fb}");
+        assert!(fb.contains("assoc-9"));
+
+        // A correction with no session id blames nobody.
+        auto_downvote_recently_fired_intentions(&store, None).unwrap();
+        let fb = std::fs::read_to_string(store.path("dreams/insight-feedback.jsonl")).unwrap();
+        assert_eq!(fb.lines().count(), 1);
     }
 
     #[test]

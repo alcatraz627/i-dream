@@ -30,6 +30,10 @@ pub enum HookEvent {
         ts: i64,
         #[serde(default)]
         cwd: Option<String>,
+        /// Claude Code's session id, so intentions fired here can be tied
+        /// back to the session a later correction comes from.
+        #[serde(default)]
+        session_id: Option<String>,
     },
     /// A tool invocation just finished. Used for metacog sampling and
     /// activity-signal updates.
@@ -51,6 +55,9 @@ pub enum HookEvent {
         positive: bool,
         /// Composite frustration score in [0.0, 1.0] derived from the signals above.
         frustration_score: f64,
+        /// Claude Code's session id; a correction only blames that session's fires.
+        #[serde(default)]
+        session_id: Option<String>,
     },
 }
 
@@ -89,7 +96,8 @@ mod tests {
             parsed,
             HookEvent::SessionStart {
                 ts: 1712345678,
-                cwd: None
+                cwd: None,
+                session_id: None
             }
         );
     }
@@ -128,8 +136,18 @@ mod tests {
                 correction: true,
                 positive: false,
                 frustration_score: 0.5,
+                session_id: None,
             }
         );
+    }
+
+    #[test]
+    fn session_id_rides_along_when_the_hook_sends_it() {
+        let payload = r#"{"event":"user_signal","ts":1,"uppercase_words":0,"swear_count":0,"correction":true,"positive":false,"frustration_score":0.3,"session_id":"abc"}"#;
+        let HookEvent::UserSignal { session_id, .. } = serde_json::from_str(payload).unwrap() else {
+            panic!("wrong variant");
+        };
+        assert_eq!(session_id.as_deref(), Some("abc"));
     }
 
     #[test]
@@ -142,6 +160,7 @@ mod tests {
             correction: false,
             positive: true,
             frustration_score: 0.0,
+            session_id: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: HookEvent = serde_json::from_str(&json).unwrap();
@@ -160,12 +179,12 @@ mod tests {
     #[test]
     fn record_wraps_event_with_timestamp() {
         let before = Utc::now();
-        let rec = HookEventRecord::new(HookEvent::SessionStart { ts: 42, cwd: None });
+        let rec = HookEventRecord::new(HookEvent::SessionStart { ts: 42, cwd: None, session_id: None });
         let after = Utc::now();
 
         assert!(rec.received_at >= before);
         assert!(rec.received_at <= after);
-        assert_eq!(rec.event, HookEvent::SessionStart { ts: 42, cwd: None });
+        assert_eq!(rec.event, HookEvent::SessionStart { ts: 42, cwd: None, session_id: None });
     }
 
     #[test]

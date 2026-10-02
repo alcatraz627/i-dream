@@ -265,11 +265,14 @@ fn write_session_start_hook(dir: &std::path::Path, config: &Config) -> Result<()
         r#"#!/bin/bash
 # i-dream: SessionStart hook — injects subconscious signals
 SOCKET="{socket}"
-# D6: send the working directory so the daemon can inject a per-project brief.
-# jq escapes the path for safe JSON; falls back to no-cwd payload if jq is missing.
+# D6: send the working directory so the daemon can inject a per-project brief,
+# and the session id so a later correction blames only this session's rules.
+# jq escapes both for safe JSON; falls back to a bare payload if jq is missing.
+HOOK_INPUT=$(cat 2>/dev/null)
 if command -v jq >/dev/null 2>&1; then
-    PAYLOAD=$(jq -nc --arg cwd "$PWD" --argjson ts "$(date +%s)" \
-        '{{event:"session_start",ts:$ts,cwd:$cwd}}')
+    SID=$(printf '%s' "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+    PAYLOAD=$(jq -nc --arg cwd "$PWD" --arg sid "$SID" --argjson ts "$(date +%s)" \
+        '{{event:"session_start",ts:$ts,cwd:$cwd}} + (if $sid == "" then {{}} else {{session_id:$sid}} end)')
 else
     PAYLOAD='{{"event":"session_start","ts":'$(date +%s)'}}'
 fi
@@ -418,7 +421,8 @@ payload = json.dumps({{
     "swear_count": swear_count,
     "correction": correction,
     "positive": positive,
-    "frustration_score": frustration_score
+    "frustration_score": frustration_score,
+    "session_id": data.get("session_id") or None
 }}).encode()
 
 try:

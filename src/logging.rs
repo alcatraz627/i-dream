@@ -19,9 +19,9 @@
 //! is our problem, solved by `cleanup_old_logs` which runs once at
 //! startup and deletes any file older than `RETENTION_DAYS`.
 //!
-//! The retention default (30 days) is hardcoded, not a config knob.
-//! If this ever becomes a real knob-worthy thing we can add it to
-//! `LoggingConfig` in `config.rs`; for now the simpler interface wins.
+//! The retention (120 days) is hardcoded, not a config knob. A month
+//! proved too short: audits look back a full quarter, and the logs run
+//! about 7 MB a month.
 
 use anyhow::{Context, Result};
 use std::fs;
@@ -32,10 +32,9 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 
 /// Keep this many days of rolled log files. Anything older gets deleted
-/// at daemon startup. Chosen to give an operator a full month of history
-/// to debug a "this started breaking sometime last week" problem without
-/// letting disk usage grow unbounded in long-running deployments.
-const RETENTION_DAYS: u64 = 30;
+/// at daemon startup. A quarter, so an audit can trace when something
+/// started breaking, while disk use stays bounded (about 7 MB a month).
+const RETENTION_DAYS: u64 = 120;
 
 /// Prefix of the rolling log file. `tracing_appender::rolling::daily`
 /// appends a `.YYYY-MM-DD` suffix. We also use this prefix to decide
@@ -79,7 +78,12 @@ pub fn init(log_level: &str) -> Result<WorkerGuard> {
     let writer = std::io::stderr.and(file_writer);
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info")))
+        // RUST_LOG wins when set, so a one-off debug run needs no flag.
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .or_else(|_| EnvFilter::try_new(log_level))
+                .unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .with_ansi(false) // file logs shouldn't have color codes; stderr loses them too, which is fine under launchd
         .with_writer(writer)
