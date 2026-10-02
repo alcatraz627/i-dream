@@ -1,5 +1,7 @@
 # i-dream — quick primer
 
+> **Status 2026-10-03.** The scheduled dream jobs (dream-pass, daily digest, weekly audit, weekly review, smell panel) were retired on 2026-09-18. The daemon still runs idle cycles, once per idle period and behind the account usage gate; the nightly residue review remains. Sections below that describe those jobs as live are historical. Current state: `.claude/output/20261003-audit/summary.md`.
+
 > **Audience:** anyone using i-dream day-to-day. 5-minute read.
 > Companion: [`15-roadmap.md`](./15-roadmap.md) for current state,
 > [`17-plugin-author-guide.md`](./17-plugin-author-guide.md) for writing

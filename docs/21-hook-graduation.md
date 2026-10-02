@@ -1,5 +1,7 @@
 # Hook graduation — the self-tuning intervention ladder (DESIGN, not built)
 
+> **Status 2026-10-03.** The flow below ran through the weekly L3 audit and review, both retired on 2026-09-18. Graduation now happens through owner decision pages, hook lifecycle `review-by` headers read by `hook-health.sh`, and the compiled intervention ladder (`i-dream promotions`). No automated producer flags a slug over 20 events that has rule text and no gate. See `.claude/output/20261003-audit/agent-workflow.md` F7.
+
 > **Status:** explored, **not built**. This is the "better option" from the
 > 2026-05-24 felt-value conversation. It is deliberately **gated** on real-world
 > validation (see §6) — building it now would be premature feature-accretion,

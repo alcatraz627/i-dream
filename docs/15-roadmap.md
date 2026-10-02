@@ -1,5 +1,7 @@
 # i-dream — roadmap & open todos
 
+> **Status 2026-10-03.** The scheduled dream jobs (dream-pass, daily digest, weekly audit, weekly review, smell panel) were retired on 2026-09-18. The daemon still runs idle cycles, once per idle period and behind the account usage gate; the nightly residue review remains. Sections below that describe those jobs as live are historical. Current state: `.claude/output/20261003-audit/summary.md`.
+
 > **Updated:** 2026-05-23
 > **Status convention:** each item carries an explicit status block.
 > `spec-pending` = needs design conversation with the user before any

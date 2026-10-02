@@ -398,7 +398,7 @@ fn render_plist(paths: &Paths) -> String {
         <key>HOME</key>
         <string>{home}</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 
     <key>ProcessType</key>
