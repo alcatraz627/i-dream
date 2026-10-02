@@ -344,9 +344,8 @@ fn write_user_prompt_submit_hook(dir: &std::path::Path, config: &Config) -> Resu
         r#"#!/bin/bash
 # i-dream: UserPromptSubmit hook — sentiment signals + compiled-intervention
 # hints (felt-metabolism Phase 2).
-# NOTE: stdout is injected into the user message by Claude Code. This script
-#       emits NOTHING to stdout except the interpreter's single
-#       additionalContext JSON for LIVE intervention hints.
+# NOTE: this script emits NOTHING to stdout; it runs async, so any output
+#       would never reach the session anyway.
 # No daemon-up guard here on purpose: the sentiment send needs the socket,
 # but the intervention interpreter is file-only and must run regardless.
 SOCKET="{socket}"
@@ -431,9 +430,8 @@ except Exception:
     pass
 
 # ── Compiled-intervention interpreter (felt-metabolism B1, prompt surface) ──
-# LIVE hints inject one additionalContext JSON (display capped at 2); every
-# match — shadow, candidate, AND live — is appended to the would-fire ledger,
-# because display caps must never gate telemetry. Patterns are re-validated
+# Every match — shadow, candidate, AND live — is appended to the would-fire
+# ledger; nothing is printed (see the note at the end). Patterns are re-validated
 # here with re.search inside try/except: a broken compiler-drafted pattern
 # skips silently rather than firing wrong (the point-of-use check).
 try:
@@ -483,10 +481,9 @@ try:
                             "ts": int(time.time())}}) + "\n")
             except Exception:
                 pass
-        if live_hits:
-            lines = ["[i-dream:%s] %s" % (str(it.get("id", ""))[:8], it.get("body", ""))
-                     for it in live_hits[:2]]
-            print(json.dumps({{"additionalContext": "\n".join(lines)}}))
+        # No stdout payload: this hook runs async on UserPromptSubmit and the
+        # harness never delivers its output (owner canary 2026-09-05, zero
+        # deliveries). The sync PreToolUse sibling delivers hints at tool time.
 except Exception:
     pass
 PYEOF
@@ -784,10 +781,10 @@ mod tests {
         assert!(stdout.trim().is_empty(), "aborted match emits nothing: {stdout}");
     }
 
-    /// The prompt-surface interpreter runs with NO daemon socket at all
-    /// (the old early-exit is gone) and injects a live hint.
+    /// The prompt-surface interpreter runs with NO daemon socket at all and
+    /// records a live hint in the ledger without printing it (async hook).
     #[test]
-    fn user_prompt_submit_script_injects_hint_without_daemon() {
+    fn user_prompt_submit_script_records_hint_without_printing() {
         let dir = tempfile::tempdir().unwrap();
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
@@ -802,11 +799,7 @@ mod tests {
         })
         .to_string();
         let stdout = run_hook_script(&hooks.join("user-prompt-submit.sh"), &home, &input);
-        let v: serde_json::Value =
-            serde_json::from_str(stdout.trim()).expect("stdout is one JSON object");
-        let ctx = v["additionalContext"].as_str().unwrap();
-        assert!(ctx.contains("[i-dream:liveHint]"), "live hint injects: {ctx}");
-        assert!(ctx.contains("re-confirm per run"));
+        assert!(stdout.trim().is_empty(), "async hook prints nothing: {stdout}");
 
         let wf =
             std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap();
