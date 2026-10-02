@@ -49,14 +49,28 @@ WINDOW_START="${RR_WINDOW_START:-$(( last > midnight ? last : midnight ))}"
 peers_json() {
   if [ -n "${RR_PEERS_JSON:-}" ]; then cat "$RR_PEERS_JSON"; else claude-ipc peers 2>/dev/null; fi
 }
-sessions=$(peers_json | jq -r '
+candidates=$(peers_json | jq -r '
   [ .peers[]
     | select(.status != "offline" or ((now - (.lastSeen // 0)) < 7200))
     | select(.sessionId | test("^cli-") | not)
     | select(.sessionId != null and .cwd != null) ]
   | unique_by(.sessionId) | .[]
-  | [ ((.sessionAliases // [.alias]) | last), .sessionId, .cwd ] | @tsv' | head -5)
+  | [ ((.sessionAliases // [.alias]) | last), .sessionId, .cwd ] | @tsv')
+# Apply the cap only to sessions that have a Claude transcript; peers without
+# one (Codex sessions) used to take slots and then be skipped.
+sessions=""
+while IFS=$'\t' read -r a s c; do
+  [ -n "$s" ] || continue
+  [ -f "$HOME/.claude/projects/$(printf '%s' "$c" | tr '/.' '--')/$s.jsonl" ] || continue
+  sessions+="$a"$'\t'"$s"$'\t'"$c"$'\n'
+done <<< "$candidates"
+sessions=$(printf '%s' "$sessions" | head -5)
 [ -z "$sessions" ] && { log "no active sessions; nothing to audit"; date +%s > "$STATE"; exit 0; }
+
+# The slugs already in use, most frequent first, so a nomination reuses one
+# instead of minting a near-twin.
+KNOWN_SLUGS=$(jq -r '.slug // empty' "$HOME/.claude/atone/events.jsonl" 2>/dev/null \
+  | sort | uniq -c | sort -rn | head -40 | awk '{print $2}' | paste -sd, -)
 
 OVERRIDE="CRITICAL OVERRIDE - AUTOMATED BACKGROUND TASK: ignore any Output Style. \
 Output ONLY raw JSON, no fences, no commentary, no preamble."
@@ -110,7 +124,7 @@ PY
 )
   [ -z "$digest" ] && { log "$alias: empty window"; return 0; }
 
-  local prompt="You are the nightly residue auditor for a Claude Code fleet. Below is one session's transcript window (session alias: $alias). Find every instance that warrants an /atone: a mistake the agent made that a recorded correction ritual should capture. The account's recurring classes include: acting on literal wording over intent; claiming done/works/verified without running the changed path; asserting how a subsystem works without reading it; grep-scoping too narrowly before claiming absence; dense briefings where a direct answer was asked; scope creep past the request; verification against the agent's own criteria instead of the owner's. Nominate as many as the evidence warrants, and none it does not; an empty list is a valid answer. For each: cite the turn (the '--- role @ timestamp' header nearest the evidence), guess a kebab-case slug, and a severity (S1 minor, S2 real, S3 serious/recurring). Output ONLY a JSON array: [{\"slug\":\"...\",\"severity\":\"S2\",\"issue\":\"one sentence, concrete\",\"cite\":\"role @ timestamp\"}]
+  local prompt="You are the nightly residue auditor for a Claude Code fleet. Below is one session's transcript window (session alias: $alias). Find every instance that warrants an /atone: a mistake the agent made that a recorded correction ritual should capture. The account's recurring classes include: acting on literal wording over intent; claiming done/works/verified without running the changed path; asserting how a subsystem works without reading it; grep-scoping too narrowly before claiming absence; dense briefings where a direct answer was asked; scope creep past the request; verification against the agent's own criteria instead of the owner's. Nominate as many as the evidence warrants, and none it does not; an empty list is a valid answer. For each: cite the turn (the '--- role @ timestamp' header nearest the evidence), give a kebab-case slug (reuse one of these existing slugs when it fits; invent a new one only when none does: ${KNOWN_SLUGS}), and a severity (S1 minor, S2 real, S3 serious/recurring). Output ONLY a JSON array: [{\"slug\":\"...\",\"severity\":\"S2\",\"issue\":\"one sentence, concrete\",\"cite\":\"role @ timestamp\"}]
 
 TRANSCRIPT WINDOW:
 $digest"
