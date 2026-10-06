@@ -167,6 +167,8 @@ Traps to design out, each with a sibling that paid for it: god files, user zoom 
 
 **Callouts gate (owner, 2026-10-06, "all").** The round-3 product gripe (`.claude/output/20261006-gripe-r3/gripe.md`) produced fifteen findings; every one is a callout row on surface `widget-2.0` and `callouts.sh gate widget-2.0` must pass before any done-claim here. The model carries them as docs/30 §9. Two of them bind the build's shape directly: every surface renders from the two JSON contracts and nothing else (one record), and no surface claims a gesture that is not wired.
 
+**Round 4 mock (2026-10-06, `.claude/output/20261006-plan-2.0/mocks/mocks-r4.html`, served at `http://localhost:5106/dp/idream-2-0-r3/mocks-r4.html`).** Every surface renders from one `STATE` record; totals are recomputed from rows and asserted at load (a red banner on mismatch); every dropdown row dives scoped; health has idle and retired; effects carry their landing or read unattributed; Flow shows six stages with Filed and Landed apart; hypnogram drag re-aggregates and a cycle click loads its log; Reader run click re-renders; chips toggle and compose with an on state; no placeholder names; full ids with copy; one key map on every Work pane; the orbit is replaced by sorted bars; "since you last looked" is real (stored locally). `shoot-r4.py` drives twenty-three checks, one per callout claim, and all pass; the fifteen callouts are claimed, not retired.
+
 **Acceptance**: from a screenshot in dark and light, without the CLI, the owner can answer: is the daemon alive and when did it last work; which source is stale; what did the reader find and what is waiting on me; is anything I was warned about improving. Plus a local open-log so Phase 5 can count use.
 
 ### Phase 5: Keep-bar
