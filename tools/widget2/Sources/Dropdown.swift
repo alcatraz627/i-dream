@@ -11,8 +11,16 @@ struct DropdownView: View {
     /// the probe, which renders the whole thing.
     var height: CGFloat?
 
-    static let width: CGFloat = 400
+    static let width: CGFloat = 424
     static let height: CGFloat = 540
+    static let heightKey = "ui.dropdownHeight"
+
+    /// The height the owner dragged the popover to; the grip at the bottom sets it.
+    @AppStorage(DropdownView.heightKey) private var savedHeight: Double = Double(DropdownView.height)
+    @State private var dragStart: Double?
+
+    private var maxHeight: Double { Double((NSScreen.main?.visibleFrame.height ?? 900) - 60) }
+    private var liveHeight: CGFloat? { height == nil ? nil : CGFloat(min(max(savedHeight, 320), maxHeight)) }
 
     init(model: AppModel, height: CGFloat? = nil, openLogs: @escaping () -> Void = {}) {
         self.model = model
@@ -25,7 +33,8 @@ struct DropdownView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let r = model.record {
                 strip(r)
-                if r.since.anything && !r.since.first { sinceLine(r) }
+                sinceLine(r)
+                band(r)
                 ribbon(r)
                 if height != nil {
                     ScrollView { groups(r) }.frame(maxHeight: .infinity)
@@ -37,9 +46,25 @@ struct DropdownView: View {
                 if height != nil { Spacer(minLength: 0) }
             }
             footer
+            if height != nil { grip }
         }
-        .frame(width: Self.width, height: height, alignment: .top)
+        .frame(width: Self.width, height: liveHeight, alignment: .top)
         .background(P.bg)
+    }
+
+    /// Drag to make the popover taller or shorter.
+    private var grip: some View {
+        Capsule().fill(P.fg3.opacity(0.5)).frame(width: 36, height: 4)
+            .frame(maxWidth: .infinity).frame(height: 10)
+            .contentShape(Rectangle())
+            .onHover { inside in if inside { NSCursor.resizeUpDown.push() } else { NSCursor.pop() } }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { v in
+                    let start = dragStart ?? savedHeight
+                    dragStart = start
+                    savedHeight = min(max(start + v.translation.height, 320), maxHeight)
+                }
+                .onEnded { _ in dragStart = nil })
     }
 
     private func groups(_ r: Record) -> some View {
@@ -73,7 +98,7 @@ struct DropdownView: View {
                         Dot(color: P.sev(mood.sev))
                         Text(mood.word).font(F.meta).foregroundStyle(P.fg2)
                     }
-                    .onHover { help.text = $0 ? mood.sentence : "" }
+                    .help(mood.sentence)
                 }
                 HStack(spacing: 12) {
                     stripLink("person.crop.circle.badge.exclamationmark", "\(r.awaitingItems)", "for you",
@@ -84,10 +109,13 @@ struct DropdownView: View {
                     Spacer(minLength: 0)
                 }
             }
-            .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 9)
+            .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 6)
+            // The tide sits in its own band under the text, never behind it.
+            Tide(level: mood.word == "calm" ? 0 : mood.word == "settled" ? 1 : mood.word == "restless" ? 2 : 3)
+                .frame(maxWidth: .infinity)
+                .frame(height: 26)
         }
         .fixedSize(horizontal: false, vertical: true)
-        .background { Tide(level: mood.word == "calm" ? 0 : mood.word == "settled" ? 1 : mood.word == "restless" ? 2 : 3) }
         .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 
@@ -106,11 +134,13 @@ struct DropdownView: View {
             }
         }
         .buttonStyle(.plain)
-        .onHover { help.text = $0 ? "open \(d.pane.title) for \(noun)" : "" }
+        .onHover { help.text = $0 ? "opens \(d.pane.title)" : "" }
     }
 
     @ViewBuilder private var readingAge: some View {
         switch model.reading {
+        case .fresh(let at):
+            Text("read \(ageText(Date().timeIntervalSince(at))) ago").font(F.mono).foregroundStyle(P.fg3).fixedSize()
         case .stale(let at, let why):
             Text("as of \(ageText(Date().timeIntervalSince(at))): \(why)").font(F.mono).foregroundStyle(P.amber).fixedSize(horizontal: false, vertical: true)
         default: EmptyView()
@@ -136,6 +166,41 @@ struct DropdownView: View {
         .padding(.horizontal, 14).padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(P.card)
+        .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
+    }
+
+    // MARK: band: small constellation + the two biggest movers
+
+    private func band(_ r: Record) -> some View {
+        HStack(spacing: 0) {
+            Constellation(patterns: r.patterns, associations: r.associations, focus: nil, big: false,
+                          onSelect: { model.open(Dive(pane: .patterns, scope: .pattern($0.id))) }, help: help)
+                .frame(minHeight: 84)
+            VStack(alignment: .leading, spacing: 3) {
+                SectionLabel(text: "biggest movers · 7d")
+                if r.movers.isEmpty {
+                    Text("no slug moved this week").font(F.meta).foregroundStyle(P.fg3)
+                }
+                ForEach(r.movers) { e in
+                    Button { model.open(Dive(pane: .landing, scope: .slug(e.slug))) } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            Image(systemName: e.delta > 0 ? "arrow.up.right" : "arrow.down.right").font(.system(size: 9))
+                                .foregroundStyle(e.delta > 0 ? P.amber : (e.landing == nil ? P.fg3 : P.green))
+                            Text(e.slug).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 2)
+                            Text(signed(e.delta)).font(F.mono).foregroundStyle(P.fg)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("\(r.patterns.count) of \(r.patternTotal) patterns drawn, \(plural(r.associations.count, "link"))").font(F.mono).foregroundStyle(P.fg3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .frame(width: 186, alignment: .leading)
+            .overlay(alignment: .leading) { Rectangle().fill(P.hair).frame(width: 0.5) }
+        }
+        .fixedSize(horizontal: false, vertical: true)
         .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 
@@ -216,7 +281,7 @@ struct DropdownView: View {
             .padding(.horizontal, 14).padding(.vertical, 6)
             .overlay(alignment: .top) { Rectangle().fill(P.hair).frame(height: 0.5) }
         }
-        .onHover { help.text = $0 ? "open \(row.dive.pane.title)" + (row.dive.scope == .none ? "" : ", scoped to this row") : "" }
+        .onHover { help.text = $0 ? "opens \(row.dive.pane.title)" : "" }
     }
 
     // MARK: empty and footer
@@ -245,13 +310,14 @@ struct DropdownView: View {
                 .buttonStyle(.plain).foregroundStyle(P.fg2)
             Button(action: openLogs) { Label("Logs", systemImage: "text.alignleft").font(F.meta) }
                 .buttonStyle(.plain).foregroundStyle(P.fg2)
-            readingAge
+            if help.text.isEmpty { readingAge }
             Spacer(minLength: 6)
-            Text(help.text)
-                .font(F.meta).italic().foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 220, alignment: .trailing).multilineTextAlignment(.trailing)
+            // One short line at a small size, so a hover never changes the footer's height.
+            Text(help.text.isEmpty ? "click a row to open it" : help.text)
+                .font(.system(size: 10)).foregroundStyle(P.fg3).fixedSize()
         }
-        .padding(.horizontal, 14).padding(.vertical, 8)
+        .padding(.horizontal, 14)
+        .frame(height: 32)
         .overlay(alignment: .top) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 }

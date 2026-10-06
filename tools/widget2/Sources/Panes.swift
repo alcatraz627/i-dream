@@ -152,12 +152,20 @@ struct PatternsPane: View {
 
     var body: some View {
         let rows = model.patternRows()
+        let shown = Set(rows.map(\.id))
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .patterns, sub: "The \(r.patterns.count) strongest of \(r.patternTotal) habits the daemon has noticed, strongest first")
+            PaneHeader(pane: .patterns, sub: "The \(r.patterns.count) strongest of \(r.patternTotal) extracted patterns, placed by category, sized and lit by strength, linked by the \(r.associations.count) associations. Hover a star to probe it, click to open it, drag to pan, pinch to zoom.")
             highlights
-            SearchField(text: $model.patterns.search, prompt: "search", token: model.searchFocusToken)
+            SearchField(text: $model.patterns.search, prompt: "search pattern text or id", token: model.searchFocusToken)
             filters
             HStack(alignment: .top, spacing: 12) {
+                Constellation(patterns: r.patterns, associations: r.associations, focus: model.patterns.focus, big: true,
+                              dimmed: Set(r.patterns.map(\.id)).subtracting(shown),
+                              onSelect: { p in model.patterns.focus = p.id; model.patterns.selected = rows.firstIndex { $0.id == p.id } ?? 0 },
+                              help: model.help)
+                    .frame(height: 460)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(P.hair, lineWidth: 0.5))
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
@@ -171,8 +179,7 @@ struct PatternsPane: View {
                     }
                     .onChange(of: model.patterns.selected) { _, i in if let id = rows[safe: i]?.id { proxy.scrollTo(id) } }
                 }
-                .frame(maxWidth: .infinity)
-                .frame(height: 520)
+                .frame(width: 380, height: 460)
                 .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
             }
         }
@@ -181,12 +188,15 @@ struct PatternsPane: View {
     private var emptyLine: String { "No drawn pattern matches these filters" + (model.patterns.search.isEmpty ? "." : " and \"\(model.patterns.search)\".") }
 
     private var highlights: some View {
+        let strongest = r.patterns.first
         let reinforced = r.patterns.filter { $0.trend == "reinforced" }.max { ($0.last7 - $0.prior7) < ($1.last7 - $1.prior7) }
         return HStack(spacing: 8) {
+            if let s = strongest { Chip(icon: "sparkles", text: "strongest: rank 1, \(String(format: "%.2f", s.strength))") { model.open(Dive(pane: .patterns, scope: .pattern(s.id))) } }
             if let s = reinforced { Chip(icon: "arrow.up.right", text: "most reinforced: +\(s.last7 - s.prior7) this week") { model.open(Dive(pane: .patterns, scope: .pattern(s.id))) } }
             Chip(icon: "exclamationmark.triangle", text: "worsening", count: r.patterns.filter { $0.trend == "worsening" }.count, on: model.patterns.trends == ["worsening"]) {
                 model.patterns.trends = model.patterns.trends == ["worsening"] ? [] : ["worsening"]
             }
+            Stat(icon: "circle.dashed", n: r.patterns.filter { $0.links.isEmpty }.count, noun: "drawn patterns with no link")
         }
     }
 
@@ -221,8 +231,8 @@ struct PatternsPane: View {
         HStack(alignment: .top, spacing: 8) {
             Dot(color: P.category(p.category)).padding(.top, 4)
             VStack(alignment: .leading, spacing: 2) {
-                Text(p.text).font(F.body).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
-                Text("\(p.category) · \(p.trend)").font(F.meta).foregroundStyle(P.fg3)
+                Text(p.text).font(F.meta).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
+                Text("rank \(p.rank) · strength \(String(format: "%.2f", p.strength)) · \(p.trend) · \(p.category)").font(F.mono).foregroundStyle(P.fg3)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)

@@ -31,12 +31,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         popover.behavior = .transient
         popover.animates = false
         popover.delegate = self
-        // A fixed size, so the popover never grows to the height of the
-        // screen; the row list scrolls inside it instead.
+        // The view pins its own height (default 540, draggable, remembered),
+        // so the popover follows that and never grows to the screen's height.
         let host = NSHostingController(rootView: DropdownView(model: model, height: DropdownView.height, openLogs: { [weak self] in self?.openLogs() }))
-        host.sizingOptions = []
+        host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
-        popover.contentSize = NSSize(width: DropdownView.width, height: DropdownView.height)
         NSApp.mainMenu = mainMenu()
 
         model.openDashboard = { [weak self] in self?.showDashboard() }

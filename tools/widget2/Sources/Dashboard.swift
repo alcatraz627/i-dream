@@ -58,6 +58,14 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach([Pane.flow, .ledger, .patterns, .reader, .landing]) { p in navItem(p) }
             Spacer()
+            if let r = model.record {
+                SectionLabel(text: "last 7 days").padding(.horizontal, 6)
+                Hypnogram(marks: r.cycles, now: r.now, compact: true, onSelect: { _ in model.pane = .flow }, help: help)
+                    .frame(height: 44)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(P.card))
+                    .padding(.horizontal, 4).padding(.bottom, 6)
+                    .onHover { help.text = $0 ? "the week's cycles; click opens Flow" : "" }
+            }
             navItem(.settings)
         }
         .padding(.horizontal, 8).padding(.vertical, 12)
@@ -170,13 +178,14 @@ struct FlowPane: View {
         let cycles = r.cycles.filter { $0.kind == "cycle" && inRange($0.at) }
         VStack(alignment: .leading, spacing: 12) {
             PaneHeader(pane: .flow, sub: model.flow.range == nil ? "Last 7 days" : "\(rangeText) · esc shows the week")
-            VStack(alignment: .leading, spacing: 6) {
-                SectionLabel(text: "runs per day · filled found something")
-                Nights(marks: r.cycles, now: r.now, selected: model.flow.cycle, range: model.flow.range,
-                       onSelect: { m in model.flow.cycle = m.id; model.flow.selected = r.cycles.firstIndex { $0.id == m.id } ?? 0 },
-                       onRange: { model.flow.range = $0 })
-            }
-            .card()
+            Hypnogram(marks: r.cycles, now: r.now, selected: model.flow.cycle, range: model.flow.range,
+                      onSelect: { m in model.flow.cycle = m.id; model.flow.selected = r.cycles.firstIndex { $0.id == m.id } ?? 0 },
+                      onRange: { model.flow.range = $0 }, help: model.help)
+                .frame(height: 150)
+                .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(P.hair, lineWidth: 0.5))
+            Text("violet marks found something · teal marks are reader runs · grey marks ran and found nothing · drag across days to narrow the cards")
+                .font(F.mono).foregroundStyle(P.fg3)
             stages(cycles)
             HStack(alignment: .top, spacing: 12) {
                 cycleLog.frame(maxWidth: .infinity, alignment: .leading)
