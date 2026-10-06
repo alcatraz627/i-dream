@@ -165,6 +165,8 @@ Deleted surfaces (D3): HUD, Today-digest submenu, Change-Frequency submenu, Jour
 
 Traps to design out, each with a sibling that paid for it: god files, user zoom via `scaleEffect`, `.resizable` borderless panels, one-direction fit probes, light-only palette hexes with a hard-coded dark hover card, FSEvents on view teardown, SwiftUI inside `NSMenuItem.view`.
 
+**Callouts gate (owner, 2026-10-06, "all").** The round-3 product gripe (`.claude/output/20261006-gripe-r3/gripe.md`) produced fifteen findings; every one is a callout row on surface `widget-2.0` and `callouts.sh gate widget-2.0` must pass before any done-claim here. The model carries them as docs/30 §9. Two of them bind the build's shape directly: every surface renders from the two JSON contracts and nothing else (one record), and no surface claims a gesture that is not wired.
+
 **Acceptance**: from a screenshot in dark and light, without the CLI, the owner can answer: is the daemon alive and when did it last work; which source is stale; what did the reader find and what is waiting on me; is anything I was warned about improving. Plus a local open-log so Phase 5 can count use.
 
 ### Phase 5: Keep-bar

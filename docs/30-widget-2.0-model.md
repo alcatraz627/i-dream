@@ -2,7 +2,7 @@
 
 <!-- sessions: span-rot-7c@2026-10-06 -->
 
-Status: **MODEL, written after visual rounds 1 and 2; round 3 is built on it.** Plan: docs/29 Phase 4. Rulings so far: docs/29 §8.
+Status: **MODEL, revision 2 after the round-3 product gripe (`.claude/output/20261006-gripe-r3/gripe.md`, 15 findings, all adopted as callouts on surface `widget-2.0`).** Plan: docs/29 Phase 4. Rulings so far: docs/29 §8.
 
 This page answers one question before any more pixels: what is the widget a view *of*, and what does the owner get to do with it. Every round-2 note is a symptom of the same gap. "Why so shy of icons", "the constellation is so limited", "red background is screaming", "landing needs to be clickable to show how and why", "a tabular ledger", "a place to peruse": each one says the surfaces were drawn one at a time instead of generated from one model. So: the model, then the grammar every surface obeys, then what each surface is.
 
@@ -154,3 +154,20 @@ One live page, built from this model, in this order: the status item in four sta
 ## 8. Placement of the two terms
 
 `/tag` proposes: both entries go to `~/.claude/GLOSSARY.md` under **Concepts** as general affordance and audience terms (they apply to every surface in the account, so not i-dream's docs), with a pointer line from `~/.claude/conventions/ui-charter.md` and from this page. Owner confirms the placement before the write; the skill requires it.
+
+## 9. Corrections from the round-3 gripe (binding)
+
+The round-3 mock drew each surface from its own numbers and announced interactions it did not have. The owner adopted all fifteen findings as callouts; `callouts.sh gate widget-2.0` must pass before any done-claim on the widget. The model changes they force:
+
+1. **One record, every surface.** Every count, age, name and effect on any surface is derived from one state record (in the product: the two JSON contracts; in a mock: one `STATE` object). A displayed total is recomputed from its rows at render time; a mock-time assertion fails the build on a mismatch. Nothing is dated after today.
+2. **No announced interaction without a handler.** A caption, sub-header or hint may name only gestures that are wired. "A row is a dive" is a test, not a sentence: every dropdown row opens its Work pane scoped to the entity.
+3. **Health has four readings, not three.** fresh · stale · dead · **idle** (ran and produced nothing; grey, with the reason). A green dot means produced, never merely ran. The status-item number is hours since the last *productive* cycle.
+4. **Retired is a state.** A domain whose consumer was retired by ruling renders grey, carries no pending count into totals or the status item, and sits collapsed under "retired". Its row's action, if any, is a real button, not a copy-to-clipboard.
+5. **Effects carry provenance or read "unattributed".** An effect line names the landing it is credited to; an unattributed drop renders grey, never as a success. Flow's main body is the Landing chain list; the stage cards are Filed (open proposals, pages) and Landed (live hooks, done proposals), two stages, not one.
+6. **Since you last looked.** Flow and the dropdown open with one strip: new findings, new landings, effects that moved. A counter animates only when its value differs from that last look (motion is news or it is nothing).
+7. **Quiet holds nothing actionable.** A worsening slug is System (a warning) or You (if a gate candidate), never Quiet.
+8. **Flow shows the six entities** (Signals → Patterns → Associations → Findings → Filed/Landed → Effect), or the page says which it folds and why.
+9. **Lenses, re-ruled by their variable.** Orbit: replaced by sorted horizontal bars per domain (pending as length, read lag as text) until a layout exists where radius and angle are the data, not list order and an animation clock. Tide: a sentence ("2 waiting on you, 1 dead source"), the wave stays as texture only if the mood word has that sentence behind it on hover. Dropdown band: the two biggest movers as text rows plus the small constellation, with wrapping tooltips inside the popover. Strata: kept only where its click can filter something with a day dimension (Reader runs by week). Hypnogram: kept with real re-aggregation and real cycle loading, or shrunk to the sidebar glance.
+10. **Peruse means peruse.** No placeholder names (unnamed patterns group under one row with a count); chips toggle, AND within a group, show an on state and a clear; counts on chips are computed by the filter they apply; full ids with a working copy; a search slot on every Work pane; strength shown against its scale.
+11. **One key map on every Work pane**: `j`/`k` move, `⏎` open, `esc` back, `/` search, `f` first filter. Claimed only where bound.
+12. **Every number has a referent**: it links to the rows it counts or carries a unit noun. Design annotations ("situate · 10 s") never appear on the product surface.
