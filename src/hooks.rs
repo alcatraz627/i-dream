@@ -268,6 +268,9 @@ fn write_session_start_hook(dir: &std::path::Path, config: &Config) -> Result<()
     let socket = config.data_dir().join("daemon.sock");
     let script = format!(
         r#"#!/bin/bash
+# i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
+# not feed the daemon (it was downvoting its own intentions, 2026-10-06).
+[ -n "${{I_DREAM_CHILD:-}}" ] && exit 0
 # i-dream: SessionStart hook — injects subconscious signals
 SOCKET="{socket}"
 # D6: send the working directory so the daemon can inject a per-project brief,
@@ -320,6 +323,9 @@ fn write_post_tool_use_hook(dir: &std::path::Path, config: &Config) -> Result<()
     let socket = config.data_dir().join("daemon.sock");
     let script = format!(
         r#"#!/bin/bash
+# i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
+# not feed the daemon (it was downvoting its own intentions, 2026-10-06).
+[ -n "${{I_DREAM_CHILD:-}}" ] && exit 0
 # i-dream: PostToolUse hook — captures tool execution metadata
 SOCKET="{socket}"
 if [ -S "$SOCKET" ]; then
@@ -350,6 +356,9 @@ fn write_user_prompt_submit_hook(dir: &std::path::Path, config: &Config) -> Resu
     // i.e. Python dict literals and the {2,} regex quantifier.
     let script = format!(
         r#"#!/bin/bash
+# i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
+# not feed the daemon (it was downvoting its own intentions, 2026-10-06).
+[ -n "${{I_DREAM_CHILD:-}}" ] && exit 0
 # i-dream: UserPromptSubmit hook — sentiment signals + compiled-intervention
 # hints (felt-metabolism Phase 2).
 # NOTE: this script emits NOTHING to stdout; it runs async, so any output
@@ -519,6 +528,9 @@ touch "{activity}" 2>/dev/null || true
 /// candidate matches log would-fires; only LIVE nudges inject.
 fn write_pre_tool_use_hook(dir: &std::path::Path) -> Result<()> {
     let script = r#"#!/bin/bash
+# i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
+# not feed the daemon (it was downvoting its own intentions, 2026-10-06).
+[ -n "${I_DREAM_CHILD:-}" ] && exit 0
 # i-dream: PreToolUse hook — compiled-intervention nudges (advisory only).
 # stdout carries at most one hookSpecificOutput/additionalContext JSON.
 HOOK_INPUT=$(cat)
@@ -624,6 +636,9 @@ fn write_stop_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
     let socket = config.data_dir().join("daemon.sock");
     let script = format!(
         r#"#!/bin/bash
+# i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
+# not feed the daemon (it was downvoting its own intentions, 2026-10-06).
+[ -n "${{I_DREAM_CHILD:-}}" ] && exit 0
 # i-dream: Stop hook — records session end for consolidation timing
 SOCKET="{socket}"
 if [ -S "$SOCKET" ]; then
@@ -949,6 +964,30 @@ mod tests {
     // The generated bash scripts are the bridge between Claude Code
     // hooks and the i-dream daemon. They must include the correct
     // socket path and activity signal path from config.
+
+    #[test]
+    fn every_hook_script_stands_down_for_the_daemons_own_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        write_session_start_hook(dir.path(), &config).unwrap();
+        write_post_tool_use_hook(dir.path(), &config).unwrap();
+        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
+        write_pre_tool_use_hook(dir.path()).unwrap();
+        write_stop_hook(dir.path(), &config).unwrap();
+        for name in ["session-start.sh", "post-tool-use.sh", "user-prompt-submit.sh", "pre-tool-use.sh", "stop.sh"] {
+            let path = dir.path().join(name);
+            let script = std::fs::read_to_string(&path).unwrap();
+            assert!(script.contains("I_DREAM_CHILD"), "{name} lacks the child guard");
+            let out = std::process::Command::new("bash")
+                .arg(&path)
+                .env("I_DREAM_CHILD", "1")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{name} should exit 0 under the marker");
+            assert!(out.stdout.is_empty(), "{name} should print nothing under the marker");
+        }
+    }
 
     #[test]
     fn session_start_hook_contains_socket_path() {

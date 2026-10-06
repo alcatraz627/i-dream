@@ -1656,6 +1656,12 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // For all other events we just ack with an empty body.
     let build_started = std::time::Instant::now();
     let response = match &event {
+        HookEvent::SessionStart { cwd, .. } if cwd.as_deref().is_some_and(is_scratch_cwd) => {
+            // A session that starts in a temp or seat directory is a background
+            // run (the daemon's own, a CI seat, a retro-dump), never the owner.
+            // It gets no briefing and no intention is spent on it.
+            String::new()
+        }
         HookEvent::SessionStart { cwd, session_id, .. } => {
             // No surfaced-claim is recorded here (A4, 2026-07-22): this lane
             // cannot prove its response ever reached a context — the client
@@ -1789,6 +1795,17 @@ fn build_session_start_response(store: &Store, cwd: Option<&str>) -> (String, Ve
 
 /// The session-start briefing, recording which session the fired
 /// intentions were shown to.
+/// Whether a working directory belongs to a background run rather than a
+/// person's project: macOS temp roots, scratchpads and agent worktrees.
+pub fn is_scratch_cwd(cwd: &str) -> bool {
+    cwd.starts_with("/tmp")
+        || cwd.starts_with("/private/tmp")
+        || cwd.starts_with("/private/var/folders")
+        || cwd.starts_with("/var/folders")
+        || cwd.contains("/scratchpad/")
+        || cwd.contains("/.claude/worktrees/")
+}
+
 fn build_session_start_response_for(
     store: &Store,
     cwd: Option<&str>,
@@ -1978,6 +1995,16 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     // ── Engine-driven cadence dispatch (Wave 1 item 6) ────────
+
+    #[test]
+    fn scratch_cwds_are_background_runs() {
+        assert!(is_scratch_cwd("/private/tmp"));
+        assert!(is_scratch_cwd("/private/var/folders/t8/x/T/seat-review/ws"));
+        assert!(is_scratch_cwd("/Users/me/Code/x/.claude/worktrees/agent-a1"));
+        assert!(is_scratch_cwd("/private/tmp/claude-501/-Users-me/abc/scratchpad/wt"));
+        assert!(!is_scratch_cwd("/Users/me/Code/Claude/i-dream"));
+        assert!(!is_scratch_cwd("/Users/me/tmpfiles"));
+    }
 
     #[test]
     fn cadence_words_parse() {

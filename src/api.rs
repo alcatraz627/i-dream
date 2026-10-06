@@ -383,6 +383,10 @@ impl ClaudeClient {
             ])
             // Run in /tmp so no project CLAUDE.md is discovered.
             .current_dir("/tmp")
+            // Mark the child so i-dream's own hooks stand down: without this the
+            // daemon's calls fired SessionStart and UserPromptSubmit back into the
+            // daemon and it downvoted its own intentions (2026-10-06).
+            .env("I_DREAM_CHILD", "1")
             // Explicitly unset ANTHROPIC_API_KEY to prevent an empty string
             // from forcing API-credit mode instead of OAuth subscription.
             .env_remove("ANTHROPIC_API_KEY")
