@@ -324,13 +324,26 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
     } else {
         return Ok(ReinforceReport::default());
     };
-    let associations: Vec<Association> = if store.exists("dreams/associations.json") {
+    let mut associations: Vec<Association> = if store.exists("dreams/associations.json") {
         store
             .read_json("dreams/associations.json")
             .unwrap_or_default()
     } else {
         vec![]
     };
+    // Reconnect every insight to its patterns by text identity before any vote
+    // is applied, so a vote lands on the pattern even after a remint.
+    let (links, archived_assocs) = relink(&patterns, &mut associations);
+    if links.changed() {
+        let now = Utc::now().to_rfc3339();
+        for a in &archived_assocs {
+            store.append_jsonl(
+                ASSOC_ARCHIVE,
+                &serde_json::json!({ "archived_at": now, "reason": "evidence gone", "association": a }),
+            )?;
+        }
+        store.write_json("dreams/associations.json", &associations)?;
+    }
 
     // A feedback event must reinforce its patterns exactly once, ever — applying
     // the whole history every cycle would spiral a rejected lesson to zero. The
@@ -464,7 +477,97 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
         evicted: evicted.len(),
         forgotten: forgotten.len(),
         archived_feedback,
+        links,
     })
+}
+
+/// Where associations go when no pattern behind them survives.
+pub const ASSOC_ARCHIVE: &str = "dreams/associations-archive.jsonl";
+
+/// What one relink pass did to the insight-to-pattern links.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct RelinkReport {
+    /// Links that pointed at a stale UUID and now point at the same text's
+    /// current pattern.
+    pub relinked: usize,
+    /// Links whose pattern exists under no UUID and no text identity.
+    pub dropped: usize,
+    /// Associations left with no live link, moved to the archive.
+    pub archived: usize,
+    /// Links remaining after the pass, all of which resolve.
+    pub live_links: usize,
+    /// Links seen before the pass (the denominator for "dangling").
+    pub links_before: usize,
+    /// Links that resolved nowhere before the pass.
+    pub dangling_before: usize,
+    stable_filled: usize,
+}
+
+impl RelinkReport {
+    /// Whether the association store needs rewriting.
+    pub fn changed(&self) -> bool {
+        self.relinked + self.dropped + self.archived + self.stable_filled > 0
+    }
+}
+
+/// Keep every association pointing at patterns that exist.
+///
+/// Each link records its pattern's text identity. A link whose UUID was
+/// reminted is moved to the current pattern with the same text; a link whose
+/// pattern is gone under both identities is dropped. An association with no
+/// link left has nothing behind it and is returned for archiving (removed
+/// from `associations`). Afterwards every link resolves.
+pub fn relink(
+    patterns: &[ExtractedPattern],
+    associations: &mut Vec<Association>,
+) -> (RelinkReport, Vec<Association>) {
+    let by_id: HashMap<&str, &ExtractedPattern> =
+        patterns.iter().map(|p| (p.id.as_str(), p)).collect();
+    let by_stable: HashMap<String, &str> = patterns
+        .iter()
+        .map(|p| (stable_id(&p.pattern), p.id.as_str()))
+        .collect();
+    let mut r = RelinkReport::default();
+    let mut archived = Vec::new();
+    let mut kept = Vec::with_capacity(associations.len());
+    for mut a in associations.drain(..) {
+        let had_links = !a.patterns_linked.is_empty();
+        let mut ids = Vec::with_capacity(a.patterns_linked.len());
+        let mut stables = Vec::with_capacity(a.patterns_linked.len());
+        for (i, pid) in a.patterns_linked.iter().enumerate() {
+            r.links_before += 1;
+            let known_stable = a.patterns_linked_stable.get(i).filter(|s| !s.is_empty());
+            if let Some(p) = by_id.get(pid.as_str()) {
+                let s = stable_id(&p.pattern);
+                if known_stable != Some(&s) {
+                    r.stable_filled += 1;
+                }
+                ids.push(pid.clone());
+                stables.push(s);
+                continue;
+            }
+            r.dangling_before += 1;
+            match known_stable.and_then(|s| by_stable.get(s).map(|id| (s, id))) {
+                Some((s, id)) => {
+                    r.relinked += 1;
+                    ids.push((*id).to_string());
+                    stables.push(s.clone());
+                }
+                None => r.dropped += 1,
+            }
+        }
+        a.patterns_linked = ids;
+        a.patterns_linked_stable = stables;
+        if had_links && a.patterns_linked.is_empty() {
+            r.archived += 1;
+            archived.push(a);
+        } else {
+            r.live_links += a.patterns_linked.len();
+            kept.push(a);
+        }
+    }
+    *associations = kept;
+    (r, archived)
 }
 
 /// The reinforcement cursor — how far into the feedback stream we have applied.
@@ -813,6 +916,8 @@ pub struct ReinforceReport {
     pub forgotten: usize,
     /// Feedback lines rotated to the monthly archive this cycle (A0 retention).
     pub archived_feedback: usize,
+    /// Insight-to-pattern link health after this cycle's relink.
+    pub links: RelinkReport,
 }
 
 #[cfg(test)]
@@ -896,6 +1001,7 @@ mod tests {
             promoted: true,
             dismissed: false,
             auto_intention_id: None,
+            patterns_linked_stable: Vec::new(),
         }
     }
 
@@ -1480,5 +1586,90 @@ mod tests {
             (after2[0].strength - s1).abs() < 1e-12,
             "a same-day cycle neither fades nor re-rejects"
         );
+    }
+}
+
+#[cfg(test)]
+mod relink_tests {
+    use super::*;
+
+    fn p(id: &str, text: &str) -> ExtractedPattern {
+        ExtractedPattern {
+            id: id.into(),
+            pattern: text.into(),
+            valence: "negative".into(),
+            confidence: 0.6,
+            category: "approach".into(),
+            source_sessions: vec![],
+            source_projects: vec![],
+            occurrences: 1,
+            first_seen: "2026-05-01".into(),
+            last_seen: "2026-05-01".into(),
+            occurrence_history: vec![],
+            strength: 0.5,
+            ease: 2.5,
+            reactivations: 0,
+        }
+    }
+
+    fn a(id: &str, linked: &[&str], stable: &[&str]) -> Association {
+        Association {
+            id: id.into(),
+            patterns_linked: linked.iter().map(|s| s.to_string()).collect(),
+            hypothesis: format!("hyp {id}"),
+            confidence: 0.6,
+            actionable: true,
+            suggested_rule: None,
+            promoted: true,
+            dismissed: false,
+            auto_intention_id: None,
+            patterns_linked_stable: stable.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn live_links_gain_their_text_identity() {
+        let ps = vec![p("u1", "Read before edit")];
+        let mut assocs = vec![a("x", &["u1"], &[])];
+        let (r, archived) = relink(&ps, &mut assocs);
+        assert!(archived.is_empty());
+        assert_eq!(r.live_links, 1);
+        assert!(r.changed());
+        assert_eq!(assocs[0].patterns_linked_stable, vec![stable_id("Read before edit")]);
+        let (again, _) = relink(&ps, &mut assocs);
+        assert!(!again.changed(), "a second pass over settled links changes nothing");
+    }
+
+    #[test]
+    fn a_reminted_pattern_is_found_again_by_text() {
+        let s = stable_id("Read before edit");
+        let ps = vec![p("new-uuid", "read BEFORE edit!")];
+        let mut assocs = vec![a("x", &["old-uuid"], &[&s])];
+        let (r, _) = relink(&ps, &mut assocs);
+        assert_eq!(r.relinked, 1);
+        assert_eq!(r.dangling_before, 1);
+        assert_eq!(assocs[0].patterns_linked, vec!["new-uuid".to_string()]);
+    }
+
+    #[test]
+    fn evidence_gone_archives_and_partial_loss_drops_only_the_dead_link() {
+        let ps = vec![p("u1", "kept")];
+        let mut assocs = vec![a("gone", &["dead1", "dead2"], &[]), a("half", &["u1", "dead3"], &[])];
+        let (r, archived) = relink(&ps, &mut assocs);
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "gone");
+        assert_eq!(r.dropped, 3);
+        assert_eq!(assocs.len(), 1);
+        assert_eq!(assocs[0].patterns_linked, vec!["u1".to_string()]);
+        assert_eq!(r.live_links, 1);
+    }
+
+    #[test]
+    fn an_association_born_without_links_is_left_alone() {
+        let mut assocs = vec![a("bare", &[], &[])];
+        let (r, archived) = relink(&[], &mut assocs);
+        assert!(archived.is_empty());
+        assert_eq!(assocs.len(), 1);
+        assert!(!r.changed());
     }
 }

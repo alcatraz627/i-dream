@@ -194,6 +194,15 @@ pub enum Command {
         force: bool,
     },
 
+    /// Reconnect insights to their patterns by text identity, drop links to
+    /// patterns that no longer exist, and archive insights with no evidence
+    /// left. The daemon does this every cycle; this runs it once and reports.
+    Relink {
+        /// Report what would change without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Count transcripts by who wrote them: interactive, headless (by
     /// entrypoint) or seat. Only interactive ones feed the learning modules.
     Transcripts {

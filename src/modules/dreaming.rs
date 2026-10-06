@@ -158,6 +158,11 @@ pub struct Association {
     /// intentions for the same association.
     #[serde(default)]
     pub auto_intention_id: Option<String>,
+    /// The text identity of each linked pattern, index-aligned with
+    /// `patterns_linked`. Pattern UUIDs are reminted on re-extraction; this
+    /// is what lets a link find the same pattern again. Filled by reinforce.
+    #[serde(default)]
+    pub patterns_linked_stable: Vec<String>,
 }
 
 /// Dream journal entry (appended after each dream cycle).
@@ -1352,6 +1357,7 @@ Output ONLY a JSON array. No commentary."#;
                             promoted: false,
                             dismissed: false,
                             auto_intention_id: None,
+                            patterns_linked_stable: Vec::new(),
                         });
                     }
                 }
@@ -1398,6 +1404,7 @@ Output ONLY a JSON array. No commentary."#;
                                         promoted: false,
                                         dismissed: false,
                                         auto_intention_id: None,
+                                        patterns_linked_stable: Vec::new(),
                                     });
                                 }
                             }
@@ -2540,6 +2547,7 @@ mod tests {
             promoted,
             dismissed: false,
             auto_intention_id: None,
+            patterns_linked_stable: Vec::new(),
         }
     }
 

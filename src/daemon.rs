@@ -776,12 +776,12 @@ impl Daemon {
         // sessions' transcripts and turn tag echoes into honored feedback.
         // Runs before reinforcement so a firing potentiates in the same
         // cycle that detects it. Never fails the cycle.
+        // Logged every cycle, zeros included, so a silent scan is visible.
         match crate::firings::scan(&self.store) {
-            Ok(r) if r.sessions_scanned > 0 => info!(
-                "Firing scan: {} session(s) — {} fired, {} present-unused, {} expired",
-                r.sessions_scanned, r.fired, r.present_unused, r.expired
+            Ok(r) => info!(
+                "Firing scan: {} session(s) scanned, {} fired, {} present-unused, {} pending, {} expired",
+                r.sessions_scanned, r.fired, r.present_unused, r.pending, r.expired
             ),
-            Ok(_) => {}
             Err(e) => warn!("Firing scan failed: {e:#}"),
         }
 
@@ -790,7 +790,19 @@ impl Daemon {
         // and evict the weakest so the store keeps what it uses. Runs after
         // dreaming (fresh patterns/associations) and intuition (fresh feedback),
         // and is the single writer of patterns.json's strength dimension.
-        match crate::consolidation::reinforce::run_cycle(&self.store) {
+        let reinforce_result = crate::consolidation::reinforce::run_cycle(&self.store);
+        if let Ok(r) = &reinforce_result {
+            info!(
+                "Relink: {} live link(s), {} relinked, {} dropped, {} association(s) archived (dangling before {}/{})",
+                r.links.live_links,
+                r.links.relinked,
+                r.links.dropped,
+                r.links.archived,
+                r.links.dangling_before,
+                r.links.links_before
+            );
+        }
+        match reinforce_result {
             Ok(r) if r.reactivated
                 + r.weakened
                 + r.stale_skipped
@@ -1648,13 +1660,30 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // confidence dropping below 0.2 then marks the source association
     // dismissed permanently.
     if let HookEvent::UserSignal {
-        correction: true,
+        correction,
+        positive,
         session_id,
+        entrypoint,
         ..
     } = &event
-        && let Err(e) = auto_downvote_recently_fired_intentions(store, session_id.as_deref())
     {
-        warn!("D3 v2 auto-downvote failed: {e:#}");
+        // A prompt that both corrects and praises says nothing clear.
+        let rating = match (*correction, *positive) {
+            (true, false) => Some(("down", "auto-correction")),
+            (false, true) => Some(("up", "auto-positive")),
+            _ => None,
+        };
+        if let Some((rating, source)) = rating
+            && let Err(e) = vote_on_surfaced_intentions(
+                store,
+                session_id.as_deref(),
+                entrypoint.as_deref(),
+                rating,
+                source,
+            )
+        {
+            warn!("feedback vote failed: {e:#}");
+        }
     }
 
     // SessionStart is the only event that gets a non-empty response —
@@ -1666,6 +1695,14 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
             // A session that starts in a temp or seat directory is a background
             // run (the daemon's own, a CI seat, a retro-dump), never the owner.
             // It gets no briefing and no intention is spent on it.
+            String::new()
+        }
+        HookEvent::SessionStart {
+            entrypoint: Some(ep),
+            ..
+        } if !crate::events::is_interactive_entrypoint(ep) => {
+            // A headless run (juror, linter, reviewer) gets no briefing, so it
+            // spends no intention budget and can cast no vote on one.
             String::new()
         }
         HookEvent::SessionStart { cwd, session_id, .. } => {
@@ -1707,51 +1744,74 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     Ok(())
 }
 
-/// When the user corrects Claude, mark the dream-made rules shown to that
-/// same session in the last 10 minutes as unhelpful.
+/// When the owner corrects or praises Claude, vote on the dream-made rules that
+/// session was shown at its start.
 ///
-/// Appends a `source: "auto-correction"` down-vote to
-/// dreams/insight-feedback.jsonl for each fired intention whose source is a
-/// "dream-wake:<assoc_id>" tag. Only fires recorded for `session_id` count:
-/// a correction in one session says nothing about rules shown in another,
-/// and blaming every concurrent session filled the ledger with 10,000
-/// down-votes. With no session id there is nothing safe to blame.
-fn auto_downvote_recently_fired_intentions(store: &Store, session_id: Option<&str>) -> Result<()> {
+/// SessionStart is the only place intentions surface, so the session's own
+/// fired records are exactly what it saw; there is no time window. Each
+/// (session, intention, rating) is voted once, however many times the owner
+/// repeats themselves. Only interactive sessions vote: a known headless
+/// entrypoint never does, and an absent one (an older hook) can only match
+/// fires from a session that passed SessionStart's own filter.
+fn vote_on_surfaced_intentions(
+    store: &Store,
+    session_id: Option<&str>,
+    entrypoint: Option<&str>,
+    rating: &str,
+    source: &str,
+) -> Result<usize> {
     use serde_json::json;
-    const WINDOW_MIN: i64 = 10;
 
     let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
-        return Ok(());
+        return Ok(0);
     };
+    if entrypoint.is_some_and(|ep| !crate::events::is_interactive_entrypoint(ep)) {
+        return Ok(0);
+    }
     let fired: Vec<FiredRecord> = store
         .read_jsonl("intentions/fired.jsonl")
         .unwrap_or_default();
-    if fired.is_empty() {
-        return Ok(());
-    }
-    let cutoff = Utc::now() - chrono::Duration::minutes(WINDOW_MIN);
-    let recent: Vec<&FiredRecord> = fired
-        .iter()
-        .filter(|r| r.fired_at >= cutoff && r.session_id == session_id)
-        .collect();
-    if recent.is_empty() {
-        return Ok(());
+    let shown: Vec<&str> = {
+        let mut v: Vec<&str> = fired
+            .iter()
+            .filter(|r| r.session_id == session_id)
+            .map(|r| r.intention_id.as_str())
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    if shown.is_empty() {
+        return Ok(0);
     }
 
     let registry: Vec<Intention> = store
         .read_jsonl("intentions/registry.jsonl")
         .unwrap_or_default();
-    if registry.is_empty() {
-        return Ok(());
-    }
-
     let intention_by_id: std::collections::HashMap<&str, &Intention> =
         registry.iter().map(|i| (i.id.as_str(), i)).collect();
 
+    // Votes already cast by this session, so a repeat signal is a no-op.
+    let already: std::collections::HashSet<(String, String)> = store
+        .read_jsonl::<serde_json::Value>("dreams/insight-feedback.jsonl")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| v.get("sid").and_then(|s| s.as_str()) == Some(session_id))
+        .filter_map(|v| {
+            Some((
+                v.get("intention_id")?.as_str()?.to_string(),
+                v.get("rating")?.as_str()?.to_string(),
+            ))
+        })
+        .collect();
+
     let now_ts = Utc::now().to_rfc3339();
-    let mut downvoted = 0usize;
-    for fired_record in &recent {
-        let Some(intent) = intention_by_id.get(fired_record.intention_id.as_str()) else {
+    let mut voted = 0usize;
+    for intention_id in shown {
+        if already.contains(&(intention_id.to_string(), rating.to_string())) {
+            continue;
+        }
+        let Some(intent) = intention_by_id.get(intention_id) else {
             continue;
         };
         let Some(assoc_id) = intent.action.source.strip_prefix("dream-wake:") else {
@@ -1759,23 +1819,19 @@ fn auto_downvote_recently_fired_intentions(store: &Store, session_id: Option<&st
         };
         let entry = json!({
             "insight_id": assoc_id,
-            "rating": "down",
-            "source": "auto-correction",
+            "rating": rating,
+            "source": source,
             "ts": now_ts.clone(),
-            "intention_id": fired_record.intention_id,
+            "intention_id": intention_id,
+            "sid": session_id,
         });
-        if let Err(e) = store.append_jsonl("dreams/insight-feedback.jsonl", &entry) {
-            warn!("D3 v2: failed to append auto-downvote: {e:#}");
-        } else {
-            downvoted += 1;
-        }
+        store.append_jsonl("dreams/insight-feedback.jsonl", &entry)?;
+        voted += 1;
     }
-    if downvoted > 0 {
-        info!(
-            "D3 v2: auto-downvoted {downvoted} dream-spawned intention(s) after correction signal"
-        );
+    if voted > 0 {
+        info!("feedback: {rating}-voted {voted} intention(s) shown to session {session_id}");
     }
-    Ok(())
+    Ok(voted)
 }
 
 /// Compose the markdown briefing the hook echoes into Claude's context
@@ -1950,14 +2006,22 @@ fn broadcast_intentions_section_for(
         Priority::Low => 2,
     });
 
-    let mut s = format!("## Behavioral rules ({})", to_surface.len());
+    let mut s = format!(
+        "## Behavioral rules ({})\nWhen a rule changes what you do, cite its tag (e.g. {}) in your reply.",
+        to_surface.len(),
+        crate::firings::intention_tag("0a1b2c3d")
+    );
     for intent in to_surface {
         let tag = match intent.action.priority {
             Priority::High => "high",
             Priority::Medium => "medium",
             Priority::Low => "low",
         };
-        s.push_str(&format!("\n- [{tag}] {}", intent.action.message));
+        s.push_str(&format!(
+            "\n- [{tag}] {} {}",
+            intent.action.message,
+            crate::firings::intention_tag(&intent.id)
+        ));
     }
     Some((s, surfaced_ids))
 }
@@ -2215,7 +2279,7 @@ timeout = "10s"
         assert_eq!(records.len(), 1);
         assert_eq!(
             records[0].event,
-            HookEvent::SessionStart { ts: 42, cwd: None, session_id: None }
+            HookEvent::SessionStart { ts: 42, cwd: None, session_id: None, entrypoint: None }
         );
     }
 
@@ -2285,7 +2349,7 @@ timeout = "10s"
         assert_eq!(records.len(), 4);
         assert_eq!(
             records[0].event,
-            HookEvent::SessionStart { ts: 100, cwd: None, session_id: None }
+            HookEvent::SessionStart { ts: 100, cwd: None, session_id: None, entrypoint: None }
         );
         assert_eq!(
             records[1].event,
@@ -2699,26 +2763,67 @@ timeout = "10s"
         assert!(out.contains("incremental verification"));
     }
 
-    #[test]
-    fn correction_downvotes_only_its_own_sessions_rules() {
-        let (_dir, store) = mk_store();
-        let mut rule = broadcast_intention("dw-1", "Rule", Priority::High, chrono::Duration::hours(-1));
-        rule.action.source = "dream-wake:assoc-9".into();
-        store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+    fn votes(store: &Store) -> Vec<serde_json::Value> {
+        store
+            .read_jsonl("dreams/insight-feedback.jsonl")
+            .unwrap_or_default()
+    }
 
-        // Session A and session B both start and see the rule.
+    #[test]
+    fn votes_land_on_exactly_what_the_session_was_shown() {
+        let (_dir, store) = mk_store();
+        for i in 1..=3 {
+            let mut rule = broadcast_intention(
+                &format!("dw-{i}"),
+                "Rule",
+                Priority::High,
+                chrono::Duration::hours(-1),
+            );
+            rule.action.source = format!("dream-wake:assoc-{i}");
+            store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        }
+
+        // Session A sees the three rules; session B starts later and sees them too.
         build_session_start_response_for(&store, None, Some("sess-A"));
         build_session_start_response_for(&store, None, Some("sess-B"));
 
-        auto_downvote_recently_fired_intentions(&store, Some("sess-A")).unwrap();
-        let fb = std::fs::read_to_string(store.path("dreams/insight-feedback.jsonl")).unwrap();
-        assert_eq!(fb.lines().count(), 1, "one down-vote, for session A's fire only: {fb}");
-        assert!(fb.contains("assoc-9"));
+        // "no that's wrong" in A: exactly A's three, nothing for B.
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction").unwrap();
+        assert_eq!(n, 3);
+        let v = votes(&store);
+        assert_eq!(v.len(), 3);
+        assert!(v.iter().all(|r| r["sid"] == "sess-A" && r["rating"] == "down"));
 
-        // A correction with no session id blames nobody.
-        auto_downvote_recently_fired_intentions(&store, None).unwrap();
-        let fb = std::fs::read_to_string(store.path("dreams/insight-feedback.jsonl")).unwrap();
-        assert_eq!(fb.lines().count(), 1);
+        // Saying it again is not a second vote.
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction").unwrap();
+        assert_eq!(n, 0);
+
+        // "perfect, that works": up-votes the same three.
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "up", "auto-positive").unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(votes(&store).iter().filter(|r| r["rating"] == "up").count(), 3);
+
+        // A headless session and a session with no id vote on nothing.
+        assert_eq!(vote_on_surfaced_intentions(&store, Some("sess-B"), Some("sdk-cli"), "down", "auto-correction").unwrap(), 0);
+        assert_eq!(vote_on_surfaced_intentions(&store, None, Some("cli"), "down", "auto-correction").unwrap(), 0);
+        assert_eq!(votes(&store).len(), 6);
+    }
+
+    #[test]
+    fn a_headless_session_start_gets_no_briefing() {
+        let (_dir, store) = mk_store();
+        let rule = broadcast_intention("dw-1", "Rule", Priority::High, chrono::Duration::hours(-1));
+        store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        let ev = HookEvent::SessionStart {
+            ts: 1,
+            cwd: Some("/Users/me/Code/x".into()),
+            session_id: Some("s".into()),
+            entrypoint: Some("sdk-cli".into()),
+        };
+        let HookEvent::SessionStart { entrypoint: Some(ep), .. } = &ev else { unreachable!() };
+        assert!(!crate::events::is_interactive_entrypoint(ep));
+        assert!(crate::events::is_interactive_entrypoint("cli"));
+        assert!(crate::events::is_interactive_entrypoint("claude-vscode"));
     }
 
     #[test]
@@ -3159,6 +3264,7 @@ timeout = "10s"
             promoted: true,
             dismissed: false,
             auto_intention_id: None,
+            patterns_linked_stable: Vec::new(),
         };
         store
             .write_json("dreams/associations.json", &vec![assoc])

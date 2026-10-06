@@ -279,8 +279,8 @@ SOCKET="{socket}"
 HOOK_INPUT=$(cat 2>/dev/null)
 if command -v jq >/dev/null 2>&1; then
     SID=$(printf '%s' "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-    PAYLOAD=$(jq -nc --arg cwd "$PWD" --arg sid "$SID" --argjson ts "$(date +%s)" \
-        '{{event:"session_start",ts:$ts,cwd:$cwd}} + (if $sid == "" then {{}} else {{session_id:$sid}} end)')
+    PAYLOAD=$(jq -nc --arg cwd "$PWD" --arg sid "$SID" --arg ep "${{CLAUDE_CODE_ENTRYPOINT:-}}" --argjson ts "$(date +%s)" \
+        '{{event:"session_start",ts:$ts,cwd:$cwd}} + (if $sid == "" then {{}} else {{session_id:$sid}} end) + (if $ep == "" then {{}} else {{entrypoint:$ep}} end)')
 else
     PAYLOAD='{{"event":"session_start","ts":'$(date +%s)'}}'
 fi
@@ -436,7 +436,8 @@ payload = json.dumps({{
     "correction": correction,
     "positive": positive,
     "frustration_score": frustration_score,
-    "session_id": data.get("session_id") or None
+    "session_id": data.get("session_id") or None,
+    "entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT") or None
 }}).encode()
 
 try:

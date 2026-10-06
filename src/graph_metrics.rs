@@ -361,6 +361,7 @@ mod tests {
             promoted,
             dismissed: false,
             auto_intention_id: None,
+            patterns_linked_stable: Vec::new(),
         }
     }
 

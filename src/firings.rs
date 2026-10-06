@@ -32,6 +32,8 @@ const SETTLE_HOURS: i64 = 6;
 const EXPIRY_DAYS: i64 = 7;
 /// Scanned-session records older than this are dropped from the state file.
 const STATE_RETAIN_DAYS: i64 = 90;
+/// How far back the daemon's own intention surfacings are scanned.
+const SURFACING_LOOKBACK_DAYS: i64 = 14;
 
 #[derive(Debug, Deserialize)]
 struct InjectionRow {
@@ -64,9 +66,67 @@ pub struct ScanReport {
     pub expired: u64,
 }
 
-/// The tag the injector renders and this scan matches.
+/// The firing ledger: one row per fired or present-unused surfacing. Kept
+/// apart from the feedback lane so trimming votes never erases firings.
+pub const FIRINGS_LEDGER: &str = "dreams/firings.jsonl";
+
+/// The tag the gcc injector renders on a lesson.
 fn tag_for(id: &str) -> String {
     format!("[L:{}]", &id[..id.len().min(8)])
+}
+
+/// The tag the daemon renders on a SessionStart intention.
+pub fn intention_tag(id: &str) -> String {
+    format!("[I:{}]", &id[..id.len().min(8)])
+}
+
+/// One thing a session was shown: its state key, the tag an echo carries,
+/// and the insight a firing votes for.
+struct Shown {
+    key: String,
+    tag: String,
+    vote_id: String,
+}
+
+impl Shown {
+    fn lesson(id: String) -> Self {
+        Shown { tag: tag_for(&id), vote_id: id.clone(), key: id }
+    }
+}
+
+/// Every dream-made intention the daemon surfaced, as (session, when, shown).
+/// Only intentions sourced from a dream association can be voted on.
+fn intention_surfacings(store: &Store, now: DateTime<Utc>) -> Vec<(String, DateTime<Utc>, Shown)> {
+    use crate::modules::prospective::{FiredRecord, Intention};
+    let registry: Vec<Intention> = store
+        .read_jsonl("intentions/registry.jsonl")
+        .unwrap_or_default();
+    let assoc_of: HashMap<&str, &str> = registry
+        .iter()
+        .filter_map(|i| Some((i.id.as_str(), i.action.source.strip_prefix("dream-wake:")?)))
+        .collect();
+    let fired: Vec<FiredRecord> = store
+        .read_jsonl("intentions/fired.jsonl")
+        .unwrap_or_default();
+    fired
+        .into_iter()
+        .filter(|r| !r.session_id.is_empty())
+        // The surfacing log reaches back months; older sessions were never
+        // tag-rendered, so scanning them would only mint present-unused noise.
+        .filter(|r| now - r.fired_at < Duration::days(SURFACING_LOOKBACK_DAYS))
+        .filter_map(|r| {
+            let assoc = *assoc_of.get(r.intention_id.as_str())?;
+            Some((
+                r.session_id,
+                r.fired_at,
+                Shown {
+                    key: format!("I:{}", r.intention_id),
+                    tag: intention_tag(&r.intention_id),
+                    vote_id: assoc.to_string(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Pull every assistant-authored text span out of a transcript. Injected
@@ -129,26 +189,33 @@ pub fn scan_at(
         .unwrap_or_default();
     let mut report = ScanReport::default();
 
-    // Group injections by session: last injection time + the union of ids.
-    let mut by_sid: HashMap<String, (Option<DateTime<Utc>>, Vec<String>)> = HashMap::new();
+    // Everything each session was shown, from both surfacing lanes: the gcc
+    // injector's lessons and the daemon's own SessionStart intentions.
+    let mut by_sid: HashMap<String, (Option<DateTime<Utc>>, Vec<Shown>)> = HashMap::new();
+    let mut add = |sid: String, ts: Option<DateTime<Utc>>, s: Shown| {
+        let entry = by_sid.entry(sid).or_default();
+        entry.0 = entry.0.max(ts);
+        if !entry.1.iter().any(|x| x.key == s.key) {
+            entry.1.push(s);
+        }
+    };
     let body = std::fs::read_to_string(injections_path).unwrap_or_default();
     for line in body.lines() {
         let Ok(row) = serde_json::from_str::<InjectionRow>(line) else {
             continue;
         };
-        if row.sid.is_empty() || row.ids.is_empty() {
+        if row.sid.is_empty() {
             continue;
         }
-        let entry = by_sid.entry(row.sid).or_default();
-        entry.0 = entry.0.max(row.ts);
-        for id in row.ids {
-            if !id.is_empty() && !entry.1.contains(&id) {
-                entry.1.push(id);
-            }
+        for id in row.ids.into_iter().filter(|i| !i.is_empty()) {
+            add(row.sid.clone(), row.ts, Shown::lesson(id));
         }
     }
+    for s in intention_surfacings(store, now) {
+        add(s.0, Some(s.1), s.2);
+    }
 
-    for (sid, (last_ts, ids)) in by_sid {
+    for (sid, (last_ts, shown)) in by_sid {
         // An undated row can't be aged; treat it as fresh forever rather
         // than scanning a session that may still be running.
         let Some(last_ts) = last_ts else {
@@ -182,28 +249,36 @@ pub fn scan_at(
         };
         let text = assistant_text(&transcript).unwrap_or_default();
         let fired_before: Vec<String> = state.fired.get(&sid).cloned().unwrap_or_default();
-        for id in &ids {
-            if fired_before.contains(id) {
+        for s in &shown {
+            if fired_before.contains(&s.key) {
                 continue; // credited on an earlier scan of this session
             }
-            if text.contains(&tag_for(id)) {
+            if text.contains(&s.tag) {
+                // The vote goes to the feedback lane; the firing itself to its
+                // own ledger, which is never trimmed along with votes.
                 store.append_jsonl(
                     "dreams/insight-feedback.jsonl",
                     &serde_json::json!({
-                        "insight_id": id, "rating": "up", "source": "fired",
+                        "insight_id": s.vote_id, "rating": "up", "source": "fired",
                         "sid": sid, "ts": now.to_rfc3339(),
                     }),
                 )?;
-                state.fired.entry(sid.clone()).or_default().push(id.clone());
+                store.append_jsonl(
+                    FIRINGS_LEDGER,
+                    &serde_json::json!({
+                        "kind": "fired", "id": s.key, "insight_id": s.vote_id,
+                        "sid": sid, "ts": now.to_rfc3339(),
+                    }),
+                )?;
+                state.fired.entry(sid.clone()).or_default().push(s.key.clone());
                 report.fired += 1;
             } else if prior_scan.is_none() {
-                // First scan only — a re-scan repeating these would duplicate
-                // the row per resume. No rating on purpose: assay-visible,
-                // vote-invisible.
+                // First scan only: a re-scan repeating these would duplicate
+                // the row per resume. Not a vote, so it stays out of feedback.
                 store.append_jsonl(
-                    "dreams/insight-feedback.jsonl",
+                    FIRINGS_LEDGER,
                     &serde_json::json!({
-                        "insight_id": id, "source": "present-unused",
+                        "kind": "present-unused", "id": s.key, "insight_id": s.vote_id,
                         "sid": sid, "ts": now.to_rfc3339(),
                     }),
                 )?;
@@ -334,18 +409,23 @@ mod tests {
         assert_eq!(rep.fired, 1);
         assert_eq!(rep.present_unused, 1, "user-row echo is not uptake");
 
-        let rows = ledger(&r);
+        // Votes: only the firing, as an up-vote.
+        let votes = ledger(&r);
+        assert_eq!(votes.len(), 1);
+        assert_eq!(votes[0]["insight_id"], "aabbccddeeff0011");
+        assert_eq!(votes[0]["rating"], "up");
+        // Firings ledger: both rows, neither a vote.
+        let rows = firings(&r);
         assert_eq!(rows.len(), 2);
-        let fired = rows.iter().find(|v| v["source"] == "fired").unwrap();
-        assert_eq!(fired["insight_id"], "aabbccddeeff0011");
-        assert_eq!(fired["rating"], "up");
-        let unused = rows.iter().find(|v| v["source"] == "present-unused").unwrap();
+        assert!(rows.iter().any(|v| v["kind"] == "fired"));
+        let unused = rows.iter().find(|v| v["kind"] == "present-unused").unwrap();
         assert!(unused.get("rating").is_none(), "vote-invisible by shape");
 
         // Second pass: session already scanned, nothing new lands.
         let rep2 = scan_at(&r.injections, &r.projects, &r.state, &r.store, now()).unwrap();
         assert_eq!(rep2.sessions_scanned, 0);
-        assert_eq!(ledger(&r).len(), 2);
+        assert_eq!(firings(&r).len(), 2);
+        assert_eq!(ledger(&r).len(), 1);
     }
 
     #[test]
@@ -369,9 +449,59 @@ mod tests {
         // A third pass with nothing newer is a no-op; the fire stays single.
         let rep3 = scan_at(&r.injections, &r.projects, &r.state, &r.store, later).unwrap();
         assert_eq!((rep3.sessions_scanned, rep3.fired), (0, 0));
-        let rows = ledger(&r);
-        assert_eq!(rows.iter().filter(|v| v["source"] == "fired").count(), 1);
+        let rows = firings(&r);
+        assert_eq!(rows.iter().filter(|v| v["kind"] == "fired").count(), 1);
         assert_eq!(rows.len(), 2, "one unused + one fired, ever");
+        assert_eq!(ledger(&r).len(), 1, "one up-vote, ever");
+    }
+
+    #[test]
+    fn a_daemon_intention_echo_votes_for_its_association() {
+        use crate::modules::prospective::{Action, FiredRecord, Intention, Priority, Trigger};
+        let r = rig();
+        let old = now() - Duration::hours(12);
+        let rule = Intention {
+            id: "abcd1234-0000".into(),
+            trigger: Trigger::Context { keywords: vec![], min_keyword_matches: 0 },
+            action: Action {
+                message: "Read siblings first".into(),
+                priority: Priority::High,
+                source: "dream-wake:assoc-7".into(),
+            },
+            created: old,
+            expires: now() + Duration::days(30),
+            fire_count: 1,
+            max_fires: 5,
+            last_fired: Some(old),
+        };
+        r.store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        r.store
+            .append_jsonl(
+                "intentions/fired.jsonl",
+                &FiredRecord {
+                    intention_id: "abcd1234-0000".into(),
+                    fired_at: old,
+                    session_id: "sid-i".into(),
+                    was_relevant: None,
+                },
+            )
+            .unwrap();
+        write_transcript(&r, "sid-i", &["Following [I:abcd1234], I read the siblings first."], &[]);
+
+        let rep = scan_at(&r.injections, &r.projects, &r.state, &r.store, now()).unwrap();
+        assert_eq!(rep.fired, 1);
+        let votes = ledger(&r);
+        assert_eq!(votes.len(), 1);
+        assert_eq!(votes[0]["insight_id"], "assoc-7");
+        assert_eq!(firings(&r)[0]["id"], "I:abcd1234-0000");
+    }
+
+    fn firings(rig: &Rig) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(rig.store.path(FIRINGS_LEDGER))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
     }
 
     #[test]

@@ -34,6 +34,10 @@ pub enum HookEvent {
         /// back to the session a later correction comes from.
         #[serde(default)]
         session_id: Option<String>,
+        /// How the session was started (`cli`, `claude-vscode`, `sdk-cli`...),
+        /// from `CLAUDE_CODE_ENTRYPOINT`. Headless sessions get no briefing.
+        #[serde(default)]
+        entrypoint: Option<String>,
     },
     /// A tool invocation just finished. Used for metacog sampling and
     /// activity-signal updates.
@@ -58,7 +62,16 @@ pub enum HookEvent {
         /// Claude Code's session id; a correction only blames that session's fires.
         #[serde(default)]
         session_id: Option<String>,
+        /// `CLAUDE_CODE_ENTRYPOINT`; only interactive sessions cast votes.
+        #[serde(default)]
+        entrypoint: Option<String>,
     },
+}
+
+/// True when an entrypoint names a person at a terminal or editor. An absent
+/// entrypoint (an older hook) is not ruled out here; callers decide.
+pub fn is_interactive_entrypoint(ep: &str) -> bool {
+    matches!(ep, "cli" | "claude-vscode")
 }
 
 /// A stored record of a received hook event, with daemon-side timestamp.
@@ -97,7 +110,8 @@ mod tests {
             HookEvent::SessionStart {
                 ts: 1712345678,
                 cwd: None,
-                session_id: None
+                session_id: None,
+                entrypoint: None,
             }
         );
     }
@@ -137,6 +151,7 @@ mod tests {
                 positive: false,
                 frustration_score: 0.5,
                 session_id: None,
+                entrypoint: None,
             }
         );
     }
@@ -161,6 +176,7 @@ mod tests {
             positive: true,
             frustration_score: 0.0,
             session_id: None,
+            entrypoint: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: HookEvent = serde_json::from_str(&json).unwrap();
@@ -179,12 +195,12 @@ mod tests {
     #[test]
     fn record_wraps_event_with_timestamp() {
         let before = Utc::now();
-        let rec = HookEventRecord::new(HookEvent::SessionStart { ts: 42, cwd: None, session_id: None });
+        let rec = HookEventRecord::new(HookEvent::SessionStart { ts: 42, cwd: None, session_id: None, entrypoint: None });
         let after = Utc::now();
 
         assert!(rec.received_at >= before);
         assert!(rec.received_at <= after);
-        assert_eq!(rec.event, HookEvent::SessionStart { ts: 42, cwd: None, session_id: None });
+        assert_eq!(rec.event, HookEvent::SessionStart { ts: 42, cwd: None, session_id: None, entrypoint: None });
     }
 
     #[test]

@@ -444,6 +444,42 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::Relink { dry_run } => {
+            use consolidation::reinforce;
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            let patterns: Vec<modules::dreaming::ExtractedPattern> =
+                store.read_json("dreams/patterns.json").unwrap_or_default();
+            let mut assocs: Vec<modules::dreaming::Association> =
+                store.read_json("dreams/associations.json").unwrap_or_default();
+            let (r, archived) = reinforce::relink(&patterns, &mut assocs);
+            let pct = |n: usize, d: usize| if d == 0 { 0.0 } else { 100.0 * n as f64 / d as f64 };
+            println!(
+                "links before: {} ({} dangling, {:.1}%)\nrelinked: {} · dropped: {} · associations archived: {}\nlinks after: {} (0 dangling) across {} association(s)",
+                r.links_before,
+                r.dangling_before,
+                pct(r.dangling_before, r.links_before),
+                r.relinked,
+                r.dropped,
+                r.archived,
+                r.live_links,
+                assocs.len()
+            );
+            if dry_run {
+                println!("(dry run, nothing written)");
+            } else if r.changed() {
+                let now = chrono::Utc::now().to_rfc3339();
+                for a in &archived {
+                    store.append_jsonl(
+                        reinforce::ASSOC_ARCHIVE,
+                        &serde_json::json!({ "archived_at": now, "reason": "evidence gone", "association": a }),
+                    )?;
+                }
+                store.write_json("dreams/associations.json", &assocs)?;
+                println!("✓ wrote dreams/associations.json; archive at {}", reinforce::ASSOC_ARCHIVE);
+            }
+        }
+
         Command::Transcripts { json } => {
             let config = config::Config::load(&cli.config)?;
             let dir = config::expand_tilde(&config.ingestion.projects_dir);
