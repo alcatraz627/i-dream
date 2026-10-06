@@ -62,6 +62,11 @@ enum P {
     }
 }
 
+/// Apply the appearance setting ("system", "dark" or "light") to every window.
+func applyAppearance(_ v: String?) {
+    NSApp.appearance = v == "dark" ? NSAppearance(named: .darkAqua) : v == "light" ? NSAppearance(named: .aqua) : nil
+}
+
 /// The one size setting: S, M or L. Type grows most, icons less, controls least.
 enum UIScale: String, CaseIterable, Identifiable {
     case small = "S", medium = "M", large = "L"

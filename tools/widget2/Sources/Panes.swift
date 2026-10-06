@@ -682,9 +682,7 @@ struct SettingsPane: View {
                     Text("System").tag("system"); Text("Dark").tag("dark"); Text("Light").tag("light")
                 }
                 .pickerStyle(.segmented).frame(width: 240)
-                .onChange(of: appearance) { _, v in
-                    NSApp.appearance = v == "dark" ? NSAppearance(named: .darkAqua) : v == "light" ? NSAppearance(named: .aqua) : nil
-                }
+                .onChange(of: appearance) { _, v in applyAppearance(v) }
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Refresh: every 20 seconds while a surface is open, every 2 minutes otherwise, paused while the display sleeps.").font(F.meta).foregroundStyle(P.fg2)

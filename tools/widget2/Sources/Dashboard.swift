@@ -66,6 +66,7 @@ struct DashboardView: View {
                     .padding(.horizontal, 4).padding(.bottom, 6)
                     .onHover { help.text = $0 ? "the week's cycles; click opens Flow" : "" }
             }
+            SidebarPrefs(model: model, help: help).padding(.bottom, 6)
             navItem(.settings)
         }
         .padding(.horizontal, 8).padding(.vertical, 12)
@@ -122,6 +123,61 @@ struct DashboardView: View {
         case .ledger, .patterns, .reader, .landing: "j k move · return opens · esc backs out · / search · f first filter"
         case .flow: "j k move between cycles · return loads one · esc clears the range"
         case .settings: ""
+        }
+    }
+}
+
+// MARK: - Sidebar size and appearance
+
+/// Size and appearance as two rows of icons in the sidebar: an icon names the
+/// row, icon buttons pick the value. Writes the same keys as Settings.
+struct SidebarPrefs: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var help: HoverHelp
+    @AppStorage("ui.scale") private var scale = "S"
+    @AppStorage("ui.appearance") private var appearance = "system"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // One "A" glyph drawn at three sizes, so the buttons read as small, medium, large.
+            row("textformat.size", "Size", [
+                ("textformat.alt", "S", "Small", 9),
+                ("textformat.alt", "M", "Medium", 12),
+                ("textformat.alt", "L", "Large", 15),
+            ], selection: scale) { scale = $0; model.scaleToken += 1 }
+            row("circle.lefthalf.filled", "Appearance", [
+                ("desktopcomputer", "system", "Follow the system", 12),
+                ("moon.fill", "dark", "Dark", 12),
+                ("sun.max.fill", "light", "Light", 12),
+            ], selection: appearance) { appearance = $0; applyAppearance($0) }
+        }
+        .padding(.horizontal, 6)
+    }
+
+    private func row(_ icon: String, _ name: String, _ options: [(String, String, String, CGFloat)],
+                     selection: String, _ pick: @escaping (String) -> Void) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(P.fg3).frame(width: 18)
+                .help(name)
+            HStack(spacing: 2) {
+                ForEach(options, id: \.1) { glyph, value, label, pt in
+                    let on = selection == value
+                    Button { pick(value) } label: {
+                        Image(systemName: glyph).font(.system(size: pt))
+                            .foregroundStyle(on ? P.fg : P.fg2)
+                            .frame(maxWidth: .infinity).frame(height: 24)
+                            .background(RoundedRectangle(cornerRadius: 5).fill(on ? P.sel : Color.clear))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                    .help("\(name): \(label)")
+                    .onHover { help.text = $0 ? "\(name.lowercased()): \(label.lowercased())" : "" }
+                    .accessibilityLabel("\(name) \(label)")
+                }
+            }
+            .padding(2)
+            .background(RoundedRectangle(cornerRadius: 7).fill(P.card))
         }
     }
 }

@@ -60,11 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     }
 
     private func applyAppearanceSetting() {
-        switch UserDefaults.standard.string(forKey: "ui.appearance") {
-        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
-        case "light": NSApp.appearance = NSAppearance(named: .aqua)
-        default: NSApp.appearance = nil
-        }
+        applyAppearance(UserDefaults.standard.string(forKey: "ui.appearance"))
     }
 
     @objc private func clicked(_ sender: NSStatusBarButton) {
