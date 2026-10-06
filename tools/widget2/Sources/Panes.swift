@@ -659,38 +659,3 @@ struct LandingPane: View {
         .padding(.leading, 20)
     }
 }
-
-// MARK: - Settings
-
-struct SettingsPane: View {
-    @ObservedObject var model: AppModel
-    @AppStorage("ui.scale") private var scale = "S"
-    @AppStorage("ui.appearance") private var appearance = "system"
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            PaneHeader(pane: .settings, sub: "Read live by every surface.")
-            HStack {
-                Text("Size").font(F.body).frame(width: 110, alignment: .leading)
-                Picker("", selection: $scale) { ForEach(UIScale.allCases) { Text($0.rawValue).tag($0.rawValue) } }
-                    .pickerStyle(.segmented).frame(width: 160)
-                    .onChange(of: scale) { _, _ in model.scaleToken += 1 }
-            }
-            HStack {
-                Text("Appearance").font(F.body).frame(width: 110, alignment: .leading)
-                Picker("", selection: $appearance) {
-                    Text("System").tag("system"); Text("Dark").tag("dark"); Text("Light").tag("light")
-                }
-                .pickerStyle(.segmented).frame(width: 240)
-                .onChange(of: appearance) { _, v in applyAppearance(v) }
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Refresh: every 20 seconds while a surface is open, every 2 minutes otherwise, paused while the display sleeps.").font(F.meta).foregroundStyle(P.fg2)
-                Text("CLI: \(Runner.idreamBinary() ?? "not found")").font(F.mono).foregroundStyle(P.fg3)
-                Text("Open log: ~/Library/Application Support/i-dream-bar/open-log.jsonl").font(F.mono).foregroundStyle(P.fg3)
-            }
-            Button("Forget my last look") { model.defaults.removeObject(forKey: AppModel.lookKey); model.refresh() }
-                .font(F.meta)
-        }
-    }
-}

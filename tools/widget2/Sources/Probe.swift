@@ -71,11 +71,24 @@ enum Probe {
         }
 
         // Dashboard panes at full height.
-        for p in [Pane.flow, .ledger, .patterns, .reader, .landing, .settings] {
+        for p in [Pane.flow, .ledger, .patterns, .reader, .landing] {
             let d = model(status, reader)
             d.pane = p
             render(DashboardView(model: d, fullHeight: true), appearance, out.appendingPathComponent("dash-\(p.rawValue)-\(tag).png"), width: 1280)
         }
+
+        // Settings, both tabs, from the live `config --json`. The tab choice is
+        // the owner's own preference, so it is put back afterwards.
+        let savedTab = UserDefaults.standard.string(forKey: "ui.settingsTab")
+        for t in ["controls", "all"] {
+            UserDefaults.standard.set(t, forKey: "ui.settingsTab")
+            let d = model(status, reader)
+            d.pane = .settings
+            d.settings.load(sync: true)
+            log.append(d.settings.doc != nil ? "PASS settings \(t): config --json decoded" : "FAIL settings \(t): \(d.settings.error ?? "no report")")
+            render(DashboardView(model: d, fullHeight: true), appearance, out.appendingPathComponent("dash-settings-\(t)-\(tag).png"), width: 1280)
+        }
+        if let savedTab { UserDefaults.standard.set(savedTab, forKey: "ui.settingsTab") } else { UserDefaults.standard.removeObject(forKey: "ui.settingsTab") }
 
         // The key map on every Work pane, then a render of the state it left.
         for p in [Pane.ledger, .patterns, .reader, .landing] {

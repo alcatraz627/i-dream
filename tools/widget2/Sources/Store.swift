@@ -34,6 +34,7 @@ final class AppModel: ObservableObject {
     @Published var scaleToken = 0
     @Published var keyLog: [String] = []
     let help = HoverHelp()
+    let settings = SettingsModel()
 
     var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
     var openDashboard: () -> Void = {}
