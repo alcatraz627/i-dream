@@ -88,3 +88,47 @@ fn the_checker_catches_a_dropped_field() {
     assert!(gaps.contains(&"status.daemon.status".to_string()));
     assert!(gaps.contains(&"status.reader".to_string()));
 }
+
+/// The widget's status number is hours since the last cycle that produced
+/// something, so a cycle that ran and produced nothing must not move it, and
+/// an association must name patterns by the same id the pattern rows carry.
+#[test]
+fn cycles_and_patterns_tell_produced_from_ran() {
+    let home = sandbox();
+    let dreams = home.path().join(".claude/subconscious/dreams");
+    std::fs::create_dir_all(&dreams).unwrap();
+    let now = chrono::Utc::now();
+    let t1 = (now - chrono::Duration::hours(30)).to_rfc3339();
+    let t2 = (now - chrono::Duration::hours(3)).to_rfc3339();
+    let journal = format!(
+        "{}\n{}\n",
+        serde_json::json!({"id":"a","timestamp":t1,"phase":"all","sessions_analyzed":4,"patterns_extracted":2,"associations_found":1,"insights_promoted":0,"tokens_used":900}),
+        serde_json::json!({"id":"b","timestamp":t2,"phase":"all","sessions_analyzed":0,"patterns_extracted":0,"associations_found":0,"insights_promoted":0,"tokens_used":0}),
+    );
+    std::fs::write(dreams.join("journal.jsonl"), journal).unwrap();
+    let pat = |text: &str, s: f64| serde_json::json!({"id":"x","pattern":text,"valence":"negative","confidence":0.9,"category":"approach","source_sessions":[],"occurrences":2,"first_seen":t1,"last_seen":t1,"occurrence_history":[t1],"strength":s});
+    std::fs::write(
+        dreams.join("patterns.json"),
+        serde_json::json!([pat("Run it before calling it done.", 0.7), pat("Read the siblings first.", 0.2)]).to_string(),
+    )
+    .unwrap();
+    let v = run_json(home.path(), &["status", "--json"]);
+    let ids: Vec<String> = v["patterns"]["top"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect();
+    std::fs::write(
+        dreams.join("associations.json"),
+        serde_json::json!([{"id":"as1","patterns_linked":["x","y"],"hypothesis":"h","confidence":0.8,"actionable":false,"suggested_rule":null,"patterns_linked_stable":[ids[0], ids[1]]}]).to_string(),
+    )
+    .unwrap();
+    let v = run_json(home.path(), &["status", "--json"]);
+    let recent = v["cycles"]["recent"].as_array().unwrap();
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0]["produced"], true);
+    assert_eq!(recent[1]["produced"], false);
+    let lp = chrono::DateTime::parse_from_rfc3339(v["cycles"]["last_productive"].as_str().unwrap()).unwrap();
+    assert!((lp.with_timezone(&chrono::Utc) - now).num_hours().abs() >= 29, "an idle cycle moved last_productive");
+    assert_eq!(v["patterns"]["total"], 2);
+    assert_eq!(v["patterns"]["top"][0]["last7"], 1, "a 30h-old occurrence counts in the last seven days");
+    let a = &v["patterns"]["associations"][0];
+    assert!(ids.contains(&a["a"].as_str().unwrap().to_string()));
+    assert!(ids.contains(&a["b"].as_str().unwrap().to_string()));
+}

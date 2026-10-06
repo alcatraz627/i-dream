@@ -580,6 +580,12 @@ pub struct LaneHealth {
     pub consumer_age: Option<String>,
     /// `live`, `stale`, `never`, `retired` or `on-demand`.
     pub consumer_state: &'static str,
+    /// The lane's expected cadence; a reading older than twice this is stale.
+    pub cadence_hours: u64,
+    /// `producer_age` in seconds, for a surface that sorts or dims by age.
+    pub producer_age_s: Option<u64>,
+    /// `consumer_age` in seconds.
+    pub consumer_age_s: Option<u64>,
 }
 
 fn worse(a: LaneStatus, b: LaneStatus) -> LaneStatus {
@@ -674,7 +680,7 @@ impl Lane {
         // The consumer half: a lane is only healthy if someone reads it.
         let mut status = status;
         let mut reason = reason;
-        let (consumer_age, consumer_state) = match &self.consumed {
+        let (consumer_dur, consumer_state) = match &self.consumed {
             Consumed::OnDemand => (None, "on-demand"),
             Consumed::By(receipt) => match store_age(&home.join(receipt)) {
                 None => {
@@ -685,19 +691,23 @@ impl Lane {
                 Some(age) if self.cadence_hours > 0 && age > cadence * 2 => {
                     status = worse(status, LaneStatus::Yellow);
                     reason.push_str(&format!(" · last read {}", fmt_age(age)));
-                    (Some(fmt_age(age)), "stale")
+                    (Some(age), "stale")
                 }
-                Some(age) => (Some(fmt_age(age)), "live"),
+                Some(age) => (Some(age), "live"),
             },
         };
+        let producer_dur = store_age(&store_abs);
         LaneHealth {
             lane: self.name,
             status,
             reason,
             consumer: self.consumer,
-            producer_age: store_age(&store_abs).map(fmt_age),
-            consumer_age,
+            producer_age: producer_dur.map(fmt_age),
+            consumer_age: consumer_dur.map(fmt_age),
             consumer_state,
+            cadence_hours: self.cadence_hours,
+            producer_age_s: producer_dur.map(|d| d.as_secs()),
+            consumer_age_s: consumer_dur.map(|d| d.as_secs()),
         }
     }
 }
