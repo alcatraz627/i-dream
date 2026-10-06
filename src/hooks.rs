@@ -124,47 +124,44 @@ fn uninstall(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Check hook installation status.
-fn status(config: &Config) -> Result<String> {
+/// The Claude Code events i-dream can hook, in install order.
+pub const HOOK_EVENTS: [&str; 5] = ["SessionStart", "PostToolUse", "Stop", "UserPromptSubmit", "PreToolUse"];
+
+/// Whether each i-dream hook is present in Claude Code's settings right now.
+/// None when settings.json is missing.
+pub fn installed(config: &Config) -> Result<Option<Vec<(&'static str, bool)>>> {
     let settings_path = expand_tilde(Path::new("~/.claude/settings.json"));
-    let mut out = String::new();
-
     if !settings_path.exists() {
-        return Ok("No settings.json found — hooks not installed".into());
+        return Ok(None);
     }
-
     let content = std::fs::read_to_string(&settings_path)?;
     let settings: Value = serde_json::from_str(&content)?;
-    let hooks_dir = config.data_dir().join("hooks");
-    let prefix = hooks_dir.to_string_lossy().to_string();
-
-    let check_events = [
-        "SessionStart",
-        "PostToolUse",
-        "Stop",
-        "UserPromptSubmit",
-        "PreToolUse",
-    ];
-
-    for event in &check_events {
-        let installed = settings
-            .get("hooks")
-            .and_then(|h| h.get(event))
-            .and_then(|entries| entries.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .any(|entry| entry_commands(entry).iter().any(|cmd| cmd.contains(&prefix)))
+    let prefix = config.data_dir().join("hooks").to_string_lossy().to_string();
+    Ok(Some(
+        HOOK_EVENTS
+            .iter()
+            .map(|event| {
+                let on = settings
+                    .get("hooks")
+                    .and_then(|h| h.get(event))
+                    .and_then(|entries| entries.as_array())
+                    .map(|arr| arr.iter().any(|entry| entry_commands(entry).iter().any(|cmd| cmd.contains(&prefix))))
+                    .unwrap_or(false);
+                (*event, on)
             })
-            .unwrap_or(false);
+            .collect(),
+    ))
+}
 
-        let status = if installed {
-            "installed"
-        } else {
-            "not installed"
-        };
-        out.push_str(&format!("  {event}: {status}\n"));
+/// Check hook installation status.
+fn status(config: &Config) -> Result<String> {
+    let Some(rows) = installed(config)? else {
+        return Ok("No settings.json found — hooks not installed".into());
+    };
+    let mut out = String::new();
+    for (event, on) in rows {
+        out.push_str(&format!("  {event}: {}\n", if on { "installed" } else { "not installed" }));
     }
-
     Ok(out)
 }
 

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "i-dream config --json",
+  "description": "The settings contract the widget's Settings pane reads: the full config, live overrides, installed hooks, the reader's schedules, limits fixed in code, and which settings `config set` accepts and when each takes effect.",
+  "type": "object",
+  "required": ["schema", "config_path", "settings_path", "config", "idle", "hooks_installed", "schedules", "fixed", "settable"],
+  "properties": {
+    "schema": { "type": "integer", "const": 1 },
+    "config_path": { "type": "string" },
+    "settings_path": { "type": "string" },
+    "config": {
+      "type": "object",
+      "required": ["daemon", "idle", "budget", "modules", "hooks", "ingestion", "limits"],
+      "properties": {
+        "modules": {
+          "type": "object",
+          "required": ["dreaming", "metacog", "intuition", "introspection", "prospective"]
+        },
+        "limits": { "type": "object", "required": ["output_tokens_5h", "output_tokens_7d", "warn_pct"] }
+      }
+    },
+    "idle": {
+      "type": "object",
+      "required": ["configured_hours", "override_hours", "effective_hours"],
+      "properties": {
+        "override_hours": { "type": ["number", "null"] }
+      }
+    },
+    "hooks_installed": {
+      "type": ["array", "null"],
+      "description": "Null when Claude Code's settings.json is missing.",
+      "items": { "type": "object", "required": ["event", "installed"] }
+    },
+    "schedules": {
+      "type": "array",
+      "items": { "type": "object", "required": ["name", "label", "registered", "loaded", "kind", "fire_at", "command"] }
+    },
+    "fixed": {
+      "type": "array",
+      "items": { "type": "object", "required": ["name", "value", "unit"] }
+    },
+    "settable": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "applies"],
+        "properties": { "applies": { "enum": ["live", "next-recon", "restart"] } }
+      }
+    }
+  }
+}

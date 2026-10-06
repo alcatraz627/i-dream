@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-const DECAY_DAYS: i64 = 14;
+pub(crate) const DECAY_DAYS: i64 = 14;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {

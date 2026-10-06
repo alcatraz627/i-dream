@@ -216,8 +216,15 @@ pub enum Command {
         json: bool,
     },
 
-    /// Show current configuration
-    Config,
+    /// Show current configuration. `--json` is the settings contract the
+    /// widget reads; `set` changes one of the few settings a UI may change.
+    Config {
+        /// Print the settings report as JSON
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
 
     /// Manage the menu bar widget (i-dream-bar.app, tools/widget2).
     Widget {
@@ -483,6 +490,17 @@ pub enum WidgetAction {
     Install,
     /// Remove the LaunchAgent registration
     Uninstall,
+}
+
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Change one setting a UI may change (run with a wrong key to list them)
+    Set {
+        /// Dotted key, e.g. modules.metacog.enabled
+        key: String,
+        /// New value
+        value: String,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]

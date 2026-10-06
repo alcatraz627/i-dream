@@ -34,7 +34,7 @@ use tracing_subscriber::fmt::writer::MakeWriterExt;
 /// Keep this many days of rolled log files. Anything older gets deleted
 /// at daemon startup. A quarter, so an audit can trace when something
 /// started breaking, while disk use stays bounded (about 7 MB a month).
-const RETENTION_DAYS: u64 = 120;
+pub(crate) const RETENTION_DAYS: u64 = 120;
 
 /// Prefix of the rolling log file. `tracing_appender::rolling::daily`
 /// appends a `.YYYY-MM-DD` suffix. We also use this prefix to decide

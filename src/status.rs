@@ -154,7 +154,7 @@ fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
 }
 
 /// How many days of cycles the report carries.
-const CYCLE_WINDOW_DAYS: i64 = 14;
+pub(crate) const CYCLE_WINDOW_DAYS: i64 = 14;
 /// How many patterns the report carries, strongest first.
 const PATTERN_TOP: usize = 80;
 

@@ -21,6 +21,7 @@ mod reader;
 mod reflect;
 mod review;
 mod service;
+mod settings;
 mod status;
 mod store;
 mod thread;
@@ -603,10 +604,24 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Config => {
-            let config = config::Config::load(&cli.config)?;
-            println!("{}", toml::to_string_pretty(&config)?);
-        }
+        Command::Config { json, action } => match action {
+            Some(cli::ConfigAction::Set { key, value }) => {
+                let applies = settings::set(&cli.config, &key, &value)?;
+                if json {
+                    println!("{}", serde_json::json!({ "key": key, "value": value, "applies": applies.word() }));
+                } else {
+                    println!("{key} = {value} (takes effect: {})", applies.word());
+                }
+            }
+            None => {
+                let config = config::Config::load(&cli.config)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&settings::report(&config, &cli.config)?)?);
+                } else {
+                    println!("{}", toml::to_string_pretty(&config)?);
+                }
+            }
+        },
 
         Command::SnapshotDiff {
             from,

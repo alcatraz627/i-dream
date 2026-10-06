@@ -1,4 +1,4 @@
-//! The two JSON contracts the widget reads, checked against the schemas in
+//! The JSON contracts the widget reads, checked against the schemas in
 //! docs/contracts. The widget never opens a store file, so a field these
 //! commands drop is a blank on the owner's screen; this test fails first.
 
@@ -78,6 +78,16 @@ fn reader_json_meets_its_contract() {
     let mut gaps = vec![];
     missing(&v, &schema("reader.schema.json"), "reader", &mut gaps);
     assert!(gaps.is_empty(), "reader --json is missing {gaps:?}");
+}
+
+#[test]
+fn config_json_meets_its_contract() {
+    let home = sandbox();
+    let v = run_json(home.path(), &["config", "--json"]);
+    let mut gaps = vec![];
+    missing(&v, &schema("config.schema.json"), "config", &mut gaps);
+    assert!(gaps.is_empty(), "config --json is missing {gaps:?}");
+    assert!(v["settable"].as_array().unwrap().iter().any(|s| s["key"] == "idle.threshold_hours"));
 }
 
 #[test]
