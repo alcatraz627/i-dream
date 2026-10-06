@@ -72,6 +72,25 @@ final class SettingsModel: ObservableObject {
     /// Settings changed since the daemon last started, by key.
     @Published var pendingRestart: Set<String> = []
     @Published var notice: String?
+    /// Bumped after every command, so a field showing a rejected value resets.
+    @Published var revision = 0
+    /// Commands run one at a time, in click order: two config writes at once
+    /// would each read the old file.
+    private let serial = DispatchQueue(label: "dev.i-dream.bar.settings")
+    private var queued = 0
+    /// The value each restart-needing key had before this pane changed it.
+    private var original: [String: String] = [:]
+
+    /// The value a settable key holds in the last report, as `config set` would write it.
+    func current(_ key: String) -> String? {
+        var v: JSONValue? = doc?.config
+        for part in key.split(separator: ".") { v = v?[String(part)] }
+        switch v {
+        case .bool(let b): return b ? "true" : "false"
+        case .number(let n): return n == n.rounded() ? String(Int(n)) : String(n)
+        default: return nil
+        }
+    }
 
     func load(sync: Bool = false) {
         let work = { () -> (ConfigDoc?, String?) in
@@ -88,31 +107,37 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// Run one command, say what happened, then reload the report.
+    /// Queue one command, say what happened, then reload the report.
     private func perform(_ what: String, _ exe: String?, _ args: [String], after: @escaping (Bool) -> Void = { _ in }) {
         guard let exe else { error = "could not find the command to run"; return }
         busy = what
-        DispatchQueue.global(qos: .userInitiated).async {
+        queued += 1
+        serial.async {
             let r = Runner.run(exe, args, timeout: 40)
             DispatchQueue.main.async {
-                self.busy = nil
+                self.queued -= 1
+                if self.queued == 0 { self.busy = nil }
                 if let f = r.failure { self.error = f; self.notice = nil } else { self.error = nil; self.notice = what }
                 after(r.ok)
-                self.load()
+                self.revision += 1
+                if self.queued == 0 { self.load() }
             }
         }
     }
 
     func set(_ key: String, _ value: String) {
         let applies = doc?.applies(key)
+        if applies == "restart", original[key] == nil, let was = current(key) { original[key] = was }
         perform("saved", Runner.idreamBinary(), ["config", "set", key, value]) { ok in
-            if ok && applies == "restart" { self.pendingRestart.insert(key) }
+            guard ok, applies == "restart" else { return }
+            // Setting a key back to where it started needs no restart.
+            if self.original[key] == value { self.pendingRestart.remove(key) } else { self.pendingRestart.insert(key) }
         }
     }
 
     func restartDaemon() {
         perform("daemon restarted", Runner.idreamBinary(), ["service", "start"]) { ok in
-            if ok { self.pendingRestart = [] }
+            if ok { self.pendingRestart = []; self.original = [:] }
         }
     }
 
@@ -252,9 +277,13 @@ struct ControlsTab: View {
     var body: some View {
         if let d = s.doc {
             VStack(alignment: .leading, spacing: 12) {
-                whenItRuns(d)
-                usageGuard(d)
-                modules(d)
+                // One change at a time: controls wait while a command runs.
+                VStack(alignment: .leading, spacing: 12) {
+                    whenItRuns(d)
+                    usageGuard(d)
+                    modules(d)
+                }
+                .disabled(s.busy != nil)
                 widget
             }
         } else if s.error == nil {
@@ -267,7 +296,10 @@ struct ControlsTab: View {
     private func whenItRuns(_ d: ConfigDoc) -> some View {
         ControlGroupCard(icon: "clock", title: "When it runs") {
             ControlRow(title: "Idle time before a cycle",
-                       detail: "A cycle starts after you have been away this long. The config file says \(Int(d.idle.configured_hours))h; this overrides it.",
+                       detail: "A cycle starts after you have been away this long. "
+                           + (d.idle.override_hours == nil
+                              ? "Using the config file's \(hoursText(d.idle.configured_hours))."
+                              : "Overrides the config file's \(hoursText(d.idle.configured_hours))."),
                        applies: d.applies("idle.threshold_hours")) {
                 Picker("", selection: Binding(
                     get: { d.idle.effective_hours },
@@ -313,7 +345,8 @@ struct ControlsTab: View {
         let on = h5 > 0 || d7 > 0
         return ControlGroupCard(icon: "gauge.with.dots.needle.67percent", title: "Usage guard") {
             ControlRow(title: "Skip cycles near my Claude usage limit",
-                       detail: "Counts output tokens in your recent transcripts and holds automatic cycles once either window passes the warning level.",
+                       detail: "Counts output tokens in your recent transcripts and holds automatic cycles once either window passes the warning level. "
+                           + "Turning it on starts at 40,000 per 5 hours and 500,000 per 7 days, the suggested Claude Pro limits; set a window to 0 to leave it unchecked.",
                        applies: d.applies("limits.output_tokens_5h")) {
                 Toggle("", isOn: Binding(get: { on }, set: { new in
                     s.set("limits.output_tokens_5h", new ? "40000" : "0")
@@ -321,8 +354,8 @@ struct ControlsTab: View {
                 })).toggleStyle(.switch).labelsHidden()
             }
             if on {
-                NumberRow(title: "5-hour window", unit: "output tokens", value: h5) { s.set("limits.output_tokens_5h", String($0)) }
-                NumberRow(title: "7-day window", unit: "output tokens", value: d7) { s.set("limits.output_tokens_7d", String($0)) }
+                NumberRow(title: "5-hour window", unit: "output tokens", value: h5, revision: s.revision) { s.set("limits.output_tokens_5h", String($0)) }
+                NumberRow(title: "7-day window", unit: "output tokens", value: d7, revision: s.revision) { s.set("limits.output_tokens_7d", String($0)) }
                 ControlRow(title: "Warn at", detail: "Share of either limit at which cycles hold") {
                     Picker("", selection: Binding(get: { pct }, set: { s.set("limits.warn_pct", String($0)) })) {
                         ForEach([0.6, 0.7, 0.8, 0.9, 0.95], id: \.self) { Text("\(Int($0 * 100))%").tag($0) }
@@ -379,11 +412,13 @@ struct ControlsTab: View {
     }
 }
 
-/// A whole-number setting edited in a field and saved on Return.
+/// A whole-number setting edited in a field and saved on Return. 0 means unchecked.
 private struct NumberRow: View {
     var title: String
     var unit: String
     var value: Int
+    /// Changes after every save attempt, so a rejected entry snaps back to the saved value.
+    var revision: Int
     var save: (Int) -> Void
     @State private var text = ""
     var body: some View {
@@ -392,13 +427,20 @@ private struct NumberRow: View {
             Spacer()
             TextField("", text: $text)
                 .textFieldStyle(.roundedBorder).frame(width: 110).multilineTextAlignment(.trailing)
-                .onSubmit { if let n = Int(text.filter(\.isNumber)), n > 0 { save(n) } else { text = String(value) } }
-            Text(unit).font(F.meta).foregroundStyle(P.fg2).frame(width: 90, alignment: .leading)
+                .onSubmit {
+                    let typed = text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "")
+                    if let n = Int(typed), n >= 0 { save(n) } else { text = String(value) }
+                }
+            Text(value == 0 ? "unchecked" : unit).font(F.meta).foregroundStyle(P.fg2).frame(width: 90, alignment: .leading)
         }
         .onAppear { text = String(value) }
         .onChange(of: value) { _, v in text = String(v) }
+        .onChange(of: revision) { _, _ in text = String(value) }
     }
 }
+
+/// Hours as a person reads them: "4 h", "0.5 h".
+func hoursText(_ h: Double) -> String { h == h.rounded() ? "\(Int(h)) h" : String(format: "%.1f h", h) }
 
 /// "daily@04:30" → "Every day at 04:30"; "weekly@wed@02:30" → "Wednesdays at 02:30".
 func humanSchedule(_ s: String?) -> String {
@@ -424,8 +466,8 @@ struct AllSettingsTab: View {
         "max_runtime_minutes": "Runtime cap per cycle", "model": "Model", "model_heavy": "Model for heavy work",
         "use_claude_code_cli": "Calls go through the claude CLI", "claude_code_cli_path": "claude CLI path",
         "projects_dir": "Transcript folder", "max_sessions_per_scan": "Sessions read per scan",
-        "socket_path": "Daemon socket", "log_level": "Log level", "max_concurrent_modules": "Modules run in parallel",
-        "sws_enabled": "Slow-wave phase", "rem_enabled": "REM phase", "wake_enabled": "Wake phase",
+        "socket_path": "Socket the hooks talk to", "log_level": "Log level", "max_concurrent_modules": "Modules run in parallel",
+        "sws_enabled": "Pattern extraction (slow-wave)", "rem_enabled": "Linking patterns (REM)", "wake_enabled": "Promoting insights (wake)",
         "min_sessions_since_last": "New sessions needed before a pass", "journal_max_entries": "Journal entries kept",
         "wake_promotion_threshold": "Confidence to promote an insight", "auto_prune_weekly": "Weekly auto-prune",
         "auto_intentions_after_cycle": "Turn links into intentions after each cycle", "auto_intention_threshold": "Confidence for an auto intention",
@@ -471,8 +513,8 @@ struct AllSettingsTab: View {
 
     @ViewBuilder private func behaviour(_ d: ConfigDoc) -> some View {
                 section("clock", "When it runs") {
-                    row("Idle threshold in effect", hours(d.idle.effective_hours))
-                    row("From settings.json", d.idle.override_hours.map(hours) ?? "not set")
+                    row("Idle threshold in effect", hoursText(d.idle.effective_hours))
+                    row("From settings.json", d.idle.override_hours.map(hoursText) ?? "not set")
                     rows(d.config["idle"], skip: [])
                     ForEach(d.schedules, id: \.name) { sc in
                         row(sc.name.hasSuffix("daily") ? "Daily recon" : "Weekly reader run",
@@ -496,7 +538,7 @@ struct AllSettingsTab: View {
                         let flag = d.config["hooks"]?[Self.hookNames[h.event] ?? ""]?.bool ?? false
                         row(h.event, (h.installed ? "installed" : "not installed") + (flag ? "" : " · off in config"))
                     }
-                    row("PreCompact", "in config, but no hook is ever installed for it")
+                    row("PreCompact", "not used: i-dream installs no hook for this event")
                 }
                 section("gearshape.2", "Daemon") { rows(d.config["daemon"], skip: []) }
                 section("lock", "Fixed in code", note: "changed only in the source") {
@@ -519,6 +561,12 @@ struct AllSettingsTab: View {
         if key.hasSuffix("_hours") { return "\(whole) h" }
         if key.hasSuffix("_days") { return "\(whole) days" }
         if key.hasPrefix("output_tokens") || key == "max_tokens_per_cycle" { return n == 0 ? "off" : "\(Int(n).formatted()) tokens" }
+        let counted: [String: String] = [
+            "journal_max_entries": "entries", "max_valence_entries": "entries", "max_sessions_per_scan": "sessions",
+            "min_sessions_since_last": "sessions", "max_active_intentions": "intentions", "min_chains_for_report": "chains",
+            "max_concurrent_modules": "modules", "min_occurrences": "times", "max_samples_per_session": "samples",
+        ]
+        if let unit = counted[key] { return "\(whole) \(unit)" }
         return whole
     }
 
@@ -526,7 +574,6 @@ struct AllSettingsTab: View {
         ["metacog": "Metacognition", "prospective": "Intentions"][m] ?? m.capitalized
     }
 
-    private func hours(_ h: Double) -> String { h == h.rounded() ? "\(Int(h)) h" : String(format: "%.1f h", h) }
 
     private func section<Content: View>(_ icon: String, _ title: String, note: String? = nil, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {

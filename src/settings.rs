@@ -60,6 +60,8 @@ pub fn set(config_path: &Path, key: &str, value: &str) -> Result<Applies> {
         let keys: Vec<&str> = SETTABLE.iter().map(|(k, _)| *k).collect();
         bail!("{key} is not settable here; settable: {}", keys.join(", "));
     };
+    // Two sets at once would each read the old file and one write would be lost.
+    let _lock = lock_beside(&expand_tilde(config_path))?;
 
     if key == "idle.threshold_hours" {
         let hours: f64 = value.parse().with_context(|| format!("{value} is not a number of hours"))?;
@@ -83,6 +85,22 @@ pub fn set(config_path: &Path, key: &str, value: &str) -> Result<Applies> {
     std::fs::write(&tmp, &next)?;
     std::fs::rename(&tmp, &path)?;
     Ok(*applies)
+}
+
+/// An exclusive lock on `<path>.lock`, held until the returned file is dropped.
+fn lock_beside(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let lock_path = path.with_extension("toml.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path)?;
+    // SAFETY: fd comes from a valid open File; LOCK_EX is a defined flag.
+    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+    if rc != 0 {
+        bail!("could not lock {}: {}", lock_path.display(), std::io::Error::last_os_error());
+    }
+    Ok(f)
 }
 
 /// The TOML literal for a value, checked against the setting's type.
@@ -253,6 +271,24 @@ mod tests {
         assert!(literal_for("modules.dreaming.enabled", "maybe").is_err());
         assert!(literal_for("limits.warn_pct", "2").is_err());
         assert_eq!(literal_for("limits.output_tokens_5h", "40000").unwrap(), "40000");
+    }
+
+    #[test]
+    fn concurrent_sets_both_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, toml::to_string_pretty(&Config::default()).unwrap()).unwrap();
+        for _ in 0..20 {
+            let (a, b) = (path.clone(), path.clone());
+            let t1 = std::thread::spawn(move || set(&a, "limits.output_tokens_5h", "40000").unwrap());
+            let t2 = std::thread::spawn(move || set(&b, "limits.output_tokens_7d", "500000").unwrap());
+            t1.join().unwrap();
+            t2.join().unwrap();
+            let c = Config::load(&path).unwrap();
+            assert_eq!((c.limits.output_tokens_5h, c.limits.output_tokens_7d), (40000, 500000));
+            set(&path, "limits.output_tokens_5h", "0").unwrap();
+            set(&path, "limits.output_tokens_7d", "0").unwrap();
+        }
     }
 
     #[test]
