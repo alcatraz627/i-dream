@@ -584,7 +584,16 @@ pub enum ReaderAction {
         force: bool,
     },
     /// Apply the owner's answers on any reader decision page now.
-    Apply,
+    /// Rebuild a weekly page from its saved run, without a model call.
+    Page {
+        /// ISO week, e.g. 2026w41
+        week: String,
+    },
+    Apply {
+        /// Apply every pending page as agreed, without waiting for a Submit
+        #[arg(long)]
+        agree_all: bool,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]

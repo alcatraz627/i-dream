@@ -291,6 +291,16 @@ pub async fn run_weekly(
 /// Apply the owner's answers on every reader page that has one. Pages still
 /// unanswered stay pending.
 pub fn apply_answers(store: &Store, now: DateTime<Utc>) -> Result<Vec<(String, Vec<land::Landed>)>> {
+    apply_answers_with(store, now, false)
+}
+
+/// As `apply_answers`; with `agree_all`, every pending page is applied as
+/// agreed without waiting for a Submit (the owner said so in chat).
+pub fn apply_answers_with(
+    store: &Store,
+    now: DateTime<Utc>,
+    agree_all: bool,
+) -> Result<Vec<(String, Vec<land::Landed>)>> {
     let mut state = ReaderState::load();
     let script = crate::config::expand_tilde(std::path::Path::new(
         "~/.claude/scripts/decision-page/decision-page.sh",
@@ -305,7 +315,7 @@ pub fn apply_answers(store: &Store, now: DateTime<Utc>) -> Result<Vec<(String, V
             .args(["answer", &slug, "--consume"])
             .output()
             .context("run decision-page.sh answer")?;
-        if !answer.status.success() {
+        if !answer.status.success() && !agree_all {
             still.push(slug);
             continue;
         }
@@ -313,7 +323,11 @@ pub fn apply_answers(store: &Store, now: DateTime<Utc>) -> Result<Vec<(String, V
             still.push(slug);
             continue;
         };
-        let text = String::from_utf8_lossy(&answer.stdout).to_string();
+        let text = if answer.status.success() {
+            String::from_utf8_lossy(&answer.stdout).to_string()
+        } else {
+            "all items agreed in chat".to_string()
+        };
         let ids: Vec<String> = run.items.iter().map(|n| n.cluster.clone()).collect();
         let verdicts = land::parse_answer(&text, &ids);
         let landed = land::apply(
@@ -468,4 +482,15 @@ pub fn scheduled_jobs() -> Vec<ScheduledJob> {
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// Rebuild a week's decision page from its saved run and that day's evidence.
+pub fn republish(week: &str) -> Result<String> {
+    let run = load_run(week).with_context(|| format!("no saved run for {week}"))?;
+    let day = run.at.context("run has no timestamp")?.format("%Y-%m-%d").to_string();
+    let body = std::fs::read_to_string(reader_dir()?.join("daily").join(format!("{day}.evidence.jsonl")))
+        .unwrap_or_default();
+    let rows: Vec<Evidence> = body.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let cfg = land::page_config(week, &run.items, &run.forwarded, &rows, run.named.process_note.as_deref());
+    land::publish(&land::page_slug(week), &cfg)
 }

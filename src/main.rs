@@ -442,8 +442,11 @@ async fn main() -> Result<()> {
                         println!("✓ decision page {url}");
                     }
                 }
-                Some(cli::ReaderAction::Apply) => {
-                    let applied = reader::apply_answers(&store, chrono::Utc::now())?;
+                Some(cli::ReaderAction::Page { week }) => {
+                    println!("✓ {}", reader::republish(&week)?);
+                }
+                Some(cli::ReaderAction::Apply { agree_all }) => {
+                    let applied = reader::apply_answers_with(&store, chrono::Utc::now(), agree_all)?;
                     if applied.is_empty() {
                         println!("no answered reader page");
                     }

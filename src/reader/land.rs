@@ -57,39 +57,55 @@ pub fn mute_target(target: &str) -> Option<PathBuf> {
 }
 
 /// The page's config.json for this week's items.
-pub fn page_config(week: &str, items: &[Named], clusters: &[Cluster], rows: &[Evidence], note: Option<&str>) -> Value {
-    let by_cluster: HashMap<&str, &Cluster> = clusters.iter().map(|c| (c.id.as_str(), c)).collect();
+pub fn page_config(week: &str, items: &[Named], _clusters: &[Cluster], rows: &[Evidence], note: Option<&str>) -> Value {
     let by_ev: HashMap<&str, &Evidence> = rows.iter().map(|e| (e.id.as_str(), e)).collect();
     let mut groups = serde_json::Map::new();
     let sections: Vec<Value> = items
         .iter()
         .map(|n| {
-            let c = by_cluster.get(n.cluster.as_str());
-            let evidence: Vec<String> = n
+            // Three short slots that sort into reading order (the kit sorts
+            // keys): what agreeing does, how much evidence, two headlines.
+            let cited: Vec<&Evidence> = n
                 .evidence_ids
                 .iter()
-                .take(6)
-                .map(|id| match by_ev.get(id.as_str()) {
-                    Some(e) => format!("▸ {} · {}: {}  [{id}]", e.domain, e.ts.format("%b %d"), e.text),
-                    None => format!("▸ {id}"),
-                })
+                .filter_map(|id| by_ev.get(id.as_str()).copied())
                 .collect();
-            let action = match &n.proposal {
+            let headline = |e: &Evidence| e.text.split(": ").next().unwrap_or(&e.text).trim().to_string();
+            let mut newest = cited.clone();
+            newest.sort_by(|a, b| b.ts.cmp(&a.ts));
+            let mut examples: Vec<String> = vec![];
+            for e in newest {
+                let h = headline(e);
+                if !h.is_empty() && !examples.contains(&h) && examples.len() < 2 {
+                    examples.push(h);
+                }
+            }
+            let mut domains: Vec<&str> = cited.iter().map(|e| e.domain.as_str()).collect();
+            domains.sort();
+            domains.dedup();
+            let latest = cited.iter().map(|e| e.ts).max();
+            let evidence = format!(
+                "{} event(s) from {}{}",
+                n.evidence_ids.len(),
+                domains.join(", "),
+                latest.map(|t| format!(", latest {}", t.format("%b %d"))).unwrap_or_default()
+            );
+            let change = match &n.proposal {
                 Some(p) if mute_target(&p.target).is_some() => {
-                    format!("Agree to re-arm the gate: {} goes to the trash.", p.target)
+                    format!("Re-arms a muted gate: {} goes to the trash.", p.target)
                 }
-                Some(_) if n.kind == "repeat" || n.kind == "structural-need" => {
-                    "Agree to file this to the gcc backlog (once; tag src:idream-reader).".to_string()
+                Some(p) if n.kind == "repeat" || n.kind == "structural-need" => {
+                    format!("Files to the gcc backlog: {} (in {})", p.change, p.target)
                 }
-                _ => "Agree to note it; nothing is filed.".to_string(),
+                Some(p) => format!("Noted only. Suggested: {} (in {})", p.change, p.target),
+                None => "Noted only; nothing is filed.".to_string(),
             };
             let mut slots = serde_json::Map::new();
-            slots.insert("FOUND".into(), json!(c.map(|c| c.summary.clone()).unwrap_or_default()));
-            slots.insert("EVIDENCE".into(), json!(evidence.join("\n")));
-            if let Some(p) = &n.proposal {
-                slots.insert("PROPOSAL".into(), json!(format!("{}: {}", p.target, p.change)));
+            slots.insert("CHANGE".into(), json!(change));
+            slots.insert("EVIDENCE".into(), json!(evidence));
+            if !examples.is_empty() {
+                slots.insert("EXAMPLE".into(), json!(examples.join(" · ")));
             }
-            slots.insert("ON AGREE".into(), json!(action));
             let group = n.kind.clone();
             groups.entry(group.clone()).or_insert_with(|| {
                 json!({"context": match group.as_str() {
@@ -108,14 +124,11 @@ pub fn page_config(week: &str, items: &[Named], clusters: &[Cluster], rows: &[Ev
             })
         })
         .collect();
-    let mut intro = format!(
-        "What i-dream's reader found across your local signals this week ({week}). \
-         Everything is pre-answered; untouched = agreed. Agreeing files the item or re-arms its gate; \
-         DISAGREE drops it. Answers are applied by the next daily recon."
+    // Two sentences only; a process note lives in reader/PROCESS.md, not here.
+    let _ = note;
+    let intro = format!(
+        "What the reader found this week ({week}). Untouched = agreed: agreeing does what CHANGE says; DISAGREE drops it."
     );
-    if let Some(n) = note {
-        intro.push_str(&format!(" The reader amended its own process this week: {n}"));
-    }
     json!({
         "title": format!("i-dream reader, {week}"),
         "storageKey": page_slug(week),
