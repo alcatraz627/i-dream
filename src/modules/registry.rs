@@ -147,7 +147,7 @@ impl<'a> DomainRegistry<'a> {
 /// (`~/.claude/i-dream/domains/*.toml`) plus well-known sibling roots that
 /// may carry an inline `.i-dream-domain.toml`. Order of returned manifests
 /// determines registration order; centralized first, then siblings.
-fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
+pub(crate) fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
     let mut out = vec![];
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -181,6 +181,8 @@ fn discover_external_manifests() -> Vec<crate::modules::DomainManifest> {
         home.join(".claude/memory-domain"),
         home.join(".claude/sessions-domain"),
         home.join(".claude/pinned"),
+        home.join(".claude/checkpoints-domain"),
+        home.join(".claude/skill-usage-domain"),
     ];
     for root in &sibling_roots {
         let p = root.join(".i-dream-domain.toml");
@@ -423,15 +425,6 @@ pub const LANES: &[Lane] = &[
         cadence_hours: 0,
         check: LaneCheck::Retained,
         consumed: Consumed::OnDemand,
-    },
-    Lane {
-        name: "injections",
-        producer: "session-start injector",
-        consumer: "session-start hook",
-        store: ".claude/i-dream/injections.jsonl",
-        cadence_hours: 0,
-        check: LaneCheck::Retained,
-        consumed: Consumed::By(".claude/i-dream/derived/firings-state.json"),
     },
     Lane {
         name: "feedback",
@@ -855,10 +848,9 @@ pub const RETENTION: &[RetentionRule] = &[
         store: ".claude/subconscious/valence/surfaced.jsonl",
         policy: RetentionPolicy::MaxLines(10_000),
     },
-    RetentionRule {
-        store: ".claude/subconscious/dreams/insight-feedback.jsonl",
-        policy: RetentionPolicy::MaxLines(10_000),
-    },
+    // The vote ledger is not here: reinforce rotates it by age (30 days, under
+    // the same lock the hook handler appends with), and a second, line-count
+    // owner would cut votes the dedup and watermark still rely on.
     // The daemon's own audit ledgers. They used to be cut by inline deletes
     // with their own numbers; overflow now archives like everything else.
     RetentionRule {
@@ -1392,7 +1384,7 @@ mod lane_health_tests {
         for l in LANES {
             assert!(seen.insert(l.name), "duplicate lane name: {}", l.name);
         }
-        assert_eq!(LANES.len(), 14, "expected 14 declared lanes");
+        assert_eq!(LANES.len(), 13, "expected 13 declared lanes");
     }
 
     // Live smoke: run against the real ~/.claude tree to prove the day-one
@@ -1417,7 +1409,7 @@ mod lane_health_tests {
         for dead in ["ipc"] {
             assert!(red.contains(dead), "expected {dead} RED while still unwired");
         }
-        assert_eq!(lanes.len(), 14);
+        assert_eq!(lanes.len(), 13);
     }
 
     #[test]
@@ -1432,11 +1424,11 @@ mod lane_health_tests {
         assert_eq!(lines.len(), 2, "one record per cycle");
         let last: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(last["cycle"], 2);
-        assert_eq!(last["lanes"].as_array().unwrap().len(), 14);
+        assert_eq!(last["lanes"].as_array().unwrap().len(), 13);
         let sum = last["red"].as_u64().unwrap()
             + last["yellow"].as_u64().unwrap()
             + last["green"].as_u64().unwrap();
-        assert_eq!(sum, 14, "every lane counted exactly once");
+        assert_eq!(sum, 13, "every lane counted exactly once");
     }
 
     // Emit one reading to the REAL store so the artifact can be jq'd (docs/24
@@ -1609,8 +1601,20 @@ mod retained_tests {
         "{}\n".repeat(n)
     }
 
-    fn injections_lane() -> &'static Lane {
-        LANES.iter().find(|l| l.name == "injections").unwrap()
+    // A lane over a line-capped store; the receipt-free OnDemand consumer
+    // leaves only the cap to decide the colour.
+    static CAPPED: Lane = Lane {
+        name: "capped",
+        producer: "p",
+        consumer: "c",
+        store: ".claude/subconscious/dreams/firings.jsonl",
+        cadence_hours: 0,
+        check: LaneCheck::Retained,
+        consumed: Consumed::OnDemand,
+    };
+
+    fn capped_lane() -> &'static Lane {
+        &CAPPED
     }
 
     #[test]
@@ -1623,24 +1627,24 @@ mod retained_tests {
     #[test]
     fn a_store_held_at_its_cap_is_green_and_only_overflow_warns() {
         let home = tempfile::tempdir().unwrap();
-        let p = home.path().join(injections_lane().store);
+        let p = home.path().join(capped_lane().store);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         // A fresh read receipt, so only the cap decides the colour.
-        if let Consumed::By(receipt) = injections_lane().consumed {
+        if let Consumed::By(receipt) = capped_lane().consumed {
             let r = home.path().join(receipt);
             std::fs::create_dir_all(r.parent().unwrap()).unwrap();
             std::fs::write(r, "{}").unwrap();
         }
-        let cap = match retention_rule(injections_lane().store).unwrap().policy {
+        let cap = match retention_rule(capped_lane().store).unwrap().policy {
             RetentionPolicy::MaxLines(n) => n,
             _ => unreachable!(),
         };
         std::fs::write(&p, lines(cap)).unwrap();
-        assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Green);
+        assert_eq!(capped_lane().evaluate(home.path()).status, LaneStatus::Green);
         std::fs::write(&p, lines(cap + cap / 5)).unwrap();
-        assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Yellow);
+        assert_eq!(capped_lane().evaluate(home.path()).status, LaneStatus::Yellow);
         std::fs::write(&p, lines(cap * 2)).unwrap();
-        assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Red);
+        assert_eq!(capped_lane().evaluate(home.path()).status, LaneStatus::Red);
     }
 }
 

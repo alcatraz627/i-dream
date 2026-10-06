@@ -39,13 +39,18 @@ deploy_domain() {
     cp -f "$src/extract-events.py"    "$dest/extract-events.py"
     chmod +x "$dest/extract-events.py"
     # Prompt: overwrite on install so updates ship; user can re-customise.
-    cp -f "$src/dream/prompt.md" "$dest/dream/prompt.md"
+    # The reader's own domains carry no dream prompt.
+    if [ -f "$src/dream/prompt.md" ]; then
+        cp -f "$src/dream/prompt.md" "$dest/dream/prompt.md"
+    fi
     echo "deployed: $name"
 }
 
 DOMAINS_SRC="$REPO_DIR/scripts/domains"
-deploy_domain "$DOMAINS_SRC/sessions-domain" "$HOME/.claude/sessions-domain"
-deploy_domain "$DOMAINS_SRC/memory-domain"   "$HOME/.claude/memory-domain"
+deploy_domain "$DOMAINS_SRC/sessions-domain"    "$HOME/.claude/sessions-domain"
+deploy_domain "$DOMAINS_SRC/memory-domain"      "$HOME/.claude/memory-domain"
+deploy_domain "$DOMAINS_SRC/checkpoints-domain" "$HOME/.claude/checkpoints-domain"
+deploy_domain "$DOMAINS_SRC/skill-usage-domain" "$HOME/.claude/skill-usage-domain"
 
 # The smell panel (Sunday + Wednesday 15:00) was retired with the other
 # scheduled dream jobs on 2026-09-18, so deploy no longer schedules it.

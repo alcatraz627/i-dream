@@ -194,6 +194,17 @@ pub enum Command {
         force: bool,
     },
 
+    /// The reader: what repeats across every local signal stream. With no
+    /// subcommand, prints the latest findings; `--json` is the contract the
+    /// widget reads.
+    Reader {
+        #[command(subcommand)]
+        action: Option<ReaderAction>,
+        /// Print the latest findings as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Reconnect insights to their patterns by text identity, drop links to
     /// patterns that no longer exist, and archive insights with no evidence
     /// left. The daemon does this every cycle; this runs it once and reports.
@@ -603,6 +614,39 @@ pub enum CronAction {
     Uninstall,
     /// Show each job's plist + whether it's loaded + last exit status.
     Status,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ReaderAction {
+    /// Read every stream and join it, without a model. Writes
+    /// reader/daily/<date>.json, picks up answered decision pages, and retries
+    /// a weekly run the usage gate held back. The daily scheduled job.
+    Recon {
+        /// How far back to read, in days
+        #[arg(long, default_value_t = 28)]
+        since_days: i64,
+        /// How many clusters to print
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        /// Do not write the recon or touch decision pages
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// The weekly run: recon, then one bounded model call names the strongest
+    /// clusters, then they land on a decision page. The Wednesday job.
+    Run {
+        /// How far back to read, in days
+        #[arg(long, default_value_t = 28)]
+        since_days: i64,
+        /// Name the clusters but build no page and file nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Run even when the usage gate is closed
+        #[arg(long)]
+        force: bool,
+    },
+    /// Apply the owner's answers on any reader decision page now.
+    Apply,
 }
 
 #[derive(clap::Subcommand, Debug)]

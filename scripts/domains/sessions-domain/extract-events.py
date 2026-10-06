@@ -22,7 +22,37 @@ ROOT = Path.home() / ".claude" / "sessions-domain"
 PROJECTS = Path.home() / ".claude" / "projects"
 EVENTS_FILE = ROOT / "events.jsonl"
 SEEN_FILE = ROOT / "_seen.json"
-MAX_FIRST_RUN = 30
+# A first run reaches back this far; older sessions are marked seen unread.
+FIRST_RUN_DAYS = 30
+
+SEAT_PREFIXES = ("/private/tmp", "/tmp/", "/var/folders", "/private/var/folders")
+
+
+def classify(path: Path) -> tuple[str, str | None, str | None]:
+    """Who wrote a transcript: 'interactive', 'headless' or 'seat', plus its entrypoint and cwd.
+
+    Mirrors i-dream's transcript::classify so the reader and the daemon agree on
+    which sessions are the owner's. Reads only the first rows."""
+    entrypoint = cwd = None
+    try:
+        with path.open(errors="replace") as f:
+            for i, line in enumerate(f):
+                if i >= 200 or (entrypoint and cwd):
+                    break
+                if entrypoint is None and '"entrypoint":"' in line:
+                    entrypoint = line.split('"entrypoint":"', 1)[1].split('"', 1)[0]
+                if cwd is None and '"cwd":"' in line:
+                    cwd = line.split('"cwd":"', 1)[1].split('"', 1)[0]
+    except OSError:
+        return "interactive", None, None
+    if entrypoint and entrypoint.startswith("sdk-"):
+        return "headless", entrypoint, cwd
+    if cwd:
+        seat = cwd.startswith(SEAT_PREFIXES) or cwd == "/tmp" or "/scratchpad" in cwd
+        worktree = "/worktrees/" in cwd
+        if seat or (worktree and entrypoint not in ("cli", "claude-vscode")):
+            return "seat", entrypoint, cwd
+    return "interactive", entrypoint, cwd
 
 ROOT.mkdir(parents=True, exist_ok=True)
 (ROOT / "derived").mkdir(exist_ok=True)
@@ -59,8 +89,18 @@ with EVENTS_FILE.open("a") as out:
         if session_id in seen:
             continue
 
-        if is_first_run and new_count >= MAX_FIRST_RUN:
-            break
+        if is_first_run:
+            age_days = (datetime.now().timestamp() - session_file.stat().st_mtime) / 86400
+            if age_days > FIRST_RUN_DAYS:
+                seen[session_id] = True
+                continue
+
+        # Only the owner's own sessions are signal; jurors, linters and seats
+        # are marked seen so they are never read again.
+        kind, entrypoint, cwd = classify(session_file)
+        if kind != "interactive":
+            seen[session_id] = True
+            continue
 
         entries: list[dict] = []
         try:
@@ -121,6 +161,10 @@ with EVENTS_FILE.open("a") as out:
             "user_turns": len(user_msgs),
             "time_span_minutes": time_span,
             "first_user_msg": first_user_msg,
+            "session_id": session_id,
+            "entrypoint": entrypoint,
+            "cwd": cwd,
+            "provenance": "human",
         }
 
         out.write(json.dumps(event) + "\n")

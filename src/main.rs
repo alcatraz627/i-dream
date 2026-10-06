@@ -20,6 +20,7 @@ mod idream_runtime;
 mod logging;
 mod modules;
 mod pin;
+mod reader;
 mod reflect;
 mod review;
 mod service;
@@ -444,15 +445,73 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::Reader { action, json } => {
+            let config = config::Config::load(&cli.config)?;
+            let store = store::Store::new(config.data_dir().clone())?;
+            match action {
+                Some(cli::ReaderAction::Recon { since_days, top, dry_run }) => {
+                    let now = chrono::Utc::now();
+                    let since = now - chrono::Duration::days(since_days);
+                    let (recon, rows) = reader::recon_at(&store, now, since);
+                    println!(
+                        "read {} events from {} streams since {}; {} clusters",
+                        recon.evidence_count,
+                        recon.streams.len(),
+                        since.format("%Y-%m-%d"),
+                        recon.clusters.len()
+                    );
+                    for s in &recon.streams {
+                        println!("  {:<16} {:>5} in window", s.domain, s.events_in_window);
+                    }
+                    for c in recon.clusters.iter().take(top) {
+                        println!(
+                            "{} {:<15} {:>6.2}  {} [{} ev · {}]",
+                            c.id,
+                            c.kind.label(),
+                            c.score,
+                            c.summary,
+                            c.evidence.len(),
+                            c.provenances.join("+")
+                        );
+                    }
+                    if !dry_run {
+                        let p = reader::persist_recon(&recon, &rows)?;
+                        println!("✓ wrote {}", p.display());
+                    }
+                }
+                Some(cli::ReaderAction::Run { .. }) | Some(cli::ReaderAction::Apply) => {
+                    anyhow::bail!("reader run/apply land with the naming pass");
+                }
+                None => {
+                    let latest = reader::latest_recon();
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&latest)?);
+                    } else if let Some(r) = latest {
+                        println!("latest recon {} · {} clusters", r.at.format("%Y-%m-%d %H:%M"), r.clusters.len());
+                    } else {
+                        println!("no recon yet: i-dream reader recon");
+                    }
+                }
+            }
+        }
+
         Command::Relink { dry_run } => {
             use consolidation::reinforce;
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
-            let patterns: Vec<modules::dreaming::ExtractedPattern> =
-                store.read_json("dreams/patterns.json").unwrap_or_default();
-            let mut assocs: Vec<modules::dreaming::Association> =
-                store.read_json("dreams/associations.json").unwrap_or_default();
+            let patterns: Vec<modules::dreaming::ExtractedPattern> = store
+                .read_json("dreams/patterns.json")
+                .context("dreams/patterns.json is missing or unreadable")?;
+            let mut assocs: Vec<modules::dreaming::Association> = store
+                .read_json("dreams/associations.json")
+                .context("dreams/associations.json is missing or unreadable")?;
             let (r, archived) = reinforce::relink(&patterns, &mut assocs);
+            if r.refused {
+                anyhow::bail!(
+                    "refused: dreams/patterns.json reads as empty while {} association(s) still carry links; check the store before relinking",
+                    assocs.len()
+                );
+            }
             let pct = |n: usize, d: usize| if d == 0 { 0.0 } else { 100.0 * n as f64 / d as f64 };
             println!(
                 "links before: {} ({} dangling, {:.1}%)\nrelinked: {} · dropped: {} · associations archived: {}\nlinks after: {} (0 dangling) across {} association(s)",

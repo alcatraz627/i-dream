@@ -1,0 +1,22 @@
+[domain]
+name        = "checkpoints"
+version     = "1.0"
+description = "Core-dumps: the owner's session summaries, with their Pending section"
+root        = "~/.claude/checkpoints-domain"
+
+[event_stream]
+path      = "{root}/events.jsonl"
+format    = "jsonl"
+id_field  = "id"
+ts_field  = "ts"
+
+[consolidation]
+enabled = true
+type    = "external_script"
+script  = "{root}/extract-events.py"
+cadence = "daily"
+timeout = "60s"
+
+[dream]
+enabled = false
+cadence = "weekly"
