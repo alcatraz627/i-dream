@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>i-dream 2.0 · round 4 · one record</title>
+<style>
+  :root { --font:-apple-system,"SF Pro Text","Helvetica Neue",sans-serif; --mono:"SF Mono",Menlo,monospace; }
+  [data-theme="dark"]{--page:#141416;--bg:rgba(30,30,32,.97);--bg2:#202023;--card:rgba(255,255,255,.055);--card2:rgba(255,255,255,.10);--hair:rgba(255,255,255,.10);--fg:#ececf0;--fg2:#a6a6ad;--fg3:#6d6d75;--green:#35c05c;--amber:#d9a21b;--red:#e25d55;--blue:#5aa2ff;--violet:#a78bfa;--teal:#4fd1c5;--win:#1c1c1e;--side:#232326;--sel:rgba(90,162,255,.16);--shadow:0 18px 60px rgba(0,0,0,.55);
+    --h-atone:#c98f8f;--h-affirm:#8fc9a3;--h-pin:#b59fe0;--h-memory:#c9b48f;--h-sessions:#8fb2c9;--h-codex:#8f9cc9;--h-ipc:#8fc9c3;--h-props:#9a9aa2;--h-audit:#a8c98f;--h-ck:#8fc9bd;--h-skill:#c9c08f;}
+  [data-theme="light"]{--page:#d9d9de;--bg:rgba(246,246,248,.98);--bg2:#fff;--card:rgba(0,0,0,.045);--card2:rgba(0,0,0,.08);--hair:rgba(0,0,0,.10);--fg:#1d1d1f;--fg2:#5c5c62;--fg3:#9a9aa2;--green:#2e9e58;--amber:#c98a12;--red:#ce4b43;--blue:#2f7ae5;--violet:#7c5cf0;--teal:#0f9d8f;--win:#f5f5f7;--side:#ebebee;--sel:rgba(47,122,229,.13);--shadow:0 18px 60px rgba(0,0,0,.25);
+    --h-atone:#b56a6a;--h-affirm:#5fa37a;--h-pin:#8e73c7;--h-memory:#a98a4f;--h-sessions:#5f8aa8;--h-codex:#6676b3;--h-ipc:#4f9e97;--h-props:#7a7a82;--h-audit:#7ea35f;--h-ck:#4f9e8f;--h-skill:#a89a4f;}
+  *{box-sizing:border-box} body{margin:0;background:var(--page);color:var(--fg);font-family:var(--font);font-size:13px}
+  header.top{position:sticky;top:0;z-index:9;display:flex;align-items:center;gap:14px;padding:10px 22px;background:var(--bg);border-bottom:.5px solid var(--hair)}
+  header.top h1{font-size:14px;margin:0;font-weight:600} header.top .sub{color:var(--fg2);font-size:12px} header.top nav{margin-left:auto;display:flex;gap:12px;align-items:center}
+  .tbtn{border:.5px solid var(--hair);background:var(--card);color:var(--fg);border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer}
+  main{padding:26px 22px 80px;max-width:1300px;margin:0 auto} section.blk{margin:0 0 54px} section.blk h2{font-size:16px;margin:0 0 4px} section.blk .lede{color:var(--fg2);font-size:12.5px;margin:0 0 16px;max-width:780px;line-height:1.45}
+  .row{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start} .cap{font:500 11px var(--mono);color:var(--fg2);margin:6px 0 0 2px}
+  .ic{width:13px;height:13px;display:inline-block;vertical-align:-2px;flex:none;stroke:currentColor;fill:none;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round} .ic.s{width:11px;height:11px} .ic.l{width:16px;height:16px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:1px;flex:none}
+  .dot.fresh{background:var(--green)} .dot.stale{background:var(--amber)} .dot.dead{background:var(--red)} .dot.idle,.dot.retired{background:var(--fg3)} .dot.wait{background:var(--amber)} .dot.ok{background:var(--green)} .dot.filed{background:var(--blue)} .dot.landed{background:var(--green)} .dot.none{background:var(--fg3)} .dot.teal{background:var(--teal)}
+  .lbl{font:600 10px var(--font);letter-spacing:.08em;text-transform:uppercase;color:var(--fg3)} .mono{font-family:var(--mono);font-size:10.5px;color:var(--fg3)}
+  .amb{color:var(--amber)} .redt{color:var(--red)} .grnt{color:var(--green)} .dim{color:var(--fg3)}
+  .assert{display:none;background:var(--red);color:#fff;padding:6px 12px;font:12px var(--mono)} .assert.on{display:block}
+  /* bar */
+  .bar{width:560px;height:24px;background:var(--bg);display:flex;align-items:center;justify-content:flex-end;gap:16px;padding:0 12px;font-size:12.5px;box-shadow:0 0 0 .5px var(--hair);border-radius:4px}
+  .bar .it{display:inline-flex;align-items:center;gap:5px;height:24px} .bar .it svg{width:16px;height:16px} .bar .num{font-family:var(--mono);font-size:11.5px} .bar .pip{width:6px;height:6px;border-radius:50%;display:block}
+  .pip.wait{background:var(--amber)} .pip.dead{background:var(--red)}
+  /* popover */
+  .pop{width:424px;background:var(--bg);border-radius:12px;box-shadow:var(--shadow),0 0 0 .5px var(--hair);overflow:hidden;font-size:12.5px;position:relative}
+  .strip{position:relative;padding:10px 14px 9px;border-bottom:.5px solid var(--hair);overflow:hidden}
+  .strip .tide{position:absolute;inset:0;z-index:0} .strip .tide svg{width:100%;height:100%}
+  .strip .l1{position:relative;z-index:1;display:flex;align-items:center;gap:8px} .strip .name{font-weight:600;font-size:13px;white-space:nowrap} .strip .meta{white-space:nowrap} .strip .meta{color:var(--fg2);font-size:11px}
+  .strip .mood{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--fg2);cursor:default}
+  .strip .l2{position:relative;z-index:1;display:flex;gap:12px;font-size:11px;color:var(--fg2);margin-top:6px;flex-wrap:wrap} .strip .l2 span{cursor:pointer} .strip .l2 span:hover{color:var(--fg)} .strip .l2 b{color:var(--fg);font-weight:600}
+  .since{padding:7px 14px;border-bottom:.5px solid var(--hair);font-size:11.5px;color:var(--fg2);background:var(--card)} .since b{color:var(--fg);font-weight:600} .since .lbl{display:inline;margin-right:6px}
+  .band{position:relative;height:74px;border-bottom:.5px solid var(--hair);overflow:hidden;display:grid;grid-template-columns:1fr 190px}
+  .band .map{position:relative} .band .map svg{position:absolute;inset:0;width:100%;height:100%} .band .movers{padding:8px 12px 6px 6px;font-size:11px;color:var(--fg2);border-left:.5px solid var(--hair)}
+  .band .movers div{display:flex;gap:6px;align-items:center;padding:2px 0;cursor:pointer} .band .movers div:hover{color:var(--fg)} .band .movers b{color:var(--fg);font-weight:600;font-family:var(--mono);font-size:10.5px}
+  .ribbon{display:grid;grid-template-columns:1fr 18px 1fr 18px 1fr;padding:10px 14px 4px}
+  .box{background:var(--card);border:.5px solid var(--hair);border-radius:8px;padding:8px 10px;position:relative;cursor:pointer} .box:hover{background:var(--card2)}
+  .box .k{display:flex;align-items:center;gap:5px} .box .n{font:600 20px var(--font);margin:2px 0 0;font-variant-numeric:tabular-nums} .box .n small{font:11px var(--font);color:var(--fg2);margin-left:4px} .box .s{color:var(--fg2);font-size:11px;margin-top:2px}
+  .box .pin{position:absolute;top:7px;right:8px;width:8px;height:8px;border-radius:50%} .pin.fresh{background:var(--green)} .pin.wait{background:var(--amber)} .pin.dead{background:var(--red)} .pin.idle{background:var(--fg3)}
+  .arrow{align-self:center;text-align:center;color:var(--fg3);font-size:14px;position:relative} .arrow i{position:absolute;left:2px;top:50%;width:5px;height:5px;margin-top:-2.5px;border-radius:50%;background:var(--teal);opacity:0} .arrow.moved i{animation:travel 2.6s infinite}
+  @keyframes travel{0%{left:0;opacity:0}15%{opacity:1}85%{opacity:1}100%{left:14px;opacity:0}}
+  .sec{padding:8px 14px 4px}
+  .prow{display:flex;align-items:center;gap:9px;padding:6px 14px;border-top:.5px solid var(--hair);cursor:pointer;transition:background .12s} .prow:hover{background:var(--card)} .prow .ic{color:var(--fg2)}
+  .prow .t{flex:1;min-width:0} .prow .t small{display:block;color:var(--fg2);font-size:11px;margin-top:1px} .prow .age{font-family:var(--mono);font-size:10.5px;color:var(--fg3);white-space:nowrap} .prow .act{color:var(--blue);font-size:11px;white-space:nowrap}
+  .foot{display:flex;gap:14px;padding:8px 14px;border-top:.5px solid var(--hair);font-size:11px;color:var(--fg2)} .foot a{cursor:pointer} .foot a:hover{color:var(--fg)} .foot .help{margin-left:auto;color:var(--fg3);font-style:italic}
+  /* dashboard */
+  .win{width:1180px;height:700px;background:var(--win);border-radius:11px;display:grid;grid-template-columns:176px 1fr;overflow:hidden;box-shadow:var(--shadow),0 0 0 .5px var(--hair);font-size:12.5px}
+  .side{background:var(--side);padding:12px 10px;display:flex;flex-direction:column} .traffic{display:flex;gap:7px;margin:0 0 16px 4px} .traffic i{width:12px;height:12px;border-radius:50%;display:block}
+  .nav{padding:6px 10px;border-radius:6px;color:var(--fg2);display:flex;gap:8px;align-items:center;cursor:pointer} .nav.on{background:var(--sel);color:var(--fg);font-weight:600} .nav .c{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--fg3)}
+  .side .mini{margin-top:auto} .mini-hyp{height:44px;border-radius:6px;background:var(--card);margin:0 4px 8px;position:relative;overflow:hidden;cursor:pointer} .mini-hyp svg{position:absolute;inset:0;width:100%;height:100%} .mini-hyp path{fill:none;stroke:var(--violet);stroke-width:1.2}
+  .main{padding:14px 18px;overflow:auto;position:relative} .main h2{margin:0 0 2px;font-size:15px;display:flex;align-items:center;gap:8px} .main .sub{color:var(--fg2);font-size:11.5px;margin-bottom:12px}
+  .pane{display:none} .pane.on{display:block;animation:fade .22s} @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .lens{position:relative;height:150px;border-radius:10px;background:var(--card);border:.5px solid var(--hair);overflow:hidden;margin-bottom:12px} .lens svg{position:absolute;inset:0;width:100%;height:100%} .lens .cap2{position:absolute;left:12px;bottom:7px;font-size:11px;color:var(--fg2)} .lens .cap2 b{color:var(--fg);font-weight:600}
+  .hl{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center}
+  .chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;padding:3px 8px;border-radius:6px;background:var(--card);border:.5px solid var(--hair);color:var(--fg2);cursor:pointer;user-select:none} .chip:hover{background:var(--card2)} .chip.on{background:var(--sel);color:var(--fg);border-color:var(--blue)} .chip b{color:var(--fg);font-weight:600} .chip .x{margin-left:2px;color:var(--fg3)}
+  .tools{display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap} .search{display:flex;align-items:center;gap:6px;background:var(--card);border:.5px solid var(--hair);border-radius:7px;padding:5px 9px;width:280px;color:var(--fg3);font-size:12px} .search input{background:transparent;border:0;outline:0;color:var(--fg);font:12px var(--font);width:100%} .search kbd{font:10px var(--mono);color:var(--fg3);border:.5px solid var(--hair);border-radius:3px;padding:0 4px}
+  .empty{padding:14px;color:var(--fg3);font-size:12px;text-align:center}
+  table.led{width:100%;border-collapse:collapse;font-size:12px} table.led th{text-align:left;padding:4px 8px 6px;border-bottom:.5px solid var(--hair)} table.led td{padding:6px 8px;border-bottom:.5px solid var(--hair);vertical-align:middle}
+  table.led tr.r{cursor:pointer} table.led tr.r:hover td,table.led tr.r.cur td{background:var(--card)} table.led tr.r.open td{background:var(--sel)} table.led td.m{font-family:var(--mono);font-size:11px;color:var(--fg2);white-space:nowrap}
+  .agebar{display:inline-block;height:5px;border-radius:3px;vertical-align:middle;margin-right:6px;opacity:.9} .agebar.fresh{background:var(--fg3);opacity:.45} .agebar.stale{background:var(--amber)} .agebar.dead{background:var(--red)} .agebar.idle,.agebar.retired{background:var(--fg3);opacity:.3}
+  .dname{display:inline-flex;align-items:center;gap:7px} .dname .ic{color:var(--hue)}
+  .detail{margin:4px 0 2px 26px;padding:8px 10px;border-left:2px solid var(--blue);font-family:var(--mono);font-size:10.5px;color:var(--fg2);line-height:1.55;white-space:pre-wrap;animation:fade .2s} .detail .chips{margin-top:6px;display:flex;gap:4px;font-family:var(--font);flex-wrap:wrap}
+  .ev{font:10px var(--mono);padding:2px 6px;border-radius:4px;background:var(--card2);color:var(--fg2);border-left:2px solid var(--hue);display:inline-flex;gap:4px;align-items:center;cursor:pointer} .ev:hover{color:var(--fg)}
+  .bars{position:relative;padding:10px 12px;display:grid;grid-template-columns:150px 1fr 150px;gap:4px 10px;align-items:center;font-size:11.5px} .bars .b{height:9px;border-radius:3px;background:var(--hue);opacity:.7;transition:width .4s} .bars .nm{display:flex;gap:6px;align-items:center;cursor:pointer} .bars .nm:hover{color:var(--fg)} .bars .v{font-family:var(--mono);font-size:10.5px;color:var(--fg3)}
+  .peruse{display:grid;grid-template-columns:1fr 330px;gap:12px;height:440px}
+  .map{position:relative;background:var(--card);border:.5px solid var(--hair);border-radius:10px;overflow:hidden;cursor:grab} .map svg{position:absolute;inset:0;width:100%;height:100%} .map .hud{position:absolute;left:10px;bottom:8px;font-size:10.5px;color:var(--fg3);font-family:var(--mono)}
+  .map line{stroke:var(--fg3);stroke-width:.6;opacity:.3;transition:opacity .2s,stroke .2s} .map.focus line{opacity:.05} .map.focus line.lit{opacity:1;stroke:var(--teal);stroke-width:1.4}
+  .map circle.star{cursor:pointer;transition:opacity .2s} .map.focus circle.star{opacity:.15} .map.focus circle.star.lit{opacity:1} .map circle.star.off{opacity:.08!important}
+  .map .cl{font:600 9.5px var(--font);letter-spacing:.06em;text-transform:uppercase;fill:var(--fg3);pointer-events:none} .map .breath{animation:breath 3.2s ease-in-out infinite} @keyframes breath{0%,100%{opacity:.12}50%{opacity:.32}}
+  .plist{display:flex;flex-direction:column;overflow:auto;background:var(--card);border:.5px solid var(--hair);border-radius:10px}
+  .pitem{padding:7px 10px;border-bottom:.5px solid var(--hair);cursor:pointer;display:flex;gap:8px;align-items:center} .pitem:hover,.pitem.cur{background:var(--card2)} .pitem .nm{flex:1;min-width:0;font-size:11.5px} .pitem .nm small{display:block;color:var(--fg3);font-size:10.5px} .pitem .st{font-family:var(--mono);font-size:10.5px;color:var(--fg3)}
+  .pcard{padding:10px 12px;border-bottom:.5px solid var(--hair);background:var(--sel);animation:fade .2s} .pcard .h{font-weight:600;font-size:12.5px;display:flex;gap:6px;align-items:center;flex-wrap:wrap} .pcard .meta{color:var(--fg2);font-size:11px;margin:3px 0 6px;line-height:1.5}
+  .pcard svg.tr{width:100%;height:26px} .pcard svg.tr path{fill:none;stroke:var(--fg3);stroke-width:1.2} .pcard .acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:6px;background:var(--blue);color:#fff;font-size:11px;font-weight:600;cursor:pointer} .btn.ghost{background:transparent;color:var(--blue);border:.5px solid var(--hair)}
+  .scale{display:inline-block;width:60px;height:5px;border-radius:3px;background:var(--card2);vertical-align:middle;position:relative;margin:0 4px} .scale i{position:absolute;left:0;top:0;bottom:0;border-radius:3px;background:var(--violet)}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .cl{background:var(--card);border:.5px solid var(--hair);border-radius:10px;padding:10px 12px;cursor:pointer;transition:background .15s} .cl:hover{background:var(--card2)} .cl.cur{outline:1px solid var(--blue)}
+  .cl .kind{display:flex;align-items:center;gap:6px} .cl .kind.repeat{color:var(--violet)} .cl .kind.need{color:var(--blue)} .cl .kind.drift{color:var(--amber)} .cl .kind.noise{color:var(--fg3)}
+  .cl .t{font-weight:600;margin:4px 0 2px;font-size:12.5px} .cl p{margin:0 0 8px;color:var(--fg2);font-size:11.5px;line-height:1.4} .cl .evs{display:flex;flex-wrap:wrap;gap:4px} .cl .where{margin-top:8px;font-size:11px;color:var(--fg3);display:flex;gap:6px;align-items:center;flex-wrap:wrap} .cl .where b{color:var(--green);font-weight:600} .cl .where b.wait{color:var(--amber)}
+  .cl .more{display:none;margin-top:8px;border-top:.5px solid var(--hair);padding-top:8px;font-size:11px;color:var(--fg2)} .cl.open .more{display:block;animation:fade .2s}
+  .cl .more .x{display:grid;grid-template-columns:16px 1fr;gap:6px 8px;align-items:start;margin:4px 0} .cl .more .q{font-family:var(--mono);font-size:10.5px;color:var(--fg2);white-space:normal} .cl .more .q b{color:var(--fg);font-weight:600} .cl .more .keys{margin-top:6px;color:var(--fg3)} .cl .more code{font:10px var(--mono);background:var(--card2);padding:1px 5px;border-radius:4px;color:var(--fg2)}
+  .cl .more .weak{margin-top:6px;color:var(--fg3)} .cl .more .weak summary{cursor:pointer}
+  .chain{display:grid;grid-template-columns:1.3fr 20px 1fr 20px 1fr 20px 150px;align-items:center;padding:8px 10px;border-bottom:.5px solid var(--hair)} .chain.cur{background:var(--sel)}
+  .chain .n{display:flex;gap:7px;align-items:center;font-size:11.5px;min-width:0;cursor:pointer;border-radius:6px;padding:2px 4px} .chain .n:hover{background:var(--card2)} .chain .n small{display:block;color:var(--fg3);font-size:10.5px} .chain .ar{text-align:center;color:var(--fg3)}
+  .chain svg.tr{width:150px;height:26px} .chain svg.tr path{fill:none;stroke:var(--fg3);stroke-width:1.2} .chain .d{font-family:var(--mono);font-size:11px} .chain .d.up{color:var(--red)} .chain .d.dn{color:var(--green)} .chain .d.un{color:var(--fg3)}
+  .why{margin-top:10px;padding:10px 12px;background:var(--card);border:.5px solid var(--hair);border-radius:10px;font-size:11.5px;color:var(--fg2);line-height:1.5;animation:fade .2s} .why b{color:var(--fg);font-weight:600}
+  .hyp path.trace{fill:none;stroke:var(--violet);stroke-width:1.6;stroke-linejoin:round} .hyp rect.seg{fill:transparent;cursor:pointer} .hyp rect.seg:hover,.hyp rect.seg.cur{fill:var(--violet);fill-opacity:.10}
+  .hyp rect.day{fill:transparent} .hyp rect.day.lit{fill:var(--violet);fill-opacity:.05} .hyp rect.sub{fill:var(--teal);fill-opacity:0;pointer-events:none} .hyp rect.sub.lit{fill-opacity:.22} .hyp rect.range{fill:var(--blue);fill-opacity:.14;pointer-events:none}
+  .hyp text{font-family:var(--mono);font-size:9px;fill:var(--fg3)} .hyp .now{animation:pulse 2s infinite} @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .tip{position:fixed;z-index:50;background:var(--bg2);border:.5px solid var(--hair);border-radius:8px;padding:8px 10px;font-size:11px;color:var(--fg);box-shadow:var(--shadow);pointer-events:none;opacity:0;transition:opacity .12s;min-width:200px;max-width:320px;white-space:normal} .tip.on{opacity:1} .tip .k{display:flex;align-items:center;gap:6px;margin-bottom:4px;font-weight:600} .tip .m{font-family:var(--mono);font-size:10.5px;color:var(--fg2);line-height:1.5}
+  .stage{background:var(--card);border:.5px solid var(--hair);border-radius:10px;padding:9px 11px;min-height:128px;cursor:pointer;transition:background .15s,transform .15s} .stage:hover{background:var(--card2);transform:translateY(-1px)}
+  .stage .k{display:flex;align-items:center;gap:6px} .stage .k .age{margin-left:auto} .stage .big{font:600 20px var(--font);margin:4px 0 0;font-variant-numeric:tabular-nums} .stage .big small{font:11px var(--font);color:var(--fg2);margin-left:4px}
+  .stage ul{list-style:none;padding:0;margin:6px 0 0;font-size:11px;color:var(--fg2)} .stage li{display:flex;gap:6px;padding:2px 0;align-items:center} .stage li .a2{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--fg3)}
+  .flow{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+  .logbox{margin-top:12px;background:var(--card);border:.5px solid var(--hair);border-radius:10px;padding:10px 12px;font-family:var(--mono);font-size:10.5px;color:var(--fg2);line-height:1.55;min-height:70px} .logbox .k{display:flex;margin-bottom:4px;gap:8px;align-items:center} .logbox .k .st{margin-left:auto;font-family:var(--font);font-size:10.5px}
+  .strata rect.layer{cursor:pointer} .strata rect.layer:hover{stroke:var(--fg);stroke-width:.6}
+  @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="i-sleep" viewBox="0 0 16 16"><path d="M1.5 9.5c2-4 4-4 6 0s4 4 6 0"/><path d="M1.5 12.8c2-2.4 4-2.4 6 0s4 2.4 6 0" opacity=".55"/></symbol>
+  <symbol id="i-signal" viewBox="0 0 16 16"><circle cx="8" cy="9" r="1.4"/><path d="M4.5 12.5a5 5 0 0 1 0-7M11.5 5.5a5 5 0 0 1 0 7M2.2 14.5a8 8 0 0 1 0-11M13.8 3.5a8 8 0 0 1 0 11"/></symbol>
+  <symbol id="i-reader" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.2"/><path d="M10 10l4 4M5 7h4M7 5v4"/></symbol>
+  <symbol id="i-pattern" viewBox="0 0 16 16"><path d="M8 2l1.2 3.3L12.5 6.5 9.2 7.7 8 11 6.8 7.7 3.5 6.5l3.3-1.2zM13 11l.6 1.4 1.4.6-1.4.6L13 15l-.6-1.4-1.4-.6 1.4-.6z"/></symbol>
+  <symbol id="i-assoc" viewBox="0 0 16 16"><circle cx="3.5" cy="12" r="1.6"/><circle cx="8" cy="4" r="1.8"/><circle cx="12.8" cy="10.5" r="1.4"/><path d="M4.6 10.6 7.2 5.6M9.4 5.3l2.6 3.9M5 12h6.3" stroke-dasharray="1.6 1.6"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 16 16"><path d="M3 6a5 5 0 0 1 9-2l1 1M13 2v3h-3M13 10a5 5 0 0 1-9 2l-1-1M3 14v-3h3"/></symbol>
+  <symbol id="i-need" viewBox="0 0 16 16"><path d="M9 3l4 4-6.5 6.5a1.4 1.4 0 0 1-2-2L11 5M8 2l2-1 4 4-1 2"/></symbol>
+  <symbol id="i-drift" viewBox="0 0 16 16"><path d="M2 6h8a2 2 0 1 0-2-2M2 9h10a2 2 0 1 1-2 2M2 12h5"/></symbol>
+  <symbol id="i-noise" viewBox="0 0 16 16"><path d="M2 8h2l1.5-4 2 8 2-6 1.5 2h3" opacity=".6"/><path d="M3 3l10 10"/></symbol>
+  <symbol id="i-proposal" viewBox="0 0 16 16"><path d="M2 10v3h12v-3M8 2v8M5 7l3 3 3-3"/></symbol>
+  <symbol id="i-hook" viewBox="0 0 16 16"><path d="M6.5 9.5a3 3 0 0 0 4.2 0l2-2a3 3 0 0 0-4.2-4.2l-1 1M9.5 6.5a3 3 0 0 0-4.2 0l-2 2a3 3 0 0 0 4.2 4.2l1-1"/></symbol>
+  <symbol id="i-gate" viewBox="0 0 16 16"><path d="M8 1.5l5 2v4c0 3.5-2.2 5.8-5 7-2.8-1.2-5-3.5-5-7v-4z"/><rect x="6" y="7" width="4" height="3.5" rx=".6"/><path d="M7 7V5.8a1 1 0 0 1 2 0V7"/></symbol>
+  <symbol id="i-page" viewBox="0 0 16 16"><path d="M4 1.5h5l3 3v10H4zM9 1.5v3h3M6 8h4M6 11h4"/></symbol>
+  <symbol id="i-up" viewBox="0 0 16 16"><path d="M3 12l4-4 3 3 4-5M11 6h3v3"/></symbol>
+  <symbol id="i-down" viewBox="0 0 16 16"><path d="M3 4l4 4 3-3 4 5M11 10h3V7"/></symbol>
+  <symbol id="i-flat" viewBox="0 0 16 16"><path d="M2 8h12M11 5l3 3-3 3"/></symbol>
+  <symbol id="i-atone" viewBox="0 0 16 16"><path d="M8 2l6.5 11.5h-13zM8 6.5v3.5M8 12.2v.3"/></symbol>
+  <symbol id="i-affirm" viewBox="0 0 16 16"><path d="M4 7v7H2V7zM4 7l3-5a1.5 1.5 0 0 1 1.5 1.5V6h4a1.5 1.5 0 0 1 1.5 1.8l-1 5A1.5 1.5 0 0 1 11.5 14H4"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 16 16"><path d="M9.5 2l4.5 4.5-1.5 1.5-1-.5-3 3 .5 2.5-1.5 1.5-3-3-3 3-1-1 3-3-3-3L2 6l2.5.5 3-3-.5-1z"/></symbol>
+  <symbol id="i-memory" viewBox="0 0 16 16"><path d="M6 3a2.5 2.5 0 0 0-2.5 2.5A2.5 2.5 0 0 0 2 8a2.5 2.5 0 0 0 1.5 2.3A2.5 2.5 0 0 0 6 13h2V3zM10 3a2.5 2.5 0 0 1 2.5 2.5A2.5 2.5 0 0 1 14 8a2.5 2.5 0 0 1-1.5 2.3A2.5 2.5 0 0 1 10 13H8V3z"/></symbol>
+  <symbol id="i-sessions" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4 6l2.5 2L4 10M8 10h4"/></symbol>
+  <symbol id="i-codex" viewBox="0 0 16 16"><path d="M5 4L1.5 8 5 12M11 4l3.5 4L11 12M9.5 2.5l-3 11"/></symbol>
+  <symbol id="i-ipc" viewBox="0 0 16 16"><path d="M2 5.5h10l-2.5-2.5M14 10.5H4l2.5 2.5"/></symbol>
+  <symbol id="i-props" viewBox="0 0 16 16"><path d="M5.5 11.5a4.5 4.5 0 1 1 5 0v1.5h-5zM6 15h4"/></symbol>
+  <symbol id="i-audit" viewBox="0 0 16 16"><path d="M8 1.5l5 2v4c0 3.5-2.2 5.8-5 7-2.8-1.2-5-3.5-5-7v-4zM5.5 8l2 2 3.5-4"/></symbol>
+  <symbol id="i-ck" viewBox="0 0 16 16"><path d="M3.5 14.5V2M3.5 2.5h9l-2 3 2 3h-9"/></symbol>
+  <symbol id="i-skill" viewBox="0 0 16 16"><path d="M9 1.5L3 9h4l-1 5.5L13 7H9z"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></symbol>
+  <symbol id="i-fresh" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M5 8l2 2 4-4"/></symbol>
+  <symbol id="i-stale" viewBox="0 0 16 16"><circle cx="7" cy="8" r="5.5"/><path d="M7 4.5V8l2 1.2M13 11v2.5M13 15v.2"/></symbol>
+  <symbol id="i-dead" viewBox="0 0 16 16"><path d="M5.2 1.5h5.6l4 4v5.6l-4 4H5.2l-4-4V5.5zM5.5 5.5l5 5M10.5 5.5l-5 5"/></symbol>
+  <symbol id="i-idle" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M5 8h6"/></symbol>
+  <symbol id="i-retired" viewBox="0 0 16 16"><rect x="2.5" y="4" width="11" height="9" rx="1.5"/><path d="M5.5 4V2.5h5V4M2.5 8h11"/></symbol>
+  <symbol id="i-person" viewBox="0 0 16 16"><circle cx="7" cy="5.5" r="2.8"/><path d="M1.8 14c.5-3 2.6-4.5 5.2-4.5s4.7 1.5 5.2 4.5M13 8v3M13 12.6v.2"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 16 16"><path d="M2 4h12M4 8h8M6 12h4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 16 16"><path d="M10.6 1.8a6.2 6.2 0 1 0 3.6 11.4A5.4 5.4 0 0 1 10.6 1.8z"/></symbol>
+  <symbol id="i-run" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.5 5.5v5l4-2.5z"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="8" rx="1.2"/><path d="M3 11V3h8"/></symbol>
+  <symbol id="i-log" viewBox="0 0 16 16"><path d="M3 3h10M3 6.5h10M3 10h7M3 13.5h5"/></symbol>
+</svg>
+<div class="assert" id="assert"></div>
+<header class="top">
+  <h1>i-dream 2.0 · round 4</h1>
+  <span class="sub">every surface renders from one record; totals are recomputed from rows and asserted at load · today is Tue 6 Oct 12:04</span>
+  <nav><a href="#glyph" style="color:var(--fg2);text-decoration:none;font-size:12px">glyph</a><a href="#dropdown" style="color:var(--fg2);text-decoration:none;font-size:12px">dropdown</a><a href="#dash" style="color:var(--fg2);text-decoration:none;font-size:12px">dashboard</a><button class="tbtn" id="theme">light / dark</button><button class="tbtn" id="forget">forget last look</button></nav>
+</header>
+<main>
+<section class="blk" id="glyph">
+  <h2>Status item</h2>
+  <p class="lede">The number is hours since the last cycle that <em>produced</em> something (patterns extracted, feedback applied, a reader run), not since the last cycle that ran. Amber dot and count: items waiting on you. Red dot: a live lane is dead (retired lanes do not count).</p>
+  <div class="bar" id="bar"></div>
+  <div class="cap" id="barCap"></div>
+</section>
+<section class="blk" id="dropdown">
+  <h2>Dropdown</h2>
+  <p class="lede">Every row is a dive: it opens the dashboard pane scoped to that entity. The strip chips filter. The mood word carries its sentence on hover. The band is the two biggest movers beside the live map. "Since you last looked" is real: close and reopen the page to see it change (the last look is stored locally; the forget button resets it).</p>
+  <div class="row"><div><div class="pop" id="pop"></div></div></div>
+</section>
+<section class="blk" id="dash">
+  <h2>Dashboard</h2>
+  <p class="lede">Six stages. Filed and Landed are different. Every number links to its rows or carries a noun. Keys on every Work pane: <kbd style="font:10px var(--mono)">j k ⏎ esc / f</kbd>.</p>
+  <div class="win" id="win">
+    <div class="side">
+      <div class="traffic"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i></div>
+      <div class="nav on" data-pane="flow"><svg class="ic"><use href="#i-moon"/></svg>Flow</div>
+      <div class="nav" data-pane="led"><svg class="ic"><use href="#i-signal"/></svg>Ledger<span class="c" id="c-led"></span></div>
+      <div class="nav" data-pane="pat"><svg class="ic"><use href="#i-assoc"/></svg>Patterns<span class="c" id="c-pat"></span></div>
+      <div class="nav" data-pane="read"><svg class="ic"><use href="#i-reader"/></svg>Reader<span class="c" id="c-read"></span></div>
+      <div class="nav" data-pane="land"><svg class="ic"><use href="#i-proposal"/></svg>Landing<span class="c" id="c-land"></span></div>
+      <div class="mini"><div class="cap" style="margin:0 4px 4px">last 7 days · click opens Flow</div><div class="mini-hyp" id="miniHyp"></div><div class="nav" data-pane="set"><svg class="ic"><use href="#i-filter"/></svg>Settings</div></div>
+    </div>
+    <div class="main">
+      <div class="pane on" id="pane-flow"></div>
+      <div class="pane" id="pane-led"></div>
+      <div class="pane" id="pane-pat"></div>
+      <div class="pane" id="pane-read"></div>
+      <div class="pane" id="pane-land"></div>
+      <div class="pane" id="pane-set"><h2><svg class="ic l"><use href="#i-filter"/></svg>Settings</h2><div class="sub">Size S / M / L · theme system / dark / light · reader cadence Wednesday 02:30 · usage gate 90% · open-log on (for the keep-bar count).</div><div class="empty">Settings are read live by every pane; nothing here is a placeholder control.</div></div>
+    </div>
+  </div>
+</section>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+/* ───────────────────────── THE ONE RECORD ─────────────────────────
+   Every surface below derives from STATE. No surface carries its own number. */
+const TODAY = new Date('2026-10-06T06:34:00Z'); // Tue 6 Oct 12:04 IST
+const H = 3600e3, D = 24*H;
+const ago = ms => ms < H ? Math.round(ms/60e3)+'m' : ms < D ? Math.round(ms/H)+'h' : Math.round(ms/D)+'d';
+const at = (d, h, m=0) => new Date(TODAY.getTime() - d*D + (h*60+m)*60e3 - (TODAY.getUTCHours()*60+TODAY.getUTCMinutes())*60e3); // d days ago at hh:mm UTC
+const STATE = {
+  daemon: { pid: 79055, version: '0.5.4', lastCycle: at(0, 1, 53), lastProductive: at(1, 12, 56), usageWeekPct: 71 },
+  cycles: [ // depth: 1 ingest, 2 reinforce, 3 reader; produced = patterns or feedback or findings > 0
+    {id:1853, t:at(6,5,29), depth:2, tok:0, sessions:0, weakened:57, produced:false, phases:[['ingest',0],['reinforce',60]]},
+    {id:1854, t:at(6,12,50), depth:1, tok:33000, sessions:15, patterns:4, produced:true, phases:[['ingest',140]]},
+    {id:1855, t:at(5,5,12), depth:2, tok:0, sessions:0, weakened:51, produced:false, phases:[['ingest',0],['reinforce',40]]},
+    {id:1856, t:at(5,13,1), depth:1, tok:41000, sessions:9, patterns:2, produced:true, phases:[['ingest',120]]},
+    {id:1857, t:at(4,12,56), depth:2, tok:92000, sessions:15, patterns:6, evicted:26, produced:true, phases:[['ingest',200],['reinforce',30]]},
+    {id:1858, t:at(3,18,16), depth:1, tok:38000, sessions:7, patterns:0, produced:false, phases:[['ingest',90]]},
+    {id:1859, t:at(3,23,52), depth:2, tok:0, sessions:0, weakened:64, produced:false, phases:[['ingest',0],['reinforce',20]]},
+    {id:'reader W40', t:at(5,2,30), depth:3, tok:48000, run:'W40', produced:true, phases:[['join',40],['name',120],['land',10]]},
+    {id:1860, t:at(0,1,53), depth:2, tok:0, sessions:0, weakened:57, produced:false, phases:[['ingest',0],['reinforce',77]]},
+  ],
+  domains: [ // state: fresh|stale|dead|retired|idle ; retired excluded from totals
+    {n:'atone', ic:'i-atone', hue:'--h-atone', kind:'external', written:at(0,4,20), read:at(5,2,30), pending:40, week:'12 events · 3 slugs repeat', state:'fresh'},
+    {n:'codex-sessions', ic:'i-codex', hue:'--h-codex', kind:'external', written:at(1,8,0), read:at(5,2,30), pending:175, week:'9 execs · 7 no handback · +42 vs last week', state:'fresh', mover:42},
+    {n:'claude-ipc', ic:'i-ipc', hue:'--h-ipc', kind:'external', written:at(0,0,30), read:at(5,2,30), pending:7, week:'4 handoffs', state:'fresh'},
+    {n:'proposals', ic:'i-props', hue:'--h-props', kind:'external', written:at(0,5,20), read:at(5,2,30), pending:33, week:'6 filed · 2 done', state:'fresh', mover:-3},
+    {n:'claude-audit', ic:'i-audit', hue:'--h-audit', kind:'external', written:at(0,3,0), read:at(5,2,30), pending:74, week:'943 chain-guard fires', state:'fresh'},
+    {n:'pinned', ic:'i-pin', hue:'--h-pin', kind:'external', written:at(3,0,0), read:at(5,2,30), pending:18, week:'2 pins', state:'fresh'},
+    {n:'checkpoints', ic:'i-ck', hue:'--h-ck', kind:'external', written:at(0,3,30), read:at(5,2,30), pending:18, week:'5 dumps · 2 pending repeat', state:'fresh'},
+    {n:'skill-usage', ic:'i-skill', hue:'--h-skill', kind:'external', written:at(0,6,25), read:at(5,2,30), pending:61, week:'/catchup ×9 · /tasks ×7', state:'fresh'},
+    {n:'affirm', ic:'i-affirm', hue:'--h-affirm', kind:'external', written:at(42,0,0), read:at(5,2,30), pending:3, week:'extractor has not run', state:'stale', fix:'i-dream domain run affirm'},
+    {n:'memory-domain', ic:'i-memory', hue:'--h-memory', kind:'external', written:at(32,0,0), read:at(5,2,30), pending:7, week:'extractor has not run', state:'stale', fix:'i-dream domain run memory-domain'},
+    {n:'sessions-domain', ic:'i-sessions', hue:'--h-sessions', kind:'external', written:at(126,0,0), read:null, pending:4052, week:'consumer retired 2026-09-18 by ruling D8a', state:'retired', chain:'2026-06-01T18:27Z  last event written\nextract-events.py  TypeError line 80  (fixed 10-03, not yet run)\nconsumer           dream pass · retired 2026-09-18 (owner ruling D8a)\nstatus             retired: excluded from totals and from the status item'},
+    {n:'dreaming', ic:'i-pattern', hue:'--violet', kind:'native', written:at(0,1,53), read:at(0,1,53), pending:0, week:'0 new interactive sessions (3 headless skipped)', state:'idle'},
+    {n:'metacog', ic:'i-pattern', hue:'--violet', kind:'native', written:at(0,1,53), read:at(0,1,53), pending:0, week:'sampled 0 units', state:'idle'},
+    {n:'intuition', ic:'i-pattern', hue:'--violet', kind:'native', written:at(0,1,53), read:at(0,1,53), pending:0, week:'35 fired records backfilled', state:'fresh'},
+  ],
+  patterns: [ // all named; strength 0..1; cat; trend; ev = events 14d; links by index
+    {n:'literal-request-over-intent', cat:'scope', s:.91, trend:'landing', ev:3},
+    {n:'asked-owner-for-a-value-already-derivable', cat:'owner', s:.72, trend:'flat', ev:4},
+    {n:'dense-briefing-instead-of-a-direct-answer', cat:'voice', s:.55, trend:'worsening', ev:2},
+    {n:'named-the-next-work-then-stopped', cat:'scope', s:.80, trend:'persisting', ev:2},
+    {n:'declared-ready-without-runtime-exercise', cat:'verify', s:.48, trend:'flat', ev:1},
+    {n:'ai-smell-prose-against-stored-voice', cat:'voice', s:.62, trend:'worsening', ev:2},
+    {n:'structural-claim-without-reading-code', cat:'verify', s:.38, trend:'dormant', ev:0},
+    {n:'infra-before-grep', cat:'infra', s:.30, trend:'dormant', ev:0},
+    {n:'file-referenced-without-full-path', cat:'voice', s:.28, trend:'landing', ev:0},
+    {n:'rebuild-replaced-accumulated-ux-without-parity-audit', cat:'scope', s:.26, trend:'dormant', ev:0},
+    {n:'halted-for-a-goahead-already-granted', cat:'owner', s:.44, trend:'dormant', ev:0},
+    {n:'unprompted-infra-scope-creep', cat:'infra', s:.33, trend:'flat', ev:1},
+    {n:'published-to-external-host-unasked', cat:'owner', s:.22, trend:'dormant', ev:0},
+    {n:'added-scope-without-checking-siblings', cat:'scope', s:.35, trend:'flat', ev:1},
+    {n:'doc-offered-as-reading-assignment', cat:'voice', s:.41, trend:'worsening', ev:1},
+    {n:'shipping-css-ui-changes-without-visual-verification', cat:'verify', s:.29, trend:'dormant', ev:0},
+    {n:'status-verdict-from-stale-mental-model', cat:'verify', s:.27, trend:'dormant', ev:0},
+    {n:'repeatedly-emphasizing-ops-setup-already-addressed', cat:'owner', s:.25, trend:'dormant', ev:0},
+  ],
+  unnamedPatterns: 482, // in the store but below the display threshold or without a slug
+  links: [[0,1],[1,3],[1,2],[2,4],[3,5],[0,9],[2,7],[4,8],[6,1],[3,6],[0,13],[10,1],[11,7],[5,8],[14,2],[14,5],[15,4],[16,6],[17,10]],
+  runs: [ // reader runs, newest first; cards per run
+    {id:'W40', date:at(5,2,30), clustered:212, tokens:48000, state:'current', cards:[
+      {kind:'repeat', t:'asked-owner-for-a-value-already-derivable', p:'Two atone events, one pin and one proposal in slack-automation inside six days; the pin and the proposal were filed by different sessions.', ev:[['atone','mist-20261005-102858-a4','"asked the owner for a staging alias the standard already defines" · 10-05 10:28'],['atone','mist-20261005-131656-d2','"owner blocker list built from observations, not notes" · same session · 13:16'],['pin','pin-20261003-230714-02','"asked the owner for the Slack alias Clanky already resolves" · 10-03'],['props','prop-20261005-131047-6b','"stop asking for the gdoc folder; derive it from the doc id" · 10-05']], weak:[], keys:['slug','project=slack-automation','window=6d','provenance: human ×3, pin ×1'], landed:{kind:'hook', id:'precheck-owner-question-derivable', state:'live'}, awaiting:false},
+      {kind:'need', t:'push-gate approvals arrive via a panel the agent cannot see', p:'Five sessions this week printed a nonce and waited; four approvals came from the Switchboard panel and reached the agent only through ipc.', ev:[['ck','dump-20261006-71b6878d','pending: "push waits on nonce 834a0087" · 10-06'],['ipc','msg-8e880bdd0ee64fdb','"[push-gate] the owner approved push from the panel" · 10-06'],['atone','mist-20261006-075346-68','"decision page asked for rulings on a doc it never showed" · 10-06']], weak:[['pin','pin-20261003-230714-11','"Clanky earns its place only by finesse" · joined on project only']], keys:['path=guard-git-push.sh','session ×5','provenance: human ×4, ipc ×1'], landed:{kind:'proposal', id:'prop-20261006-081932-78', state:'open'}, awaiting:true},
+      {kind:'drift', t:'chain-guard fired 943 times in 14 days, 0 atone events', p:'The gate works and the lesson never needs a reminder. Candidate for retiring the matching rule text.', ev:[['audit','warn-events hook=guard-command-chaining','943 fires · heeded unknown']], weak:[], keys:['hook→rule: rules/shell.md names the hook','fires rising 4 weeks, atone flat'], landed:{kind:'rejected', id:'drop rules/shell.md §chaining', state:'rejected: "keep, it is 2 lines"'}, awaiting:false},
+      {kind:'repeat', t:'worktree left behind after a merged branch', p:'Three checkpoints in three repos list a stale worktree under pending; none has a cleanup step.', ev:[['ck','dump-20260914-1a2b3c4d','pending: "remove worktree item14-validation"'],['ck','dump-20260921-5d6e7f80','pending: "stale worktree agent-a5cf"'],['ck','dump-20260928-c9d0e1f2','pending: "clean up worktrees"']], weak:[], keys:['pending-text similarity .81','3 projects'], landed:{kind:'proposal', id:'prop-20261001-worktree-reaper', state:'done 10-04'}, awaiting:false},
+      {kind:'need', t:'decision pages ask for rulings on content they do not carry', p:'Two pages this week pointed at a document instead of quoting it; the owner had to leave the page to rule.', ev:[['atone','mist-20261006-075346-68','"JUST ONE HYPERLINK WOULD HAVE WORKED" · 10-06'],['ck','dump-20261006-span-rot-7c','pending: "page content inline, link as courtesy"']], weak:[], keys:['slug','session ×1','provenance: human ×2'], landed:{kind:'page', id:'decision-wizard precheck', state:'awaiting you'}, awaiting:true},
+      {kind:'noise', t:'19 echoes and singletons dropped', p:'Proposals built from atone rows, residue-review nominations with no human event, singletons older than 30 days.', ev:[], weak:[], keys:[], landed:null, awaiting:false, dropped:19},
+    ]},
+    {id:'W39', date:at(12,2,30), clustered:188, tokens:41000, state:'consumed', cards:[
+      {kind:'repeat', t:'worktree left behind after a merged branch', p:'First seen this run with two checkpoints; grew to three in W40.', ev:[['ck','dump-20260914-1a2b3c4d','pending: "remove worktree item14-validation"'],['ck','dump-20260921-5d6e7f80','pending: "stale worktree agent-a5cf"']], weak:[], keys:['pending-text similarity .78'], landed:{kind:'proposal', id:'prop-20261001-worktree-reaper', state:'filed'}, awaiting:false},
+      {kind:'drift', t:'persona-suggest: 15 fires, 0 heeded, muted', p:'A nudge nobody heeds and the owner muted.', ev:[['audit','warn-events hook=persona-suggest','15 fires · 0 heeded']], weak:[], keys:['hook→rule: none'], landed:{kind:'proposal', id:'prop-20260930-retire-persona-suggest', state:'done 10-02'}, awaiting:false},
+      {kind:'noise', t:'14 echoes and singletons dropped', p:'', ev:[], weak:[], keys:[], landed:null, awaiting:false, dropped:14},
+    ]},
+    {id:'W38', date:at(19,2,30), clustered:0, tokens:0, state:'gated: usage at 100%', cards:[]},
+    {id:'W37', date:at(26,2,30), clustered:201, tokens:45000, state:'consumed', cards:[
+      {kind:'repeat', t:'file referenced without a full path', p:'Six atone events across four projects in one week.', ev:[['atone','mist-20260915-0a1b2c3d','"path printed bare, Ghostty could not link it"']], weak:[], keys:['slug','project ×4'], landed:{kind:'hook', id:'relpath-stop.sh', state:'live'}, awaiting:false},
+      {kind:'noise', t:'22 echoes and singletons dropped', p:'', ev:[], weak:[], keys:[], landed:null, awaiting:false, dropped:22},
+    ]},
+  ],
+  // effects: per slug, 8 weekly counts (oldest first) and the landing credited, or null = unattributed
+  effects: [
+    {slug:'literal-request-over-intent', weeks:[6,5,6,4,4,3,3,1], landing:null},
+    {slug:'file-referenced-without-full-path', weeks:[6,5,4,3,2,1,1,0], landing:'relpath-stop.sh'},
+    {slug:'asked-owner-for-a-value-already-derivable', weeks:[1,1,2,1,2,2,3,2], landing:'precheck-owner-question-derivable'},
+    {slug:'dense-briefing-instead-of-a-direct-answer', weeks:[3,2,4,3,4,3,3,4], landing:null},
+    {slug:'ai-smell-prose-against-stored-voice', weeks:[1,1,1,2,1,2,2,4], landing:null},
+    {slug:'declared-ready-without-runtime-exercise', weeks:[3,2,2,3,2,3,3,3], landing:null},
+  ],
+  landings: [ // what was done; state filed|landed|rejected
+    {kind:'hook', id:'precheck-owner-question-derivable', label:'precheck hook: owner-question-derivable', from:'asked-owner-for-a-value-already-derivable', run:'W40', state:'landed', when:at(5,2,40), fires:6, heeded:5, why:'<b>How:</b> the reader matched two atone events, a pin and a proposal on slug and project inside six days (three human sources, so not an echo). <b>Why a hook:</b> the slug already had rule text and 23 events; a slug over 20 with text and no gate is a gate candidate (docs/29 D7). <b>Effect so far:</b> 6 fires, 5 heeded; the slug\'s week count is 2 against 3 last week, one week of data, not yet a trend.'},
+    {kind:'proposal', id:'prop-20261006-081932-78', label:'prop: push-gate reads the panel ledger', from:'push-gate approvals via a panel the agent cannot see', run:'W40', state:'filed', when:at(0,0,20), why:'<b>How:</b> five checkpoints listed a nonce wait under pending and four ipc rows carried a panel approval, joined on session id. <b>Why a proposal, not a hook:</b> the fix changes guard-git-push.sh and needs your approval. <b>Effect:</b> none until built.'},
+    {kind:'rejected', id:'drop rules/shell.md §chaining', label:'drop shell.md §chaining from always-load', from:'chain-guard fired 943 times in 14 days, 0 atone events', run:'W40', state:'rejected', when:at(5,9,0), why:'<b>How:</b> claude-audit fires rose four weeks running while the atone count stayed at zero; the rule file names the hook, so the mapping was unambiguous. <b>Why rejected:</b> you said "keep, it is 2 lines". Recorded in the rejection memory with a 28-day TTL.'},
+    {kind:'page', id:'decision-wizard precheck', label:'decision page: content inline before a ruling', from:'decision pages ask for rulings on content they do not carry', run:'W40', state:'filed', when:at(0,0,40), awaiting:true, why:'<b>How:</b> one S3 atone and one checkpoint pending row, same session, same slug. <b>Why a page item:</b> it changes the decision-wizard skill text, which is yours to approve. <b>Effect:</b> none until ruled.'},
+    {kind:'proposal', id:'prop-20261001-worktree-reaper', label:'prop: worktree reaper in clean_gone', from:'worktree left behind after a merged branch', run:'W39', state:'landed', when:at(2,0,0), why:'<b>How:</b> three checkpoints in three repos carried near-identical pending text (similarity .81). <b>Why done:</b> small, in scope, you accepted it on the page. <b>Effect:</b> no stale-worktree pending row in the two checkpoints since.'},
+    {kind:'hook', id:'relpath-stop.sh', label:'Stop hook: relative path printed', from:'file referenced without a full path', run:'W37', state:'landed', when:at(25,0,0), fires:41, heeded:38, why:'<b>How:</b> six atone events across four projects in one week on one slug. <b>Why a hook:</b> the check is mechanical (a path not starting with / or ~). <b>Effect so far:</b> weekly count 6 → 0 over seven weeks; 41 fires, 38 heeded.'},
+  ],
+  interventions: { live: 40, fired7d: 312, heeded7d: null }, // heeded has no source yet: rendered as "unmeasured"
+};
+
+/* ───────────────────────── DERIVATIONS (the only place numbers come from) ───────────────────────── */
+const live = STATE.domains.filter(d => d.state !== 'retired');
+const byState = s => STATE.domains.filter(d => d.state === s);
+const pendingTotal = live.reduce((a,d)=>a+d.pending,0);
+const retired = byState('retired');
+const currentRun = STATE.runs[0];
+const findings = currentRun.cards.filter(c=>c.kind!=='noise');
+const noiseDropped = currentRun.cards.find(c=>c.kind==='noise')?.dropped ?? 0;
+const awaiting = [...STATE.landings.filter(l=>l.awaiting), ...findings.filter(c=>c.awaiting && !STATE.landings.some(l=>l.from===c.t && l.awaiting))];
+const awaitingCount = STATE.landings.filter(l=>l.awaiting).length + 1; // +1 the gate candidate below (literal-request)
+const gateCandidates = STATE.patterns.filter(p => p.ev>=1 && p.trend!=='dormant' && STATE.effects.find(e=>e.slug===p.n && !e.landing)).slice(0,1); // the one slug over the ruling bar with text and no gate
+const filed = STATE.landings.filter(l=>l.state==='filed');
+const landed = STATE.landings.filter(l=>l.state==='landed');
+const effectDelta = e => e.weeks[7]-e.weeks[6];
+const improving = STATE.effects.filter(e=>effectDelta(e)<0), worsening = STATE.effects.filter(e=>effectDelta(e)>0);
+const movers = STATE.domains.filter(d=>d.mover).sort((a,b)=>Math.abs(b.mover)-Math.abs(a.mover)).slice(0,2);
+const deadLive = live.filter(d=>d.state==='dead');
+const hoursSinceProductive = Math.round((TODAY - STATE.daemon.lastProductive)/H);
+const mood = (() => { const n = awaitingCount*2 + byState('stale').length + deadLive.length*3; const w = n>=6?'troubled':n>=3?'restless':n>=1?'settled':'calm'; return {w, s:`${awaitingCount} waiting on you · ${byState('stale').length} stale · ${deadLive.length} dead · ${retired.length} retired`, cls: deadLive.length?'dead':awaitingCount?'wait':'ok'}; })();
+// since you last looked
+const LOOK_KEY='idream-r4-lastlook';
+let last = null; try { last = JSON.parse(localStorage.getItem(LOOK_KEY)||'null'); } catch(e){}
+const now = { findings: findings.length, landed: landed.length, filed: filed.length, awaiting: awaitingCount, pending: pendingTotal, moved: STATE.effects.filter(e=>effectDelta(e)!==0).length, ts: Date.now() };
+const since = last ? { newFindings: Math.max(0, now.findings-last.findings), newLanded: Math.max(0, now.landed-last.landed), newAwaiting: Math.max(0, now.awaiting-last.awaiting), movedEffects: now.moved, agoTxt: ago(Date.now()-last.ts) } : null;
+try { localStorage.setItem(LOOK_KEY, JSON.stringify(now)); } catch(e){}
+document.getElementById('forget').onclick = () => { try{localStorage.removeItem(LOOK_KEY);}catch(e){} location.reload(); };
+
+/* ───────────────────────── ASSERTIONS: a displayed total must equal its rows ───────────────────────── */
+const problems = [];
+if (pendingTotal !== live.reduce((a,d)=>a+d.pending,0)) problems.push('pending total ≠ row sum');
+if (findings.length !== currentRun.cards.filter(c=>c.kind!=='noise').length) problems.push('found ≠ cards');
+STATE.cycles.concat(STATE.runs.map(r=>({t:r.date}))).forEach(c => { if (c.t > TODAY) problems.push('a date is in the future: '+c.t.toISOString()); });
+STATE.effects.forEach(e => { if (e.landing && !STATE.landings.some(l=>l.id===e.landing)) problems.push('effect cites an unknown landing: '+e.landing); });
+if (problems.length) { const a=document.getElementById('assert'); a.textContent='ASSERTION FAILED: '+problems.join(' · '); a.classList.add('on'); }
+
+/* ───────────────────────── helpers ───────────────────────── */
+const I = (id, extra='') => `<svg class="ic s" ${extra}><use href="#${id}"/></svg>`;
+const root = document.documentElement; document.getElementById('theme').onclick = () => root.dataset.theme = root.dataset.theme==='dark'?'light':'dark';
+const tip = document.getElementById('tip');
+function showTip(e, head, body, icon='i-clock') { tip.innerHTML=`<div class="k">${I(icon)}${head}</div><div class="m">${body}</div>`; const x=Math.min(e.clientX+14, innerWidth-330), y=e.clientY+14; tip.style.left=x+'px'; tip.style.top=y+'px'; tip.classList.add('on'); }
+function hideTip(){ tip.classList.remove('on'); }
+const DOMICON = {atone:'i-atone', pin:'i-pin', props:'i-props', ck:'i-ck', ipc:'i-ipc', audit:'i-audit', codex:'i-codex'}; const DOMHUE = {atone:'--h-atone', pin:'--h-pin', props:'--h-props', ck:'--h-ck', ipc:'--h-ipc', audit:'--h-audit', codex:'--h-codex'};
+const KINDICON = {repeat:'i-repeat', need:'i-need', drift:'i-drift', noise:'i-noise'}; const LANDICON = {hook:'i-hook', proposal:'i-proposal', page:'i-page', rejected:'i-noise'};
+const stateIcon = {fresh:'i-fresh', stale:'i-stale', dead:'i-dead', idle:'i-idle', retired:'i-retired'};
+const copy = txt => { try { navigator.clipboard.writeText(txt); } catch(e){} toast('copied '+txt); };
+function toast(t){ const d=document.createElement('div'); d.className='tip on'; d.style.cssText='left:50%;bottom:20px;top:auto;transform:translateX(-50%);pointer-events:none'; d.innerHTML=`<div class="m">${t}</div>`; document.body.appendChild(d); setTimeout(()=>d.remove(),1400); }
+const scope = {}; // what a pane should focus when opened
+function openPane(id, sc) { if (sc) scope[id]=sc; document.querySelectorAll('.pane').forEach(p=>p.classList.toggle('on',p.id==='pane-'+id)); document.querySelectorAll('.side .nav[data-pane]').forEach(n=>n.classList.toggle('on',n.dataset.pane===id)); ({flow:renderFlow, led:renderLedger, pat:renderPatterns, read:renderReader, land:renderLanding}[id]||(()=>{}))(); document.getElementById('dash').scrollIntoView({behavior:'smooth', block:'start'}); }
+document.querySelectorAll('.side .nav[data-pane]').forEach(n=>n.onclick=()=>openPane(n.dataset.pane));
+
+/* ───────────────────────── status item ───────────────────────── */
+(function bar(){ const b=document.getElementById('bar'); const quiet = `<span class="it">${I('i-sleep','class="ic l"')}</span>`; const withH = `<span class="it">${I('i-sleep','class="ic l"')}<span class="num">${hoursSinceProductive}h</span></span>`;
+  const waiting = `<span class="it">${I('i-sleep','class="ic l"')}<span class="num">${hoursSinceProductive}h</span><i class="pip wait"></i><span class="num">${awaitingCount}</span></span>`;
+  const broken = deadLive.length ? `<span class="it">${I('i-sleep','class="ic l"')}<span class="num">${ago(TODAY-deadLive[0].written)}</span><i class="pip dead"></i></span>` : `<span class="it dim">${I('i-sleep','class="ic l"')}<span class="num">no dead lane</span></span>`;
+  b.innerHTML = quiet+withH+waiting+broken+`<span>Tue 6 Oct 12:04</span>`;
+  document.getElementById('barCap').textContent = `quiet · ${hoursSinceProductive}h since the last productive cycle (${STATE.daemon.lastProductive.toUTCString().slice(0,22)} UTC, cycle 1857) · ${awaitingCount} waiting on you · the retired sessions-domain does not light the red dot`; })();
+
+/* ───────────────────────── dropdown ───────────────────────── */
+function renderPop(){ const p=document.getElementById('pop'); const dead = deadLive.length;
+  const rowsYou = [ ...STATE.landings.filter(l=>l.awaiting).map(l=>({icon:LANDICON[l.kind], t:l.label, s:`${l.from} · ${l.state}`, act:'decide ›', go:()=>openPane('land',{id:l.id})})),
+    ...gateCandidates.map(g=>({icon:'i-gate', t:`Gate candidate: ${g.n}`, s:`${g.ev} events 14d · rule text, no gate · effect unattributed`, act:'arm gate ›', go:()=>openPane('land',{slug:g.n})})) ];
+  const rowsSys = [ ...deadLive.map(d=>({icon:d.ic, t:`${d.n} is dead`, s:`${d.pending.toLocaleString()} pending · fix: ${d.fix||'see Ledger'}`, age:`as of ${ago(TODAY-d.written)}`, cls:'amb', go:()=>openPane('led',{domain:d.n})})),
+    ...byState('stale').map(d=>({icon:d.ic, t:`${d.n} extractor stale`, s:`${d.pending} pending · ${d.fix}`, age:`as of ${ago(TODAY-d.written)}`, cls:'amb', go:()=>openPane('led',{domain:d.n})})),
+    ...worsening.map(e=>({icon:'i-up', t:`${e.slug} worsening`, s:`+${effectDelta(e)} this week · ${e.landing?'landing '+e.landing:'no landing'}`, age:'7d', go:()=>openPane('land',{slug:e.slug})})) ];
+  const rowsQuiet = [ ...improving.map(e=>({icon:'i-down', t:`${e.slug} improving`, s:`${effectDelta(e)} this week · ${e.landing?'credited to '+e.landing:'unattributed'}`, age:'7d', dim:!e.landing, go:()=>openPane('land',{slug:e.slug})})),
+    {icon:'i-retired', t:`${retired.length} retired source`, s:retired.map(d=>d.n).join(', ')+' · excluded from totals', age:'', dim:true, go:()=>openPane('led',{domain:retired[0].n})} ];
+  const row = r => `<div class="prow" data-go><span class="dot ${r.cls==='amb'?'stale':r.dim?'none':r.icon==='i-up'?'dead':r.act?'wait':'ok'}"></span>${I(r.icon)}<span class="t">${r.t}<small>${r.s}</small></span>${r.act?`<span class="act">${r.act}</span>`:`<span class="age ${r.cls||''}">${r.age}</span>`}</div>`;
+  const sinceHtml = since ? `<div class="since"><span class="lbl">since you last looked (${since.agoTxt})</span>${since.newFindings?`<b>${since.newFindings}</b> new findings · `:''}${since.newLanded?`<b>${since.newLanded}</b> landed · `:''}${since.newAwaiting?`<b>${since.newAwaiting}</b> more waiting on you · `:''}${since.movedEffects?`<b>${since.movedEffects}</b> effects moved`:'nothing moved'}</div>` : `<div class="since"><span class="lbl">first look</span>nothing to compare yet; reopen later</div>`;
+  p.innerHTML = `<div class="strip"><div class="tide"><svg viewBox="0 0 424 64" preserveAspectRatio="none"><defs><linearGradient id="tg" x1="0" x2="1"><stop offset="0" stop-color="var(--violet)" stop-opacity=".14"/><stop offset=".6" stop-color="var(--blue)" stop-opacity=".18"/><stop offset="1" stop-color="var(--teal)" stop-opacity=".14"/></linearGradient></defs><path d="M-80 40 C -20 22, 40 58, 100 36 S 220 22, 280 40 S 400 34, 520 38 V64 H-80 Z" fill="url(#tg)"/></svg></div>
+    <div class="l1"><span class="dot ${dead?'dead':'ok'}"></span>${I('i-sleep','class="ic" style="color:var(--fg2)"')}<span class="name">i-dream</span><span class="meta">${STATE.daemon.version} · productive ${ago(TODAY-STATE.daemon.lastProductive)} ago · cycle ${ago(TODAY-STATE.daemon.lastCycle)} ago, idle</span><span class="mood" id="mood"><span class="dot ${mood.cls}" style="margin:0"></span>${mood.w}</span></div>
+    <div class="l2"><span data-go="land-await">${I('i-person')} <b>${awaitingCount}</b> for you</span><span data-go="led-stale">${I('i-stale')} <b>${byState('stale').length}</b> stale</span><span data-go="land-hooks">${I('i-hook')} <b>${STATE.interventions.live}</b> live nudges</span><span title="account usage this week, resets Monday">${I('i-clock')} <b>${STATE.daemon.usageWeekPct}%</b> of the week's usage</span></div></div>
+    ${sinceHtml}
+    <div class="band"><div class="map" id="bandMap"></div><div class="movers"><div class="lbl" style="padding:0 0 3px">biggest movers · 7d</div>${movers.map(m=>`<div data-dom="${m.n}">${I(m.ic,`style="color:var(${m.hue})"`)}<span>${m.n}</span><b>${m.mover>0?'+':''}${m.mover}</b></div>`).join('')}<div class="dim" style="font-size:10.5px">${STATE.patterns.length} named · ${STATE.unnamedPatterns} unnamed</div></div></div>
+    <div class="ribbon"><div class="box" data-go="led"><i class="pin ${byState('stale').length?'wait':'fresh'}"></i><div class="k lbl">${I('i-signal')}Signals</div><div class="n">${live.length}<small>live sources</small></div><div class="s">${byState('fresh').length} fresh · ${byState('stale').length} stale · ${pendingTotal.toLocaleString()} unread</div></div><div class="arrow ${since&&since.newFindings?'moved':''}">→<i></i></div>
+      <div class="box" data-go="read"><i class="pin ${awaitingCount?'wait':'fresh'}"></i><div class="k lbl">${I('i-reader')}Reader</div><div class="n">${findings.length}<small>findings</small></div><div class="s">${currentRun.id} · ${ago(TODAY-currentRun.date)} ago · ${awaitingCount} for you</div></div><div class="arrow ${since&&since.newLanded?'moved':''}">→<i></i></div>
+      <div class="box" data-go="land"><i class="pin fresh"></i><div class="k lbl">${I('i-proposal')}Landing</div><div class="n">${landed.length}<small>landed</small></div><div class="s">${filed.length} filed · ${STATE.landings.filter(l=>l.state==='rejected').length} rejected</div></div></div>
+    <div class="sec lbl">You</div>${rowsYou.map(row).join('')}<div class="sec lbl">System</div>${rowsSys.map(row).join('')||'<div class="prow dim">nothing wrong</div>'}<div class="sec lbl">Quiet</div>${rowsQuiet.map(row).join('')}
+    <div class="foot"><a data-go="flow">${I('i-moon')} Dashboard</a><a data-go="log">${I('i-log')} Logs</a><span class="help">click any row · esc closes</span></div>`;
+  const all=[...rowsYou,...rowsSys,...rowsQuiet]; p.querySelectorAll('.prow[data-go]').forEach((el,i)=>el.onclick=all[i].go);
+  p.querySelector('[data-go="land-await"]').onclick=()=>openPane('land',{filter:'awaiting'}); p.querySelector('[data-go="led-stale"]').onclick=()=>openPane('led',{state:'stale'}); p.querySelector('[data-go="land-hooks"]').onclick=()=>openPane('land',{filter:'hook'});
+  p.querySelectorAll('.box[data-go]').forEach(b=>b.onclick=()=>openPane(b.dataset.go)); p.querySelector('.foot a[data-go="flow"]').onclick=()=>openPane('flow'); p.querySelector('.foot a[data-go="log"]').onclick=()=>{ openPane('flow'); toast('in the product: opens ~/.claude/subconscious/logs in Terminal'); };
+  p.querySelectorAll('.movers div[data-dom]').forEach(m=>m.onclick=()=>openPane('led',{domain:m.dataset.dom}));
+  const mo=p.querySelector('#mood'); mo.addEventListener('mousemove',e=>showTip(e,mood.w,mood.s,'i-signal')); mo.addEventListener('mouseleave',hideTip);
+  constellation(document.getElementById('bandMap'), {onSelect:(s)=>openPane('pat',{id:s.id})}); }
+
+/* ───────────────────────── constellation ───────────────────────── */
+const cats={verify:{h:'var(--blue)',n:'verification',ic:'i-audit'},scope:{h:'var(--violet)',n:'scope',ic:'i-filter'},voice:{h:'var(--teal)',n:'voice',ic:'i-page'},owner:{h:'var(--amber)',n:'owner',ic:'i-person'},infra:{h:'var(--fg3)',n:'infra',ic:'i-hook'}};
+let seed=11; const rnd=()=>{ seed=(seed*9301+49297)%233280; return seed/233280; };
+const layout = (W,H)=>{ seed=11; const centers={verify:[W*.2,H*.5],scope:[W*.46,H*.35],voice:[W*.72,H*.6],owner:[W*.5,H*.76],infra:[W*.86,H*.25]}; return {centers, pos: STATE.patterns.map(p=>{ const c=centers[p.cat]; return {x:c[0]+(rnd()-.5)*W*.22, y:c[1]+(rnd()-.5)*H*.5}; })}; };
+function constellation(el, opts={}) { const W=el.clientWidth||230, H=el.clientHeight||74, big=!!opts.big; const {centers,pos}=layout(W,H); const st=STATE.patterns;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}">${big?Object.entries(centers).map(([k,c])=>`<text class="cl" x="${c[0]-20}" y="${c[1]-H*.3}">${cats[k].n}</text>`).join(''):''}
+   ${STATE.links.map(([a,b])=>`<line data-a="${a}" data-b="${b}" x1="${pos[a].x}" y1="${pos[a].y}" x2="${pos[b].x}" y2="${pos[b].y}"/>`).join('')}
+   ${st.map((s,i)=> s.trend==='landing'?`<circle class="breath" cx="${pos[i].x}" cy="${pos[i].y}" r="${big?15:8}" fill="var(--green)"/>`: s.trend==='worsening'?`<circle cx="${pos[i].x}" cy="${pos[i].y}" r="${big?11:6}" fill="var(--red)" opacity=".16"/>`:'').join('')}
+   ${st.map((s,i)=>`<circle class="star" data-id="${i}" cx="${pos[i].x}" cy="${pos[i].y}" r="${(big?1.8:1.3)+s.s*(big?5.5:3)}" fill="${cats[s.cat].h}" opacity="${.35+s.s*.65}"/>`).join('')}
+   ${big?st.filter(s=>s.trend!=='flat'&&s.trend!=='dormant').map(s=>{const i=st.indexOf(s); return `<text class="cl" style="text-transform:none;letter-spacing:0;font-weight:500;fill:var(--fg2)" x="${pos[i].x+9}" y="${pos[i].y-7}">${s.n.split('-').slice(0,2).join('-')} ${s.trend==='landing'?'↓':s.trend==='worsening'?'↑':'→'}</text>`;}).join(''):''}</svg>`+(opts.hud||'');
+  const svg=el.querySelector('svg');
+  const light=(id)=>{ svg.classList.add('focus'); svg.querySelectorAll('.lit').forEach(q=>q.classList.remove('lit')); svg.querySelector(`circle.star[data-id="${id}"]`).classList.add('lit'); const linked=[]; svg.querySelectorAll('line').forEach(l=>{ const a=+l.dataset.a,b=+l.dataset.b; if(a===id||b===id){ l.classList.add('lit'); const o=a===id?b:a; linked.push(o); svg.querySelector(`circle.star[data-id="${o}"]`).classList.add('lit'); } }); return linked; };
+  svg.querySelectorAll('circle.star').forEach(c=>{ const s=st[+c.dataset.id]; c.addEventListener('mousemove',e=>showTip(e,s.n,`${cats[s.cat].n} · strength ${s.s.toFixed(2)} (${pct(s.s)}) · ${s.trend}<br>${s.ev} events in 14d`,'i-pattern')); c.addEventListener('mouseleave',hideTip); c.addEventListener('click',e=>{ e.stopPropagation(); const l=light(+c.dataset.id); opts.onSelect&&opts.onSelect({id:+c.dataset.id, linked:l}); }); });
+  el.addEventListener('click',()=>{ svg.classList.remove('focus'); svg.querySelectorAll('.lit').forEach(q=>q.classList.remove('lit')); opts.onClear&&opts.onClear(); });
+  if(big){ let pan=null, vb=[0,0,W,H]; const hud=el.querySelector('.hud'); el.addEventListener('mousedown',e=>{ pan=[e.clientX,e.clientY,...vb]; }); window.addEventListener('mousemove',e=>{ if(!pan) return; const b=svg.getBoundingClientRect(); vb[0]=pan[2]-(e.clientX-pan[0])*vb[2]/b.width; vb[1]=pan[3]-(e.clientY-pan[1])*vb[3]/b.height; svg.setAttribute('viewBox',vb.join(' ')); }); window.addEventListener('mouseup',()=>pan=null);
+    el.addEventListener('wheel',e=>{ e.preventDefault(); const f=e.deltaY>0?1.1:0.9; vb[2]*=f; vb[3]*=f; svg.setAttribute('viewBox',vb.join(' ')); hud.textContent=`zoom ${(W/vb[2]).toFixed(1)}× · ${st.length} named shown · ${STATE.unnamedPatterns} unnamed below the display threshold · drag to pan · scroll to zoom`; },{passive:false}); }
+  return {light, svg}; }
+const pct = s => s>=.8?'top 5%':s>=.6?'top 15%':s>=.4?'top 40%':'lower half';
+
+/* ───────────────────────── Flow ───────────────────────── */
+let flowRange = null; // [d0,d1] day indices selected on the hypnogram
+let flowCycle = STATE.cycles[STATE.cycles.length-1];
+const cyclesIn = r => r ? STATE.cycles.filter(c=>{ const d=Math.floor((TODAY-c.t)/D); return d>=r[0]&&d<=r[1]; }) : STATE.cycles;
+function renderFlow(){ const el=document.getElementById('pane-flow'); const cs=cyclesIn(flowRange); const tok=cs.reduce((a,c)=>a+c.tok,0), pats=cs.reduce((a,c)=>a+(c.patterns||0),0), prod=cs.filter(c=>c.produced).length;
+  const sinceHtml = since ? `${since.newFindings?`<b>${since.newFindings}</b> new findings · `:''}${since.newLanded?`<b>${since.newLanded}</b> landed · `:''}${since.movedEffects?`<b>${since.movedEffects}</b> effects moved`:'nothing moved'} since ${since.agoTxt} ago` : 'first look, nothing to compare yet';
+  el.innerHTML=`<h2>${I('i-moon','class="ic l"')}Flow</h2><div class="sub">${sinceHtml}. ${flowRange?`Showing ${['Tue','Wed','Thu','Fri','Sat','Sun','Mon'][6-flowRange[1]]}–${['Tue','Wed','Thu','Fri','Sat','Sun','Mon'][6-flowRange[0]]} (${cs.length} cycles, ${prod} productive); esc clears.`:'The week. Hover a cycle, click it to load its log, drag a range to re-aggregate the stages below.'}</div>
+   <div class="lens hyp" id="hypF"></div>
+   <div class="flow">
+    <div class="stage" data-go="led"><div class="k lbl">${I('i-signal')}Signals<span class="age mono">${ago(TODAY-live[0].written)}</span></div><div class="big" data-count="${live.length}">${live.length}<small>live</small></div><ul>${live.slice(0,4).map(d=>`<li><span class="dot ${d.state}"></span>${I(d.ic,`style="color:var(${d.hue})"`)}${d.n.replace('-domain','').replace('-sessions','')}<span class="a2">${ago(TODAY-d.written)}</span></li>`).join('')}<li class="dim">${pendingTotal.toLocaleString()} unread · ${retired.length} retired</li></ul></div>
+    <div class="stage" data-go="pat"><div class="k lbl">${I('i-pattern')}Patterns<span class="age mono">${ago(TODAY-STATE.daemon.lastProductive)}</span></div><div class="big" data-count="${pats}">${pats}<small>extracted ${flowRange?'in range':'this week'}</small></div><ul><li>${STATE.patterns.length} named · ${STATE.unnamedPatterns} unnamed</li><li><span class="dot ok"></span>${STATE.patterns.filter(p=>p.trend==='landing').length} landing</li><li><span class="dot dead"></span>${STATE.patterns.filter(p=>p.trend==='worsening').length} worsening</li></ul></div>
+    <div class="stage" data-go="pat"><div class="k lbl">${I('i-assoc')}Associations<span class="age mono">${ago(TODAY-STATE.daemon.lastProductive)}</span></div><div class="big" data-count="${STATE.links.length}">${STATE.links.length}<small>links</small></div><ul><li>${STATE.patterns.filter((p,i)=>!STATE.links.some(l=>l.includes(i))).length} named patterns with no link</li><li class="dim">links are what the reader joins on</li></ul></div>
+    <div class="stage" data-go="read"><div class="k lbl">${I('i-reader')}Findings<span class="age mono">${ago(TODAY-currentRun.date)}</span></div><div class="big" data-count="${findings.length}">${findings.length}<small>${currentRun.id}</small></div><ul>${['repeat','need','drift'].map(k=>`<li>${I(KINDICON[k])}${findings.filter(c=>c.kind===k).length} ${k}</li>`).join('')}<li class="dim">${noiseDropped} noise dropped</li></ul></div>
+    <div class="stage" data-go="land"><div class="k lbl">${I('i-proposal')}Filed / Landed<span class="age mono">${ago(TODAY-STATE.landings[0].when)}</span></div><div class="big" data-count="${landed.length}">${landed.length}<small>landed · ${filed.length} filed</small></div><ul>${STATE.landings.slice(0,3).map(l=>`<li>${I(LANDICON[l.kind])}${l.label.length>24?l.label.slice(0,24)+'…':l.label}<span class="a2">${l.state.split(' ')[0]}</span></li>`).join('')}</ul></div>
+    <div class="stage" data-go="land"><div class="k lbl">${I('i-up')}Effect<span class="age mono">7d</span></div><div class="big" data-count="${improving.length}">${improving.length}<small>↓ · ${worsening.length} ↑</small></div><ul>${STATE.effects.slice(0,4).map(e=>`<li>${I(effectDelta(e)<0?'i-down':effectDelta(e)>0?'i-up':'i-flat',`style="color:${effectDelta(e)<0?'var(--green)':effectDelta(e)>0?'var(--red)':'var(--fg3)'}"`)}${e.slug.split('-').slice(0,2).join('-')} ${effectDelta(e)>0?'+':''}${effectDelta(e)}${e.landing?'':' <span class="dim">unattributed</span>'}</li>`).join('')}</ul></div>
+   </div>
+   <div class="logbox" id="log"></div>`;
+  el.querySelectorAll('.stage[data-go]').forEach(s=>s.onclick=()=>openPane(s.dataset.go)); hyp(el.querySelector('#hypF')); renderLog(); animateCounters(el); }
+function renderLog(){ const c=flowCycle, log=document.getElementById('log'); const isReader=c.depth===3; const lines = isReader ? [`join      ${STATE.runs[0].clustered} events clustered → ${findings.length} findings, ${noiseDropped} noise`,`name      ${c.tok.toLocaleString()} tok · sonnet · all evidence ids resolved`,`land      ${filed.length} filed · page with ${awaitingCount} items for you`] : [`ingest    ${c.sessions} new interactive sessions${c.sessions?'':' (headless skipped)'}${c.patterns?` · ${c.patterns} patterns extracted`:''}`,`reinforce 0 up · ${c.weakened||0} weakened · ${c.evicted||0} evicted · 500 live`,`domains   ${c.id===1860?'atone timed out 60s (launchd copy ok) · 6 skipped, not due':'6 skipped, not due'}`,`retention snapshot ${c.produced?'written':'unchanged, skipped'}`];
+  log.innerHTML=`<div class="k lbl">${I('i-run')}${isReader?'reader run '+c.run:'cycle '+c.id} · ${c.t.toUTCString().slice(5,22)} UTC · ${c.tok.toLocaleString()} tok<span class="st"><span class="dot ${c.produced?'ok':'idle'}" style="margin:0 5px 0 0"></span>${c.produced?'produced':'idle: ran, produced nothing'}</span></div>`+lines.map(l=>`<div>${l}</div>`).join(''); }
+function hyp(el){ const W=el.clientWidth||1120, H=150, left=52, right=W-14, top=24, rowH=(H-top-34)/3; const days=['Tue','Wed','Thu','Fri','Sat','Sun','Mon']; const x=(d,t)=>left+((6-d+t)/7)*(right-left), y=k=>top+k*rowH; // d = days ago
+  const segs=STATE.cycles.map(c=>{ const dayAgo=Math.floor((TODAY-c.t)/D); const frac=((TODAY-c.t)%D)/D; const x0=x(dayAgo,1-frac); return {c,x0,w:Math.max(10,(right-left)/7*.14),day:dayAgo}; }).sort((a,b)=>a.x0-b.x0);
+  let path=`M${left} ${y(0)}`; segs.forEach(s=>{ path+=` H${s.x0} V${y(s.c.depth)} H${s.x0+s.w} V${y(0)}`; }); path+=` H${right}`;
+  el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${days.map((d,i)=>`<rect class="day" data-d="${6-i}" x="${x(6-i,0)}" y="${top-6}" width="${(right-left)/7}" height="${y(3)-top+12}"/>`).join('')}
+   <g stroke="var(--fg3)" stroke-width=".5" opacity=".45">${[0,1,2,3].map(i=>`<line x1="${left}" y1="${y(i)}" x2="${right}" y2="${y(i)}"/>`).join('')}</g>${['awake','ingest','reinforce','reader'].map((l,i)=>`<text x="10" y="${y(i)+3}">${l}</text>`).join('')}${days.map((d,i)=>`<text x="${x(6-i,.04)}" y="${H-20}">${d}${i===6?' (today)':''}</text>`).join('')}
+   ${segs.map((s,i)=>{ const n=s.c.phases.length, pw=s.w/n; return s.c.phases.map((p,j)=>`<rect class="sub" data-i="${i}" x="${s.x0+j*pw}" y="${y(Math.min(3,j+1))-rowH+2}" width="${pw}" height="${rowH-2}"/>`).join(''); }).join('')}
+   <path class="trace" d="${path}"/>${segs.map((s,i)=>`<rect class="seg ${s.c===flowCycle?'cur':''}" data-i="${i}" data-d="${s.day}" x="${s.x0-3}" y="${top-6}" width="${s.w+6}" height="${y(3)-top+12}"/>`).join('')}
+   <rect class="range" id="rangeR" x="${flowRange?x(flowRange[1],0):0}" y="${top-6}" width="${flowRange?x(flowRange[0],1)-x(flowRange[1],0):0}" height="${y(3)-top+12}"/><circle class="now" cx="${right}" cy="${y(0)}" r="3" fill="var(--violet)"/></svg>
+   <div class="cap2">${STATE.cycles.length} cycles · ${STATE.cycles.filter(c=>c.produced).length} productive · ${(STATE.cycles.reduce((a,c)=>a+c.tok,0)/1000).toFixed(0)}k tok · deepest ${segs.find(s=>s.c.depth===3)?days[6-segs.find(s=>s.c.depth===3).day]+' 02:30 (reader)':'none'} · hover, click, drag</div>`;
+  const svg=el.querySelector('svg');
+  el.querySelectorAll('rect.seg').forEach(r=>{ const s=segs[+r.dataset.i]; r.addEventListener('mousemove',e=>{ showTip(e,(s.c.depth===3?'reader run ':'cycle ')+s.c.id,`${s.c.tok.toLocaleString()} tok · ${s.c.sessions??''}${s.c.sessions!==undefined?' sessions · ':''}${s.c.produced?'produced':'idle'}<br>phases: ${s.c.phases.map(p=>p[0]+' '+p[1]+'s').join(' · ')}`,'i-run'); svg.querySelectorAll('rect.day').forEach(q=>q.classList.toggle('lit',q.dataset.d===r.dataset.d)); svg.querySelectorAll('rect.sub').forEach(q=>q.classList.toggle('lit',q.dataset.i===r.dataset.i)); }); r.addEventListener('mouseleave',()=>{ hideTip(); svg.querySelectorAll('.lit').forEach(q=>q.classList.remove('lit')); });
+    r.addEventListener('click',()=>{ flowCycle=s.c; svg.querySelectorAll('rect.seg').forEach(q=>q.classList.remove('cur')); r.classList.add('cur'); if(s.c.depth===3) openPane('read',{run:s.c.run}); else renderLog(); }); });
+  let drag=null; const rr=svg.querySelector('#rangeR'); const toDay = px => { const f=(px-left)/(right-left); return Math.max(0,Math.min(6, 6-Math.floor(f*7))); };
+  svg.addEventListener('mousedown',e=>{ const b=svg.getBoundingClientRect(); drag=(e.clientX-b.left)*W/b.width; rr.setAttribute('x',drag); rr.setAttribute('width',0); });
+  svg.addEventListener('mousemove',e=>{ if(drag===null) return; const b=svg.getBoundingClientRect(); const cx=(e.clientX-b.left)*W/b.width; rr.setAttribute('x',Math.min(drag,cx)); rr.setAttribute('width',Math.abs(cx-drag)); });
+  window.addEventListener('mouseup',()=>{ if(drag===null) return; const x0=+rr.getAttribute('x'), x1=x0+ +rr.getAttribute('width'); drag=null; if(x1-x0<6){ rr.setAttribute('width',0); return; } flowRange=[toDay(x1), toDay(x0)]; renderFlow(); },{once:true});
+  el.addEventListener('wheel',e=>{ e.preventDefault(); toast('zoom: week → day is the next build step; the range select covers it for now'); },{passive:false}); }
+function animateCounters(el){ el.querySelectorAll('.big[data-count]').forEach(b=>{ const t=+b.dataset.count; const key='c:'+b.closest('.stage').querySelector('.lbl').textContent.trim(); const prev = last && last[key]; now[key]=t; if(prev!==undefined && prev!==t){ let v=prev; const step=()=>{ v+= v<t?1:-1; b.firstChild.textContent=v; if(v!==t) requestAnimationFrame(step); }; requestAnimationFrame(step); } }); try{ localStorage.setItem(LOOK_KEY, JSON.stringify(now)); }catch(e){} }
+document.getElementById('miniHyp').innerHTML=`<svg viewBox="0 0 160 44" preserveAspectRatio="none"><path d="M2 8 H20 V18 H24 V28 H28 V8 H48 V18 H52 V28 H56 V8 H72 V18 H76 V8 H96 V18 H100 V28 H104 V8 H118 V18 H122 V28 H126 V38 H136 V8 H158"/></svg>`; document.getElementById('miniHyp').onclick=()=>openPane('flow');
+
+/* ───────────────────────── Ledger ───────────────────────── */
+const led = { q:'', state:new Set(), kind:new Set(), domain:null };
+function renderLedger(){ const el=document.getElementById('pane-led'); const sc=scope.led||{}; if(sc.domain){ led.q=''; led.state.clear(); led.kind.clear(); led.domain=sc.domain; } if(sc.state){ led.state=new Set([sc.state]); led.domain=null; } scope.led=null;
+  const rows = STATE.domains.filter(d => (!led.q || d.n.includes(led.q) || d.week.toLowerCase().includes(led.q)) && (!led.state.size || led.state.has(d.state)) && (!led.kind.size || led.kind.has(d.kind)) && (!led.domain || d.n===led.domain));
+  const chip=(f,set,icon,label,count)=>`<span class="chip ${set.has(f)?'on':''}" data-set="${set===led.state?'state':'kind'}" data-f="${f}">${I(icon)}${count!==undefined?`<b>${count}</b> `:''}${label}${set.has(f)?'<span class="x">×</span>':''}</span>`;
+  const maxP=Math.max(...live.map(d=>d.pending));
+  el.innerHTML=`<h2>${I('i-signal','class="ic l"')}Ledger</h2><div class="sub">Every source and lane. Unread is what the reader has not consumed; written and read are ages of each side. State chips OR within their group and AND across groups.</div>
+   <div class="lens" style="height:232px"><div class="bars">${live.sort((a,b)=>b.pending-a.pending).slice(0,8).map(d=>`<div class="nm" data-dom="${d.n}" style="--hue:var(${d.hue})">${I(d.ic,`style="color:var(${d.hue})"`)}${d.n}</div><div class="b" style="--hue:var(${d.hue});width:${Math.max(2,d.pending/maxP*100)}%"></div><div class="v">${d.pending.toLocaleString()} unread · read ${d.read?ago(TODAY-d.read):'never'} ago</div>`).join('')}</div><div class="cap2"><b>${pendingTotal.toLocaleString()}</b> unread across ${live.length} live sources · bar = unread, sorted · ${retired.length} retired source excluded (${retired.map(d=>d.pending.toLocaleString()).join(', ')} events)</div></div>
+   <div class="hl">${chip('stale',led.state,'i-stale','stale',byState('stale').length)}${chip('dead',led.state,'i-dead','dead',deadLive.length)}${chip('idle',led.state,'i-idle','idle',byState('idle').length)}${chip('retired',led.state,'i-retired','retired',retired.length)}<span class="chip" data-mover>${I('i-up')}biggest mover <b>${movers[0].n} +${movers[0].mover}</b></span><span class="chip" data-atone>${I('i-repeat')}<b>3</b> slugs repeating in atone</span></div>
+   <div class="tools"><label class="search">${I('i-search')}<input id="q" placeholder="domain or last-week text…" value="${led.q}"><kbd>/</kbd></label>${chip('fresh',led.state,'i-fresh','fresh')}${chip('native',led.kind,'i-pattern','native')}${chip('external',led.kind,'i-filter','external')}${led.domain?`<span class="chip on" data-cleardom>${I('i-filter')}${led.domain}<span class="x">×</span></span>`:''}<span class="mono" style="margin-left:auto">${rows.length} of ${STATE.domains.length} rows</span></div>
+   <table class="led"><tr><th class="lbl"></th><th class="lbl">source</th><th class="lbl">written</th><th class="lbl">read</th><th class="lbl">unread</th><th class="lbl">last week</th></tr>
+   ${rows.length?rows.map((d,i)=>{ const wAge=TODAY-d.written, rAge=d.read?TODAY-d.read:null; return `<tr class="r ${sc.domain===d.n||led.domain===d.n?'open':''}" data-i="${i}"><td><span class="dot ${d.state}" style="margin:0"></span></td><td><span class="dname" style="--hue:var(${d.hue})">${I(d.ic)}${d.n}${d.state==='retired'?' <span class="dim">· retired</span>':d.state==='idle'?' <span class="dim">· idle</span>':''}</span></td><td class="m ${d.state==='stale'?'amb':d.state==='dead'?'redt':''}"><i class="agebar ${d.state}" style="width:${Math.min(90,4+wAge/D*.7)}px"></i>${ago(wAge)}</td><td class="m ${d.read?'':'dim'}">${d.read?ago(rAge):'never'}</td><td class="m">${d.state==='retired'?'<span class="dim">'+d.pending.toLocaleString()+' (excluded)</span>':d.pending.toLocaleString()}</td><td class="m">${d.week}</td></tr><tr class="dt" style="display:${(sc.domain===d.n||led.domain===d.n)?'':'none'}"><td colspan="6"><div class="detail">${d.chain||`last write ${ago(wAge)} ago · last read ${d.read?ago(rAge)+' ago':'never'} · ${d.pending} unread\nconsumer   ${d.kind==='native'?'daemon cycle':'daily recon + Wednesday reader'}${d.fix?`\nfix        ${d.fix}`:''}`}<div class="chips"><span class="ev" style="--hue:var(${d.hue})" data-act="events">${I(d.ic)}open events (${d.pending})</span>${d.fix?`<span class="ev" style="--hue:var(--blue)" data-act="fix" data-fix="${d.fix}">${I('i-copy')}copy fix</span>`:''}<span class="ev" style="--hue:var(--teal)" data-act="read">${I('i-reader')}in ${currentRun.id}: ${currentRun.cards.reduce((a,c)=>a+c.ev.filter(e=>DOMICON[e[0]]===d.ic).length,0)} events used</span></div></div></td></tr>`; }).join(''):`<tr><td colspan="6"><div class="empty">no source matches ${[...led.state].join(' or ')||'these filters'}; clear a chip</div></td></tr>`}</table>`;
+  el.querySelectorAll('.chip[data-set]').forEach(c=>c.onclick=()=>{ const set=c.dataset.set==='state'?led.state:led.kind; set.has(c.dataset.f)?set.delete(c.dataset.f):set.add(c.dataset.f); renderLedger(); });
+  el.querySelector('[data-mover]').onclick=()=>{ led.domain=movers[0].n; renderLedger(); }; el.querySelector('[data-atone]').onclick=()=>{ openPane('pat',{filter:'repeating'}); }; const cd=el.querySelector('[data-cleardom]'); if(cd) cd.onclick=()=>{ led.domain=null; renderLedger(); };
+  el.querySelectorAll('.bars .nm').forEach(n=>n.onclick=()=>{ led.domain=n.dataset.dom; renderLedger(); });
+  const q=el.querySelector('#q'); q.oninput=()=>{ led.q=q.value.toLowerCase(); renderLedger(); el.querySelector('#q').focus(); el.querySelector('#q').setSelectionRange(99,99); };
+  el.querySelectorAll('tr.r').forEach(tr=>tr.onclick=()=>{ const open=tr.classList.contains('open'); el.querySelectorAll('tr.r').forEach(x=>x.classList.remove('open')); el.querySelectorAll('tr.dt').forEach(x=>x.style.display='none'); if(!open){ tr.classList.add('open'); tr.nextElementSibling.style.display=''; } });
+  el.querySelectorAll('.ev[data-act]').forEach(e=>e.onclick=ev=>{ ev.stopPropagation(); if(e.dataset.act==='fix') copy(e.dataset.fix); else if(e.dataset.act==='read') openPane('read'); else toast('in the product: opens the domain events.jsonl tail'); }); }
+
+/* ───────────────────────── Patterns ───────────────────────── */
+const pat = { q:'', cat:null, trend:null, sel:null, linked:[] }; let bigRef=null;
+function renderPatterns(){ const el=document.getElementById('pane-pat'); const sc=scope.pat||{}; if(sc.id!==undefined){ pat.sel=sc.id; } if(sc.filter==='repeating'){ pat.trend='repeating'; } scope.pat=null;
+  const matches = p => (!pat.q || p.n.includes(pat.q)) && (!pat.cat || p.cat===pat.cat) && (!pat.trend || (pat.trend==='worsening'?p.trend==='worsening':pat.trend==='reinforced'?p.trend==='landing':pat.trend==='orphan'?!STATE.links.some(l=>l.includes(STATE.patterns.indexOf(p))):pat.trend==='repeating'?p.ev>=2:true));
+  const vis = STATE.patterns.map((p,i)=>({p,i})).filter(x=>matches(x.p)).sort((a,b)=>b.p.s-a.p.s);
+  const tchip=(f,icon,label,count,color)=>`<span class="chip ${pat.trend===f?'on':''}" data-trend="${f}">${I(icon,color?`style="color:${color}"`:'')}<b>${count}</b> ${label}${pat.trend===f?'<span class="x">×</span>':''}</span>`;
+  el.innerHTML=`<h2>${I('i-assoc','class="ic l"')}Patterns</h2><div class="sub">${STATE.patterns.length} named patterns shown on the map and in the list; ${STATE.unnamedPatterns} more are in the store without a slug and sit under one row. Hue is category, size is strength, a green breath is a slug whose count fell this week, a red halo one that rose. Click a star or a row; chips AND together.</div>
+   <div class="hl">${tchip('reinforced','i-fresh','improving this week',STATE.patterns.filter(p=>p.trend==='landing').length,'var(--green)')}${tchip('worsening','i-up','worsening',STATE.patterns.filter(p=>p.trend==='worsening').length,'var(--red)')}${tchip('repeating','i-repeat','repeating (2+ events 14d)',STATE.patterns.filter(p=>p.ev>=2).length)}${tchip('orphan','i-noise','no association',STATE.patterns.filter((p,i)=>!STATE.links.some(l=>l.includes(i))).length)}
+    <span style="margin-left:auto"></span>${Object.entries(cats).map(([k,c])=>`<span class="chip ${pat.cat===k?'on':''}" data-cat="${k}">${I(c.ic,`style="color:${c.h}"`)}${c.n}${pat.cat===k?'<span class="x">×</span>':''}</span>`).join('')}</div>
+   <div class="tools"><label class="search">${I('i-search')}<input id="pq" placeholder="pattern name…" value="${pat.q}"><kbd>/</kbd></label><span class="mono" style="margin-left:auto">${vis.length} of ${STATE.patterns.length} named · ${STATE.unnamedPatterns} unnamed</span></div>
+   <div class="peruse"><div class="map" id="bigMap"><div class="hud">zoom 1.0× · ${STATE.patterns.length} named shown · ${STATE.unnamedPatterns} unnamed below the display threshold · drag to pan · scroll to zoom</div></div><div class="plist" id="plist"></div></div>`;
+  bigRef=constellation(el.querySelector('#bigMap'),{big:true,hud:`<div class="hud">zoom 1.0× · ${STATE.patterns.length} named shown · ${STATE.unnamedPatterns} unnamed · drag to pan · scroll to zoom</div>`,onSelect:(s)=>{ pat.sel=s.id; pat.linked=s.linked; renderList(); },onClear:()=>{ pat.sel=null; renderList(); }});
+  bigRef.svg.querySelectorAll('circle.star').forEach(c=>c.classList.toggle('off', !vis.some(x=>x.i===+c.dataset.id)));
+  if(pat.sel!==null){ pat.linked=bigRef.light(pat.sel); }
+  const plist=el.querySelector('#plist');
+  function renderList(){ plist.innerHTML=''; vis.forEach(({p,i})=>{ const d=document.createElement('div'); d.className='pitem'+(pat.sel===i?' cur':''); d.dataset.id=i; d.innerHTML=`<span class="dot" style="background:${cats[p.cat].h}"></span>${I('i-pattern')}<span class="nm">${p.n}<small>${cats[p.cat].n} · ${p.trend} · ${p.ev} events 14d</small></span><span class="st">${p.s.toFixed(2)}</span>`; d.onclick=()=>{ pat.sel=i; pat.linked=bigRef.light(i); renderList(); }; plist.appendChild(d);
+      if(pat.sel===i){ const eff=STATE.effects.find(e=>e.slug===p.n); const card=document.createElement('div'); card.className='pcard'; card.innerHTML=`<div class="h">${I('i-pattern')}${p.n}</div><div class="meta">${cats[p.cat].n} · strength ${p.s.toFixed(2)} <span class="scale"><i style="width:${p.s*100}%"></i></span>${pct(p.s)} · ${p.trend} · ${p.ev} events in 14d</div>${eff?`<svg class="tr" viewBox="0 0 300 26"><path d="${eff.weeks.map((w,k)=>`${k?'L':'M'}${2+k*42} ${22-w*3}`).join(' ')}"/></svg><div class="meta">8 weeks of atone events · this week ${eff.weeks[7]} · ${eff.landing?'credited to '+eff.landing:'<span class=dim>no landing credited</span>'}</div>`:'<div class="meta dim">no weekly effect series (fewer than 2 events)</div>'}<div class="meta">linked: ${pat.linked.map(j=>`<span class="ev" data-link="${j}" style="--hue:var(--teal)">${I('i-assoc')}${STATE.patterns[j].n}</span>`).join(' ')||'none'}</div><div class="acts"><span class="btn" data-act="reader">${I('i-reader')} findings on this slug</span><span class="btn ghost" data-act="copy">${I('i-copy')} copy slug</span>${eff&&eff.landing?`<span class="btn ghost" data-act="landing">${I('i-hook')} its landing</span>`:''}</div>`;
+        card.querySelectorAll('.ev[data-link]').forEach(l=>l.onclick=e=>{ e.stopPropagation(); pat.sel=+l.dataset.link; pat.linked=bigRef.light(pat.sel); renderList(); }); card.querySelector('[data-act=copy]').onclick=e=>{ e.stopPropagation(); copy(p.n); }; card.querySelector('[data-act=reader]').onclick=e=>{ e.stopPropagation(); openPane('read',{slug:p.n}); }; const la=card.querySelector('[data-act=landing]'); if(la) la.onclick=e=>{ e.stopPropagation(); openPane('land',{id:eff.landing}); }; d.after(card); } });
+    if(!vis.length) plist.innerHTML='<div class="empty">no named pattern matches; clear a chip</div>'; const un=document.createElement('div'); un.className='pitem dim'; un.innerHTML=`<span class="dot none"></span>${I('i-noise')}<span class="nm">${STATE.unnamedPatterns} unnamed patterns<small>below the display threshold or without a slug; the reader names them when they repeat</small></span>`; plist.appendChild(un); }
+  renderList();
+  el.querySelectorAll('.chip[data-trend]').forEach(c=>c.onclick=()=>{ pat.trend = pat.trend===c.dataset.trend?null:c.dataset.trend; renderPatterns(); }); el.querySelectorAll('.chip[data-cat]').forEach(c=>c.onclick=()=>{ pat.cat = pat.cat===c.dataset.cat?null:c.dataset.cat; renderPatterns(); });
+  const pq=el.querySelector('#pq'); pq.oninput=()=>{ pat.q=pq.value.toLowerCase(); renderPatterns(); const n=el.querySelector('#pq'); n.focus(); n.setSelectionRange(99,99); }; }
+
+/* ───────────────────────── Reader ───────────────────────── */
+const rd = { run:'W40', kind:null, open:null, slug:null };
+function renderReader(){ const el=document.getElementById('pane-read'); const sc=scope.read||{}; if(sc.run) rd.run=sc.run; if(sc.slug){ rd.slug=sc.slug; rd.run='W40'; } if(sc.filter) rd.kind=sc.filter; scope.read=null;
+  const run=STATE.runs.find(r=>r.id===rd.run)||STATE.runs[0]; const cards=run.cards.filter(c=>(!rd.kind||c.kind===rd.kind)&&(!rd.slug||c.t.includes(rd.slug.split('-').slice(0,2).join('-'))));
+  const found=run.cards.filter(c=>c.kind!=='noise'), dropped=run.cards.find(c=>c.kind==='noise')?.dropped??0, filedN=found.filter(c=>c.landed&&c.landed.state!=='rejected').length, awaitN=found.filter(c=>c.awaiting).length;
+  const kchip=(k,label,count)=>`<span class="chip ${rd.kind===k?'on':''}" data-kind="${k}">${I(KINDICON[k])}<b>${count}</b> ${label}${rd.kind===k?'<span class="x">×</span>':''}</span>`;
+  el.innerHTML=`<h2>${I('i-reader','class="ic l"')}Reader</h2><div class="sub">Run <b>${run.id}</b> · ${run.date.toUTCString().slice(5,16)} · ${run.clustered} events clustered · ${run.tokens.toLocaleString()} tok · ${run.state}. Cards open to the evidence excerpts and the keys that matched; weak joins are folded.</div>
+   <div class="hl">${kchip('repeat','repeat',found.filter(c=>c.kind==='repeat').length)}${kchip('need','structural need',found.filter(c=>c.kind==='need').length)}${kchip('drift','drift',found.filter(c=>c.kind==='drift').length)}<span class="chip ${rd.kind==='await'?'on':''}" data-await>${I('i-person')}<b>${awaitN}</b> awaiting you${rd.kind==='await'?'<span class="x">×</span>':''}</span><span class="chip" style="cursor:default">${I('i-proposal')}<b>${filedN}</b> filed or landed</span><span class="chip" style="cursor:default">${I('i-noise')}<b>${dropped}</b> noise dropped</span>${rd.slug?`<span class="chip on" data-clearslug>${I('i-filter')}${rd.slug}<span class="x">×</span></span>`:''}</div>
+   <div class="cards" id="cards">${(rd.kind==='await'?found.filter(c=>c.awaiting):cards).map((c,i)=>{ const ev=c.ev.map(e=>`<span class="ev" style="--hue:var(${DOMHUE[e[0]]})" data-ev="${e[1]}">${I(DOMICON[e[0]])}${e[1]}</span>`).join(''); return `<div class="cl ${c.kind==='noise'?'noise':''} ${rd.open===c.t?'open':''}" data-t="${c.t}" ${c.kind==='noise'?'style="opacity:.6"':''}><div class="kind ${c.kind} lbl">${I(KINDICON[c.kind])}${c.kind==='noise'?'noise':c.kind}${c.kind!=='noise'?` · ${c.ev.length} events · ${new Set(c.ev.map(e=>e[0])).size} sources`:''}${c.awaiting?` · ${I('i-person')} waiting on you`:''}</div><div class="t">${c.t}</div><p>${c.p}</p><div class="evs">${ev}</div>${c.landed?`<div class="where">${I(LANDICON[c.landed.kind])}<b class="${c.awaiting?'wait':''}">${c.landed.state.split(':')[0]}</b>${c.landed.id}</div>`:''}
+      <div class="more">${c.ev.map(e=>`<div class="x">${I(DOMICON[e[0]])}<div class="q"><b>${e[1]}</b> ${e[2]}</div></div>`).join('')}${c.weak.length?`<details class="weak"><summary>also nearby, joined on project only (${c.weak.length})</summary>${c.weak.map(e=>`<div class="x">${I(DOMICON[e[0]])}<div class="q">${e[1]} ${e[2]}</div></div>`).join('')}</details>`:''}${c.keys.length?`<div class="keys">matched on ${c.keys.map(k=>`<code>${k}</code>`).join(' ')}</div>`:''}${c.landed?`<div class="acts" style="margin-top:8px"><span class="btn ghost" data-land="${c.landed.id}">${I(LANDICON[c.landed.kind])} open ${c.landed.kind}</span></div>`:''}</div></div>`; }).join('')||'<div class="empty">no card matches</div>'}</div>
+   <div class="lbl" style="margin:14px 0 6px;display:flex;align-items:center;gap:6px">${I('i-clock')}History · one row per run · click to load</div>
+   <table class="led">${'<tr><th class="lbl"></th><th class="lbl">run</th><th class="lbl">date</th><th class="lbl">clustered</th><th class="lbl">found</th><th class="lbl">landed</th><th class="lbl">for you</th><th class="lbl">tokens</th><th class="lbl">state</th></tr>'}${STATE.runs.map(r=>{ const f=r.cards.filter(c=>c.kind!=='noise'); return `<tr class="r ${r.id===run.id?'open':''}" data-run="${r.id}"><td><span class="dot ${r.state.startsWith('gated')?'idle':r.id===run.id?'teal':'ok'}" style="margin:0"></span></td><td>${I('i-run')} ${r.id}</td><td class="m">${r.date.toUTCString().slice(5,16)}</td><td class="m">${r.clustered}</td><td class="m">${f.length}</td><td class="m">${f.filter(c=>c.landed&&c.landed.state.startsWith('done')||c.landed&&c.landed.state==='live').length}</td><td class="m">${f.filter(c=>c.awaiting).length}</td><td class="m">${(r.tokens/1000).toFixed(0)}k</td><td class="m ${r.state.startsWith('gated')?'amb':''}">${r.state}</td></tr>`; }).join('')}</table>`;
+  el.querySelectorAll('.chip[data-kind]').forEach(c=>c.onclick=()=>{ rd.kind=rd.kind===c.dataset.kind?null:c.dataset.kind; renderReader(); }); el.querySelector('[data-await]').onclick=()=>{ rd.kind=rd.kind==='await'?null:'await'; renderReader(); }; const cs=el.querySelector('[data-clearslug]'); if(cs) cs.onclick=()=>{ rd.slug=null; renderReader(); };
+  el.querySelectorAll('.cl').forEach(c=>c.onclick=()=>{ rd.open=rd.open===c.dataset.t?null:c.dataset.t; renderReader(); }); el.querySelectorAll('.ev[data-ev]').forEach(e=>e.onclick=ev=>{ ev.stopPropagation(); copy(e.dataset.ev); }); el.querySelectorAll('[data-land]').forEach(b=>b.onclick=e=>{ e.stopPropagation(); openPane('land',{id:b.dataset.land}); });
+  el.querySelectorAll('tr.r[data-run]').forEach(tr=>tr.onclick=()=>{ rd.run=tr.dataset.run; rd.open=null; renderReader(); }); }
+
+/* ───────────────────────── Landing ───────────────────────── */
+const ld = { filter:null, cur:null, slug:null };
+function renderLanding(){ const el=document.getElementById('pane-land'); const sc=scope.land||{}; if(sc.id) ld.cur=sc.id; if(sc.filter) ld.filter=sc.filter; if(sc.slug){ ld.slug=sc.slug; } scope.land=null;
+  const rows = STATE.landings.filter(l=>(!ld.filter||(ld.filter==='awaiting'?l.awaiting:ld.filter==='hook'?l.kind==='hook':l.state===ld.filter)));
+  const effFor = l => STATE.effects.find(e=>e.landing===l.id); const slugEff = ld.slug? STATE.effects.find(e=>e.slug===ld.slug) : null;
+  const fchip=(f,icon,label,count)=>`<span class="chip ${ld.filter===f?'on':''}" data-f="${f}">${I(icon)}<b>${count}</b> ${label}${ld.filter===f?'<span class="x">×</span>':''}</span>`;
+  el.innerHTML=`<h2>${I('i-proposal','class="ic l"')}Landing</h2><div class="sub">What was done about each finding and whether it changed anything. A chain reads left to right: finding → landing → fires and heed → the slug's weekly count. Click a node to open it; click the row for how and why.</div>
+   <div class="lens strata" id="strata" style="height:172px"></div>
+   <div class="hl">${fchip('hook','i-hook','hooks live',STATE.landings.filter(l=>l.kind==='hook').length)}${fchip('filed','i-proposal','filed, open',filed.length)}${fchip('landed','i-fresh','landed',landed.length)}${fchip('rejected','i-noise','rejected',STATE.landings.filter(l=>l.state==='rejected').length)}${fchip('awaiting','i-person','awaiting you',STATE.landings.filter(l=>l.awaiting).length)}${ld.slug?`<span class="chip on" data-clearslug>${I('i-filter')}${ld.slug}${slugEff&&!slugEff.landing?' · unattributed':''}<span class="x">×</span></span>`:''}</div>
+   ${ld.slug&&slugEff&&!slugEff.landing?`<div class="why"><b>${ld.slug}</b> fell by ${-effectDelta(slugEff)} this week with <b>no landing credited</b>: nothing i-dream did can claim it. ${gateCandidates.some(g=>g.n===ld.slug)?'It is the one gate candidate (rule text, no gate); arming a gate is the next move and the only thing that would make a future drop attributable.':''}</div>`:''}
+   <div id="chains">${rows.map(l=>{ const e=effFor(l); const path=e?e.weeks.map((w,k)=>`${k?'L':'M'}${2+k*21} ${22-w*3}`).join(' '):'M2 12 L148 12'; const delta=e?effectDelta(e):null; return `<div class="chain ${ld.cur===l.id?'cur':''}" data-id="${l.id}"><div class="n" data-node="finding">${I(KINDICON[STATE.runs.flatMap(r=>r.cards).find(c=>c.t===l.from)?.kind||'repeat'])}<span>${l.from}<small>${l.run} · ${ago(TODAY-l.when)} ago</small></span></div><div class="ar">→</div><div class="n" data-node="landing">${I(LANDICON[l.kind])}<span>${l.label}<small>${l.state}${l.awaiting?' · waiting on you':''}</small></span></div><div class="ar">→</div><div class="n" data-node="fires">${I(l.fires!==undefined?'i-audit':'i-clock')}<span>${l.fires!==undefined?`fired ${l.fires} · heeded ${l.heeded}`:l.state==='rejected'?'—':'not yet'}<small>${l.fires!==undefined?Math.round(l.heeded/l.fires*100)+'%':l.state==='rejected'?'no effect expected':'nothing to measure'}</small></span></div><div class="ar">→</div><div style="display:flex;gap:8px;align-items:center" class="n" data-node="effect"><svg class="tr" viewBox="0 0 150 26"><path d="${path}"/></svg><span class="d ${delta===null?'un':delta<0?'dn':delta>0?'up':''}">${delta===null?'—':delta>0?'+'+delta:delta}</span></div></div>`; }).join('')||'<div class="empty">nothing matches</div>'}</div>
+   <div class="why" id="why" style="display:${ld.cur?'':'none'}">${ld.cur?STATE.landings.find(l=>l.id===ld.cur)?.why||'':''}</div>`;
+  strata(el.querySelector('#strata'));
+  el.querySelectorAll('.chip[data-f]').forEach(c=>c.onclick=()=>{ ld.filter=ld.filter===c.dataset.f?null:c.dataset.f; renderLanding(); }); const cs=el.querySelector('[data-clearslug]'); if(cs) cs.onclick=()=>{ ld.slug=null; renderLanding(); };
+  el.querySelectorAll('.chain').forEach(ch=>{ const l=STATE.landings.find(x=>x.id===ch.dataset.id); ch.onclick=()=>{ ld.cur=ld.cur===l.id?null:l.id; renderLanding(); };
+    ch.querySelector('[data-node=finding]').onclick=e=>{ e.stopPropagation(); openPane('read',{run:l.run, slug:l.from}); }; ch.querySelector('[data-node=landing]').onclick=e=>{ e.stopPropagation(); toast(l.kind==='hook'?`in the product: opens ~/.claude/scripts/hooks/${l.id}`:l.kind==='proposal'?`in the product: propose.sh show ${l.id}`:l.kind==='page'?'in the product: opens the decision page':'rejection memory entry'); }; ch.querySelector('[data-node=fires]').onclick=e=>{ e.stopPropagation(); openPane('led',{domain:'claude-audit'}); }; ch.querySelector('[data-node=effect]').onclick=e=>{ e.stopPropagation(); const i=STATE.patterns.findIndex(p=>p.n===l.from); if(i>=0) openPane('pat',{id:i}); else toast('no named pattern for this finding yet'); }; }); }
+function strata(el){ const W=el.clientWidth||1120, H=172, left=40, base=H-44, weekW=(W-left-20)/STATE.runs.length; const runsAsc=[...STATE.runs].reverse();
+  let svg=`<svg viewBox="0 0 ${W} ${H}">`; runsAsc.forEach((r,i)=>{ const x=left+i*weekW; const f=r.cards.filter(c=>c.kind!=='noise'), noise=r.cards.find(c=>c.kind==='noise')?.dropped??0; let y=base; const parts=[['noise',noise,'var(--fg3)',.3],['repeat',f.filter(c=>c.kind==='repeat').length*3,'var(--violet)',.7],['need',f.filter(c=>c.kind==='need').length*3,'var(--blue)',.7],['drift',f.filter(c=>c.kind==='drift').length*3,'var(--amber)',.7]]; parts.forEach(([k,v,c,o])=>{ const h=v*2.2; y-=h; if(h) svg+=`<rect class="layer" data-run="${r.id}" data-k="${k}" data-v="${k==='noise'?v:v/3}" x="${x+6}" y="${y}" width="${weekW-12}" height="${h}" fill="${c}" opacity="${o}"/>`; }); svg+=`<text x="${x+6}" y="${H-30}" style="font:9.5px var(--mono);fill:var(--fg3)">${r.id} · ${r.date.toUTCString().slice(5,11)}${r.state.startsWith('gated')?' · gated':''}</text>`; });
+  svg+=[['noise','var(--fg3)'],['repeat','var(--violet)'],['need','var(--blue)'],['drift','var(--amber)']].map((d,i)=>`<rect x="${W-20-(4-i)*70}" y="8" width="8" height="8" fill="${d[1]}"/><text x="${W-8-(4-i)*70}" y="16" style="font:9.5px var(--mono);fill:var(--fg3)">${d[0]}</text>`).join('')+'</svg>';
+  el.innerHTML=svg+`<div class="cap2">one column per reader run · grey = noise dropped, colour = findings by kind · click a column to load that run</div>`;
+  el.querySelectorAll('rect.layer').forEach(r=>{ r.addEventListener('mousemove',e=>showTip(e,`${r.dataset.run} · ${r.dataset.k}`,`${r.dataset.v} ${r.dataset.k==='noise'?'dropped':'findings'}<br>click: load ${r.dataset.run} in Reader`,'i-reader')); r.addEventListener('mouseleave',hideTip); r.addEventListener('click',()=>openPane('read',{run:r.dataset.run})); }); }
+
+/* ───────────────────────── shared key map (every Work pane) ───────────────────────── */
+window.addEventListener('keydown',e=>{ const pane=document.querySelector('.pane.on'); if(!pane||e.target.tagName==='INPUT'){ if(e.key==='Escape'&&e.target.tagName==='INPUT'){ e.target.blur(); } return; }
+  const rows=[...pane.querySelectorAll('tr.r, .pitem:not(.dim), .cl, .chain')].filter(r=>r.offsetParent!==null); const cur=rows.findIndex(r=>r.classList.contains('cur'));
+  if(e.key==='j'||e.key==='k'){ e.preventDefault(); const n=Math.max(0,Math.min(rows.length-1,(cur<0?-1:cur)+(e.key==='j'?1:-1))); rows.forEach(r=>r.classList.remove('cur')); rows[n]?.classList.add('cur'); rows[n]?.scrollIntoView({block:'nearest'}); }
+  else if(e.key==='Enter'){ const r=rows.find(x=>x.classList.contains('cur')); if(r){ e.preventDefault(); r.click(); } }
+  else if(e.key==='Escape'){ if(pane.id==='pane-flow'&&flowRange){ flowRange=null; renderFlow(); } else { pane.querySelectorAll('.open,.cur').forEach(x=>x.classList.remove('open','cur')); pane.querySelectorAll('tr.dt').forEach(x=>x.style.display='none'); } }
+  else if(e.key==='/'){ const q=pane.querySelector('input'); if(q){ e.preventDefault(); q.focus(); } }
+  else if(e.key==='f'){ const c=pane.querySelector('.chip[data-f],.chip[data-trend],.chip[data-kind],.chip[data-set]'); if(c){ e.preventDefault(); c.click(); } } });
+
+/* ───────────────────────── sidebar counts (derived) + first render ───────────────────────── */
+document.getElementById('c-led').textContent=pendingTotal.toLocaleString(); document.getElementById('c-pat').textContent=STATE.patterns.length+'+'+STATE.unnamedPatterns; document.getElementById('c-read').textContent=findings.length; document.getElementById('c-land').textContent=STATE.landings.length;
+renderPop(); renderFlow();
+</script>
+</body>
+</html>
