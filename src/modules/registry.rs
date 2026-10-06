@@ -281,13 +281,9 @@ pub struct Lane {
 pub enum Consumed {
     /// The consumer touches this file (relative to `$HOME`) each time it reads.
     By(&'static str),
-    /// The consumer was retired; the lane is written and nobody reads it.
-    Retired(&'static str),
     /// Read on demand by a person (a dashboard); there is no receipt to age.
     OnDemand,
 }
-
-const DREAM_PASS_RETIRED: &str = "dream-pass retired 2026-09-18";
 
 /// Every lane the subconscious depends on. Adding a row here surfaces the lane
 /// in the health file and subjects it to the consumer-resolution test.
@@ -306,24 +302,24 @@ pub const LANES: &[Lane] = &[
     Lane {
         name: "atone",
         producer: "/atone skill",
-        consumer: "atone external-domain",
+        consumer: "i-dream reader",
         store: ".claude/atone/events.jsonl",
         cadence_hours: 96,
         check: LaneCheck::Freshness {
             signal: ".claude/atone/events.jsonl",
         },
-        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
+        consumed: Consumed::By(".claude/i-dream/reader/state.json"),
     },
     Lane {
         name: "affirm",
         producer: "/affirm skill",
-        consumer: "affirm external-domain",
+        consumer: "i-dream reader",
         store: ".claude/affirm/events.jsonl",
         cadence_hours: 168,
         check: LaneCheck::Freshness {
             signal: ".claude/affirm/events.jsonl",
         },
-        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
+        consumed: Consumed::By(".claude/i-dream/reader/state.json"),
     },
     Lane {
         name: "ingest-queue",
@@ -370,33 +366,33 @@ pub const LANES: &[Lane] = &[
     Lane {
         name: "sessions-domain",
         producer: "sessions-domain extractor",
-        consumer: "external-domain dream pass",
+        consumer: "i-dream reader",
         store: ".claude/sessions-domain/events.jsonl",
         cadence_hours: 168,
         check: LaneCheck::Freshness {
             signal: ".claude/sessions-domain/_seen.json",
         },
-        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
+        consumed: Consumed::By(".claude/i-dream/reader/state.json"),
     },
     Lane {
         name: "memory-domain",
         producer: "memory-domain extractor",
-        consumer: "external-domain dream pass",
+        consumer: "i-dream reader",
         store: ".claude/memory-domain/events.jsonl",
         cadence_hours: 168,
         check: LaneCheck::Freshness {
             signal: ".claude/memory-domain/_seen.json",
         },
-        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
+        consumed: Consumed::By(".claude/i-dream/reader/state.json"),
     },
     Lane {
         name: "ipc",
         producer: "claude-ipc bridge",
-        consumer: "ipc external-domain",
+        consumer: "i-dream reader",
         store: ".claude-ipc/i-dream-events.jsonl",
         cadence_hours: 168,
         check: LaneCheck::Existence,
-        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
+        consumed: Consumed::By(".claude/i-dream/reader/state.json"),
     },
     Lane {
         name: "traces",
@@ -675,11 +671,6 @@ impl Lane {
         let mut reason = reason;
         let (consumer_age, consumer_state) = match &self.consumed {
             Consumed::OnDemand => (None, "on-demand"),
-            Consumed::Retired(why) => {
-                status = worse(status, LaneStatus::Yellow);
-                reason.push_str(&format!(" · no consumer ({why})"));
-                (None, "retired")
-            }
             Consumed::By(receipt) => match store_age(&home.join(receipt)) {
                 None => {
                     status = worse(status, LaneStatus::Yellow);
@@ -1652,15 +1643,18 @@ mod consumer_tests {
     }
 
     #[test]
-    fn a_retired_consumer_says_so_and_is_not_green() {
+    fn a_consumer_that_stopped_reading_says_so_and_is_not_green() {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("s.jsonl"), "x").unwrap();
-        let h = lane(Consumed::Retired("dream-pass retired 2026-09-18")).evaluate(home.path());
+        let receipt = home.path().join("read.json");
+        std::fs::write(&receipt, "{}").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 86_400);
+        std::fs::File::options().write(true).open(&receipt).unwrap().set_modified(old).unwrap();
+        let h = lane(Consumed::By("read.json")).evaluate(home.path());
         assert_eq!(h.status, LaneStatus::Yellow);
-        assert_eq!(h.consumer_state, "retired");
-        assert!(h.reason.contains("no consumer (dream-pass retired"));
+        assert_eq!(h.consumer_state, "stale");
+        assert!(h.reason.contains("last read 5d"));
         assert!(h.producer_age.is_some());
-        assert!(h.consumer_age.is_none());
     }
 
     #[test]
