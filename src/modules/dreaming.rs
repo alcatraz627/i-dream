@@ -162,6 +162,81 @@ pub struct Association {
     pub patterns_linked_stable: Vec<String>,
 }
 
+/// How far into the feedback ledger wake has applied votes.
+pub const WAKE_FEEDBACK_STATE: &str = "dreams/wake-feedback-state.json";
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WakeFeedbackState {
+    pub watermark: Option<DateTime<Utc>>,
+}
+
+/// Apply the feedback rows newer than `watermark` to association confidence:
+/// up adds 0.05, down takes 0.10, un-promotes, and dismisses below 0.2.
+/// Returns how many votes landed and the new watermark.
+///
+/// With no watermark yet, nothing is applied and the watermark jumps to the
+/// newest row: until 2026-10 wake replayed the whole ledger every pass, so the
+/// history is already in every confidence and must not land again.
+pub fn apply_wake_feedback(
+    assocs: &mut [Association],
+    ledger: &str,
+    watermark: Option<DateTime<Utc>>,
+) -> (usize, Option<DateTime<Utc>>) {
+    let rows: Vec<(DateTime<Utc>, String, String)> = ledger
+        .lines()
+        .filter_map(|line| {
+            let fb: serde_json::Value = serde_json::from_str(line).ok()?;
+            let ts = fb
+                .get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())?
+                .with_timezone(&Utc);
+            let id = fb
+                .get("insight_id")
+                .or_else(|| fb.get("pattern_id"))
+                .and_then(|v| v.as_str())?
+                .to_string();
+            let vote = match fb.get("rating")? {
+                v if v.is_string() => v.as_str()?.to_string(),
+                v if v.is_number() => match v.as_i64()? {
+                    n if n > 0 => "up".to_string(),
+                    n if n < 0 => "down".to_string(),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            (!id.is_empty() && (vote == "up" || vote == "down")).then_some((ts, id, vote))
+        })
+        .collect();
+    let newest = rows.iter().map(|r| r.0).max();
+    let Some(mark) = watermark else {
+        return (0, newest);
+    };
+    let mut applied = 0;
+    for (_, id, vote) in rows.iter().filter(|r| r.0 > mark) {
+        // CLI and daemon votes carry a UUID; widget votes carry the
+        // hypothesis text as their id.
+        let is_uuid = id.len() == 36 || id.len() == 16;
+        for assoc in assocs.iter_mut() {
+            let matched = if is_uuid { assoc.id == *id } else { assoc.hypothesis.starts_with(id.as_str()) };
+            if !matched {
+                continue;
+            }
+            applied += 1;
+            if vote == "up" {
+                assoc.confidence = (assoc.confidence + 0.05).min(1.0);
+            } else {
+                assoc.confidence = (assoc.confidence - 0.10).max(0.0);
+                assoc.promoted = false;
+                if assoc.confidence < 0.2 {
+                    assoc.dismissed = true;
+                }
+            }
+        }
+    }
+    (applied, newest.max(Some(mark)))
+}
+
 /// Dream journal entry (appended after each dream cycle).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DreamEntry {
@@ -1522,70 +1597,24 @@ Output ONLY a JSON array. No commentary."#;
         } else {
             Vec::new()
         };
-
-        // Apply feedback: read insight-feedback.jsonl and adjust confidence.
-        // Upvotes boost confidence by 0.05, downvotes penalize by 0.10 and
-        // un-promote so the insight gets re-evaluated.
-        //
-        // Two feedback formats exist:
-        //   CLI:    {"insight_id": "...", "rating": "up"|"down"}
-        //   Widget: {"pattern_id": "...", "rating": 1|-1, "source": "widget"}
+        // Apply feedback that arrived since the last wake: upvotes add 0.05,
+        // downvotes take 0.10 and un-promote. Each vote applies once; the
+        // watermark is what stops a single correction compounding every pass.
         if self.store.exists("dreams/insight-feedback.jsonl") {
-            let feedback_path = self.store.path("dreams/insight-feedback.jsonl");
-            if let Ok(content) = std::fs::read_to_string(&feedback_path) {
-                for line in content.lines() {
-                    if let Ok(fb) = serde_json::from_str::<serde_json::Value>(line) {
-                        // Accept both "insight_id" (CLI) and "pattern_id" (widget)
-                        let id = fb
-                            .get("insight_id")
-                            .or_else(|| fb.get("pattern_id"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        // Accept string "up"/"down" or numeric 1/-1
-                        let vote = match fb.get("rating") {
-                            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
-                            Some(v) if v.is_number() => match v.as_i64().unwrap_or(0) {
-                                n if n > 0 => "up".to_string(),
-                                n if n < 0 => "down".to_string(),
-                                _ => String::new(),
-                            },
-                            _ => String::new(),
-                        };
-                        if id.is_empty() || vote.is_empty() {
-                            continue;
-                        }
-                        for assoc in all_assocs.iter_mut() {
-                            // Match by UUID (CLI feedback) or by hypothesis
-                            // text (widget feedback uses full pattern text
-                            // as pattern_id, not a UUID).
-                            let is_uuid = id.len() == 36 || id.len() == 16;
-                            let matched = if is_uuid {
-                                assoc.id == id
-                            } else {
-                                assoc.hypothesis.starts_with(id)
-                            };
-                            if matched {
-                                match vote.as_str() {
-                                    "up" => {
-                                        assoc.confidence = (assoc.confidence + 0.05).min(1.0);
-                                    }
-                                    "down" => {
-                                        assoc.confidence = (assoc.confidence - 0.10).max(0.0);
-                                        assoc.promoted = false; // re-evaluate
-                                        // D3 v1: when a down-vote drags
-                                        // confidence below the dismissal
-                                        // threshold, mark dismissed so the
-                                        // association stops re-surfacing.
-                                        if assoc.confidence < 0.2 {
-                                            assoc.dismissed = true;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
+            let state: WakeFeedbackState = self
+                .store
+                .read_json(WAKE_FEEDBACK_STATE)
+                .unwrap_or_default();
+            let content = std::fs::read_to_string(self.store.path("dreams/insight-feedback.jsonl"))
+                .unwrap_or_default();
+            let (applied, watermark) = apply_wake_feedback(&mut all_assocs, &content, state.watermark);
+            if applied > 0 {
+                self.store.write_json("dreams/associations.json", &all_assocs)?;
+                info!("Wake: applied {applied} new feedback vote(s)");
+            }
+            if watermark != state.watermark {
+                self.store
+                    .write_json(WAKE_FEEDBACK_STATE, &WakeFeedbackState { watermark })?;
             }
         }
 
@@ -2598,5 +2627,57 @@ mod tests {
             promotable(&strong, THRESHOLD, true),
             "bypass confidence still promotes in maintenance"
         );
+    }
+}
+
+#[cfg(test)]
+mod wake_feedback_tests {
+    use super::*;
+
+    fn assoc(id: &str, conf: f64) -> Association {
+        Association {
+            id: id.into(),
+            patterns_linked: vec![],
+            hypothesis: format!("hyp {id}"),
+            confidence: conf,
+            actionable: true,
+            suggested_rule: Some("r".into()),
+            promoted: true,
+            dismissed: false,
+            auto_intention_id: None,
+            patterns_linked_stable: vec![],
+        }
+    }
+
+    const ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    fn row(ts: &str, rating: &str) -> String {
+        format!("{{\"insight_id\":\"{ID}\",\"rating\":\"{rating}\",\"ts\":\"{ts}\"}}\n")
+    }
+
+    #[test]
+    fn history_is_not_replayed_on_first_use() {
+        let mut a = vec![assoc(ID, 0.8)];
+        let ledger = row("2026-10-01T00:00:00Z", "down");
+        let (n, w) = apply_wake_feedback(&mut a, &ledger, None);
+        assert_eq!(n, 0);
+        assert_eq!(a[0].confidence, 0.8);
+        assert!(w.is_some());
+    }
+
+    #[test]
+    fn a_vote_lands_once_however_many_passes_run() {
+        let mut a = vec![assoc(ID, 0.8)];
+        let mut ledger = row("2026-10-01T00:00:00Z", "down");
+        let (_, w) = apply_wake_feedback(&mut a, &ledger, None);
+        ledger.push_str(&row("2026-10-02T00:00:00Z", "down"));
+        let mut mark = w;
+        for _ in 0..6 {
+            let (_, next) = apply_wake_feedback(&mut a, &ledger, mark);
+            mark = next;
+        }
+        assert!((a[0].confidence - 0.7).abs() < 1e-9, "one down-vote, once: {}", a[0].confidence);
+        assert!(!a[0].dismissed);
+        assert!(!a[0].promoted);
     }
 }

@@ -60,29 +60,37 @@ impl<'a> ProjectBriefsModule<'a> {
     /// at each level, pick the entry whose own encoding prefixes what is left.
     /// Returns `None` when no path on disk encodes to the id.
     pub fn decode_project_id(id: &str) -> Option<String> {
-        fn walk(dir: &std::path::Path, rest: &str) -> Option<std::path::PathBuf> {
-            if rest.is_empty() {
-                return Some(dir.to_path_buf());
+        // `/a/b-c`, `/a/b/c` and `/a/b.c` encode alike, so every match is
+        // collected and a real project wins over a stray directory.
+        fn walk(dir: &std::path::Path, rest: &str, out: &mut Vec<std::path::PathBuf>) {
+            if out.len() >= 8 {
+                return;
             }
-            for e in std::fs::read_dir(dir).ok()?.flatten() {
+            if rest.is_empty() {
+                out.push(dir.to_path_buf());
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
                 if !e.path().is_dir() {
                     continue;
                 }
-                let name = e.file_name();
-                let enc = ProjectBriefsModule::encode_cwd(&name.to_string_lossy());
+                let enc = ProjectBriefsModule::encode_cwd(&e.file_name().to_string_lossy());
                 if rest == enc {
-                    return Some(e.path());
-                }
-                if let Some(tail) = rest.strip_prefix(&format!("{enc}-")) {
-                    if let Some(p) = walk(&e.path(), tail) {
-                        return Some(p);
-                    }
+                    out.push(e.path());
+                } else if let Some(tail) = rest.strip_prefix(&format!("{enc}-")) {
+                    walk(&e.path(), tail, out);
                 }
             }
-            None
         }
         let rest = id.strip_prefix('-')?;
-        walk(std::path::Path::new("/"), rest).map(|p| p.to_string_lossy().into_owned())
+        let mut found = vec![];
+        walk(std::path::Path::new("/"), rest, &mut found);
+        let pick = found
+            .iter()
+            .find(|p| Self::is_real_project_dir(&p.to_string_lossy()))
+            .or(found.first())?;
+        Some(pick.to_string_lossy().into_owned())
     }
 
     /// Whether a brief for this project id can ever be read. Session start
@@ -103,9 +111,14 @@ impl<'a> ProjectBriefsModule<'a> {
     pub fn is_real_project_dir(cwd: &str) -> bool {
         let p = std::path::Path::new(cwd);
         let is_home = std::env::var("HOME").map(|h| h.trim_end_matches('/') == cwd.trim_end_matches('/'));
+        // Session tooling drops a .claude/ (WAL, local settings, notes) into any
+        // directory it runs in, so only shared project config counts.
+        let has_project_config = p.join("CLAUDE.md").is_file()
+            || p.join(".claude/CLAUDE.md").is_file()
+            || p.join(".claude/settings.json").is_file();
         p.is_dir()
             && !is_home.unwrap_or(false)
-            && (p.join(".git").exists() || p.join(".claude").is_dir())
+            && (p.join(".git").exists() || has_project_config)
             && !crate::transcript::is_seat_cwd(cwd)
     }
 
@@ -148,14 +161,18 @@ impl<'a> ProjectBriefsModule<'a> {
         Self::is_real_project_dir(&cwd).then_some(cwd)
     }
 
-    /// Delete every brief that could never be injected, or describes a
-    /// directory that is not a real project. Returns the deleted ids.
+    /// Archive every brief that could never be injected, or describes a
+    /// directory that is not a real project, into `_archived/<date>/` so a
+    /// wrong call can be undone. Returns the archived ids.
     pub fn prune_unreachable(&self, cwds: &HashMap<String, String>) -> Result<Vec<String>> {
         let dir = self.store.path("dreams/project-briefs");
         let mut gone = Vec::new();
         let Ok(rd) = std::fs::read_dir(&dir) else {
             return Ok(gone);
         };
+        let archive = dir
+            .join("_archived")
+            .join(chrono::Utc::now().format("%Y-%m-%d").to_string());
         for e in rd.flatten() {
             let p = e.path();
             if p.extension().and_then(|s| s.to_str()) != Some("md") {
@@ -163,7 +180,10 @@ impl<'a> ProjectBriefsModule<'a> {
             }
             let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
             if Self::real_cwd_for(&id, cwds).is_none() {
-                std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+                std::fs::create_dir_all(&archive)?;
+                let dest = archive.join(format!("{id}.md"));
+                std::fs::rename(&p, &dest)
+                    .with_context(|| format!("archive {} to {}", p.display(), dest.display()))?;
                 gone.push(id);
             }
         }
@@ -588,7 +608,14 @@ mod real_dir_tests {
         let mut gone = pbm.prune_unreachable(&HashMap::new()).unwrap();
         gone.sort();
         assert_eq!(gone, vec!["-nowhere-gone", "-private-tmp-abc", "i-dream"]);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let top_level_briefs = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+            .count();
+        assert_eq!(top_level_briefs, 0);
+        let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert!(dir.join("_archived").join(day).join("i-dream.md").is_file(), "archived, not deleted");
     }
 
     #[test]

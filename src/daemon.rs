@@ -1444,7 +1444,7 @@ struct DomainCadenceState {
 /// when the owner's 5-hour or weekly window is nearly spent. Returns the gate's
 /// detail line when it is closed, `None` when open or when the gate script is
 /// missing or unreadable (a broken gate must not silently stop dreaming).
-fn shared_usage_gate_closed() -> Option<String> {
+pub(crate) fn shared_usage_gate_closed() -> Option<String> {
     let script = crate::config::expand_tilde(Path::new("~/.claude/scripts/cron/usage-gate.sh"));
     if !script.exists() {
         return None;
@@ -1690,33 +1690,28 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
     // the hook script echoes whatever we write back into Claude's context.
     // For all other events we just ack with an empty body.
     let build_started = std::time::Instant::now();
-    let response = match &event {
-        HookEvent::SessionStart { cwd, .. } if cwd.as_deref().is_some_and(is_scratch_cwd) => {
-            // A session that starts in a temp or seat directory is a background
-            // run (the daemon's own, a CI seat, a retro-dump), never the owner.
-            // It gets no briefing and no intention is spent on it.
-            String::new()
-        }
+    let (response, shown, shown_to) = match &event {
         HookEvent::SessionStart {
-            entrypoint: Some(ep),
-            ..
-        } if !crate::events::is_interactive_entrypoint(ep) => {
-            // A headless run (juror, linter, reviewer) gets no briefing, so it
-            // spends no intention budget and can cast no vote on one.
-            String::new()
+            cwd, entrypoint, ..
+        } if crate::transcript::classify_fields(entrypoint.as_deref(), cwd.as_deref())
+            != crate::transcript::TranscriptKind::Interactive =>
+        {
+            // A headless run (juror, linter, reviewer) or an agent seat in a
+            // scratch or worktree directory gets no briefing, so it spends no
+            // intention budget and can cast no vote. Same classifier as the
+            // learning modules use.
+            (String::new(), vec![], None)
         }
         HookEvent::SessionStart { cwd, session_id, .. } => {
-            // No surfaced-claim is recorded here (A4, 2026-07-22): this lane
-            // cannot prove its response ever reached a context — the client
-            // may read-and-discard — and the rows it used to write poisoned
-            // the valence correlation with briefings nobody saw. Delivery
-            // receipts belong to the file-based injector (injections.jsonl);
-            // valence/surfaced.jsonl keeps only its historical rows.
-            let (text, _intention_ids, _has_introspection) =
-                build_session_start_response_for(store, cwd.as_deref(), session_id.as_deref());
-            text
+            let (text, ids, _has_introspection) = build_session_start_response_for(
+                store,
+                cwd.as_deref(),
+                session_id.as_deref(),
+                false,
+            );
+            (text, ids, session_id.clone())
         }
-        _ => String::new(),
+        _ => (String::new(), vec![], None),
     };
     if !response.is_empty() {
         // A hung-up client (its recv timeout beat our build) is a delivery
@@ -1739,6 +1734,9 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
             }
             return Err(e.into());
         }
+        // Delivered: only now do the shown rules count as surfaced, spend a
+        // fire, and become what a later correction or praise votes on.
+        record_surfacings(store, &shown, shown_to.as_deref());
     }
 
     Ok(())
@@ -1805,7 +1803,6 @@ fn vote_on_surfaced_intentions(
         })
         .collect();
 
-    let now_ts = Utc::now().to_rfc3339();
     let mut voted = 0usize;
     for intention_id in shown {
         if already.contains(&(intention_id.to_string(), rating.to_string())) {
@@ -1821,7 +1818,7 @@ fn vote_on_surfaced_intentions(
             "insight_id": assoc_id,
             "rating": rating,
             "source": source,
-            "ts": now_ts.clone(),
+            "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
             "intention_id": intention_id,
             "sid": session_id,
         });
@@ -1852,26 +1849,18 @@ fn vote_on_surfaced_intentions(
 /// nothing into Claude's context.
 #[cfg(test)]
 fn build_session_start_response(store: &Store, cwd: Option<&str>) -> (String, Vec<String>, bool) {
-    build_session_start_response_for(store, cwd, None)
+    build_session_start_response_for(store, cwd, None, true)
 }
 
-/// The session-start briefing, recording which session the fired
-/// intentions were shown to.
-/// Whether a working directory belongs to a background run rather than a
-/// person's project: macOS temp roots, scratchpads and agent worktrees.
-pub fn is_scratch_cwd(cwd: &str) -> bool {
-    cwd.starts_with("/tmp")
-        || cwd.starts_with("/private/tmp")
-        || cwd.starts_with("/private/var/folders")
-        || cwd.starts_with("/var/folders")
-        || cwd.contains("/scratchpad/")
-        || cwd.contains("/.claude/worktrees/")
-}
+/// The session-start briefing. With `record`, the shown intentions are
+/// counted as surfaced at once; the hook path passes false and records only
+/// after delivery.
 
 fn build_session_start_response_for(
     store: &Store,
     cwd: Option<&str>,
     session_id: Option<&str>,
+    record: bool,
 ) -> (String, Vec<String>, bool) {
     let mut sections: Vec<String> = Vec::new();
     let mut surfaced_ids: Vec<String> = Vec::new();
@@ -1894,7 +1883,7 @@ fn build_session_start_response_for(
     }
 
     // ── 1. Broadcast intentions ─────────────────────────────
-    if let Some((section, ids)) = broadcast_intentions_section_for(store, session_id) {
+    if let Some((section, ids)) = broadcast_intentions_section_for(store, session_id, record) {
         sections.push(section);
         surfaced_ids = ids;
     }
@@ -1930,9 +1919,63 @@ fn build_session_start_response_for(
 /// one shared tmp file and lose fire counts.
 static REGISTRY_REWRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Count one surfacing of each id: bump its fire count in the registry and
+/// log a fired record for the session. Caller holds `REGISTRY_REWRITE`.
+fn persist_fires(
+    store: &Store,
+    registry: &mut [Intention],
+    ids: &[String],
+    session_id: Option<&str>,
+    now: DateTime<Utc>,
+) {
+    for intent in registry.iter_mut() {
+        if ids.contains(&intent.id) {
+            intent.fire_count += 1;
+            intent.last_fired = Some(now);
+        }
+    }
+    let registry_path = store.path("intentions/registry.jsonl");
+    let tmp_path = registry_path.with_extension("tmp");
+    let lines: String = registry
+        .iter()
+        .filter_map(|i| serde_json::to_string(i).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    if let Err(e) =
+        std::fs::write(&tmp_path, &lines).and_then(|_| std::fs::rename(&tmp_path, &registry_path))
+    {
+        warn!("Failed to update intention fire counts: {e:#}");
+    }
+    for id in ids {
+        let record = FiredRecord {
+            intention_id: id.clone(),
+            fired_at: now,
+            session_id: session_id.unwrap_or_default().to_string(),
+            was_relevant: None,
+        };
+        let _ = store.append_jsonl("intentions/fired.jsonl", &record);
+    }
+}
+
+/// Record that `ids` reached a session's context. Called only after the
+/// briefing was written, so a briefing the client gave up on spends no fire
+/// and attracts no vote.
+fn record_surfacings(store: &Store, ids: &[String], session_id: Option<&str>) {
+    if ids.is_empty() {
+        return;
+    }
+    let _guard = REGISTRY_REWRITE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut registry: Vec<Intention> = store
+        .read_jsonl("intentions/registry.jsonl")
+        .unwrap_or_default();
+    persist_fires(store, &mut registry, ids, session_id, Utc::now());
+}
+
 fn broadcast_intentions_section_for(
     store: &Store,
     session_id: Option<&str>,
+    record: bool,
 ) -> Option<(String, Vec<String>)> {
     let _guard = REGISTRY_REWRITE.lock().unwrap_or_else(|p| p.into_inner());
     let mut registry: Vec<Intention> = store
@@ -1962,37 +2005,8 @@ fn broadcast_intentions_section_for(
         return None;
     }
 
-    // Increment fire_count for all surfaced intentions and rewrite registry.
-    for intent in &mut registry {
-        if surfaced_ids.contains(&intent.id) {
-            intent.fire_count += 1;
-            intent.last_fired = Some(now);
-        }
-    }
-    // Atomically rewrite the JSONL registry with updated fire counts.
-    let registry_path = store.path("intentions/registry.jsonl");
-    let tmp_path = registry_path.with_extension("tmp");
-    let lines: String = registry
-        .iter()
-        .filter_map(|i| serde_json::to_string(i).ok())
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    if let Err(e) =
-        std::fs::write(&tmp_path, &lines).and_then(|_| std::fs::rename(&tmp_path, &registry_path))
-    {
-        warn!("Failed to update intention fire counts: {e:#}");
-    }
-
-    // Log fired records
-    for id in &surfaced_ids {
-        let record = FiredRecord {
-            intention_id: id.clone(),
-            fired_at: now,
-            session_id: session_id.unwrap_or_default().to_string(),
-            was_relevant: None,
-        };
-        let _ = store.append_jsonl("intentions/fired.jsonl", &record);
+    if record {
+        persist_fires(store, &mut registry, &surfaced_ids, session_id, now);
     }
 
     // Build the output section, sorted by priority.
@@ -2067,13 +2081,14 @@ mod tests {
     // ── Engine-driven cadence dispatch (Wave 1 item 6) ────────
 
     #[test]
-    fn scratch_cwds_are_background_runs() {
-        assert!(is_scratch_cwd("/private/tmp"));
-        assert!(is_scratch_cwd("/private/var/folders/t8/x/T/seat-review/ws"));
-        assert!(is_scratch_cwd("/Users/me/Code/x/.claude/worktrees/agent-a1"));
-        assert!(is_scratch_cwd("/private/tmp/claude-501/-Users-me/abc/scratchpad/wt"));
-        assert!(!is_scratch_cwd("/Users/me/Code/Claude/i-dream"));
-        assert!(!is_scratch_cwd("/Users/me/tmpfiles"));
+    fn session_start_gates_on_the_shared_classifier() {
+        use crate::transcript::{TranscriptKind as K, classify_fields};
+        assert_ne!(classify_fields(None, Some("/private/tmp")), K::Interactive);
+        assert_ne!(classify_fields(None, Some("/private/var/folders/t8/x/T/seat-review/ws")), K::Interactive);
+        assert_ne!(classify_fields(None, Some("/Users/me/Code/x/.claude/worktrees/agent-a1")), K::Interactive);
+        assert_ne!(classify_fields(Some("cli"), Some("/private/tmp/claude-501/x/scratchpad/wt")), K::Interactive);
+        assert_eq!(classify_fields(Some("cli"), Some("/Users/me/Code/x/.claude/worktrees/feat")), K::Interactive);
+        assert_eq!(classify_fields(None, Some("/Users/me/tmpfiles")), K::Interactive);
     }
 
     #[test]
@@ -2784,8 +2799,8 @@ timeout = "10s"
         }
 
         // Session A sees the three rules; session B starts later and sees them too.
-        build_session_start_response_for(&store, None, Some("sess-A"));
-        build_session_start_response_for(&store, None, Some("sess-B"));
+        build_session_start_response_for(&store, None, Some("sess-A"), true);
+        build_session_start_response_for(&store, None, Some("sess-B"), true);
 
         // "no that's wrong" in A: exactly A's three, nothing for B.
         let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction").unwrap();
@@ -2809,21 +2824,64 @@ timeout = "10s"
         assert_eq!(votes(&store).len(), 6);
     }
 
-    #[test]
-    fn a_headless_session_start_gets_no_briefing() {
-        let (_dir, store) = mk_store();
+    /// Send one payload through the real hook handler and return the reply.
+    async fn handler_reply(store: &Store, dir: &std::path::Path, payload: &str) -> String {
+        let socket_path = dir.join(format!("h{}.sock", rand_suffix()));
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let p = payload.to_string();
+        let client_path = socket_path.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(&client_path).await.unwrap();
+            stream.write_all(p.as_bytes()).await.unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            let mut buf = Vec::new();
+            let _ = stream.read_to_end(&mut buf).await;
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        handle_hook_connection(stream, store).await.unwrap();
+        client.await.unwrap()
+    }
+
+    fn rand_suffix() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(1, Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn a_headless_session_start_gets_no_briefing_and_spends_no_fire() {
+        let (dir, store) = mk_store();
         let rule = broadcast_intention("dw-1", "Rule", Priority::High, chrono::Duration::hours(-1));
         store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
-        let ev = HookEvent::SessionStart {
-            ts: 1,
-            cwd: Some("/Users/me/Code/x".into()),
-            session_id: Some("s".into()),
-            entrypoint: Some("sdk-cli".into()),
-        };
-        let HookEvent::SessionStart { entrypoint: Some(ep), .. } = &ev else { unreachable!() };
-        assert!(!crate::events::is_interactive_entrypoint(ep));
-        assert!(crate::events::is_interactive_entrypoint("cli"));
-        assert!(crate::events::is_interactive_entrypoint("claude-vscode"));
+        let reply = handler_reply(
+            &store,
+            dir.path(),
+            r#"{"event":"session_start","ts":1,"cwd":"/Users/me/Code/x","session_id":"h1","entrypoint":"sdk-cli"}"#,
+        )
+        .await;
+        assert!(reply.is_empty(), "headless got a briefing: {reply}");
+        let fired: Vec<FiredRecord> = store.read_jsonl("intentions/fired.jsonl").unwrap_or_default();
+        assert!(fired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_interactive_start_is_briefed_and_its_fires_are_recorded_after_delivery() {
+        let (dir, store) = mk_store();
+        let rule = broadcast_intention("dw-1", "Rule", Priority::High, chrono::Duration::hours(-1));
+        store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        let reply = handler_reply(
+            &store,
+            dir.path(),
+            r#"{"event":"session_start","ts":1,"cwd":"/Users/me/Code/x","session_id":"i1","entrypoint":"cli"}"#,
+        )
+        .await;
+        assert!(reply.contains("Behavioral rules"), "no rules in: {reply}");
+        let fired: Vec<FiredRecord> = store.read_jsonl("intentions/fired.jsonl").unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].session_id, "i1");
+        let reg: Vec<Intention> = store.read_jsonl("intentions/registry.jsonl").unwrap();
+        assert_eq!(reg[0].fire_count, 1);
     }
 
     #[test]

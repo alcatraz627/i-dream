@@ -89,6 +89,14 @@ impl Store {
         Ok(path)
     }
 
+    /// Run `f` while holding the same per-path lock appends and writes take,
+    /// so a read-modify-rewrite of a file cannot lose a concurrent append.
+    pub fn with_lock<R>(&self, rel_path: &str, f: impl FnOnce() -> R) -> R {
+        let lock = file_lock(&self.root.join(rel_path));
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        f()
+    }
+
     /// Read a JSON file.
     pub fn read_json<T: DeserializeOwned>(&self, rel_path: &str) -> Result<T> {
         let path = self.root.join(rel_path);

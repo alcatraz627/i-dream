@@ -319,15 +319,15 @@ pub fn evict_to_cap(patterns: &mut Vec<ExtractedPattern>, cap: usize) -> Vec<Evi
 /// Single writer of `dreams/patterns.json` for the strength dimension. Never
 /// fails the cycle — a reinforcement error leaves the store as it was.
 pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
+    // An unreadable store is an error, never an empty one: writing back an
+    // empty default would wipe every pattern and archive every association.
     let mut patterns: Vec<ExtractedPattern> = if store.exists("dreams/patterns.json") {
-        store.read_json("dreams/patterns.json").unwrap_or_default()
+        store.read_json("dreams/patterns.json")?
     } else {
         return Ok(ReinforceReport::default());
     };
     let mut associations: Vec<Association> = if store.exists("dreams/associations.json") {
-        store
-            .read_json("dreams/associations.json")
-            .unwrap_or_default()
+        store.read_json("dreams/associations.json")?
     } else {
         vec![]
     };
@@ -496,13 +496,17 @@ pub struct RelinkReport {
     pub links_before: usize,
     /// Links that resolved nowhere before the pass.
     pub dangling_before: usize,
+    /// True when the pass refused to run: no patterns at all while
+    /// associations still carry links reads as a broken store, not a world
+    /// where every pattern is gone.
+    pub refused: bool,
     stable_filled: usize,
 }
 
 impl RelinkReport {
     /// Whether the association store needs rewriting.
     pub fn changed(&self) -> bool {
-        self.relinked + self.dropped + self.archived + self.stable_filled > 0
+        !self.refused && self.relinked + self.dropped + self.archived + self.stable_filled > 0
     }
 }
 
@@ -524,6 +528,10 @@ pub fn relink(
         .map(|p| (stable_id(&p.pattern), p.id.as_str()))
         .collect();
     let mut r = RelinkReport::default();
+    if patterns.is_empty() && associations.iter().any(|a| !a.patterns_linked.is_empty()) {
+        r.refused = true;
+        return (r, vec![]);
+    }
     let mut archived = Vec::new();
     let mut kept = Vec::with_capacity(associations.len());
     for mut a in associations.drain(..) {
@@ -538,12 +546,18 @@ pub fn relink(
                 if known_stable != Some(&s) {
                     r.stable_filled += 1;
                 }
-                ids.push(pid.clone());
-                stables.push(s);
+                if ids.contains(pid) {
+                    // A second link to the same pattern would count every vote twice.
+                    r.stable_filled += 1;
+                } else {
+                    ids.push(pid.clone());
+                    stables.push(s);
+                }
                 continue;
             }
             r.dangling_before += 1;
             match known_stable.and_then(|s| by_stable.get(s).map(|id| (s, id))) {
+                Some((_, id)) if ids.iter().any(|x| x == id) => r.dropped += 1,
                 Some((s, id)) => {
                     r.relinked += 1;
                     ids.push((*id).to_string());
@@ -634,6 +648,11 @@ fn partition_feedback_lines<'a>(
 /// a crash can duplicate a line but never lose one. `min` gates the rewrite;
 /// production passes FEEDBACK_ROTATE_MIN.
 fn rotate_feedback_ledger(store: &Store, now: DateTime<Utc>, min: usize) -> Result<usize> {
+    // The hook handler appends votes while a cycle runs; rewrite under its lock.
+    store.with_lock("dreams/insight-feedback.jsonl", || rotate_feedback_locked(store, now, min))
+}
+
+fn rotate_feedback_locked(store: &Store, now: DateTime<Utc>, min: usize) -> Result<usize> {
     let path = store.path("dreams/insight-feedback.jsonl");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Ok(0);
@@ -1667,5 +1686,66 @@ mod relink_tests {
         assert!(archived.is_empty());
         assert_eq!(assocs.len(), 1);
         assert!(!r.changed());
+    }
+}
+
+#[cfg(test)]
+mod relink_guard_tests {
+    use super::*;
+
+    fn p(id: &str, text: &str) -> ExtractedPattern {
+        ExtractedPattern {
+            id: id.into(),
+            pattern: text.into(),
+            valence: "negative".into(),
+            confidence: 0.6,
+            category: "approach".into(),
+            source_sessions: vec![],
+            source_projects: vec![],
+            occurrences: 1,
+            first_seen: "2026-05-01".into(),
+            last_seen: "2026-05-01".into(),
+            occurrence_history: vec![],
+            strength: 0.5,
+            ease: 2.5,
+            reactivations: 0,
+        }
+    }
+
+    fn a(linked: &[&str], stable: &[&str]) -> Association {
+        Association {
+            id: "x".into(),
+            patterns_linked: linked.iter().map(|s| s.to_string()).collect(),
+            hypothesis: "h".into(),
+            confidence: 0.6,
+            actionable: true,
+            suggested_rule: None,
+            promoted: true,
+            dismissed: false,
+            auto_intention_id: None,
+            patterns_linked_stable: stable.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn an_empty_pattern_store_archives_nothing() {
+        let mut assocs = vec![a(&["u1", "u2"], &[])];
+        let (r, archived) = relink(&[], &mut assocs);
+        assert!(r.refused);
+        assert!(!r.changed());
+        assert!(archived.is_empty());
+        assert_eq!(assocs[0].patterns_linked.len(), 2, "links untouched");
+    }
+
+    #[test]
+    fn a_reminted_link_beside_its_live_twin_is_kept_once() {
+        let s = stable_id("t");
+        let ps = vec![p("new", "t")];
+        let mut first = vec![a(&["old", "new"], &[&s, ""])];
+        relink(&ps, &mut first);
+        assert_eq!(first[0].patterns_linked, vec!["new".to_string()]);
+        let mut second = vec![a(&["new", "old"], &["", &s])];
+        relink(&ps, &mut second);
+        assert_eq!(second[0].patterns_linked, vec!["new".to_string()]);
     }
 }
