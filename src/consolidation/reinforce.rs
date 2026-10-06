@@ -433,9 +433,6 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
             );
         }
     }
-    if !forgotten.is_empty() {
-        store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
-    }
 
     // Retention (A0): the ledger is re-read wholesale every cycle and grows
     // fastest during exactly the absences the arc targets. Consumed state
@@ -464,7 +461,6 @@ pub fn run_cycle(store: &Store) -> Result<ReinforceReport> {
             "reinforce::evict",
         );
     }
-    store.prune_jsonl("dreams/evicted.jsonl", 5_000)?;
     store.write_json("dreams/patterns.json", &patterns)?;
     store.write_json(STATE_PATH, &state)?;
 

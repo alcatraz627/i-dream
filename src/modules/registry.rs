@@ -244,12 +244,20 @@ pub enum LaneCheck {
     /// The store must exist and be non-empty — a store never created is a lane
     /// that never lived.
     Existence,
-    /// The store must stay under a growth bound; `warn` is yellow, `max` is red.
-    Bound {
-        metric: BoundMetric,
-        warn: u64,
-        max: u64,
-    },
+    /// The store is bounded by its rule in [`RETENTION`], the one table of caps.
+    /// Yellow means the reaper is behind (more than a tenth over the cap), red
+    /// means it is not running (twice the cap). Sitting at the cap is green.
+    Retained,
+}
+
+/// Yellow and red thresholds for a store that retention keeps at `cap`.
+fn over_cap_bounds(cap: u64) -> (u64, u64) {
+    (cap + cap / 10 + 1, cap * 2)
+}
+
+/// The retention rule that bounds a store, if any.
+fn retention_rule(store: &str) -> Option<&'static RetentionRule> {
+    RETENTION.iter().find(|r| r.store == store)
 }
 
 /// What a `Bound` check counts.
@@ -380,11 +388,7 @@ pub const LANES: &[Lane] = &[
         consumer: "dashboard + journal",
         store: ".claude/subconscious/dreams/traces",
         cadence_hours: 0,
-        check: LaneCheck::Bound {
-            metric: BoundMetric::DirEntries,
-            warn: 300,
-            max: 800,
-        },
+        check: LaneCheck::Retained,
     },
     Lane {
         name: "snapshots",
@@ -392,11 +396,7 @@ pub const LANES: &[Lane] = &[
         consumer: "dashboard cycle-diff",
         store: ".claude/subconscious/dreams/snapshots",
         cadence_hours: 0,
-        check: LaneCheck::Bound {
-            metric: BoundMetric::DirEntries,
-            warn: 20,
-            max: 60,
-        },
+        check: LaneCheck::Retained,
     },
     Lane {
         name: "injections",
@@ -404,11 +404,7 @@ pub const LANES: &[Lane] = &[
         consumer: "session-start hook",
         store: ".claude/i-dream/injections.jsonl",
         cadence_hours: 0,
-        check: LaneCheck::Bound {
-            metric: BoundMetric::JsonlLines,
-            warn: 5000,
-            max: 20000,
-        },
+        check: LaneCheck::Retained,
     },
     Lane {
         name: "feedback",
@@ -608,17 +604,29 @@ impl Lane {
                     (LaneStatus::Red, format!("store absent ({})", self.store))
                 }
             }
-            LaneCheck::Bound { metric, warn, max } => {
-                let n = measure_bound(*metric, &store_abs);
-                let unit = match metric {
-                    BoundMetric::DirEntries => "entries",
-                    BoundMetric::JsonlLines => "lines",
-                };
-                (
-                    classify_bound(n, *warn, *max),
-                    format!("{n} {unit} (max {max})"),
-                )
-            }
+            LaneCheck::Retained => match retention_rule(self.store).map(|r| &r.policy) {
+                None => (LaneStatus::Red, format!("no retention rule for {}", self.store)),
+                Some(RetentionPolicy::MaxLines(cap)) => {
+                    let n = measure_bound(BoundMetric::JsonlLines, &store_abs);
+                    let (warn, max) = over_cap_bounds(*cap as u64);
+                    (classify_bound(n, warn, max), format!("{n} lines (keeps {cap})"))
+                }
+                Some(RetentionPolicy::KeepNewest(cap)) => {
+                    let n = measure_bound(BoundMetric::DirEntries, &store_abs);
+                    let (warn, max) = over_cap_bounds(*cap as u64);
+                    (classify_bound(n, warn, max), format!("{n} entries (keeps {cap})"))
+                }
+                Some(RetentionPolicy::MaxAgeDays(days)) => match oldest_child_age(&store_abs) {
+                    None => (LaneStatus::Green, "empty".to_string()),
+                    Some(age) => {
+                        let (warn, max) = over_cap_bounds(*days);
+                        (
+                            classify_bound(age.as_secs() / 86_400, warn, max),
+                            format!("oldest {} (keeps {days}d)", fmt_age(age)),
+                        )
+                    }
+                },
+            },
         };
         LaneHealth {
             lane: self.name,
@@ -672,8 +680,6 @@ pub fn write_lane_health(store: &Store, cycle: u64) -> Result<()> {
         lanes,
     };
     store.append_jsonl("dreams/lane-health.jsonl", &record)?;
-    // Keep the health log bounded — it is itself a lane.
-    store.prune_jsonl("dreams/lane-health.jsonl", 2_000)?;
     Ok(())
 }
 
@@ -714,7 +720,7 @@ pub const KNOWN_ORPHANS: &[&str] = &[
 pub fn contract_orphans(home: &Path) -> Vec<&'static str> {
     LANES
         .iter()
-        .filter(|l| !matches!(l.check, LaneCheck::Bound { .. }))
+        .filter(|l| !matches!(l.check, LaneCheck::Retained))
         .filter(|l| l.evaluate(home).status == LaneStatus::Red)
         .map(|l| l.name)
         .collect()
@@ -766,6 +772,28 @@ pub const RETENTION: &[RetentionRule] = &[
     RetentionRule {
         store: ".claude/subconscious/dreams/insight-feedback.jsonl",
         policy: RetentionPolicy::MaxLines(10_000),
+    },
+    // The daemon's own audit ledgers. They used to be cut by inline deletes
+    // with their own numbers; overflow now archives like everything else.
+    RetentionRule {
+        store: ".claude/subconscious/dreams/firings.jsonl",
+        policy: RetentionPolicy::MaxLines(20_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/dreams/forgotten.jsonl",
+        policy: RetentionPolicy::MaxLines(5_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/dreams/evicted.jsonl",
+        policy: RetentionPolicy::MaxLines(5_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/dreams/associations-archive.jsonl",
+        policy: RetentionPolicy::MaxLines(5_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/dreams/lane-health.jsonl",
+        policy: RetentionPolicy::MaxLines(2_000),
     },
     // The intervention interpreters append every match (display caps never
     // gate telemetry), so this grows with prompt volume — bound it like its
@@ -1483,5 +1511,42 @@ mod tests {
         for name in NATIVE_MODULE_NAMES {
             assert!(seen.insert(*name), "duplicate native module name: {name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_tests {
+    use super::*;
+
+    fn lines(n: usize) -> String {
+        "{}\n".repeat(n)
+    }
+
+    fn injections_lane() -> &'static Lane {
+        LANES.iter().find(|l| l.name == "injections").unwrap()
+    }
+
+    #[test]
+    fn every_retained_lane_has_its_rule() {
+        for l in LANES.iter().filter(|l| matches!(l.check, LaneCheck::Retained)) {
+            assert!(retention_rule(l.store).is_some(), "{} has no retention rule", l.name);
+        }
+    }
+
+    #[test]
+    fn a_store_held_at_its_cap_is_green_and_only_overflow_warns() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().join(injections_lane().store);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let cap = match retention_rule(injections_lane().store).unwrap().policy {
+            RetentionPolicy::MaxLines(n) => n,
+            _ => unreachable!(),
+        };
+        std::fs::write(&p, lines(cap)).unwrap();
+        assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Green);
+        std::fs::write(&p, lines(cap + cap / 5)).unwrap();
+        assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Yellow);
+        std::fs::write(&p, lines(cap * 2)).unwrap();
+        assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Red);
     }
 }

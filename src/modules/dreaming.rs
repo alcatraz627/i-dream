@@ -48,9 +48,6 @@ pub fn govern_interventions_pass(store: &crate::store::Store) -> anyhow::Result<
         for f in &composted {
             store.append_jsonl("dreams/forgotten.jsonl", f)?;
         }
-        if !composted.is_empty() {
-            store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
-        }
         crate::interventions::save_interventions(&ipath, &items)?;
         composted
     };
@@ -1615,9 +1612,6 @@ Output ONLY a JSON array. No commentary."#;
                 "reinsert:dreams/associations.json",
                 "dreaming::wake-govern",
             );
-        }
-        if !forgotten.is_empty() {
-            self.store.prune_jsonl("dreams/forgotten.jsonl", 5_000)?;
         }
         // Grounding is only watchable if it reports the no-op case too — a
         // filter that logs nothing when it forgets nothing is
