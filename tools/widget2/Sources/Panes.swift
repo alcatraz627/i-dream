@@ -152,20 +152,12 @@ struct PatternsPane: View {
 
     var body: some View {
         let rows = model.patternRows()
-        let shown = Set(rows.map(\.id))
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .patterns, sub: "The \(r.patterns.count) strongest of \(r.patternTotal) extracted patterns, placed by category, sized and lit by strength, linked by the \(r.associations.count) associations. Hover a star to probe it, click to open it, drag to pan, pinch to zoom.")
+            PaneHeader(pane: .patterns, sub: "The \(r.patterns.count) strongest of \(r.patternTotal) habits the daemon has noticed, strongest first")
             highlights
-            SearchField(text: $model.patterns.search, prompt: "search pattern text or id", token: model.searchFocusToken)
+            SearchField(text: $model.patterns.search, prompt: "search", token: model.searchFocusToken)
             filters
             HStack(alignment: .top, spacing: 12) {
-                Constellation(patterns: r.patterns, associations: r.associations, focus: model.patterns.focus, big: true,
-                              dimmed: Set(r.patterns.map(\.id)).subtracting(shown),
-                              onSelect: { p in model.patterns.focus = p.id; model.patterns.selected = rows.firstIndex { $0.id == p.id } ?? 0 },
-                              help: model.help)
-                    .frame(height: 460)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(P.hair, lineWidth: 0.5))
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
@@ -179,7 +171,8 @@ struct PatternsPane: View {
                     }
                     .onChange(of: model.patterns.selected) { _, i in if let id = rows[safe: i]?.id { proxy.scrollTo(id) } }
                 }
-                .frame(width: 380, height: 460)
+                .frame(maxWidth: .infinity)
+                .frame(height: 520)
                 .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
             }
         }
@@ -188,15 +181,12 @@ struct PatternsPane: View {
     private var emptyLine: String { "No drawn pattern matches these filters" + (model.patterns.search.isEmpty ? "." : " and \"\(model.patterns.search)\".") }
 
     private var highlights: some View {
-        let strongest = r.patterns.first
         let reinforced = r.patterns.filter { $0.trend == "reinforced" }.max { ($0.last7 - $0.prior7) < ($1.last7 - $1.prior7) }
         return HStack(spacing: 8) {
-            if let s = strongest { Chip(icon: "sparkles", text: "strongest: rank 1, \(String(format: "%.2f", s.strength))") { model.open(Dive(pane: .patterns, scope: .pattern(s.id))) } }
             if let s = reinforced { Chip(icon: "arrow.up.right", text: "most reinforced: +\(s.last7 - s.prior7) this week") { model.open(Dive(pane: .patterns, scope: .pattern(s.id))) } }
             Chip(icon: "exclamationmark.triangle", text: "worsening", count: r.patterns.filter { $0.trend == "worsening" }.count, on: model.patterns.trends == ["worsening"]) {
                 model.patterns.trends = model.patterns.trends == ["worsening"] ? [] : ["worsening"]
             }
-            Stat(icon: "circle.dashed", n: r.patterns.filter { $0.links.isEmpty }.count, noun: "drawn patterns with no link")
         }
     }
 
@@ -231,8 +221,8 @@ struct PatternsPane: View {
         HStack(alignment: .top, spacing: 8) {
             Dot(color: P.category(p.category)).padding(.top, 4)
             VStack(alignment: .leading, spacing: 2) {
-                Text(p.text).font(F.meta).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
-                Text("rank \(p.rank) · strength \(String(format: "%.2f", p.strength)) · \(p.trend) · \(p.category)").font(F.mono).foregroundStyle(P.fg3)
+                Text(p.text).font(F.body).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
+                Text("\(p.category) · \(p.trend)").font(F.meta).foregroundStyle(P.fg3)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
@@ -296,7 +286,7 @@ struct ReaderPane: View {
     var body: some View {
         let cards = model.readerCards()
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .reader, sub: "What the reader found. The daily recon joins every stream without a model; the weekly run names the strongest clusters and puts them on a page for you. Click a run to load it; click a card to open its evidence.")
+            PaneHeader(pane: .reader, sub: "What this week's run found · click a card for why")
             runsTimeline
             highlights
             SearchField(text: $model.reader.search, prompt: "search title, reason, join key", token: model.searchFocusToken)
@@ -392,8 +382,9 @@ struct ReaderPane: View {
                         else if let o = f.outcome { Dot(color: P.green); Text(o).font(F.meta).foregroundStyle(P.fg2) }
                     }
                     Text(f.title).font(F.title).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
-                    Text(f.why).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
-                    FlowChips(ids: f.evidenceIds)
+                    Text("\(plural(f.evidenceIds.count, "event")) · \(f.joinedDomains.joined(separator: ", "))")
+                        .font(F.meta).foregroundStyle(P.fg2)
+                    if open { Text(f.why).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true) }
                 }
                 .contentShape(Rectangle())
             }
@@ -409,8 +400,7 @@ struct ReaderPane: View {
                         .buttonStyle(.plain).foregroundStyle(P.blue)
                 }
                 Spacer()
-                Text(f.cluster).font(F.mono).foregroundStyle(P.fg3)
-                CopyButton(value: f.cluster)
+                Text(open ? "less" : "why ›").font(F.meta).foregroundStyle(P.fg3)
             }
         }
         .card(current)
@@ -546,14 +536,12 @@ struct LandingPane: View {
     var body: some View {
         let effects = model.landingEffects()
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .landing, sub: "Where findings went and whether anything moved. An effect is credited only to a finding about the same slug that you filed or armed; every other movement reads unattributed.")
-            Text("\(r.interventions.live) live nudges · \(r.interventions.candidate) candidates · \(r.interventions.shadow) in shadow · \(r.interventions.fired_7d) fired in the last 7 days · heed is not measured yet")
-                .font(F.meta).foregroundStyle(P.fg2)
+            PaneHeader(pane: .landing, sub: "What you did with each finding, and which mistakes moved this week")
             highlights
             SearchField(text: $model.landing.search, prompt: "search slug", token: model.searchFocusToken)
             filters
             VStack(alignment: .leading, spacing: 4) {
-                SectionLabel(text: "the chain, every named finding")
+                SectionLabel(text: "findings · what you did · this week")
                 ForEach(r.findings) { f in ChainRow(model: model, r: r, f: f) }
                 if r.findings.isEmpty { Text("no named findings yet").font(F.meta).foregroundStyle(P.fg3) }
             }.card()
@@ -563,14 +551,14 @@ struct LandingPane: View {
 
     private var highlights: some View {
         HStack(spacing: 8) {
-            Stat(icon: "lock.shield", n: r.armed.count, noun: "gates armed from your answers")
-            Stat(icon: "tray.and.arrow.down", n: r.filed.count, noun: "proposals filed from your answers")
+            Stat(icon: "lock.shield", n: r.armed.count, noun: "hooks armed")
+            Stat(icon: "tray.and.arrow.down", n: r.filed.count, noun: "filed")
             if let u = r.awaitingPages.first?.url, r.findings.contains(where: \.awaiting) {
                 Chip(icon: "person.crop.circle.badge.exclamationmark", text: "awaiting you, open the page", count: r.findings.filter(\.awaiting).count) { model.openURL(u) }
             } else {
                 Stat(icon: "person.crop.circle.badge.exclamationmark", n: r.findings.filter(\.awaiting).count, noun: "awaiting you")
             }
-            Chip(icon: "lock.shield", text: "gate candidates", count: r.effects.filter(\.gateCandidate).count, on: model.landing.groups == ["gate candidate"]) {
+            Chip(icon: "lock.shield", text: "need a hook", count: r.effects.filter(\.gateCandidate).count, on: model.landing.groups == ["gate candidate"]) {
                 model.landing.groups = model.landing.groups == ["gate candidate"] ? [] : ["gate candidate"]
             }
         }
@@ -584,8 +572,8 @@ struct LandingPane: View {
         }
         return HStack(spacing: 6) {
             Image(systemName: "line.3.horizontal.decrease.circle").font(.system(size: 11)).foregroundStyle(P.fg3)
-            ForEach(["worsening", "easing", "flat", "credited", "unattributed", "gate candidate"], id: \.self) { g in
-                Chip(icon: nil, text: g, count: count(g), on: base.groups.contains(g)) { toggle(&model.landing.groups, g) }
+            ForEach([("worsening", "rising"), ("easing", "falling"), ("flat", "unchanged"), ("gate candidate", "need a hook")], id: \.0) { g, label in
+                Chip(icon: nil, text: label, count: count(g), on: base.groups.contains(g)) { toggle(&model.landing.groups, g) }
             }
             if !base.groups.isEmpty || !base.search.isEmpty {
                 Button("clear") { model.landing = LandingFilter() }.buttonStyle(.plain).font(F.meta).foregroundStyle(P.blue)
@@ -597,12 +585,12 @@ struct LandingPane: View {
         let maxN = max(1, rows.map { max($0.last7, $0.prior7) }.max() ?? 1)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text("SLUG").frame(maxWidth: .infinity, alignment: .leading)
-                Text("WEEK BEFORE · THIS WEEK").frame(width: 190, alignment: .leading)
-                Text("MOVE").frame(width: 44, alignment: .trailing)
+                Text("MISTAKE").frame(maxWidth: .infinity, alignment: .leading)
+                Text("LAST WEEK · THIS WEEK").frame(width: 190, alignment: .leading)
+                Text("CHANGE").frame(width: 50, alignment: .trailing)
                 Text("TOTAL").frame(width: 44, alignment: .trailing)
-                Text("LAST").frame(width: 50, alignment: .trailing)
-                Text("CREDITED TO").frame(width: 170, alignment: .leading)
+                Text("LAST SEEN").frame(width: 64, alignment: .trailing)
+                Text("FIXED BY").frame(width: 120, alignment: .leading)
             }
             .font(F.label).foregroundStyle(P.fg3).padding(.horizontal, 8).padding(.vertical, 5)
             .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
@@ -618,10 +606,10 @@ struct LandingPane: View {
                             bar(e.prior7, maxN, P.fg3); Text("\(e.prior7)").font(F.mono).foregroundStyle(P.fg3).frame(width: 18)
                             bar(e.last7, maxN, e.delta > 0 ? P.amber : e.delta < 0 ? P.green : P.fg2); Text("\(e.last7)").font(F.mono).foregroundStyle(P.fg).frame(width: 18)
                         }.frame(width: 190, alignment: .leading)
-                        Text("\(e.delta > 0 ? "+" : "")\(e.delta)").font(F.mono).foregroundStyle(e.delta > 0 ? P.amber : e.delta < 0 ? (e.landing == nil ? P.fg2 : P.green) : P.fg3).frame(width: 44, alignment: .trailing)
+                        Text(signed(e.delta)).font(F.mono).foregroundStyle(e.delta > 0 ? P.amber : e.delta < 0 ? (e.landing == nil ? P.fg2 : P.green) : P.fg3).frame(width: 50, alignment: .trailing)
                         Text("\(e.total)").font(F.mono).foregroundStyle(P.fg2).frame(width: 44, alignment: .trailing)
-                        AgeText(age: e.last.map { r.now.timeIntervalSince($0) }).frame(width: 50, alignment: .trailing)
-                        Text(e.landing ?? e.recentLanding ?? "unattributed").font(F.meta).foregroundStyle(e.landing == nil ? P.fg3 : P.fg2).fixedSize(horizontal: false, vertical: true).frame(width: 170, alignment: .leading)
+                        AgeText(age: e.last.map { r.now.timeIntervalSince($0) }).frame(width: 64, alignment: .trailing)
+                        Text(e.landing ?? (e.recentLanding != nil ? "filed, too soon" : "–")).font(F.meta).foregroundStyle(e.landing == nil ? P.fg3 : P.fg2).fixedSize(horizontal: false, vertical: true).frame(width: 120, alignment: .leading)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(model.landing.focus == e.slug ? P.sel : i == model.landing.selected ? P.card : Color.clear)
@@ -630,6 +618,11 @@ struct LandingPane: View {
                 }
                 .buttonStyle(.plain)
                 if model.landing.focus == e.slug { effectDetail(e) }
+            }
+            let flat = r.effects.filter { $0.delta == 0 && !$0.gateCandidate }.count
+            if model.landing.groups.isEmpty && model.landing.search.isEmpty && flat > 0 {
+                Button(model.landing.showFlat ? "Hide \(flat) unchanged" : "Show \(flat) unchanged") { model.landing.showFlat.toggle() }
+                    .buttonStyle(.plain).font(F.meta).foregroundStyle(P.blue).padding(8)
             }
         }
     }
@@ -641,13 +634,11 @@ struct LandingPane: View {
     private func effectDetail(_ e: Effect) -> some View {
         let f = r.findings.first { $0.key == e.slug }
         return VStack(alignment: .leading, spacing: 4) {
-            Text("\(e.slug): \(e.total) atone events in all; \(e.prior7) the week before, \(e.last7) this week.").font(F.meta).foregroundStyle(P.fg2)
-            if e.gateCandidate { Text("Past 20 events a slug needs a hook, not more text: this is a gate candidate.").font(F.meta).foregroundStyle(P.amber) }
+            if e.gateCandidate { Text("Over 20 events: rule text is not working, it needs a hook.").font(F.meta).foregroundStyle(P.amber) }
             if let f {
-                Text("The reader named it: \(f.title) (\(f.week)).").font(F.meta).foregroundStyle(P.fg2)
                 ChainRow(model: model, r: r, f: f)
             } else {
-                Text("No named finding is about this slug yet, so nothing can be credited for its movement.").font(F.meta).foregroundStyle(P.fg3)
+                Text("No finding covers this one yet.").font(F.meta).foregroundStyle(P.fg3)
             }
         }
         .padding(.leading, 12).padding(.vertical, 8)

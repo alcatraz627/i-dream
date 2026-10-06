@@ -15,7 +15,7 @@ enum ReadingState {
 struct LedgerFilter { var search = ""; var states: Set<Health> = []; var kinds: Set<String> = []; var selected = 0; var expanded: String? }
 struct PatternFilter { var search = ""; var cats: Set<String> = []; var trends: Set<String> = []; var selected = 0; var focus: String? }
 struct ReaderFilter { var search = ""; var kinds: Set<String> = []; var domains: Set<String> = []; var run: String?; var selected = 0; var expanded: String? }
-struct LandingFilter { var search = ""; var groups: Set<String> = []; var selected = 0; var focus: String? }
+struct LandingFilter { var search = ""; var groups: Set<String> = []; var selected = 0; var focus: String?; var showFlat = false }
 struct FlowFilter { var range: ClosedRange<Date>?; var cycle: String?; var selected = 0 }
 
 /// The app's single source of state: the latest record, how fresh it is,
@@ -227,6 +227,9 @@ final class AppModel: ObservableObject {
             groups.insert(move)
             groups.insert(e.landing == nil ? "unattributed" : "credited")
             if e.gateCandidate { groups.insert("gate candidate") }
+            // With no filter set, unchanged mistakes stay folded until asked for.
+            let unfiltered = landing.groups.isEmpty && q.isEmpty && !landing.showFlat
+            if unfiltered && move == "flat" && !e.gateCandidate { return false }
             return (landing.groups.isEmpty || !landing.groups.isDisjoint(with: groups)) && (q.isEmpty || e.slug.contains(q))
         }
         .sorted { abs($0.delta) != abs($1.delta) ? abs($0.delta) > abs($1.delta) : $0.total > $1.total }
