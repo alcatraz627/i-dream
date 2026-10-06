@@ -397,8 +397,13 @@ async fn main() -> Result<()> {
                     }
                     drop(rows);
                     if !dry_run {
-                        let (_, applied, retry) = reader::daily(&config, &store, now, since).await?;
+                        let (_, applied, retry, extracted) =
+                            reader::daily(&config, &store, now, since).await?;
                         println!("✓ wrote reader/daily/{}.json", now.format("%Y-%m-%d"));
+                        match extracted {
+                            Some(t) => println!("✓ extractors ran ({t} tokens)"),
+                            None => println!("extractors held by the usage gate"),
+                        }
                         for (slug, landed) in applied {
                             println!("✓ applied answers on {slug}:");
                             for l in landed {

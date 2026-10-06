@@ -239,6 +239,13 @@ pub async fn run_weekly(
     persist_recon(&recon, &rows)?;
     run.forwarded = join::forward(&recon.clusters, now, 20);
 
+    // Project briefs regenerate weekly (docs/29 3.1), for projects whose
+    // patterns moved since their brief was written.
+    if !dry_run {
+        let client = crate::api::ClaudeClient::for_config(config)?;
+        crate::daemon::regen_dirty_project_briefs(config, store, &client).await;
+    }
+
     if !run.forwarded.is_empty() {
         let process = load_process()?;
         let batch = name::render_batch(&run.forwarded, &rows, 8);
@@ -347,10 +354,22 @@ pub async fn daily(
     store: &Store,
     now: DateTime<Utc>,
     since: DateTime<Utc>,
-) -> Result<(Recon, Vec<(String, Vec<land::Landed>)>, Option<WeeklyRun>)> {
+) -> Result<(Recon, Vec<(String, Vec<land::Landed>)>, Option<WeeklyRun>, Option<u64>)> {
     let (recon, rows) = recon_at(store, now, since);
     persist_recon(&recon, &rows)?;
     let applied = apply_answers(store, now)?;
+    // The LLM extractors (dreaming, metacog, introspection) run here, once a
+    // day and usage-gated, instead of in the daemon's idle cycle (ruling D9).
+    let extracted = match crate::daemon::shared_usage_gate_closed() {
+        Some(reason) => {
+            tracing::info!("extractors held by the usage gate: {reason}");
+            None
+        }
+        None => {
+            let client = crate::api::ClaudeClient::for_config(config)?;
+            Some(crate::daemon::run_extractors(config, store, &client).await?)
+        }
+    };
     let state = ReaderState::load();
     let retry = match state.weekly_pending_since {
         Some(t) if now - t < chrono::Duration::hours(48) => {
@@ -364,7 +383,7 @@ pub async fn daily(
         }
         None => None,
     };
-    Ok((recon, applied, retry))
+    Ok((recon, applied, retry, extracted))
 }
 
 /// The contract the widget reads (`i-dream reader --json`): the latest recon,

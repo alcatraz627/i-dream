@@ -582,79 +582,10 @@ impl Daemon {
                 .join(", ")
         );
 
-        let mut budget = self.config.budget.max_tokens_per_cycle;
-        let deadline = tokio::time::Instant::now()
-            + Duration::from_secs(self.config.budget.max_runtime_minutes * 60);
-
-        info!(
-            "Starting consolidation (budget: {budget} tokens, deadline: {}min)",
-            self.config.budget.max_runtime_minutes
-        );
-
-        // Phase 1: Dreaming (50% of budget)
-        if self.config.modules.dreaming.enabled {
-            let module = DreamingModule::new(&self.config, &self.store);
-            if module.should_run()? {
-                let dreaming_budget = budget / 2;
-                info!("Running dreaming module (budget: {dreaming_budget} tokens)");
-                match tokio::time::timeout(
-                    deadline - tokio::time::Instant::now(),
-                    module.run(client, dreaming_budget),
-                )
-                .await
-                {
-                    Ok(Ok(tokens)) => {
-                        budget = budget.saturating_sub(tokens);
-                        info!("Dreaming complete ({tokens} tokens used)");
-                    }
-                    Ok(Err(e)) => error!("Dreaming failed: {e:#}"),
-                    Err(_) => warn!("Dreaming timed out"),
-                }
-            }
-        }
-
-        // Phase 2: Metacognitive analysis (25% of remaining budget)
-        if self.config.modules.metacog.enabled && budget > 0 {
-            let module = MetacogModule::new(&self.config, &self.store);
-            if module.should_run()? {
-                let metacog_budget = budget / 2;
-                info!("Running metacog module (budget: {metacog_budget} tokens)");
-                match tokio::time::timeout(
-                    deadline - tokio::time::Instant::now(),
-                    module.run(client, metacog_budget),
-                )
-                .await
-                {
-                    Ok(Ok(tokens)) => {
-                        budget = budget.saturating_sub(tokens);
-                        info!("Metacog complete ({tokens} tokens used)");
-                    }
-                    Ok(Err(e)) => error!("Metacog failed: {e:#}"),
-                    Err(_) => warn!("Metacog timed out"),
-                }
-            }
-        }
-
-        // Phase 3: Introspection (remaining budget)
-        if self.config.modules.introspection.enabled && budget > 0 {
-            let module = IntrospectionModule::new(&self.config, &self.store);
-            if module.should_run()? {
-                info!("Running introspection module (budget: {budget} tokens)");
-                match tokio::time::timeout(
-                    deadline - tokio::time::Instant::now(),
-                    module.run(client, budget),
-                )
-                .await
-                {
-                    Ok(Ok(tokens)) => {
-                        budget = budget.saturating_sub(tokens);
-                        info!("Introspection complete ({tokens} tokens used)");
-                    }
-                    Ok(Err(e)) => error!("Introspection failed: {e:#}"),
-                    Err(_) => warn!("Introspection timed out"),
-                }
-            }
-        }
+        // The idle cycle spends no model tokens (ruling D9): the LLM extractors
+        // run in the reader's daily recon (`run_extractors`).
+        let budget = self.config.budget.max_tokens_per_cycle;
+        info!("Starting consolidation (no-API phases only)");
 
         // Phase 4: Intuition (no API budget — pure local transcript analysis)
         if self.config.modules.intuition.enabled {
@@ -790,15 +721,6 @@ impl Daemon {
 
         // Run post-consolidation hooks (dream-metrics refresh, etc.)
         Self::run_post_wake_hooks();
-
-        // D6 v2 — auto-regenerate per-project briefs for any project
-        // whose patterns moved this cycle. Cheap because we already
-        // recomputed graph_metrics + the brief module is project-scoped.
-        // Errors are logged but don't fail the cycle (briefs are an
-        // ergonomic surface, not load-bearing).
-        if let Some(client) = self.client.as_ref() {
-            self.regen_dirty_project_briefs(client).await;
-        }
 
         // D17 daemon-side weekly auto-prune (opt-in via config).
         if self.config.modules.dreaming.auto_prune_weekly
@@ -1023,73 +945,6 @@ impl Daemon {
         Ok(())
     }
 
-    /// D6 v2: refresh per-project briefs that have new pattern activity
-    /// since the last brief generation. Compares each project's most
-    /// recent pattern last_seen against the brief file's mtime; if newer,
-    /// regenerates the brief.
-    async fn regen_dirty_project_briefs(&self, client: &ClaudeClient) {
-        use crate::modules::dreaming::ExtractedPattern;
-        use std::collections::HashMap;
-        let patterns: Vec<ExtractedPattern> = self
-            .store
-            .read_json("dreams/patterns.json")
-            .unwrap_or_default();
-        if patterns.is_empty() {
-            return;
-        }
-        // Map project_id → max(last_seen) across its patterns.
-        let mut latest: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
-        for p in &patterns {
-            for proj in &p.source_projects {
-                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&p.last_seen) {
-                    let ts_utc = ts.with_timezone(&chrono::Utc);
-                    latest
-                        .entry(proj.clone())
-                        .and_modify(|cur| {
-                            if ts_utc > *cur {
-                                *cur = ts_utc;
-                            }
-                        })
-                        .or_insert(ts_utc);
-                }
-            }
-        }
-        let pbm =
-            crate::modules::project_briefs::ProjectBriefsModule::new(&self.config, &self.store);
-        let mut regen = 0u32;
-        let cwds = pbm.project_cwds();
-        if let Err(e) = pbm.prune_unreachable(&cwds) {
-            warn!("project briefs: prune failed: {e:#}");
-        }
-        for (proj, ts) in latest {
-            let Some(cwd) =
-                crate::modules::project_briefs::ProjectBriefsModule::real_cwd_for(&proj, &cwds)
-            else {
-                continue;
-            };
-            let brief_path = self.store.path(&format!("dreams/project-briefs/{proj}.md"));
-            // Regenerate if missing OR pattern activity is newer than the brief mtime.
-            let needs = !brief_path.exists()
-                || std::fs::metadata(&brief_path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map(|sys| chrono::DateTime::<chrono::Utc>::from(sys) < ts)
-                    .unwrap_or(true);
-            if !needs {
-                continue;
-            }
-            match pbm.generate_for_project(client, &proj, &cwd).await {
-                Ok((tokens, _)) => {
-                    info!("D6 v2: regenerated brief for {proj} ({tokens} tokens)");
-                    regen += 1;
-                }
-                Err(e) => warn!("D6 v2: brief regen failed for {proj}: {e:#}"),
-            }
-        }
-        if regen > 0 {
-            info!("D6 v2: refreshed {regen} project brief(s) post-cycle");
-        }
-    }
 
     /// Manually trigger a dream cycle.
     ///
@@ -1190,21 +1045,17 @@ impl Daemon {
         Ok(())
     }
 
-    /// Spawn post-wake hook scripts (dream-metrics refresh, insight injection, etc.)
-    ///
-    /// These scripts run fire-and-forget — failures are logged but do not
-    /// block the consolidation cycle. The hooks live under
-    /// `~/.claude/subconscious/hooks/` and `~/.claude/scripts/`.
+    /// Refresh the dream metrics after a cycle. Failures are logged, never
+    /// fatal. The post-wake writers that put "auto-insights" into the gcc
+    /// runtime notes and filed proposals from insights are retired (docs/29
+    /// §5): text injection is not the lever, and the reader lands findings.
     fn run_post_wake_hooks() {
         let home = match dirs::home_dir() {
             Some(h) => h,
             None => return,
         };
 
-        let hooks = [
-            home.join(".claude/scripts/dream-metrics.sh"),
-            home.join(".claude/subconscious/hooks/post-wake.sh"),
-        ];
+        let hooks = [home.join(".claude/scripts/dream-metrics.sh")];
 
         for hook in &hooks {
             if hook.exists() {
@@ -1526,6 +1377,149 @@ fn bind_socket(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// D6 v2: refresh per-project briefs that have new pattern activity
+/// since the last brief generation. Compares each project's most
+/// recent pattern last_seen against the brief file's mtime; if newer,
+/// regenerates the brief.
+pub async fn regen_dirty_project_briefs(config: &Config, store: &Store, client: &ClaudeClient) {
+    use crate::modules::dreaming::ExtractedPattern;
+    use std::collections::HashMap;
+    let patterns: Vec<ExtractedPattern> = store
+        .read_json("dreams/patterns.json")
+        .unwrap_or_default();
+    if patterns.is_empty() {
+        return;
+    }
+    // Map project_id → max(last_seen) across its patterns.
+    let mut latest: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    for p in &patterns {
+        for proj in &p.source_projects {
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&p.last_seen) {
+                let ts_utc = ts.with_timezone(&chrono::Utc);
+                latest
+                    .entry(proj.clone())
+                    .and_modify(|cur| {
+                        if ts_utc > *cur {
+                            *cur = ts_utc;
+                        }
+                    })
+                    .or_insert(ts_utc);
+            }
+        }
+    }
+    let pbm =
+        crate::modules::project_briefs::ProjectBriefsModule::new(config, store);
+    let mut regen = 0u32;
+    let cwds = pbm.project_cwds();
+    if let Err(e) = pbm.prune_unreachable(&cwds) {
+        warn!("project briefs: prune failed: {e:#}");
+    }
+    for (proj, ts) in latest {
+        let Some(cwd) =
+            crate::modules::project_briefs::ProjectBriefsModule::real_cwd_for(&proj, &cwds)
+        else {
+            continue;
+        };
+        let brief_path = store.path(&format!("dreams/project-briefs/{proj}.md"));
+        // Regenerate if missing OR pattern activity is newer than the brief mtime.
+        let needs = !brief_path.exists()
+            || std::fs::metadata(&brief_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(|sys| chrono::DateTime::<chrono::Utc>::from(sys) < ts)
+                .unwrap_or(true);
+        if !needs {
+            continue;
+        }
+        match pbm.generate_for_project(client, &proj, &cwd).await {
+            Ok((tokens, _)) => {
+                info!("D6 v2: regenerated brief for {proj} ({tokens} tokens)");
+                regen += 1;
+            }
+            Err(e) => warn!("D6 v2: brief regen failed for {proj}: {e:#}"),
+        }
+    }
+    if regen > 0 {
+        info!("D6 v2: refreshed {regen} project brief(s) post-cycle");
+    }
+}
+
+/// The model-spending extractors over the owner's interactive sessions:
+/// dreaming (SWS, REM, wake), metacog and introspection. Ruling D9 keeps
+/// them out of the idle cycle; the reader's daily recon runs them, inside
+/// the per-cycle token budget and runtime cap. Returns the tokens spent.
+pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClient) -> Result<u64> {
+    let mut budget = config.budget.max_tokens_per_cycle;
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_secs(config.budget.max_runtime_minutes * 60);
+    // Phase 1: Dreaming (50% of budget)
+    if config.modules.dreaming.enabled {
+        let module = DreamingModule::new(config, store);
+        if module.should_run()? {
+            let dreaming_budget = budget / 2;
+            info!("Running dreaming module (budget: {dreaming_budget} tokens)");
+            match tokio::time::timeout(
+                deadline - tokio::time::Instant::now(),
+                module.run(client, dreaming_budget),
+            )
+            .await
+            {
+                Ok(Ok(tokens)) => {
+                    budget = budget.saturating_sub(tokens);
+                    info!("Dreaming complete ({tokens} tokens used)");
+                }
+                Ok(Err(e)) => error!("Dreaming failed: {e:#}"),
+                Err(_) => warn!("Dreaming timed out"),
+            }
+        }
+    }
+
+    // Phase 2: Metacognitive analysis (25% of remaining budget)
+    if config.modules.metacog.enabled && budget > 0 {
+        let module = MetacogModule::new(config, store);
+        if module.should_run()? {
+            let metacog_budget = budget / 2;
+            info!("Running metacog module (budget: {metacog_budget} tokens)");
+            match tokio::time::timeout(
+                deadline - tokio::time::Instant::now(),
+                module.run(client, metacog_budget),
+            )
+            .await
+            {
+                Ok(Ok(tokens)) => {
+                    budget = budget.saturating_sub(tokens);
+                    info!("Metacog complete ({tokens} tokens used)");
+                }
+                Ok(Err(e)) => error!("Metacog failed: {e:#}"),
+                Err(_) => warn!("Metacog timed out"),
+            }
+        }
+    }
+
+    // Phase 3: Introspection (remaining budget)
+    if config.modules.introspection.enabled && budget > 0 {
+        let module = IntrospectionModule::new(config, store);
+        if module.should_run()? {
+            info!("Running introspection module (budget: {budget} tokens)");
+            match tokio::time::timeout(
+                deadline - tokio::time::Instant::now(),
+                module.run(client, budget),
+            )
+            .await
+            {
+                Ok(Ok(tokens)) => {
+                    budget = budget.saturating_sub(tokens);
+                    info!("Introspection complete ({tokens} tokens used)");
+                }
+                Ok(Err(e)) => error!("Introspection failed: {e:#}"),
+                Err(_) => warn!("Introspection timed out"),
+            }
+        }
+    }
+
+    Ok(config.budget.max_tokens_per_cycle.saturating_sub(budget))
 }
 
 /// Handle a single hook-script connection.

@@ -380,6 +380,8 @@ impl ClaudeClient {
                 "--append-system-prompt",
                 format_override,
                 "--no-session-persistence",
+                "--output-format",
+                "json",
             ])
             // Run in /tmp so no project CLAUDE.md is discovered.
             .current_dir("/tmp")
@@ -431,14 +433,28 @@ impl ClaudeClient {
             anyhow::bail!("claude CLI exited with {}: {}", output.status, detail);
         }
 
-        let content = sanitize_control_chars(
-            String::from_utf8(output.stdout)
-                .context("claude CLI output is not valid UTF-8")?
-                .trim(),
-        );
-
-        // Rough estimate — subprocess mode has no usage metadata
-        let tokens_used = ((full_prompt.len() + content.len()) / 4) as u64;
+        let raw = String::from_utf8(output.stdout).context("claude CLI output is not valid UTF-8")?;
+        let (content, tokens_used) = match parse_cli_json(&raw) {
+            Some(r) => {
+                tracing::info!(
+                    "CLI usage ({model}): in {} (cache read {}, cache write {}), out {}{}",
+                    r.input,
+                    r.cache_read,
+                    r.cache_write,
+                    r.output,
+                    r.cost_usd.map(|c| format!(", ${c:.4}")).unwrap_or_default()
+                );
+                (sanitize_control_chars(r.result.trim()), r.total())
+            }
+            None => {
+                // An older CLI without --output-format json: fall back to the
+                // raw text and a length estimate, and say so.
+                tracing::warn!("CLI usage unavailable; estimating from length");
+                let content = sanitize_control_chars(raw.trim());
+                let est = ((full_prompt.len() + content.len()) / 4) as u64;
+                (content, est)
+            }
+        };
 
         // The claude CLI exposes no output-token cap, so `max_tokens` is
         // accounting-only in this mode. Surface a blow-past so budget
@@ -899,5 +915,60 @@ pub(crate) mod tests {
             !msg.contains("attempts"),
             "terminal error should NOT mention attempt count: {msg}"
         );
+    }
+}
+
+/// What `claude --print --output-format json` reports about one call.
+#[derive(Debug, PartialEq)]
+pub struct CliResult {
+    pub result: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub cost_usd: Option<f64>,
+}
+
+impl CliResult {
+    /// Every token the call moved, cached or not.
+    pub fn total(&self) -> u64 {
+        self.input + self.output + self.cache_read + self.cache_write
+    }
+}
+
+/// Parse the CLI's JSON result object. None when the output is not that object.
+pub fn parse_cli_json(raw: &str) -> Option<CliResult> {
+    let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    let result = v.get("result")?.as_str()?.to_string();
+    let usage = v.get("usage").cloned().unwrap_or_default();
+    let n = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(CliResult {
+        result,
+        input: n("input_tokens"),
+        output: n("output_tokens"),
+        cache_read: n("cache_read_input_tokens"),
+        cache_write: n("cache_creation_input_tokens"),
+        cost_usd: v.get("total_cost_usd").and_then(|x| x.as_f64()),
+    })
+}
+
+#[cfg(test)]
+mod cli_json_tests {
+    use super::*;
+
+    #[test]
+    fn reads_result_and_every_usage_field() {
+        let raw = r#"{"type":"result","subtype":"success","result":"[1,2]","total_cost_usd":0.0123,
+            "usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":300,"cache_creation_input_tokens":40}}"#;
+        let r = parse_cli_json(raw).unwrap();
+        assert_eq!(r.result, "[1,2]");
+        assert_eq!(r.total(), 370);
+        assert_eq!(r.cost_usd, Some(0.0123));
+    }
+
+    #[test]
+    fn plain_text_is_not_a_result() {
+        assert!(parse_cli_json("just words").is_none());
+        assert!(parse_cli_json("{\"no_result\":1}").is_none());
     }
 }
