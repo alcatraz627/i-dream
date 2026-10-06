@@ -8,7 +8,6 @@ use crate::events::{HookEvent, HookEventRecord};
 use crate::modules::{
     Module,
     dreaming::DreamingModule,
-    insight_digest::InsightDigestModule,
     introspection::{IntrospectionModule, ReasoningPatterns},
     intuition::IntuitionModule,
     metacog::{MetacogModule, ToolActivitySample},
@@ -290,7 +289,6 @@ impl Daemon {
                 }
                 _ = tokio::time::sleep(check_interval) => {
                     self.check_and_run().await;
-                    self.check_and_run_briefing().await;
                 }
                 accept = listener.accept() => {
                     match accept {
@@ -351,38 +349,6 @@ impl Daemon {
         self.run_foreground().await
     }
 
-    /// D4 (2026-05-01): wall-clock check for the Sunday morning briefing.
-    /// Cheap — early-exits on weekday/hour mismatch before any I/O. The
-    /// underlying module guarantees one-fire-per-ISO-week via state.json.
-    async fn check_and_run_briefing(&self) {
-        let bm =
-            crate::modules::weekly_briefing::WeeklyBriefingModule::new(&self.config, &self.store);
-        if !bm.should_run_now() {
-            return;
-        }
-        let client = match crate::api::ClaudeClient::for_config(&self.config) {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("weekly briefing: failed to construct API client: {e:#}");
-                return;
-            }
-        };
-        match bm.run(&client).await {
-            Ok(Some((tokens, path))) => {
-                info!(
-                    "weekly briefing: wrote {} ({tokens} tokens)",
-                    path.display()
-                );
-            }
-            Ok(None) => {
-                // should_run_now said yes but the inner check refused (race
-                // with manual --force run). Silent skip.
-            }
-            Err(e) => {
-                warn!("weekly briefing failed: {e:#}");
-            }
-        }
-    }
 
     /// Check idle state and run consolidation if appropriate.
     ///
@@ -707,30 +673,6 @@ impl Daemon {
                         }
                     }
                     Err(e) => error!("Intuition failed: {e:#}"),
-                }
-            }
-        }
-
-        // Phase 5: Insight Digest (3h cooldown, capped at 512 tokens). Its
-        // only reader is dream-insights.sh, gated by dreams/.inject-on, so
-        // without that flag the digest is written for nobody.
-        if budget > 0 && self.store.exists("dreams/.inject-on") {
-            let module = InsightDigestModule::new(&self.config, &self.store);
-            if module.should_run()? {
-                let digest_budget = budget.min(512);
-                info!("Running insight digest (budget: {digest_budget} tokens)");
-                match tokio::time::timeout(
-                    deadline - tokio::time::Instant::now(),
-                    module.run(client, digest_budget),
-                )
-                .await
-                {
-                    Ok(Ok(tokens)) => {
-                        budget = budget.saturating_sub(tokens);
-                        info!("Insight digest complete ({tokens} tokens used)");
-                    }
-                    Ok(Err(e)) => error!("Insight digest failed: {e:#}"),
-                    Err(_) => warn!("Insight digest timed out"),
                 }
             }
         }

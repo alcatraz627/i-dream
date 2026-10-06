@@ -266,6 +266,10 @@ pub async fn run_weekly(
         run.page_slug = Some(slug.clone());
         run.page_url = Some(url);
         state = ReaderState::load();
+        let prior_unanswered = state.pending_pages.iter().any(|p| p != &slug);
+        if let Err(e) = crate::review::record_staging(&week, prior_unanswered) {
+            tracing::warn!("review ladder not updated: {e:#}");
+        }
         if !state.pending_pages.contains(&slug) {
             state.pending_pages.push(slug);
         }
@@ -279,7 +283,7 @@ pub async fn run_weekly(
 
 /// Apply the owner's answers on every reader page that has one. Pages still
 /// unanswered stay pending.
-pub fn apply_answers(now: DateTime<Utc>) -> Result<Vec<(String, Vec<land::Landed>)>> {
+pub fn apply_answers(store: &Store, now: DateTime<Utc>) -> Result<Vec<(String, Vec<land::Landed>)>> {
     let mut state = ReaderState::load();
     let script = crate::config::expand_tilde(std::path::Path::new(
         "~/.claude/scripts/decision-page/decision-page.sh",
@@ -314,6 +318,12 @@ pub fn apply_answers(now: DateTime<Utc>) -> Result<Vec<(String, Vec<land::Landed
             land::arm_with_trash,
         )?;
         std::fs::write(run_dir(&week)?.join("answer.txt"), &text)?;
+        // The yield monitor judges whether reviews lead to action.
+        let acted = landed
+            .iter()
+            .filter(|l| matches!(l.outcome.as_str(), "filed" | "armed" | "already-filed"))
+            .count();
+        crate::consolidation::yield_slo::record_review_outcome(store, run.items.len(), acted, "idream-reader")?;
         let log = reader_dir()?.join("landed.jsonl");
         let mut body = std::fs::read_to_string(&log).unwrap_or_default();
         for l in &landed {
@@ -340,7 +350,7 @@ pub async fn daily(
 ) -> Result<(Recon, Vec<(String, Vec<land::Landed>)>, Option<WeeklyRun>)> {
     let (recon, rows) = recon_at(store, now, since);
     persist_recon(&recon, &rows)?;
-    let applied = apply_answers(now)?;
+    let applied = apply_answers(store, now)?;
     let state = ReaderState::load();
     let retry = match state.weekly_pending_since {
         Some(t) if now - t < chrono::Duration::hours(48) => {
@@ -391,4 +401,52 @@ pub fn view() -> ReaderView {
         runs: all_runs(),
         evidence,
     }
+}
+
+/// One i-dream job in the gcc schedule registry (`~/.claude/scheduled/registry.json`),
+/// the same registry Switchboard's Schedules list reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledJob {
+    pub name: String,
+    pub label: String,
+    /// The registry's schedule word, e.g. `daily@04:30`, `weekly@wed@02:30`.
+    pub fire_at: String,
+    pub description: String,
+    pub plist: String,
+    pub installed: bool,
+}
+
+/// i-dream's scheduled jobs: every registry entry whose name starts with
+/// `i-dream` or `idream`. Help, status and the domain list derive from this,
+/// so nothing advertises a job that is not registered.
+pub fn scheduled_jobs() -> Vec<ScheduledJob> {
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let Ok(body) = std::fs::read_to_string(home.join(".claude/scheduled/registry.json")) else {
+        return vec![];
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return vec![];
+    };
+    let Some(map) = v.as_object() else { return vec![] };
+    let mut out: Vec<ScheduledJob> = map
+        .values()
+        .filter_map(|j| {
+            let name = j.get("name")?.as_str()?.to_string();
+            if !(name.starts_with("i-dream") || name.starts_with("idream")) {
+                return None;
+            }
+            let s = |k: &str| j.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            let plist = s("plist");
+            Some(ScheduledJob {
+                installed: !plist.is_empty() && std::path::Path::new(&plist).exists(),
+                label: s("label"),
+                fire_at: s("fire_at"),
+                description: s("description"),
+                plist,
+                name,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }

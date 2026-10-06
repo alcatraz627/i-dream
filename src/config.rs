@@ -113,11 +113,6 @@ pub struct ModulesConfig {
     pub intuition: IntuitionConfig,
     pub introspection: IntrospectionConfig,
     pub prospective: ProspectiveConfig,
-    /// D4 (2026-05-01): Sunday morning briefing. `#[serde(default)]` so
-    /// existing config.toml files continue to deserialize without the
-    /// section — defaults to Sunday 09:00 enabled.
-    #[serde(default)]
-    pub briefing: crate::modules::weekly_briefing::BriefingConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -324,7 +319,6 @@ impl Default for Config {
                     default_expiry_days: 30,
                     match_threshold: 0.7,
                 },
-                briefing: crate::modules::weekly_briefing::BriefingConfig::default(),
             },
             hooks: HooksConfig {
                 session_start: true,

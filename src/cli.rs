@@ -15,13 +15,12 @@ const HELP_STYLES: Styles = Styles::styled()
 
 const EXAMPLES: &str = "\
 Examples:
-  i-dream status                # daemon health + module state
-  i-dream dream-pass            # LLM pass over domains with fresh delta
-  i-dream dream-pass --domain codex-sessions --dry-run  # inspect one bounded batch
-  i-dream insight-digest        # force-refresh the digest (skips 3h cooldown)
+  i-dream status                # daemon health, lanes, scheduled jobs
+  i-dream reader                # what the reader found; --json for tools
+  i-dream reader recon          # join every signal stream now (no model)
+  i-dream reader run --dry-run  # name this week's clusters without a page
+  i-dream transcripts           # who wrote the transcripts the modules read
   i-dream snapshot-diff         # what did the last dream cycle change?
-  i-dream audit                 # weekly self-audit -> staged proposals
-  i-dream review                # adjudicate staged proposals interactively
 ";
 
 /// i-dream: A subconsciousness layer for Claude Code
@@ -145,14 +144,15 @@ pub enum Command {
 
     /// Run the opus smell panel over newly-consolidated insights (D2):
     /// specificity / actionability / novelty / grounding, graded harshly,
-    /// appended to derived/smell.jsonl. Delta-driven — nothing new means no
-    /// LLM call. Scheduled Sun+Wed 15:00 via com.alcatraz.i-dream-smell.
+    /// appended to derived/smell.jsonl. Delta-driven: nothing new means no
+    /// LLM call. Run by hand; it is not scheduled.
     Smell,
 
     /// The non-interactive promotion surface: list shadow/candidate/live
     /// interventions with their would-fire evidence; flip one with
-    /// --promote/--demote by id prefix. Hints auto-promote on the evidence
-    /// bar (owner ladder 2026-07-22); nudges always wait for a flip here.
+    /// --promote/--demote by id prefix. Hints go live by themselves once the
+    /// evidence bar is met; nudges wait for a flip here unless two weekly
+    /// reader pages in a row went unanswered.
     Promotions {
         /// Promote an intervention to live by id (8-char prefix ok).
         #[arg(long)]
@@ -181,17 +181,11 @@ pub enum Command {
         prune: bool,
     },
 
-    /// Synthesize a weekly briefing from the past 7 days of dream activity.
-    ///
-    /// Writes a 5-section markdown brief (worked-on / improved / recurring
-    /// frustration / one idea / one question) to
-    /// `~/.claude/subconscious/dreams/briefings/<YYYY-Www>.md` and prints
-    /// the path on success. Without --force, refuses to re-run within the
-    /// same ISO week.
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
     Briefing {
-        /// Force regeneration even if a briefing already exists for this ISO week.
-        #[arg(long)]
-        force: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
 
     /// The reader: what repeats across every local signal stream. With no
@@ -231,52 +225,39 @@ pub enum Command {
         action: WidgetAction,
     },
 
-    /// Inspect registered dream-domains (native modules + external plugins).
-    /// First user-visible surface of the docs/14 plugin system — ships
-    /// `list` (with per-domain pending/last-pass/insights), `enable`, and
-    /// `disable`; further subcommands (info, install, …) land with Stage 2+.
+    /// Inspect registered domains (native modules and external streams):
+    /// `list` shows what the reader read from each in its last recon and
+    /// when; `enable` and `disable` switch an external domain.
     Domain {
         #[command(subcommand)]
         action: DomainAction,
     },
 
-    /// Render and print the L2 daily digest for `--day YYYY-MM-DD` (default
-    /// today). Writes `~/.claude/i-dream/daily/<day>.md` + updates the
-    /// `latest.md` symlink when day == today. Idempotent. First user-visible
-    /// surface of the consolidation pipeline (docs/16, Stage 2 deterministic).
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
     Digest {
-        /// Day to render in YYYY-MM-DD form. Defaults to today's local date.
-        #[arg(long)]
-        day: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
 
-    /// Force-refresh the insight digest (dreams/insight-digest.md) from the
-    /// latest insights, ignoring the 3h cooldown. Applies resolutions.jsonl
-    /// filtering and live hook-inventory grounding, then prints the result.
-    InsightDigest,
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
+    InsightDigest {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
+    },
 
-    /// Run an LLM dream pass over every registered domain with fresh delta
-    /// (docs/14 §3.5). Zero LLM cost when all domains are idle. Outputs
-    /// land at each domain's insights.jsonl + rebuilds union views at
-    /// ~/.claude/i-dream/derived/{triggers.union.json, tldr.union.txt}.
-    /// When ≥2 domains emit output, a cross-domain join pass writes to
-    /// associations.cross.jsonl.
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
     DreamPass {
-        /// Max tokens per domain (default: 4000).
-        #[arg(long, default_value_t = 4000)]
-        budget: u32,
-        /// Limit the pass to one registered domain.
-        #[arg(long)]
-        domain: Option<String>,
-        /// Show the selected delta and prompt size without an LLM call or cursor change.
-        #[arg(long)]
-        dry_run: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
 
     /// Rebuild the honest derived views at ~/.claude/i-dream/derived/views/
     /// — per-type JSON where every item carries a stable id, its age, and
     /// its near-duplicate cluster, and every file states its real total.
-    /// Deterministic, no LLM. Also runs nightly after the dream pass.
+    /// Deterministic, no LLM.
     Views,
 
     /// Print the i-dream ingestion contract — how a local system integrates
@@ -290,12 +271,11 @@ pub enum Command {
         install: bool,
     },
 
-    /// Manage scheduled jobs (launchd plists): dream-pass (02:45 daily, feeds
-    /// the digest), daily digest (03:00), and the weekly audit (Sun 02:30,
-    /// non-interactive — stages proposals to review).
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
     Cron {
-        #[command(subcommand)]
-        action: CronAction,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
 
     /// Pin a session insight for the next dream cycle. Writes a structured
@@ -307,18 +287,20 @@ pub enum Command {
         action: PinAction,
     },
 
-    /// Track open investigation threads that carry across days in the daily
-    /// digest. A thread auto-resolves when its target file is edited or after
-    /// 14 days; resolve/reopen manage it explicitly.
+    /// Track open investigation threads that carry across days. A thread
+    /// resolves itself when its target file is edited or after 14 days;
+    /// resolve/reopen manage it explicitly.
     Thread {
         #[command(subcommand)]
         action: ThreadAction,
     },
 
-    /// Render a one-screen snapshot of the dreaming layer — Today / Week /
-    /// Sources / GCC-fitness in a 2×2 grid. Static; re-run to refresh. Reads
-    /// the daily digest + audit artifacts (no LLM work of its own).
-    Board,
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
+    Board {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
+    },
 
     /// Audit whether i-dream's guidance is landing: for each recurring mistake
     /// pattern it surfaces every session, show the recurrence trend from the
@@ -331,29 +313,18 @@ pub enum Command {
         json: bool,
     },
 
-    /// Open the weekly review — a Ghostty + claude session seeded with the
-    /// staged audit proposals for you to approve/apply. Auto-opens Monday 09:00
-    /// when proposals are pending (via the cron review job); run it by hand any
-    /// time. `--add-calendar` adds a recurring Calendar.app event.
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
     Review {
-        /// Only open if the audit staged proposals (used by the LaunchAgent).
-        #[arg(long)]
-        if_pending: bool,
-        /// Add a recurring weekly Calendar.app event instead of opening.
-        #[arg(long)]
-        add_calendar: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
 
-    /// Run the L3 weekly audit — coordinator + multi-lens proposals +
-    /// interactive approval + apply-time render. Reads last N days of
-    /// daily digests + per-domain TLDRs + rejection memory; produces
-    /// proposals for GCC edits; you approve / reject / skip each;
-    /// approved proposals get rendered to concrete edits + applied
-    /// after confirm. Aggressive dials (confidence floor 0.5, max
-    /// 6/lens, max 30 total). Full spec: docs/16 §3.6 + §3.10.
+    /// Retired 2026-10; see docs/29 §2.6.
+    #[command(hide = true)]
     Audit {
-        #[command(subcommand)]
-        action: AuditAction,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
 
     /// M17 — diff two patterns-graph snapshots written by
@@ -389,10 +360,9 @@ pub enum Command {
         json: bool,
     },
 
-    /// D8 — auto-promote high-confidence, actionable, already-promoted
-    /// associations into Context-triggered intentions. Idempotent: an
-    /// association won't be auto-promoted twice (tracked via
-    /// Association.auto_intention_id).
+    /// Turn high-confidence, actionable, promoted associations into
+    /// session-start intentions. Idempotent: an association becomes an
+    /// intention once (tracked via Association.auto_intention_id).
     AutoIntentions {
         /// Preview without writing intentions or mutating associations.
         #[arg(long)]
@@ -516,27 +486,6 @@ pub enum WidgetAction {
 }
 
 #[derive(clap::Subcommand, Debug)]
-pub enum AuditAction {
-    /// Run the audit. Interactive: prompts for each proposal. Without
-    /// --dry-run, makes real LLM calls (proposals + per-edit render).
-    Run {
-        /// Skip the LLM call; print the gathered inputs and stop.
-        #[arg(long)]
-        dry_run: bool,
-        /// Days of daily-digest history to read (default 7).
-        #[arg(long, default_value_t = 7)]
-        week_days: u32,
-        /// Generate proposals and stage them to the audit log without
-        /// prompting, then exit. For the weekly cron — you review the log and
-        /// run `i-dream audit run` interactively to approve/apply.
-        #[arg(long)]
-        non_interactive: bool,
-    },
-    /// List past audit log files + rejection count.
-    Status,
-}
-
-#[derive(clap::Subcommand, Debug)]
 pub enum PinAction {
     /// Add a new pinned insight. Required: text (or --from-json).
     Add {
@@ -586,7 +535,7 @@ pub enum PinAction {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum ThreadAction {
-    /// Open a new thread (a loose end to keep visible in the daily digest).
+    /// Open a new thread (a loose end to keep visible across days).
     Add {
         /// The loose end, one line.
         text: String,
@@ -603,17 +552,6 @@ pub enum ThreadAction {
     Resolve { id: String },
     /// Reopen a resolved thread by id.
     Reopen { id: String },
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub enum CronAction {
-    /// Write + load all scheduled-job plists: dream-pass (02:45 daily), daily
-    /// digest (03:00), weekly audit (Sun 02:30). Idempotent.
-    Install,
-    /// Bootout + remove all scheduled-job plists.
-    Uninstall,
-    /// Show each job's plist + whether it's loaded + last exit status.
-    Status,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -662,8 +600,7 @@ pub enum DomainAction {
     /// Enable a previously-disabled external domain. No-op for natives
     /// (their enable lives in `config.modules.<name>.enabled`).
     Enable { name: String },
-    /// Disable an external domain — it stops appearing in the registry,
-    /// the widget submenu, and `i-dream dream-pass`. Persists across runs
-    /// via `~/.claude/i-dream/_runtime.json`.
+    /// Disable an external domain: it leaves the registry and the reader
+    /// stops reading it. Persists via `~/.claude/i-dream/_runtime.json`.
     Disable { name: String },
 }

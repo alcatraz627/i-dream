@@ -209,8 +209,8 @@ fn status_verbose_shows_lane_table_and_jobs() {
         .success()
         .stdout(predicate::str::contains("Lanes ("))
         .stdout(predicate::str::contains("Scheduled jobs:"))
-        // Sandbox has no LaunchAgents — jobs must be honest about it.
-        .stdout(predicate::str::contains("NOT INSTALLED"))
+        // The sandbox has no schedule registry; the section must say so.
+        .stdout(predicate::str::contains("no i-dream jobs in"))
         .stdout(predicate::str::contains("Build: v"));
 }
 
@@ -271,7 +271,7 @@ fn domain_list_shows_enrichment_columns() {
     // Either a populated table with the enrichment columns, or an honest
     // empty message — never a bare old-style table.
     assert!(
-        (out.contains("PENDING") && out.contains("LAST PASS") && out.contains("INSIGHTS"))
+        (out.contains("READ 28D") && out.contains("LAST READ") && out.contains("INSIGHTS"))
             || out.contains("(no domains registered)"),
         "unexpected domain list output: {out}"
     );

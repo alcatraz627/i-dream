@@ -1,10 +1,7 @@
 mod api;
-mod audit;
-mod board;
 mod cli;
 mod config;
 mod consolidation;
-mod cron;
 mod daemon;
 mod dashboard;
 mod domain;
@@ -194,42 +191,17 @@ async fn main() -> Result<()> {
             domain::handle(action, &config)?;
         }
 
-        Command::Digest { day } => {
-            use chrono::{Local, NaiveDate};
-            let date = match day {
-                Some(s) => NaiveDate::parse_from_str(&s, "%Y-%m-%d")
-                    .with_context(|| format!("--day '{s}' is not YYYY-MM-DD"))?,
-                None => Local::now().naive_local().date(),
-            };
-            let config = config::Config::load(&cli.config)?;
-            let store = store::Store::new(config.data_dir())?;
-            let path = consolidation::l2_digest::write_daily(date, &config, &store)?;
-            let content = std::fs::read_to_string(&path)?;
-            print!("{content}");
-            eprintln!("\n[digest written: {}]", path.display());
-        }
-
-        Command::InsightDigest => {
-            use modules::Module as _;
-            let config = config::Config::load(&cli.config)?;
-            let store = store::Store::new(config.data_dir())?;
-            let client = api::ClaudeClient::for_config(&config)?;
-            let module = modules::insight_digest::InsightDigestModule::new(&config, &store);
-            let budget: u64 = 512;
-            let tokens = module.run(&client, budget).await?;
-            let digest_path = store.path("dreams/insight-digest.md");
-            let content = std::fs::read_to_string(&digest_path)?;
-            print!("{content}");
-            eprintln!(
-                "\n[insight digest → {} · {tokens} tokens (budget {budget}) · model {}]",
-                digest_path.display(),
-                config.budget.model
+        Command::Digest { .. }
+        | Command::InsightDigest { .. }
+        | Command::Cron { .. }
+        | Command::Board { .. }
+        | Command::Review { .. }
+        | Command::Audit { .. }
+        | Command::DreamPass { .. }
+        | Command::Briefing { .. } => {
+            anyhow::bail!(
+                "retired 2026-10, see docs/29 §2.6: the reader replaces it (i-dream reader, i-dream reader recon, i-dream reader run)"
             );
-            eprintln!("next: i-dream board · i-dream reflect");
-        }
-
-        Command::Cron { action } => {
-            cron::handle(action)?;
         }
 
         Command::Pin { action } => {
@@ -240,63 +212,12 @@ async fn main() -> Result<()> {
             thread::handle(action)?;
         }
 
-        Command::Board => {
-            board::render()?;
-        }
-
         Command::Reflect { json } => {
             if json {
                 reflect::render_json()?;
             } else {
                 reflect::render()?;
             }
-        }
-
-        Command::Review {
-            if_pending,
-            add_calendar,
-        } => {
-            review::handle(if_pending, add_calendar)?;
-        }
-
-        Command::Audit { action } => {
-            let config = config::Config::load(&cli.config)?;
-            audit::handle(action, &config).await?;
-        }
-
-        Command::DreamPass { budget, domain, dry_run } => {
-            let config = config::Config::load(&cli.config)?;
-            let store = store::Store::new(config.data_dir())?;
-            let registry = modules::registry::DomainRegistry::boot(&config, &store);
-            if dry_run {
-                let preview = consolidation::dream_pass::preview_dream_pass(
-                    &registry,
-                    domain.as_deref(),
-                )?;
-                println!("{}", serde_json::to_string_pretty(&preview)?);
-                return Ok(());
-            }
-            let client = api::ClaudeClient::for_config(&config)?;
-            let report = consolidation::dream_pass::run_dream_pass(
-                &registry,
-                &client,
-                &config.budget.model,
-                budget,
-                domain.as_deref(),
-            )
-            .await?;
-            // Views feed the digest + widget from the stores the pass just
-            // updated — rebuild them in the same nightly slot.
-            match consolidation::views::rebuild_views(&store) {
-                Ok(receipts) => {
-                    for (path, items) in &receipts {
-                        eprintln!("[view rebuilt: {} ({items} items)]", path.display());
-                    }
-                }
-                Err(e) => eprintln!("[view rebuild failed: {e:#}]"),
-            }
-            eprint!("{}", report.render_human(&config.budget.model, budget));
-            println!("{}", serde_json::to_string_pretty(&report)?);
         }
 
         Command::Views => {
@@ -517,7 +438,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Some(cli::ReaderAction::Apply) => {
-                    let applied = reader::apply_answers(chrono::Utc::now())?;
+                    let applied = reader::apply_answers(&store, chrono::Utc::now())?;
                     if applied.is_empty() {
                         println!("no answered reader page");
                     }
@@ -671,30 +592,6 @@ async fn main() -> Result<()> {
                     "✓ Generated briefs for {count} projects\n  Total tokens: {total_tokens} · model {}",
                     config.budget.model
                 );
-            }
-        }
-
-        Command::Briefing { force } => {
-            let config = config::Config::load(&cli.config)?;
-            let store = store::Store::new(config.data_dir().clone())?;
-            let client = api::ClaudeClient::for_config(&config)?;
-            let bm = modules::weekly_briefing::WeeklyBriefingModule::new(&config, &store);
-            let result = if force {
-                Some(bm.run_force(&client).await?)
-            } else {
-                bm.run(&client).await?
-            };
-            match result {
-                Some((tokens, path)) => {
-                    println!(
-                        "✓ Weekly briefing written to {}\n  Tokens used: {tokens} · model {}",
-                        path.display(),
-                        config.budget.model
-                    );
-                }
-                None => {
-                    println!("Skipping — already ran this ISO week. Use --force to regenerate.");
-                }
             }
         }
 

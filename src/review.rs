@@ -1,41 +1,17 @@
-//! `i-dream review` — bring the weekly review TO you.
+//! Whether the owner is keeping up with the weekly review.
 //!
-//! The audit (Sun 02:30 cron) stages proposals + sets a "pending" flag. This
-//! command is the *presentation* side, decoupled from generation: it opens a
-//! Ghostty window running a fresh `claude` session in the i-dream repo, seeded
-//! with a prompt to walk you through the staged proposals. A Monday-09:00
-//! LaunchAgent runs `--if-pending` so it surfaces on its own (you never log
-//! out, so a calendar time, not login, is the trigger); you can also run it by
-//! hand any time. `--add-calendar` drops a recurring event in Calendar.app.
+//! The weekly review is the reader's decision page. When the owner leaves two
+//! pages in a row unanswered, compiled nudges may auto-promote on evidence
+//! instead of waiting for a human flip (owner ladder 2026-07-22). The reader
+//! records each publish here; the promotion pass asks `auto_nudges_now`.
 
 use anyhow::{Context, Result};
-use chrono::{Datelike, Duration, Local, Timelike, Utc};
 use std::path::PathBuf;
-use std::process::Command;
-
-const GHOSTTY_APP: &str = "/Applications/Ghostty.app";
-
-fn home() -> Result<PathBuf> {
-    dirs::home_dir().context("cannot resolve home dir")
-}
-
-fn flag_path() -> Result<PathBuf> {
-    Ok(home()?.join(".claude/i-dream/.review-pending"))
-}
-
-/// Called by the audit's non-interactive path to mark that proposals are
-/// waiting. The flag's body is the audit date, so `review` can name it.
-pub fn mark_pending(audit_date: &str) -> Result<()> {
-    let p = flag_path()?;
-    if let Some(parent) = p.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&p, audit_date)?;
-    Ok(())
-}
 
 fn misses_path() -> Result<PathBuf> {
-    Ok(home()?.join(".claude/i-dream/derived/review-misses.json"))
+    Ok(dirs::home_dir()
+        .context("cannot resolve home dir")?
+        .join(".claude/i-dream/derived/review-misses.json"))
 }
 
 /// Nudges unlock for evidence-auto-promotion at this many consecutive missed
@@ -49,7 +25,7 @@ struct ReviewMisses {
     last_staged: String,
 }
 
-/// 0 on absent/unreadable — fail-closed toward human gating.
+/// 0 on absent/unreadable, which keeps nudges human-gated.
 pub fn consecutive_missed_reviews() -> usize {
     misses_path()
         .ok()
@@ -59,204 +35,39 @@ pub fn consecutive_missed_reviews() -> usize {
         .unwrap_or(0)
 }
 
-/// A miss = the prior staging's flag is STILL present when the next staging
-/// arrives (nobody walked or cleared it in between).
+/// A miss is a new page published while the previous one is still unanswered.
 pub fn bump_or_reset(prior: usize, missed: bool) -> usize {
     if missed { prior + 1 } else { 0 }
 }
 
-/// Unlock = streak AND currently behind (gate MAJOR-4: without the flag term
-/// the latch stayed open after the owner caught up, and empty-staging weeks
-/// never reset it).
-pub fn nudges_unlocked(misses: usize, flag_present: bool) -> bool {
-    flag_present && misses >= NUDGE_UNLOCK_MISSES
+/// Unlock needs the streak AND the owner currently behind, so catching up
+/// re-locks at once.
+pub fn nudges_unlocked(misses: usize, behind: bool) -> bool {
+    behind && misses >= NUDGE_UNLOCK_MISSES
+}
+
+/// Called by the reader when it publishes a weekly page. `prior_unanswered`
+/// is whether an earlier reader page was still waiting at that moment.
+pub fn record_staging(week: &str, prior_unanswered: bool) -> Result<usize> {
+    let next = bump_or_reset(consecutive_missed_reviews(), prior_unanswered);
+    let p = misses_path()?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &p,
+        serde_json::to_string(&ReviewMisses {
+            consecutive: next,
+            last_staged: week.to_string(),
+        })?,
+    )?;
+    Ok(next)
 }
 
 /// The one composed read the promote block wires. Fail-closed everywhere.
 pub fn auto_nudges_now() -> bool {
-    let flag = flag_path().map(|p| p.exists()).unwrap_or(false);
-    nudges_unlocked(consecutive_missed_reviews(), flag)
-}
-
-/// Called at staging time, BEFORE `mark_pending` rewrites the flag.
-pub fn record_staging(audit_date: &str) -> Result<usize> {
-    let missed = flag_path()?.exists();
-    let n = bump_or_reset(consecutive_missed_reviews(), missed);
-    let p = misses_path()?;
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = p.with_extension("json.tmp");
-    let state = ReviewMisses { consecutive: n, last_staged: audit_date.into() };
-    std::fs::write(&tmp, serde_json::to_string_pretty(&state)?)?;
-    std::fs::rename(&tmp, &p)?;
-    Ok(n)
-}
-
-/// Clear the pending flag — called when an interactive `audit run` completes,
-/// i.e. the staged proposals were actually reviewed, not merely shown.
-pub fn clear_pending() -> Result<()> {
-    let p = flag_path()?;
-    if p.exists() {
-        std::fs::remove_file(&p)?;
-    }
-    Ok(())
-}
-
-pub fn handle(if_pending: bool, add_calendar: bool) -> Result<()> {
-    if add_calendar {
-        return install_calendar_event();
-    }
-
-    let flag = flag_path()?;
-    let pending = flag.exists();
-
-    // The LaunchAgent calls `--if-pending`: stay silent + do nothing unless the
-    // audit actually staged something, so it never opens a window into the void.
-    if if_pending && !pending {
-        return Ok(());
-    }
-
-    // Absolute path only — a tilde inside the single-quoted `cd` below would
-    // NOT expand and would silently fail the launch (leaving an empty window).
-    // Fall back to $HOME if the repo isn't where we expect, so claude still
-    // opens somewhere valid.
-    let repo = home()?.join("Code/Claude/i-dream");
-    let cd_target = if repo.exists() { repo } else { home()? };
-    let cd_target = cd_target.display().to_string();
-
-    let staged = std::fs::read_to_string(&flag)
-        .ok()
-        .filter(|s| !s.trim().is_empty());
-
-    // Quote-safe: single-quoted, and neither value contains a single quote.
-    // Backticks stay literal inside single quotes (no command substitution).
-    //
-    // The apply instruction matters: interactive `i-dream audit run` REGENERATES
-    // proposals (fresh LLM call) rather than resuming the staged file, so the
-    // review agent must apply approved edits directly and close the loop by
-    // hand. The 2026-07-12 review paid for the old wording that said otherwise.
-    let prompt = "Run the i-dream weekly review. Read the most recent staged audit \
-                  under ~/.claude/i-dream/audits/ (check its header first — a \
-                  Reviewed note means it is already actioned, nothing pending) and \
-                  the output of `i-dream reflect`, then walk me through each \
-                  proposal with your recommendation. Apply the ones I approve by \
-                  editing the target files directly — do NOT apply via \
-                  `i-dream audit run`; it regenerates a fresh proposal set instead \
-                  of resuming the staged one. For each APPLIED proposal that ships \
-                  a rule or hook from an insight, also record the graduation \
-                  up-vote: find the 1-3 entries in \
-                  ~/.claude/subconscious/dreams/patterns.json whose pattern text \
-                  states the same lesson (read them — never guess ids), and append \
-                  one JSON line per match to \
-                  ~/.claude/subconscious/dreams/insight-feedback.jsonl with keys \
-                  ts (current UTC ISO), pattern_id, rating set to up, source set \
-                  to graduation-manual, and proposal_intent. If no pattern states \
-                  the lesson, record nothing and say so. Record each rejection as a line in \
-                  ~/.claude/i-dream/audits/_rejections.jsonl with \
-                  fp = sha256(expanded_target + newline + lowercased \
-                  whitespace-collapsed intent) and a dated reason — verify the fp \
-                  recipe by reproducing an existing ledger line first. When done, \
-                  append ONE review-outcome line to \
-                  ~/.claude/subconscious/dreams/review-outcomes.jsonl shaped \
-                  exactly like {\"ts\":\"2026-07-13T09:00:00Z\",\"surfaced\":20,\
-                  \"applied\":3,\"source\":\"manual-review\"} — ts MUST be full \
-                  RFC3339 with time, surfaced = total proposals in the staged \
-                  audit, applied = count you applied. Verify your line parses \
-                  by reading it back with jq before moving on — this feeds the \
-                  graduation-yield SLO. Then \
-                  update the audit file header with Reviewed counts and remove the \
-                  ~/.claude/i-dream/.review-pending flag (trash, not rm). Start by \
-                  summarizing what is pending.";
-    let inner = format!("cd '{cd_target}' && claude '{prompt}'");
-
-    // Launch a *fresh* Ghostty instance, not a window off the running one.
-    //
-    // `ghostty -e <cmd>` (binary-direct) hands the command to the already-running
-    // single instance, which then opens a window inheriting that instance's tab
-    // group — so the review window comes up with the prior window's (empty) tabs
-    // plus one tab running the review. This is single-instance tab inheritance —
-    // NOT macOS saved-state restoration (none exists) and NOT
-    // AppleWindowTabbingMode=always. `open -n` forces a new application process,
-    // which starts with a clean single-tab window and ignores the running
-    // instance's tab group. argv is passed element-by-element (no shell), so the
-    // single-quoted `inner` needs no extra escaping here.
-    Command::new("open")
-        .args(["-n", "-a", GHOSTTY_APP, "--args", "-e", "bash", "-lc", &inner])
-        .spawn()
-        .with_context(|| format!("Cannot launch Ghostty ({GHOSTTY_APP})"))?;
-
-    // Intentionally do NOT clear the flag here: opening a window is not the same
-    // as reviewing. The flag clears when the review actually completes — the
-    // seeded prompt tells the review agent to remove it at the end, and an
-    // interactive `audit run` also clears it — so the Monday LaunchAgent keeps
-    // re-surfacing pending proposals until they're actually handled, and a
-    // failed launch never silently consumes them.
-    match staged {
-        Some(d) => println!("✓ opened the weekly review (proposals staged {}).", d.trim()),
-        None => println!("✓ opened the weekly review in a new Ghostty window."),
-    }
-    println!("  Manual re-open any time:  i-dream review");
-    Ok(())
-}
-
-/// Write a recurring weekly .ics and `open` it so Calendar.app offers to add
-/// it. Using an .ics (vs AppleScript automation) keeps it user-consented and
-/// avoids the automation-permission dance — Calendar just shows an "Add" sheet.
-fn install_calendar_event() -> Result<()> {
-    // Next Monday at 09:00 local — floating local time (no TZID) so it stays at
-    // 9am wherever the laptop is.
-    let today = Local::now();
-    let days_until_mon = (8 - today.weekday().number_from_monday() as i64) % 7;
-    let days_until_mon = if days_until_mon == 0 { 7 } else { days_until_mon };
-    let start = (today + Duration::days(days_until_mon))
-        .with_hour(9)
-        .and_then(|d| d.with_minute(0))
-        .and_then(|d| d.with_second(0))
-        .context("could not build start time")?;
-    let dt = start.format("%Y%m%dT%H%M%S").to_string();
-    // DTSTAMP is the creation instant in UTC (RFC 5545); DTSTART stays floating
-    // local so the 09:00 holds wherever the laptop is.
-    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-
-    let ics = format!(
-        "BEGIN:VCALENDAR\r\n\
-         VERSION:2.0\r\n\
-         PRODID:-//i-dream//weekly-review//EN\r\n\
-         BEGIN:VEVENT\r\n\
-         UID:i-dream-weekly-review@local\r\n\
-         DTSTAMP:{stamp}\r\n\
-         DTSTART:{dt}\r\n\
-         DURATION:PT30M\r\n\
-         RRULE:FREQ=WEEKLY;BYDAY=MO\r\n\
-         SUMMARY:i-dream weekly review\r\n\
-         DESCRIPTION:Review last week's dreamt proposals + GCC changes. It auto-opens \
-         Monday 09:00 if proposals are pending. Open any time by running: i-dream review\r\n\
-         BEGIN:VALARM\r\n\
-         ACTION:DISPLAY\r\n\
-         DESCRIPTION:i-dream weekly review\r\n\
-         TRIGGER:PT0S\r\n\
-         END:VALARM\r\n\
-         END:VEVENT\r\n\
-         END:VCALENDAR\r\n"
-    );
-
-    let path = std::env::temp_dir().join("i-dream-weekly-review.ics");
-    std::fs::write(&path, ics).with_context(|| format!("Cannot write {}", path.display()))?;
-    Command::new("open")
-        .arg(&path)
-        .spawn()
-        .context("Cannot open the .ics in Calendar")?;
-
-    println!("✓ Calendar.app should now offer to add a recurring event:");
-    println!("    “i-dream weekly review” — Mondays 09:00, weekly");
-    println!();
-    println!("  To open the review manually any time:");
-    println!("    i-dream review");
-    println!();
-    println!("  It also auto-opens Monday 09:00 when proposals are pending");
-    println!("  (the `i-dream cron install` review job).");
-    Ok(())
+    let behind = !crate::reader::ReaderState::load().pending_pages.is_empty();
+    nudges_unlocked(consecutive_missed_reviews(), behind)
 }
 
 #[cfg(test)]
@@ -264,31 +75,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flag_path_under_idream() {
-        // Don't assert the home prefix (varies by machine) — just the tail.
-        let p = flag_path().unwrap();
-        assert!(p.ends_with(".claude/i-dream/.review-pending"));
-    }
-
-    #[test]
     fn misses_bump_on_missed_and_reset_on_walked() {
         assert_eq!(bump_or_reset(0, true), 1);
         assert_eq!(bump_or_reset(1, true), 2, "consecutive misses accumulate");
-        assert_eq!(bump_or_reset(5, false), 0, "one walked review resets the streak");
+        assert_eq!(bump_or_reset(5, false), 0, "one answered page resets the streak");
     }
 
     #[test]
     fn unlock_requires_streak_and_currently_behind() {
         assert!(!nudges_unlocked(2, false), "caught up = locked, whatever the streak");
-        assert!(!nudges_unlocked(9, false), "empty-staging weeks cannot hold it open");
+        assert!(!nudges_unlocked(9, false), "a stale streak cannot hold it open");
         assert!(!nudges_unlocked(1, true), "behind but no streak = locked");
         assert!(nudges_unlocked(2, true));
     }
 
     #[test]
     fn promote_block_wires_the_composed_unlock() {
-        // Reads the OTHER side (not a same-file drift guard): pins the exact
-        // hardwired-open mutation the gate ran against dreaming.rs.
+        // Reads the OTHER side: pins the hardwired-open mutation the gate ran
+        // against dreaming.rs.
         let src = include_str!("modules/dreaming.rs");
         assert!(
             src.contains("crate::review::auto_nudges_now()"),
@@ -298,9 +102,15 @@ mod tests {
     }
 
     #[test]
+    fn the_reader_records_each_publish() {
+        let src = include_str!("reader/mod.rs");
+        assert!(src.contains("crate::review::record_staging("), "the reader must feed the ladder");
+    }
+
+    #[test]
     fn nudge_unlock_boundary_is_two_consecutive() {
         assert!(bump_or_reset(0, true) < NUDGE_UNLOCK_MISSES, "one miss stays locked");
         assert!(bump_or_reset(1, true) >= NUDGE_UNLOCK_MISSES, "second consecutive miss unlocks");
-        assert!(bump_or_reset(bump_or_reset(1, true), false) < NUDGE_UNLOCK_MISSES, "a walk re-locks");
+        assert!(bump_or_reset(bump_or_reset(1, true), false) < NUDGE_UNLOCK_MISSES, "an answer re-locks");
     }
 }

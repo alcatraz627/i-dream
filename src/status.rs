@@ -75,8 +75,8 @@ pub struct ModuleInit {
 
 #[derive(Serialize)]
 pub struct JobStatus {
-    pub label: &'static str,
-    pub desc: &'static str,
+    pub label: String,
+    pub desc: String,
     pub schedule: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_fire: Option<String>,
@@ -269,16 +269,13 @@ fn lane_word(s: LaneStatus) -> &'static str {
 /// a plist whose label is live in the real session will read the REAL job's
 /// state; the `program` field is carried so that collision is visible.
 fn gather_jobs() -> Vec<JobStatus> {
-    let now = Local::now();
-    crate::cron::JOBS
-        .iter()
+    crate::reader::scheduled_jobs()
+        .into_iter()
         .map(|job| {
-            let installed = crate::cron::plist_path(job.label)
-                .map(|p| p.exists())
-                .unwrap_or(false);
+            let installed = job.installed;
             let (loaded, pid, last_exit, program) = if installed {
                 match std::process::Command::new("launchctl")
-                    .args(["list", job.label])
+                    .args(["list", job.label.as_str()])
                     .output()
                 {
                     Ok(out) if out.status.success() => {
@@ -293,12 +290,9 @@ fn gather_jobs() -> Vec<JobStatus> {
             };
             JobStatus {
                 label: job.label,
-                desc: job.desc,
-                schedule: job.schedule.human(),
-                next_fire: job
-                    .schedule
-                    .next_fire_after(now)
-                    .map(|t| t.format("%Y-%m-%d %H:%M").to_string()),
+                desc: job.description,
+                schedule: job.fire_at,
+                next_fire: None,
                 installed,
                 loaded,
                 pid,
@@ -625,13 +619,16 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
 
     if let Some(jobs) = &r.jobs {
         out.push_str("\nScheduled jobs:\n");
+        if jobs.is_empty() {
+            out.push_str("  (no i-dream jobs in ~/.claude/scheduled/registry.json)\n");
+        }
         for j in jobs {
             let mut line = format!("  {}  {}", j.label, j.schedule);
             if let Some(next) = &j.next_fire {
                 line.push_str(&format!(" · next {next}"));
             }
             if !j.installed {
-                line.push_str(" · NOT INSTALLED (i-dream cron install)");
+                line.push_str(" · plist missing (re-add with ~/.claude/scripts/schedule/schedule.sh)");
             } else if !j.loaded {
                 line.push_str(" · plist present but NOT LOADED");
             } else {

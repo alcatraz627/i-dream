@@ -9,12 +9,10 @@ use crate::modules::{
     DreamDomain, NativeAdapter,
     dreaming::DreamingModule,
     external_domain::{ExternalDomain, load_manifest},
-    insight_digest::InsightDigestModule,
     introspection::IntrospectionModule,
     intuition::IntuitionModule,
     metacog::MetacogModule,
     prospective::ProspectiveModule,
-    weekly_briefing::WeeklyBriefingModule,
 };
 use crate::store::Store;
 use anyhow::Result;
@@ -72,14 +70,6 @@ impl<'a> DomainRegistry<'a> {
             Box::new(NativeAdapter::new(
                 "prospective",
                 ProspectiveModule::new(config, store),
-            )),
-            Box::new(NativeAdapter::new(
-                "insight_digest",
-                InsightDigestModule::new(config, store),
-            )),
-            Box::new(NativeAdapter::new(
-                "weekly_briefing",
-                WeeklyBriefingModule::new(config, store),
             )),
         ];
 
@@ -1577,10 +1567,7 @@ mod tests {
         for d in registry.iter() {
             // every trait method dispatchable through &dyn DreamDomain
             assert_eq!(d.name(), "dispatch-test");
-            let cursor = d.current_cursor().unwrap();
-            assert!(d.delta(&cursor).unwrap().is_empty());
-            assert!(d.contribute_triggers().unwrap().is_empty());
-            assert!(d.contribute_tldr().unwrap().is_empty());
+            assert_eq!(d.consolidate().unwrap().domain, "dispatch-test");
         }
     }
 

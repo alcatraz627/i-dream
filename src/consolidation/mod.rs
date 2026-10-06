@@ -1,16 +1,10 @@
-//! Three-layer consolidation pipeline — L1 per-domain, L2 daily roll-up,
-//! L3 weekly audit. Full design at `docs/16-consolidation-build.md`.
-//!
-//! Stage 2 (this commit) ships **deterministic** L2: the daily digest file
-//! exists every day, even before LLM enrichment lands in Stage 3. Sections
-//! that need LLM input (Top signals, Cross-domain associations) carry a
-//! placeholder until then.
+//! Consolidation: what happens to stored learning between sessions.
+//! Reinforcement and forgetting shape the pattern store; views and schemas
+//! give it honest read models. The cross-stream reader lives in `reader`.
 
 pub mod assay;
 pub mod autonomous;
-pub mod dream_pass;
 pub mod forgetting;
-pub mod l2_digest;
 pub mod reinforce;
 pub mod schemas;
 pub mod views;

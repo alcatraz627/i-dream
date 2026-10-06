@@ -83,21 +83,15 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
     let store = Store::new(config.data_dir())?;
     let registry = DomainRegistry::boot(config, &store);
 
+    // The reader is every external domain's consumer: its last recon is the
+    // last read, and its window count is what it read.
+    let reader = crate::reader::ReaderState::load();
     let entries: Vec<DomainListEntry> = registry
         .iter()
         .map(|d| {
             let m = d.manifest();
-            let cursor = d.current_cursor().unwrap_or_default();
-            // Same delta read the dream-pass makes — file reads, no LLM. A
-            // failed read must not masquerade as "0 pending / all caught
-            // up": surface it (mirrors dream_pass's warn on the same call).
-            let pending = match d.delta(&cursor) {
-                Ok(v) => Some(v.len()),
-                Err(e) => {
-                    tracing::warn!("domain '{}' delta read failed: {e:#}", d.name());
-                    None
-                }
-            };
+            let read = reader.streams.iter().find(|s| s.domain == d.name());
+            let pending = read.map(|s| s.events_in_window);
             let insights = m
                 .dream
                 .insights_path
@@ -116,7 +110,7 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
                 description: m.domain.description.clone(),
                 cadence: m.consolidation.cadence.clone(),
                 pending,
-                last_pass: cursor.last_ts,
+                last_pass: read.and(reader.last_recon),
                 insights,
             }
         })
@@ -131,7 +125,7 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
         }
         println!(
             "{:<18} {:<10} {:<13} {:>7}  {:<10} {:>8}  DESCRIPTION",
-            "NAME", "KIND", "CADENCE", "PENDING", "LAST PASS", "INSIGHTS"
+            "NAME", "KIND", "CADENCE", "READ 28D", "LAST READ", "INSIGHTS"
         );
         let now = chrono::Utc::now();
         for e in &entries {
@@ -158,17 +152,14 @@ fn list(config: &Config, as_json: bool) -> Result<()> {
                 e.name, e.kind, e.cadence, pending, last_pass, insights, e.description
             );
         }
-        // The pass itself is delta-driven; the cron fire is the only real
-        // per-domain "next chance to run", and only when its job is installed.
-        let job = crate::cron::JOBS.iter().find(|j| j.label.ends_with("dreampass"));
-        let installed = job
-            .and_then(|j| crate::cron::plist_path(j.label).ok())
-            .is_some_and(|p| p.exists());
-        match job.and_then(|j| j.schedule.next_fire_after(chrono::Local::now())) {
-            Some(next) if installed => {
-                println!("\nnext dream-pass: {} (cron)", next.format("%Y-%m-%d %H:%M"));
+        let jobs = crate::reader::scheduled_jobs();
+        if jobs.is_empty() {
+            println!("\nthe reader is not scheduled; run `i-dream reader recon` by hand");
+        } else {
+            println!();
+            for j in jobs {
+                println!("{}: {}{}", j.name, j.fire_at, if j.installed { "" } else { " (plist missing)" });
             }
-            _ => println!("\ndream-pass is not scheduled (retired 2026-09-18); `pending` only grows"),
         }
     }
     Ok(())

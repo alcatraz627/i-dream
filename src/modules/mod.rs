@@ -7,7 +7,6 @@
 pub mod dreaming;
 pub mod external_domain;
 pub mod grounding;
-pub mod insight_digest;
 pub mod introspection;
 pub mod intuition;
 pub mod metacog;
@@ -15,12 +14,10 @@ pub mod project_briefs;
 pub mod prospective;
 pub mod registry;
 pub mod user_settings;
-pub mod weekly_briefing;
 
 use crate::api::ClaudeClient;
 use crate::config::Config;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
@@ -206,24 +203,6 @@ pub fn inspect(config: &Config, module_name: &str) -> Result<String> {
 // filesystem-described plugins (e.g. ~/.claude/atone/) both implement it.
 // Full design + manifest schema: docs/14-dreaming-plugins.md.
 
-/// Position within a domain's append-only event stream. Each domain advances
-/// its own cursor after a successful consolidation or dream pass.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Cursor {
-    pub last_event_id: Option<String>,
-    pub last_ts: Option<DateTime<Utc>>,
-}
-
-/// A single event read from a domain's stream. The payload is raw JSON — each
-/// domain's schema is its own concern; the registry only relies on `id` and
-/// `ts` (resolved via the manifest's id_field / ts_field declarations).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainEvent {
-    pub id: String,
-    pub ts: DateTime<Utc>,
-    pub raw: Value,
-}
-
 /// What a domain returns after running its consolidation step. Used for
 /// logging and for the daily digest's per-domain summary section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -233,146 +212,6 @@ pub struct ConsolidationReport {
     pub derived_files_written: Vec<PathBuf>,
     pub runtime_ms: u64,
     pub note: Option<String>,
-}
-
-/// One entry in the shared trigger lookup. Domains contribute these; the
-/// union is consumed by hinter fan-out for first-turn + periodic injection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TriggerEntry {
-    pub id: String,
-    pub from_slug: String,
-    pub from_source: String,
-    pub weight: TriggerWeight,
-    pub instruction: String,
-    #[serde(default)]
-    pub match_keywords: Vec<String>,
-    #[serde(default)]
-    pub match_tool_signatures: Vec<String>,
-    #[serde(default)]
-    pub deep_link: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TriggerWeight {
-    Low,
-    Medium,
-    High,
-}
-
-/// One line of TLDR feed contributed by a domain. The top-N across domains
-/// (weighted) becomes the first-turn session injection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TldrLine {
-    pub source_domain: String,
-    pub slug: String,
-    pub text: String,
-    pub score: f64,
-}
-
-/// Context handed to a domain's `render_dream_prompt` so the prompt can
-/// include hints about other domains' recent activity and prior signals.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DreamContext {
-    pub recent_other_domain_summaries: Vec<(String, String)>,
-    pub prior_top_signals: Vec<String>,
-}
-
-/// Parsed LLM output for a single domain's dream pass. JSON schema in
-/// docs/14-dreaming-plugins.md §3.6.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DreamOutput {
-    // Models inconsistently emit `1` (int) or `"1"` (string) for the
-    // schema version. Accept either via a tolerant deserializer.
-    #[serde(
-        rename = "schemaVersion",
-        default,
-        deserialize_with = "de_flexible_u32"
-    )]
-    pub schema_version: u32,
-    #[serde(default)]
-    pub domain: String,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub insights: Vec<Insight>,
-}
-
-/// Deserialize a u32 from either a JSON number or a JSON string. LLM output
-/// is inconsistent about quoting numeric fields; this tolerates both rather
-/// than failing the whole DreamOutput parse on a quoted "1".
-fn de_flexible_u32<'de, D>(d: D) -> std::result::Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    let v = Value::deserialize(d)?;
-    match v {
-        Value::Number(n) => Ok(n.as_u64().unwrap_or(1) as u32),
-        Value::String(s) => Ok(s.trim().parse().unwrap_or(1)),
-        _ => Ok(1),
-    }
-}
-
-/// One insight produced by a dream pass. The five variants are the v1
-/// taxonomy — extensible, but stable enough that adapter scripts can match
-/// against them.
-///
-/// Every field is `#[serde(default)]` so a single malformed insight (LLM
-/// omitted a field) degrades to empty values rather than failing the entire
-/// `Vec<Insight>` parse and losing the whole domain's dream output. An
-/// unknown `type` falls through to `Unknown` rather than erroring.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Insight {
-    Pattern {
-        #[serde(default)]
-        name: String,
-        #[serde(default)]
-        evidence_event_ids: Vec<String>,
-        #[serde(default)]
-        confidence: f64,
-        #[serde(default)]
-        instruction: String,
-        #[serde(default)]
-        trigger_keywords: Vec<String>,
-        #[serde(default)]
-        tool_signatures: Vec<String>,
-    },
-    Association {
-        #[serde(default)]
-        from_slug: String,
-        #[serde(default)]
-        to_slug: String,
-        #[serde(default)]
-        confidence: f64,
-        #[serde(default)]
-        instruction: Option<String>,
-    },
-    GraduationCandidate {
-        #[serde(default)]
-        slug: String,
-        #[serde(default)]
-        rationale: String,
-        #[serde(default)]
-        target: Option<String>,
-    },
-    DecayCandidate {
-        #[serde(default)]
-        slug: String,
-        #[serde(default)]
-        rationale: String,
-        #[serde(default)]
-        action: String,
-    },
-    Summary {
-        #[serde(default)]
-        text: String,
-    },
-    /// Catch-all for insight types the LLM invents that aren't in the v1
-    /// taxonomy. Keeps one bad insight from failing the whole parse.
-    #[serde(other)]
-    Unknown,
 }
 
 /// Manifest describing an external domain plugin. Loaded from
@@ -518,18 +357,7 @@ fn default_timeout() -> String {
 pub trait DreamDomain: Send + Sync {
     fn name(&self) -> &str;
     fn manifest(&self) -> &DomainManifest;
-    fn current_cursor(&self) -> Result<Cursor>;
-    fn delta(&self, cursor: &Cursor) -> Result<Vec<DomainEvent>>;
-    fn advance_cursor(&self, new: Cursor) -> Result<()>;
     fn consolidate(&self) -> Result<ConsolidationReport>;
-    fn render_dream_prompt(
-        &self,
-        delta: &[DomainEvent],
-        context: &DreamContext,
-    ) -> Result<Option<String>>;
-    fn consume_dream(&self, output: &DreamOutput) -> Result<()>;
-    fn contribute_triggers(&self) -> Result<Vec<TriggerEntry>>;
-    fn contribute_tldr(&self) -> Result<Vec<TldrLine>>;
 }
 
 /// Wraps a native compiled `Module` to expose it as a `DreamDomain`. The
@@ -604,36 +432,11 @@ impl<M: Module + Send + Sync> DreamDomain for NativeAdapter<M> {
     fn manifest(&self) -> &DomainManifest {
         &self.manifest
     }
-    fn current_cursor(&self) -> Result<Cursor> {
-        Ok(Cursor::default())
-    }
-    fn delta(&self, _cursor: &Cursor) -> Result<Vec<DomainEvent>> {
-        Ok(vec![])
-    }
-    fn advance_cursor(&self, _new: Cursor) -> Result<()> {
-        Ok(())
-    }
     fn consolidate(&self) -> Result<ConsolidationReport> {
         Ok(ConsolidationReport {
             domain: self.name.clone(),
             ..Default::default()
         })
-    }
-    fn render_dream_prompt(
-        &self,
-        _delta: &[DomainEvent],
-        _context: &DreamContext,
-    ) -> Result<Option<String>> {
-        Ok(None)
-    }
-    fn consume_dream(&self, _output: &DreamOutput) -> Result<()> {
-        Ok(())
-    }
-    fn contribute_triggers(&self) -> Result<Vec<TriggerEntry>> {
-        Ok(vec![])
-    }
-    fn contribute_tldr(&self) -> Result<Vec<TldrLine>> {
-        Ok(vec![])
     }
 }
 
@@ -649,99 +452,6 @@ mod sanitize_tests {
     fn strips_bell_and_escape() {
         let s = "a\u{0007}b\u{001b}c";
         assert_eq!(sanitize_json_control_chars(s), "abc");
-    }
-}
-
-#[cfg(test)]
-mod dream_output_robustness_tests {
-    //! Regression tests for the 3 parser failures the first real dream-pass
-    //! surfaced (2026-05-21): string schemaVersion, partial Association
-    //! (missing from_slug), and JSON after a prose preamble.
-    use super::{DreamOutput, Insight, parse_json_codeblock};
-
-    #[test]
-    fn schema_version_accepts_string() {
-        // affirm failure: {"schemaVersion": "1", ...}
-        let json = r#"{"schemaVersion":"1","domain":"affirm","insights":[]}"#;
-        let out: DreamOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(out.schema_version, 1);
-        assert_eq!(out.domain, "affirm");
-    }
-
-    #[test]
-    fn schema_version_accepts_int() {
-        let json = r#"{"schemaVersion":1,"domain":"x","insights":[]}"#;
-        let out: DreamOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(out.schema_version, 1);
-    }
-
-    #[test]
-    fn partial_association_missing_from_slug_parses() {
-        // sessions failure: an association lacking from_slug shouldn't fail
-        // the whole insights array.
-        let json = r#"{"schemaVersion":1,"domain":"sessions","insights":[
-            {"type":"association","to_slug":"y","confidence":0.7}
-        ]}"#;
-        let out: DreamOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(out.insights.len(), 1);
-        match &out.insights[0] {
-            Insight::Association {
-                from_slug, to_slug, ..
-            } => {
-                assert_eq!(from_slug, ""); // defaulted
-                assert_eq!(to_slug, "y");
-            }
-            _ => panic!("expected Association"),
-        }
-    }
-
-    #[test]
-    fn unknown_insight_type_falls_through() {
-        let json = r#"{"schemaVersion":1,"domain":"x","insights":[
-            {"type":"some_future_type","field":"value"},
-            {"type":"summary","text":"kept"}
-        ]}"#;
-        let out: DreamOutput = serde_json::from_str(json).unwrap();
-        assert_eq!(out.insights.len(), 2);
-        assert!(matches!(out.insights[0], Insight::Unknown));
-        assert!(matches!(out.insights[1], Insight::Summary { .. }));
-    }
-
-    #[test]
-    fn extracts_json_after_prose_preamble() {
-        // pinned failure: model emitted prose then JSON.
-        let content = "I have all the context needed. Generating the DreamOutput v1 JSON now.\n\n{\"schemaVersion\":1,\"domain\":\"pinned\",\"summary\":\"ok\",\"insights\":[]}";
-        let extracted = parse_json_codeblock(content).expect("should extract embedded JSON");
-        let out: DreamOutput = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(out.domain, "pinned");
-        assert_eq!(out.summary.as_deref(), Some("ok"));
-    }
-
-    #[test]
-    fn balanced_extraction_ignores_braces_in_strings() {
-        // A brace inside a string value must not throw off depth counting.
-        let content = "prefix {\"k\":\"a } b\",\"insights\":[]} suffix";
-        let extracted = parse_json_codeblock(content).expect("should extract");
-        let v: serde_json::Value = serde_json::from_str(&extracted).unwrap();
-        assert_eq!(v.get("k").unwrap().as_str().unwrap(), "a } b");
-    }
-
-    #[test]
-    fn prose_with_non_json_brace_still_returns_none() {
-        // Blast-radius guard: prose that merely CONTAINS a brace but no real
-        // JSON must return None (as it did before the balanced-extraction
-        // fallback), so callers like audit/introspection/metacog/dreaming
-        // keep getting a clean None rather than a garbage span.
-        assert!(parse_json_codeblock("Use {curly} braces in your config file.").is_none());
-        assert!(parse_json_codeblock("Consider the array[0] index syntax.").is_none());
-        assert!(parse_json_codeblock("No JSON here at all, just prose.").is_none());
-    }
-
-    #[test]
-    fn prose_then_real_json_still_extracts() {
-        // The fix must still work: real JSON after a preamble extracts.
-        let c = "Done thinking. {\"schemaVersion\":1,\"domain\":\"x\",\"insights\":[]}";
-        assert!(parse_json_codeblock(c).is_some());
     }
 }
 
@@ -776,30 +486,9 @@ mod dream_domain_dispatch_tests {
         assert_eq!(adapter.manifest().domain.name, "test-stub");
         assert_eq!(adapter.manifest().consolidation.kind, "native");
 
-        // every trait method returns Ok with the documented stub shape
-        let cursor = adapter.current_cursor().unwrap();
-        assert!(cursor.last_event_id.is_none());
-
-        let delta = adapter.delta(&cursor).unwrap();
-        assert!(delta.is_empty());
-
-        adapter.advance_cursor(Cursor::default()).unwrap();
-
         let report = adapter.consolidate().unwrap();
         assert_eq!(report.domain, "test-stub");
         assert_eq!(report.events_processed, 0);
-
-        let prompt = adapter
-            .render_dream_prompt(&[], &DreamContext::default())
-            .unwrap();
-        assert!(
-            prompt.is_none(),
-            "native modules opt out of cross-domain dream pass"
-        );
-
-        adapter.consume_dream(&DreamOutput::default()).unwrap();
-        assert!(adapter.contribute_triggers().unwrap().is_empty());
-        assert!(adapter.contribute_tldr().unwrap().is_empty());
     }
 
     #[test]

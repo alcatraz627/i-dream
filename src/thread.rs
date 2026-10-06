@@ -106,16 +106,6 @@ fn resolve_in_place(t: &mut Thread, now: DateTime<Utc>, reason: &str) {
     t.resolution = Some(reason.to_string());
 }
 
-/// Open threads after applying auto-close in memory. Read-only — does NOT
-/// persist, so the daily digest (run by a cron) can call it without racing a
-/// concurrent `thread` CLI write. Auto-close is recomputed each call and gets
-/// persisted whenever a CLI command (`list`/`resolve`/…) next writes.
-pub fn open_threads() -> Result<Vec<Thread>> {
-    let mut threads = load()?;
-    apply_auto_close(&mut threads, Utc::now());
-    Ok(threads.into_iter().filter(|t| t.status == "open").collect())
-}
-
 pub fn handle(action: ThreadAction) -> Result<()> {
     match action {
         ThreadAction::Add { text, target_file } => add(text, target_file),
