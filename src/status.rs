@@ -49,6 +49,13 @@ pub struct StatusReport {
     /// Recurring mistake slugs with their 7-day movement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reflect: Option<Vec<crate::reflect::SlugTrend>>,
+    /// Recent full dream cycles and what each produced, so a surface can tell
+    /// a cycle that ran from one that produced something.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cycles: Option<CyclesSection>,
+    /// The strongest extracted patterns and the associations between them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patterns: Option<PatternsSection>,
     /// Section name to the file or command it is read from. Every section of
     /// the report names one, so no surface shows a number of unknown origin.
     pub sources: std::collections::BTreeMap<&'static str, &'static str>,
@@ -146,6 +153,179 @@ fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
     }
 }
 
+/// How many days of cycles the report carries.
+const CYCLE_WINDOW_DAYS: i64 = 14;
+/// How many patterns the report carries, strongest first.
+const PATTERN_TOP: usize = 80;
+
+#[derive(Serialize)]
+pub struct CyclesSection {
+    /// The newest full cycle that extracted a pattern, an association or an
+    /// insight. A cycle that ran and produced nothing does not move this.
+    pub last_productive: Option<chrono::DateTime<chrono::Utc>>,
+    /// Full cycles in the window, oldest first.
+    pub recent: Vec<CycleRow>,
+    pub window_days: i64,
+}
+
+#[derive(Serialize)]
+pub struct CycleRow {
+    pub ts: chrono::DateTime<chrono::Utc>,
+    pub cycle_id: String,
+    pub sessions: u64,
+    pub patterns: u64,
+    pub associations: u64,
+    pub insights: u64,
+    pub tokens: u64,
+    pub produced: bool,
+}
+
+fn gather_cycles(home: &Path) -> CyclesSection {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(CYCLE_WINDOW_DAYS);
+    let all: Vec<crate::modules::dreaming::DreamEntry> =
+        std::fs::read_to_string(home.join(".claude/subconscious/dreams/journal.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+    let produced = |e: &crate::modules::dreaming::DreamEntry| {
+        e.patterns_extracted + e.associations_found + e.insights_promoted > 0
+    };
+    let last_productive = all.iter().filter(|e| produced(e)).map(|e| e.timestamp).max();
+    let mut recent: Vec<CycleRow> = all
+        .iter()
+        .filter(|e| e.timestamp > cutoff)
+        .map(|e| CycleRow {
+            ts: e.timestamp,
+            cycle_id: e.cycle_id.clone(),
+            sessions: e.sessions_analyzed,
+            patterns: e.patterns_extracted,
+            associations: e.associations_found,
+            insights: e.insights_promoted,
+            tokens: e.tokens_used,
+            produced: produced(e),
+        })
+        .collect();
+    recent.sort_by_key(|c| c.ts);
+    CyclesSection {
+        last_productive,
+        recent,
+        window_days: CYCLE_WINDOW_DAYS,
+    }
+}
+
+#[derive(Serialize)]
+pub struct PatternsSection {
+    /// Every pattern in the store.
+    pub total: usize,
+    pub by_category: std::collections::BTreeMap<String, usize>,
+    /// The strongest patterns plus every pattern an association links.
+    pub top: Vec<PatternRow>,
+    pub associations: Vec<AssociationRow>,
+}
+
+#[derive(Serialize)]
+pub struct PatternRow {
+    /// The text-derived id that survives re-extraction.
+    pub id: String,
+    pub text: String,
+    pub category: String,
+    pub valence: String,
+    /// Memory strength in [0, 1].
+    pub strength: f64,
+    pub confidence: f64,
+    pub occurrences: u64,
+    pub last_seen: String,
+    /// Occurrences in the last seven days and the seven before.
+    pub last7: usize,
+    pub prior7: usize,
+}
+
+#[derive(Serialize)]
+pub struct AssociationRow {
+    pub id: String,
+    /// Stable pattern ids, as in `PatternRow::id`.
+    pub a: String,
+    pub b: String,
+    pub hypothesis: String,
+    pub confidence: f64,
+}
+
+fn gather_patterns(home: &Path) -> PatternsSection {
+    use crate::consolidation::views::stable_id;
+    use crate::modules::dreaming::{Association, ExtractedPattern};
+    let dir = home.join(".claude/subconscious/dreams");
+    let pats: Vec<ExtractedPattern> = std::fs::read_to_string(dir.join("patterns.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let assocs: Vec<Association> = std::fs::read_to_string(dir.join("associations.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let now = chrono::Utc::now();
+    let mut by_category = std::collections::BTreeMap::new();
+    for p in &pats {
+        *by_category.entry(p.category.clone()).or_insert(0) += 1;
+    }
+    let associations: Vec<AssociationRow> = assocs
+        .iter()
+        .filter(|a| !a.dismissed && a.patterns_linked_stable.len() >= 2)
+        .map(|a| AssociationRow {
+            id: a.id.clone(),
+            a: a.patterns_linked_stable[0].clone(),
+            b: a.patterns_linked_stable[1].clone(),
+            hypothesis: a.hypothesis.clone(),
+            confidence: a.confidence,
+        })
+        .collect();
+    let linked: std::collections::HashSet<&str> = associations
+        .iter()
+        .flat_map(|a| [a.a.as_str(), a.b.as_str()])
+        .collect();
+    let mut rows: Vec<PatternRow> = pats
+        .iter()
+        .map(|p| {
+            let (mut last7, mut prior7) = (0, 0);
+            for t in &p.occurrence_history {
+                if let Ok(t) = chrono::DateTime::parse_from_rfc3339(t) {
+                    let days = (now - t.with_timezone(&chrono::Utc)).num_days();
+                    if days < 7 {
+                        last7 += 1;
+                    } else if days < 14 {
+                        prior7 += 1;
+                    }
+                }
+            }
+            PatternRow {
+                id: stable_id(&p.pattern),
+                text: p.pattern.clone(),
+                category: p.category.clone(),
+                valence: p.valence.clone(),
+                strength: p.strength.max(0.0),
+                confidence: p.confidence,
+                occurrences: p.occurrences,
+                last_seen: p.last_seen.clone(),
+                last7,
+                prior7,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.strength.total_cmp(&a.strength));
+    let top: Vec<PatternRow> = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(i, r)| *i < PATTERN_TOP || linked.contains(r.id.as_str()))
+        .map(|(_, r)| r)
+        .collect();
+    PatternsSection {
+        total: pats.len(),
+        by_category,
+        top,
+        associations,
+    }
+}
+
 /// Where each report section comes from.
 fn sources() -> std::collections::BTreeMap<&'static str, &'static str> {
     [
@@ -161,6 +341,8 @@ fn sources() -> std::collections::BTreeMap<&'static str, &'static str> {
         ("domains", "~/.claude/i-dream/reader/state.json streams"),
         ("interventions", "~/.claude/i-dream/{interventions.json,would-fire.jsonl}"),
         ("reflect", "~/.claude/atone/events.jsonl"),
+        ("cycles", "~/.claude/subconscious/dreams/journal.jsonl"),
+        ("patterns", "~/.claude/subconscious/dreams/{patterns,associations}.json"),
     ]
     .into_iter()
     .collect()
@@ -342,6 +524,12 @@ pub fn gather(deep: bool) -> Result<StatusReport> {
         (None, None, None)
     };
 
+    let (cycles, patterns) = if deep {
+        (Some(gather_cycles(&home)), Some(gather_patterns(&home)))
+    } else {
+        (None, None)
+    };
+
     let (reader, domains, interventions, reflect) = if deep {
         let reader_state = crate::reader::ReaderState::load();
         (
@@ -378,6 +566,8 @@ pub fn gather(deep: bool) -> Result<StatusReport> {
         domains,
         interventions,
         reflect,
+        cycles,
+        patterns,
         sources: sources(),
     })
 }
@@ -871,6 +1061,9 @@ mod tests {
             producer_age: None,
             consumer_age: None,
             consumer_state: "on-demand",
+            cadence_hours: 24,
+            producer_age_s: None,
+            consumer_age_s: None,
         }
     }
 
@@ -1091,6 +1284,8 @@ mod tests {
             domains: None,
             interventions: None,
             reflect: None,
+            cycles: None,
+            patterns: None,
             sources: sources(),
         };
         let v = serde_json::to_value(&report).unwrap();
@@ -1130,6 +1325,8 @@ mod tests {
             domains: None,
             interventions: None,
             reflect: None,
+            cycles: None,
+            patterns: None,
             sources: sources(),
         };
         let text = render_text(&report, false);
@@ -1163,6 +1360,8 @@ mod tests {
             domains: None,
             interventions: None,
             reflect: None,
+            cycles: None,
+            patterns: None,
             sources: sources(),
         };
         let text = render_text(&report, false);

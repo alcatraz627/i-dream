@@ -3,48 +3,195 @@
   "title": "i-dream status --json",
   "description": "The summary contract the widget reads. Every top-level section is named in `sources` with the file or command it comes from.",
   "type": "object",
-  "required": ["daemon", "lanes", "queue", "modules", "jobs", "reader", "domains", "interventions", "reflect", "sources"],
+  "required": [
+    "daemon",
+    "lanes",
+    "queue",
+    "modules",
+    "jobs",
+    "reader",
+    "domains",
+    "interventions",
+    "reflect",
+    "cycles",
+    "patterns",
+    "sources"
+  ],
   "properties": {
     "daemon": {
       "type": "object",
-      "required": ["status"],
-      "properties": {"status": {"type": "string"}, "pid": {"type": "integer"}}
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        }
+      }
     },
     "lanes": {
       "type": "object",
-      "required": ["green", "yellow", "red", "lanes"],
+      "required": [
+        "green",
+        "yellow",
+        "red",
+        "lanes"
+      ],
       "properties": {
         "lanes": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["lane", "status", "reason", "consumer", "consumer_state"]
+            "required": [
+              "lane",
+              "status",
+              "reason",
+              "consumer",
+              "consumer_state",
+              "cadence_hours"
+            ]
           }
         }
       }
     },
-    "queue": {"type": "object", "required": ["depth"]},
-    "modules": {"type": "array"},
+    "queue": {
+      "type": "object",
+      "required": [
+        "depth"
+      ]
+    },
+    "modules": {
+      "type": "array"
+    },
     "jobs": {
       "type": "array",
-      "items": {"type": "object", "required": ["label", "schedule", "installed", "loaded"]}
+      "items": {
+        "type": "object",
+        "required": [
+          "label",
+          "schedule",
+          "installed",
+          "loaded"
+        ]
+      }
     },
     "reader": {
       "type": "object",
-      "required": ["last_recon", "last_weekly", "clusters", "awaiting", "latest_items", "landed"]
+      "required": [
+        "last_recon",
+        "last_weekly",
+        "clusters",
+        "awaiting",
+        "latest_items",
+        "landed"
+      ]
     },
     "domains": {
       "type": "array",
-      "items": {"type": "object", "required": ["name", "events_in_window"]}
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "events_in_window"
+        ]
+      }
     },
     "interventions": {
       "type": "object",
-      "required": ["live", "candidate", "shadow", "fired_7d"]
+      "required": [
+        "live",
+        "candidate",
+        "shadow",
+        "fired_7d"
+      ]
     },
     "reflect": {
       "type": "array",
-      "items": {"type": "object", "required": ["slug", "severity", "total", "last7", "prior7", "delta7"]}
+      "items": {
+        "type": "object",
+        "required": [
+          "slug",
+          "severity",
+          "total",
+          "last7",
+          "prior7",
+          "delta7"
+        ]
+      }
     },
-    "sources": {"type": "object"}
+    "sources": {
+      "type": "object"
+    },
+    "cycles": {
+      "type": "object",
+      "required": [
+        "last_productive",
+        "recent",
+        "window_days"
+      ],
+      "properties": {
+        "recent": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "ts",
+              "cycle_id",
+              "sessions",
+              "patterns",
+              "associations",
+              "insights",
+              "tokens",
+              "produced"
+            ]
+          }
+        }
+      }
+    },
+    "patterns": {
+      "type": "object",
+      "required": [
+        "total",
+        "by_category",
+        "top",
+        "associations"
+      ],
+      "properties": {
+        "top": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "text",
+              "category",
+              "valence",
+              "strength",
+              "confidence",
+              "occurrences",
+              "last_seen",
+              "last7",
+              "prior7"
+            ]
+          }
+        },
+        "associations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "a",
+              "b",
+              "hypothesis",
+              "confidence"
+            ]
+          }
+        }
+      }
+    }
   }
 }
