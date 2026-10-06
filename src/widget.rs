@@ -1,22 +1,18 @@
-//! Menubar widget management.
+//! The menu bar widget, `i-dream-bar.app` (tools/widget2/).
 //!
-//! Wraps `tools/menubar/build.sh` and direct process management for
-//! the i-dream-bar Swift menubar widget. The binary lives next to the
-//! script at `tools/menubar/i-dream-bar` relative to the cargo workspace
-//! root (discovered via the `CARGO_MANIFEST_DIR` env-var baked in at
-//! compile time, or by walking up from the current executable path).
-//!
-//! ## Commands
+//! The widget reads only `i-dream status --json` and `i-dream reader --json`;
+//! these verbs build, install and control it. The v1 widget in tools/menubar/
+//! is no longer built or launched by anything.
 //!
 //! ```text
-//!   i-dream widget start     launch widget (no recompile)
-//!   i-dream widget stop      kill all running widget instances
-//!   i-dream widget restart   stop + start
-//!   i-dream widget build     recompile from source + relaunch
-//!   i-dream widget status    show PID, LaunchAgent state, build freshness
-//!   i-dream widget logs      tail /tmp/i-dream-bar.log
-//!   i-dream widget install   register as LaunchAgent (auto-start on login)
-//!   i-dream widget uninstall remove LaunchAgent
+//!   i-dream widget build      compile tools/widget2 into tools/widget2/build/
+//!   i-dream widget install    copy to ~/Applications and start at login (dev.i-dream.bar)
+//!   i-dream widget uninstall  stop it and remove the LaunchAgent and the app
+//!   i-dream widget start      launch the installed app (or the build)
+//!   i-dream widget stop       quit it cleanly, so launchd does not relaunch it
+//!   i-dream widget restart    stop, then start
+//!   i-dream widget status     build freshness, install, running, at-login
+//!   i-dream widget logs       tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
 //! ```
 
 use crate::cli::WidgetAction;
@@ -25,207 +21,98 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BINARY_NAME: &str = "i-dream-bar";
-const LAUNCHD_LABEL: &str = "dev.i-dream.menubar";
-const DEBUG_LOG: &str = "/tmp/i-dream-bar.log";
+const BUNDLE_ID: &str = "dev.i-dream.bar";
 
 pub fn manage(action: WidgetAction) -> Result<()> {
     match action {
         WidgetAction::Start => start(),
         WidgetAction::Stop => stop(),
-        WidgetAction::Restart => restart(),
-        WidgetAction::Build => build(),
-        WidgetAction::Status => status(),
+        WidgetAction::Restart => {
+            stop()?;
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            start()
+        }
+        WidgetAction::Build => run_script("build.sh", &[]),
+        WidgetAction::Status => run_script("build.sh", &["--status"]),
         WidgetAction::Logs { lines } => logs(lines),
-        WidgetAction::Install => run_build_sh(&["--install"]),
-        WidgetAction::Uninstall => run_build_sh(&["--uninstall"]),
+        WidgetAction::Install => run_script("install.sh", &[]),
+        WidgetAction::Uninstall => run_script("install.sh", &["--uninstall"]),
     }
 }
 
-// ─── actions ─────────────────────────────────────────────────────────────────
-
 fn start() -> Result<()> {
-    if is_running() {
-        println!(
-            "Widget is already running (PID {}).",
-            current_pid().unwrap_or(0)
-        );
+    if let Some(pid) = current_pid() {
+        println!("Widget is already running (PID {pid}).");
         return Ok(());
     }
-    let bin = widget_binary()?;
-    // Launch detached: stdout/stderr → debug log, no controlling terminal.
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(DEBUG_LOG)
-        .with_context(|| format!("Cannot open debug log at {DEBUG_LOG}"))?;
-    let log_copy = log_file.try_clone()?;
-    Command::new(&bin)
-        .stdout(log_file)
-        .stderr(log_copy)
-        .spawn()
-        .with_context(|| format!("Failed to launch {}", bin.display()))?;
-
-    // Brief wait so pgrep has time to register the process.
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    if let Some(pid) = current_pid() {
-        println!("Widget started (PID {pid}).");
-        println!("Logs: tail -f {DEBUG_LOG}");
-    } else {
-        println!("Widget launched but did not appear in process list — check {DEBUG_LOG}");
+    let app = app_bundle()?;
+    let ok = Command::new("open")
+        .arg(&app)
+        .status()
+        .with_context(|| format!("Failed to open {}", app.display()))?
+        .success();
+    if !ok {
+        bail!("open {} failed", app.display());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    match current_pid() {
+        Some(pid) => println!("Widget started (PID {pid}) from {}.", app.display()),
+        None => println!("Widget launched but is not in the process list; see `i-dream widget logs`."),
     }
     Ok(())
 }
 
+/// Quit through the app's own quit path. The LaunchAgent relaunches the app
+/// after any exit that is not clean, so a plain kill would bring it back.
 fn stop() -> Result<()> {
-    if !is_running() {
+    if current_pid().is_none() {
         println!("Widget is not running.");
         return Ok(());
     }
-    let output = Command::new("pkill")
-        .args(["-x", BINARY_NAME])
-        .output()
-        .context("Failed to invoke pkill")?;
-    if output.status.success() || output.status.code() == Some(1) {
-        // pkill exit 1 = no process matched (already gone).
-        println!("Widget stopped.");
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("pkill failed: {stderr}");
-    }
-    Ok(())
-}
-
-fn restart() -> Result<()> {
-    stop()?;
-    // Give the OS a moment to clean up before relaunching.
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    start()
-}
-
-fn build() -> Result<()> {
-    run_build_sh(&[])
-}
-
-fn status() -> Result<()> {
-    // ── Process ──────────────────────────────────────────────────────────────
-    println!("Process:");
-    if let Some(pid) = current_pid() {
-        println!("  Running  PID {pid}");
-    } else {
-        println!("  Not running");
-    }
-
-    // ── LaunchAgent ──────────────────────────────────────────────────────────
-    println!("\nLaunchAgent ({LAUNCHD_LABEL}):");
-    let la_out = Command::new("launchctl")
-        .args(["list", LAUNCHD_LABEL])
-        .output()
-        .context("Failed to invoke launchctl")?;
-    if la_out.status.success() {
-        let stdout = String::from_utf8_lossy(&la_out.stdout);
-        // `launchctl list <label>` prints a plist-like dict; pull out PID + LastExitStatus.
-        for line in stdout.lines() {
-            let t = line.trim();
-            if t.contains("\"PID\"") || t.contains("\"LastExitStatus\"") || t.contains("\"Label\"")
-            {
-                println!("  {t}");
-            }
+    let script = format!("tell application id \"{BUNDLE_ID}\" to quit");
+    Command::new("osascript")
+        .args(["-e", &script])
+        .status()
+        .context("Failed to invoke osascript")?;
+    for _ in 0..10 {
+        if current_pid().is_none() {
+            println!("Widget stopped.");
+            return Ok(());
         }
-    } else {
-        println!("  Not registered (run `i-dream widget install` to enable auto-start)");
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
-
-    // ── Build freshness ──────────────────────────────────────────────────────
-    println!("\nBuild:");
-    if let Ok(build_info_path) = build_info_path() {
-        if build_info_path.exists() {
-            let info = std::fs::read_to_string(&build_info_path).unwrap_or_default();
-            let get = |key: &str| -> String {
-                info.lines()
-                    .find(|l| l.starts_with(key))
-                    .and_then(|l| l.split_once('=').map(|x| x.1))
-                    .unwrap_or("?")
-                    .to_string()
-            };
-            let commit = get("commit");
-            let built_at = get("built_at");
-            println!("  Built at: {built_at}  (commit: {commit})");
-
-            // Compare source hash to detect staleness.
-            if let Ok(source) = source_path() {
-                let md5_out = Command::new("md5").arg(&source).output().ok();
-                if let Some(out) = md5_out {
-                    let current_hash: String = String::from_utf8_lossy(&out.stdout)
-                        .split_whitespace()
-                        .last()
-                        .map(|s| s.chars().take(8).collect())
-                        .unwrap_or_default();
-                    let built_hash = get("src_hash");
-                    if current_hash == built_hash {
-                        println!("  Source:   ✓ Binary matches source (hash: {current_hash})");
-                    } else {
-                        println!("  Source:   ⚠ SOURCE HAS CHANGED — binary is stale!");
-                        println!("            source now:  {current_hash}");
-                        println!("            binary from: {built_hash}");
-                        println!("            → run: i-dream widget build");
-                    }
-                }
-            }
-        } else {
-            println!("  (no .build-info — binary predates hash tracking)");
-        }
-    }
-
-    Ok(())
+    bail!("the widget did not quit; it may be busy, try again or use Activity Monitor");
 }
 
 fn logs(lines: usize) -> Result<()> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let log = home.join("Library/Logs/i-dream-bar/i-dream-bar.log");
     let status = Command::new("tail")
-        .args(["-n", &lines.to_string(), DEBUG_LOG])
+        .args(["-n", &lines.to_string()])
+        .arg(&log)
         .status()
         .context("Failed to invoke tail")?;
     if !status.success() {
-        bail!("tail exited non-zero — {DEBUG_LOG} may not exist yet");
+        bail!("{} does not exist yet; the widget writes it once installed", log.display());
     }
     Ok(())
 }
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-/// Run build.sh with the given extra args, inheriting stdout/stderr so the
-/// compile output streams directly to the user's terminal.
-fn run_build_sh(extra_args: &[&str]) -> Result<()> {
-    let script = build_sh_path()?;
-    let mut cmd = Command::new("bash");
-    cmd.arg(&script);
-    for a in extra_args {
-        cmd.arg(a);
-    }
-    let status = cmd
+fn run_script(name: &str, args: &[&str]) -> Result<()> {
+    let script = project_root()?.join("tools/widget2").join(name);
+    let status = Command::new("bash")
+        .arg(&script)
+        .args(args)
         .status()
         .with_context(|| format!("Failed to run {}", script.display()))?;
     if !status.success() {
-        bail!(
-            "build.sh exited with status {}",
-            status.code().unwrap_or(-1)
-        );
+        bail!("{name} exited with status {}", status.code().unwrap_or(-1));
     }
     Ok(())
 }
 
-fn is_running() -> bool {
-    Command::new("pgrep")
-        .args(["-x", BINARY_NAME])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn current_pid() -> Option<u32> {
-    let out = Command::new("pgrep")
-        .args(["-x", BINARY_NAME])
-        .output()
-        .ok()?;
+    let out = Command::new("pgrep").args(["-x", BINARY_NAME]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -235,84 +122,50 @@ fn current_pid() -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-/// Resolve the project root by trying, in order: executable walk-up (works for
-/// `cargo run` / in-tree `target/` builds), the compile-time `CARGO_MANIFEST_DIR`
-/// baked in via the `env!` macro (works for `cargo install --path .` installs),
-/// and finally a walk-up from the current working directory (works when the
-/// binary was relocated but is invoked from inside a checkout).
-fn project_root() -> Result<PathBuf> {
-    let has_build_sh = |d: &Path| d.join("tools/menubar/build.sh").exists();
-
-    // 1. Walk up from the executable (in-tree builds).
-    if let Ok(exe) = std::env::current_exe() {
-        let mut dir = exe.parent().map(|p| p.to_path_buf());
-        for _ in 0..8 {
-            if let Some(d) = dir {
-                if has_build_sh(&d) {
-                    return Ok(d);
-                }
-                dir = d.parent().map(|p| p.to_path_buf());
-            } else {
-                break;
-            }
+/// The installed app in ~/Applications, else the in-tree build.
+fn app_bundle() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let installed = PathBuf::from(home).join("Applications/i-dream-bar.app");
+        // The v1 widget installed under the same name; only a v2 bundle carries src-hash.
+        if installed.join("Contents/Resources/src-hash").exists() {
+            return Ok(installed);
         }
     }
+    let built = project_root()?.join("tools/widget2/build/i-dream-bar.app");
+    if built.exists() {
+        return Ok(built);
+    }
+    bail!("no i-dream-bar.app installed or built; run `i-dream widget build`")
+}
 
-    // 2. Compile-time baked-in manifest dir (cargo install --path .).
-    //    `env!` runs at compile time, unlike `std::env::var` which reads the
-    //    runtime environment and finds nothing once installed.
+/// The checkout that holds tools/widget2: up from the executable (in-tree
+/// builds), the compile-time manifest dir (`cargo install --path .`), then up
+/// from the working directory.
+fn project_root() -> Result<PathBuf> {
+    let has = |d: &Path| d.join("tools/widget2/build.sh").exists();
+    let walk = |start: Option<PathBuf>| -> Option<PathBuf> {
+        let mut dir = start;
+        for _ in 0..8 {
+            let d = dir?;
+            if has(&d) {
+                return Some(d);
+            }
+            dir = d.parent().map(Path::to_path_buf);
+        }
+        None
+    };
+    if let Some(d) = walk(std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf))) {
+        return Ok(d);
+    }
     let baked = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if has_build_sh(&baked) {
+    if has(&baked) {
         return Ok(baked);
     }
-
-    // 3. Walk up from CWD (relocated binary invoked from a checkout).
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut dir: Option<PathBuf> = Some(cwd);
-        for _ in 0..8 {
-            if let Some(d) = dir {
-                if has_build_sh(&d) {
-                    return Ok(d);
-                }
-                dir = d.parent().map(|p| p.to_path_buf());
-            } else {
-                break;
-            }
-        }
+    if let Some(d) = walk(std::env::current_dir().ok()) {
+        return Ok(d);
     }
-
     bail!(
-        "Could not locate project root (tools/menubar/build.sh not found up from executable, CARGO_MANIFEST_DIR={}, or CWD)",
+        "could not find tools/widget2/build.sh above the executable, in {}, or above the working directory",
         env!("CARGO_MANIFEST_DIR")
-    );
-}
-
-fn build_sh_path() -> Result<PathBuf> {
-    Ok(project_root()?.join("tools/menubar/build.sh"))
-}
-
-fn widget_binary() -> Result<PathBuf> {
-    // Prefer the deployed bundle in ~/Applications/ — that's the location
-    // macOS Spotlight/LaunchServices indexes, so the icon shows correctly in
-    // Login Items and Notification Center. Fall back to the in-tree build
-    // output if the deploy step hasn't run yet (developer/first-build case).
-    if let Some(home) = std::env::var_os("HOME") {
-        let deployed = PathBuf::from(home)
-            .join("Applications/i-dream-bar.app/Contents/MacOS")
-            .join(BINARY_NAME);
-        if deployed.exists() {
-            return Ok(deployed);
-        }
-    }
-    Ok(project_root()?
-        .join("tools/menubar/i-dream-bar.app/Contents/MacOS")
-        .join(BINARY_NAME))
-}
-
-fn source_path() -> Result<PathBuf> {
-    Ok(project_root()?.join("tools/menubar/i-dream-bar.swift"))
-}
-
-fn build_info_path() -> Result<PathBuf> {
-    Ok(project_root()?.join("tools/menubar/.build-info"))
+    )
 }

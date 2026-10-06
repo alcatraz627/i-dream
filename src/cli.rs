@@ -219,7 +219,7 @@ pub enum Command {
     /// Show current configuration
     Config,
 
-    /// Manage the menubar widget (i-dream-bar).
+    /// Manage the menu bar widget (i-dream-bar.app, tools/widget2).
     Widget {
         #[command(subcommand)]
         action: WidgetAction,
@@ -463,17 +463,17 @@ pub enum ServiceAction {
 
 #[derive(Subcommand)]
 pub enum WidgetAction {
-    /// Launch the widget (no recompile)
+    /// Launch the installed widget, or the in-tree build
     Start,
-    /// Kill all running widget instances
+    /// Quit the widget cleanly so launchd does not relaunch it
     Stop,
     /// Stop then start the widget
     Restart,
-    /// Recompile from source and relaunch
+    /// Compile tools/widget2 into tools/widget2/build/
     Build,
-    /// Show PID, LaunchAgent state, and build freshness
+    /// Show build freshness, install, running and at-login state
     Status,
-    /// Tail the widget debug log (/tmp/i-dream-bar.log)
+    /// Tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
     Logs {
         /// Number of lines to show (default: 50)
         #[arg(short, long, default_value_t = 50)]
