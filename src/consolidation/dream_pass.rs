@@ -20,9 +20,9 @@ use crate::modules::{
     DomainEvent, DreamContext, DreamDomain, DreamOutput, Insight, TldrLine, TriggerEntry,
     parse_json_codeblock,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -35,6 +35,62 @@ type SeverityMap = HashMap<String, String>;
 
 const DEFAULT_CROSS_BUDGET: u32 = 2000;
 const DREAM_TEMPERATURE: f64 = 0.4;
+// External-domain prompt rendering shows at most 20 events. The cursor may
+// advance only through those same events.
+const MAX_EVENTS_PER_PASS: usize = 20;
+
+#[derive(Debug, Serialize)]
+pub struct DreamPassPreview {
+    pub domain: String,
+    pub pending: usize,
+    pub selected: usize,
+    pub last_selected_id: Option<String>,
+    pub prompt_chars: Option<usize>,
+}
+
+fn check_target(registry: &DomainRegistry<'_>, target: Option<&str>) -> Result<()> {
+    if let Some(name) = target && registry.get(name).is_none() {
+        bail!("Unknown domain '{name}'. Use `i-dream domain list` to see registered domains.");
+    }
+    Ok(())
+}
+
+fn bounded_delta(mut delta: Vec<DomainEvent>) -> Vec<DomainEvent> {
+    delta.truncate(MAX_EVENTS_PER_PASS);
+    delta
+}
+
+pub fn preview_dream_pass(
+    registry: &DomainRegistry<'_>,
+    target: Option<&str>,
+) -> Result<Vec<DreamPassPreview>> {
+    check_target(registry, target)?;
+    let mut previews = Vec::new();
+    for domain in registry.iter() {
+        if target.is_some_and(|name| name != domain.name()) {
+            continue;
+        }
+        let cursor = domain.current_cursor()?;
+        let pending = domain.delta(&cursor)?;
+        let pending_count = pending.len();
+        let selected = bounded_delta(pending);
+        let prompt_chars = if selected.is_empty() {
+            None
+        } else {
+            domain
+                .render_dream_prompt(&selected, &DreamContext::default())?
+                .map(|prompt| prompt.chars().count())
+        };
+        previews.push(DreamPassPreview {
+            domain: domain.name().to_string(),
+            pending: pending_count,
+            selected: selected.len(),
+            last_selected_id: selected.last().map(|event| event.id.clone()),
+            prompt_chars,
+        });
+    }
+    Ok(previews)
+}
 
 #[derive(Debug, Default, Serialize)]
 pub struct DreamPassReport {
@@ -90,7 +146,7 @@ impl DreamPassReport {
                 PassStatus::NoDelta => "no delta — skipped (no LLM call)".to_string(),
                 PassStatus::OptedOut => "opted out via manifest".to_string(),
                 PassStatus::NoPrompt => "prompt template missing".to_string(),
-                PassStatus::Failed(e) => format!("FAILED: {e}"),
+                PassStatus::Failed(e) => format!("FAILED: {e} · {} tok", d.tokens),
             };
             out.push_str(&format!("  [{}] {detail}\n", d.domain));
         }
@@ -109,7 +165,9 @@ pub async fn run_dream_pass(
     client: &ClaudeClient,
     model: &str,
     per_domain_budget: u32,
+    target: Option<&str>,
 ) -> Result<DreamPassReport> {
+    check_target(registry, target)?;
     let start = Instant::now();
     let mut report = DreamPassReport::default();
 
@@ -120,6 +178,9 @@ pub async fn run_dream_pass(
     // delta read must never masquerade as "no delta".
     let mut work: Vec<(&dyn DreamDomain, Vec<crate::modules::DomainEvent>)> = vec![];
     for d in registry.iter() {
+        if target.is_some_and(|name| name != d.name()) {
+            continue;
+        }
         let cursor = d.current_cursor().unwrap_or_default();
         match d.delta(&cursor) {
             Ok(delta) if delta.is_empty() => {
@@ -131,7 +192,7 @@ pub async fn run_dream_pass(
                     insight_count: 0,
                 });
             }
-            Ok(delta) => work.push((d, delta)),
+            Ok(delta) => work.push((d, bounded_delta(delta))),
             Err(e) => {
                 warn!("[dream-pass] domain '{}' delta failed: {e:#}", d.name());
                 report.per_domain.push(DomainPassResult {
@@ -172,7 +233,7 @@ pub async fn run_dream_pass(
             }
             PerDomainResult::OptedOut => (PassStatus::OptedOut, 0, 0, None),
             PerDomainResult::NoPrompt => (PassStatus::NoPrompt, 0, 0, None),
-            PerDomainResult::Failed(msg) => (PassStatus::Failed(msg), 0, 0, None),
+            PerDomainResult::Failed(msg, toks) => (PassStatus::Failed(msg), toks, 0, None),
         };
         report.total_tokens += tokens;
         if let Some(out) = output {
@@ -224,7 +285,7 @@ enum PerDomainResult {
     Done(DreamOutput, u64),
     OptedOut,
     NoPrompt,
-    Failed(String),
+    Failed(String, u64),
 }
 
 async fn run_one_domain(
@@ -239,24 +300,30 @@ async fn run_one_domain(
     let prompt = match domain.render_dream_prompt(delta, &context) {
         Ok(Some(p)) => p,
         Ok(None) => return PerDomainResult::OptedOut,
-        Err(e) => return PerDomainResult::Failed(format!("render: {e:#}")),
+        Err(e) => return PerDomainResult::Failed(format!("render: {e:#}"), 0),
     };
     if prompt.trim().is_empty() {
         return PerDomainResult::NoPrompt;
     }
 
-    let system = "You are i-dream's dream-pass orchestrator. Your output is a single \
-                  JSON object matching the DreamOutput v1 schema (schemaVersion, domain, \
-                  summary, insights[]). insight.type is one of pattern / association / \
-                  graduation_candidate / decay_candidate / summary. Drop insights with \
-                  confidence < 0.6. Maximum 5 insights. Always return parseable JSON.";
+    let system = "You are i-dream's dream-pass orchestrator. Return one JSON object with \
+                  schemaVersion as number 1, domain as a string, summary as a plain string, \
+                  and insights as an array of at most five objects. Every insight MUST \
+                  have a type field: pattern, association, graduation_candidate, \
+                  decay_candidate, or summary. Exact fields: \
+                  pattern uses name, evidence_event_ids, confidence, instruction; \
+                  association uses from_slug, to_slug, confidence, instruction; \
+                  graduation_candidate uses slug, rationale, target; decay_candidate uses \
+                  slug, rationale, action; summary uses text. For pattern, do not substitute \
+                  slug/description for name/instruction. Cite only event IDs in the supplied \
+                  batch. Drop low-confidence insights. Return parseable JSON only.";
 
     let response = match client
         .analyze(system, &prompt, model, budget_tokens, DREAM_TEMPERATURE)
         .await
     {
         Ok(r) => r,
-        Err(e) => return PerDomainResult::Failed(format!("llm: {e:#}")),
+        Err(e) => return PerDomainResult::Failed(format!("llm: {e:#}"), 0),
     };
 
     let json_str = match parse_json_codeblock(&response.content) {
@@ -265,16 +332,24 @@ async fn run_one_domain(
             return PerDomainResult::Failed(format!(
                 "no JSON in response (first 200 chars): {}",
                 &response.content.chars().take(200).collect::<String>()
-            ));
+            ), response.tokens_used);
         }
     };
     let output: DreamOutput = match serde_json::from_str(&json_str) {
         Ok(o) => o,
-        Err(e) => return PerDomainResult::Failed(format!("parse: {e:#}")),
+        Err(e) => {
+            return PerDomainResult::Failed(format!(
+                "parse: {e:#}; shape: {}",
+                json_shape(&json_str)
+            ), response.tokens_used);
+        }
     };
+    if let Err(e) = validate_output(&output, domain.name(), delta) {
+        return PerDomainResult::Failed(format!("validation: {e:#}"), response.tokens_used);
+    }
 
     if let Err(e) = domain.consume_dream(&output) {
-        return PerDomainResult::Failed(format!("consume: {e:#}"));
+        return PerDomainResult::Failed(format!("consume: {e:#}"), response.tokens_used);
     }
 
     // Advance cursor to the last event in this batch.
@@ -292,6 +367,69 @@ async fn run_one_domain(
     }
 
     PerDomainResult::Done(output, response.tokens_used)
+}
+
+fn json_shape(text: &str) -> String {
+    fn kind(value: &serde_json::Value) -> &'static str {
+        match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(map)) => ["schemaVersion", "domain", "summary", "insights"]
+            .iter()
+            .map(|key| format!("{key}={}", map.get(*key).map(kind).unwrap_or("missing")))
+            .collect::<Vec<_>>()
+            .join(", "),
+        Ok(value) => kind(&value).into(),
+        Err(_) => "invalid JSON".into(),
+    }
+}
+
+fn validate_output(output: &DreamOutput, domain: &str, delta: &[DomainEvent]) -> Result<()> {
+    if output.schema_version != 1 || output.domain != domain {
+        bail!("wrong schema version or domain");
+    }
+    if output.summary.as_deref().unwrap_or("").trim().is_empty() {
+        bail!("summary is empty");
+    }
+    if output.insights.len() > 5 {
+        bail!("more than five insights");
+    }
+    let event_ids: HashSet<&str> = delta.iter().map(|e| e.id.as_str()).collect();
+    for (index, insight) in output.insights.iter().enumerate() {
+        let valid = match insight {
+            Insight::Pattern { name, evidence_event_ids, confidence, instruction, .. } => {
+                !name.trim().is_empty()
+                    && !instruction.trim().is_empty()
+                    && (0.0..=1.0).contains(confidence)
+                    && !evidence_event_ids.is_empty()
+                    && evidence_event_ids.iter().all(|id| event_ids.contains(id.as_str()))
+            }
+            Insight::Association { from_slug, to_slug, confidence, .. } => {
+                !from_slug.trim().is_empty()
+                    && !to_slug.trim().is_empty()
+                    && (0.0..=1.0).contains(confidence)
+            }
+            Insight::GraduationCandidate { slug, rationale, .. } => {
+                !slug.trim().is_empty() && !rationale.trim().is_empty()
+            }
+            Insight::DecayCandidate { slug, rationale, action } => {
+                !slug.trim().is_empty() && !rationale.trim().is_empty() && !action.trim().is_empty()
+            }
+            Insight::Summary { text } => !text.trim().is_empty(),
+            Insight::Unknown => false,
+        };
+        if !valid {
+            bail!("insight {} has empty required fields or invalid evidence", index + 1);
+        }
+    }
+    Ok(())
 }
 
 fn build_context_for(_my_name: &str, prior: &[(String, DreamOutput)]) -> DreamContext {
@@ -525,6 +663,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn malformed_model_output_cannot_be_consumed_or_advance_cursor() {
+        let malformed: DreamOutput = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "domain": "codex-sessions",
+            "summary": "A pattern",
+            "insights": [{
+                "type": "pattern", "slug": "missing-handback",
+                "description": "The fields the parser used to discard",
+                "confidence": 0.8, "evidence_event_ids": ["event-1"]
+            }]
+        })).unwrap();
+        assert!(validate_output(&malformed, "codex-sessions", &[event("event-1", "S1")]).is_err());
+    }
+
+    #[test]
+    fn valid_model_output_requires_batch_evidence() {
+        let mut output = DreamOutput {
+            schema_version: 1,
+            domain: "codex-sessions".into(),
+            summary: Some("A pattern".into()),
+            insights: vec![Insight::Pattern {
+                name: "missing-handback".into(),
+                evidence_event_ids: vec!["event-1".into()],
+                confidence: 0.8,
+                instruction: "Check handback completion".into(),
+                trigger_keywords: vec![],
+                tool_signatures: vec![],
+            }],
+        };
+        let delta = [event("event-1", "S1")];
+        assert!(validate_output(&output, "codex-sessions", &delta).is_ok());
+        if let Insight::Pattern { evidence_event_ids, .. } = &mut output.insights[0] {
+            evidence_event_ids[0] = "event-outside-batch".into();
+        }
+        assert!(validate_output(&output, "codex-sessions", &delta).is_err());
+    }
+
+    #[test]
+    fn cursor_batch_stops_at_last_prompt_visible_event() {
+        let events = (0..25)
+            .map(|n| event(&format!("event-{n}"), "S1"))
+            .collect();
+        let selected = bounded_delta(events);
+        assert_eq!(selected.len(), 20);
+        assert_eq!(selected.last().unwrap().id, "event-19");
+    }
+
+    #[test]
+    fn unknown_scoped_domain_is_an_error() {
+        let registry = DomainRegistry::from_domains(vec![]);
+        assert!(preview_dream_pass(&registry, Some("missing")).is_err());
+    }
+
+    #[test]
     fn render_human_names_every_domain_outcome_and_the_budget() {
         let report = DreamPassReport {
             domains_attempted: 3,
@@ -561,7 +753,7 @@ mod tests {
         assert!(text.contains("model claude-test-model · budget 4000/domain"));
         assert!(text.contains("[atone] 12 delta → 4 insights · 1832 tok"));
         assert!(text.contains("[ipc] no delta — skipped (no LLM call)"));
-        assert!(text.contains("[sessions] FAILED: boom"));
+        assert!(text.contains("[sessions] FAILED: boom · 0 tok"));
         assert!(text.contains("[cross-domain] join pass ran"));
         // Output happened → point at the verbs that inspect it.
         assert!(text.contains("next: i-dream snapshot-diff"));

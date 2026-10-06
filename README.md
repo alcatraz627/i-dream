@@ -325,6 +325,8 @@ Dream-domain plugins (docs/14 + docs/20)
   domain list               List registered domains (native + external)
   dream-pass                LLM dream pass over every domain with fresh delta;
                             per-domain insights + cross-domain associations
+  dream-pass --domain NAME --dry-run
+                            Show one domain's selected batch and prompt size
   contract [--install]      Print the ingestion contract; --install writes
                             ~/.claude/i-dream/CONTRACT.md (point other agents here)
 
@@ -354,6 +356,12 @@ Options
 ```
 
 Run `i-dream <command> --help` for full per-command detail.
+
+Each pass selects at most 20 events per domain. The cursor advances through
+that selected batch only after the model returns a valid `DreamOutput` with
+real evidence IDs. A failed pass leaves the batch pending; its model tokens
+still appear in the receipt. Use `--domain NAME` to run one domain without
+calling the others.
 
 ## macOS menu-bar widget
 

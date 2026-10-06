@@ -17,6 +17,7 @@ const EXAMPLES: &str = "\
 Examples:
   i-dream status                # daemon health + module state
   i-dream dream-pass            # LLM pass over domains with fresh delta
+  i-dream dream-pass --domain codex-sessions --dry-run  # inspect one bounded batch
   i-dream insight-digest        # force-refresh the digest (skips 3h cooldown)
   i-dream snapshot-diff         # what did the last dream cycle change?
   i-dream audit                 # weekly self-audit -> staged proposals
@@ -232,6 +233,12 @@ pub enum Command {
         /// Max tokens per domain (default: 4000).
         #[arg(long, default_value_t = 4000)]
         budget: u32,
+        /// Limit the pass to one registered domain.
+        #[arg(long)]
+        domain: Option<String>,
+        /// Show the selected delta and prompt size without an LLM call or cursor change.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Rebuild the honest derived views at ~/.claude/i-dream/derived/views/

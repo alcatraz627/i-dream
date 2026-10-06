@@ -263,16 +263,25 @@ async fn main() -> Result<()> {
             audit::handle(action, &config).await?;
         }
 
-        Command::DreamPass { budget } => {
+        Command::DreamPass { budget, domain, dry_run } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir())?;
-            let client = api::ClaudeClient::for_config(&config)?;
             let registry = modules::registry::DomainRegistry::boot(&config, &store);
+            if dry_run {
+                let preview = consolidation::dream_pass::preview_dream_pass(
+                    &registry,
+                    domain.as_deref(),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&preview)?);
+                return Ok(());
+            }
+            let client = api::ClaudeClient::for_config(&config)?;
             let report = consolidation::dream_pass::run_dream_pass(
                 &registry,
                 &client,
                 &config.budget.model,
                 budget,
+                domain.as_deref(),
             )
             .await?;
             // Views feed the digest + widget from the stores the pass just
