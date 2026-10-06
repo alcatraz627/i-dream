@@ -190,6 +190,14 @@ pub enum Command {
         force: bool,
     },
 
+    /// Count transcripts by who wrote them: interactive, headless (by
+    /// entrypoint) or seat. Only interactive ones feed the learning modules.
+    Transcripts {
+        /// Print the counts as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show current configuration
     Config,
 

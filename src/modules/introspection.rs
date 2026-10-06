@@ -92,7 +92,7 @@ impl<'a> IntrospectionModule<'a> {
     /// [`run`] so it can be unit-tested without a live [`ClaudeClient`].
     pub fn load_new_chains(&self) -> Result<(Vec<ReasoningChain>, Vec<String>)> {
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
-        let files = transcript::scan_projects(&projects_dir)?;
+        let files = transcript::scan_interactive(&projects_dir)?;
 
         let processed: ProcessedState = if self.store.exists("introspection/processed.json") {
             self.store
@@ -115,14 +115,6 @@ impl<'a> IntrospectionModule<'a> {
             if processed.sessions.contains(&file.session_id) {
                 continue;
             }
-            // Headless runs (jurors, linters, residue reviews) are not how the
-            // owner's sessions reason; their chains skewed the Self-awareness
-            // briefing. Mark them seen so they are not re-read.
-            if is_headless_transcript(&file.path) {
-                sessions_seen.push(file.session_id.clone());
-                continue;
-            }
-
             let entries = match transcript::read_transcript(&file.path) {
                 Ok(e) => e,
                 Err(e) => {
@@ -203,18 +195,6 @@ mod tests {
     // ── available_chains: directory scanning ───────────────────
     // Controls whether should_run() triggers a weekly analysis.
     // Must correctly count only .jsonl files and handle empty dirs.
-
-    #[test]
-    fn headless_transcripts_are_told_apart_by_entrypoint() {
-        let dir = tempfile::tempdir().unwrap();
-        let headless = dir.path().join("h.jsonl");
-        let interactive = dir.path().join("i.jsonl");
-        std::fs::write(&headless, "{\"type\":\"user\",\"entrypoint\":\"sdk-cli\"}\n").unwrap();
-        std::fs::write(&interactive, "{\"type\":\"user\",\"entrypoint\":\"cli\"}\n").unwrap();
-        assert!(super::is_headless_transcript(&headless));
-        assert!(!super::is_headless_transcript(&interactive));
-        assert!(!super::is_headless_transcript(&dir.path().join("missing.jsonl")));
-    }
 
     #[test]
     fn available_chains_empty_dir() {
@@ -460,21 +440,6 @@ impl CompactChain {
             outcome: chain.outcome.clone(),
         }
     }
-}
-
-/// Whether a transcript came from a headless `claude -p` run rather than an
-/// interactive session. Claude Code stamps every row with `entrypoint`
-/// (`cli` interactive, `sdk-cli` headless); the first rows are enough.
-fn is_headless_transcript(path: &std::path::Path) -> bool {
-    use std::io::{BufRead, BufReader};
-    let Ok(f) = std::fs::File::open(path) else {
-        return false;
-    };
-    BufReader::new(f)
-        .lines()
-        .take(20)
-        .map_while(Result::ok)
-        .any(|l| l.contains(r#""entrypoint":"sdk-cli""#))
 }
 
 /// Stratified sampling of reasoning chains for analysis.

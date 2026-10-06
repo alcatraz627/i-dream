@@ -444,6 +444,29 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::Transcripts { json } => {
+            let config = config::Config::load(&cli.config)?;
+            let dir = config::expand_tilde(&config.ingestion.projects_dir);
+            let files = transcript::scan_projects(&dir)?;
+            let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+            for f in &files {
+                *counts
+                    .entry(transcript::classify(&f.path).label().to_string())
+                    .or_default() += 1;
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "total": files.len(), "by_kind": counts })
+                );
+            } else {
+                println!("{} transcripts", files.len());
+                for (k, n) in &counts {
+                    println!("  {k:<14} {n}");
+                }
+            }
+        }
+
         Command::Curves => {
             let (doc, path) = curves::compute_and_persist()?;
             let top: Vec<String> = doc

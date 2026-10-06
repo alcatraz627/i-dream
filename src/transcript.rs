@@ -236,6 +236,159 @@ pub fn scan_projects(projects_dir: &Path) -> Result<Vec<TranscriptFile>> {
     Ok(files)
 }
 
+/// Who a transcript came from: the owner at a terminal, a headless
+/// `claude -p` run, or an agent seat working in a scratch directory.
+///
+/// Every learning module reads only [`TranscriptKind::Interactive`]
+/// transcripts. Headless and seat runs are jurors, linters, reviews and
+/// sub-agents; their reasoning is not how the owner's sessions work, and
+/// counting it taught the daemon from its own echoes.
+///
+/// Retro-dump runs need no kind of their own: they run with
+/// `--no-session-persistence`, so they write no transcript, and the session
+/// they resume stays an honest interactive file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptKind {
+    Interactive,
+    /// Headless, carrying the entrypoint (`sdk-cli`, `sdk-py`, ...).
+    Headless(String),
+    Seat,
+}
+
+impl TranscriptKind {
+    /// Short name for counts and logs.
+    pub fn label(&self) -> &str {
+        match self {
+            TranscriptKind::Interactive => "interactive",
+            TranscriptKind::Headless(ep) => ep.as_str(),
+            TranscriptKind::Seat => "seat",
+        }
+    }
+}
+
+/// True for a working directory that only an agent seat uses: temp dirs,
+/// macOS per-user temp, scratchpads, and git worktrees.
+pub fn is_seat_cwd(cwd: &str) -> bool {
+    cwd.starts_with("/private/tmp")
+        || cwd.starts_with("/tmp/")
+        || cwd == "/tmp"
+        || cwd.starts_with("/var/folders")
+        || cwd.starts_with("/private/var/folders")
+        || cwd.contains("/worktrees/")
+        || cwd.contains("/scratchpad")
+}
+
+/// Pull the string value of `"key":"..."` out of a raw JSONL line without
+/// parsing it. Transcript lines can be megabytes of hook output; a substring
+/// search is enough for the two flat fields classification needs.
+fn raw_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":\"");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// Decide a transcript's kind from its first rows.
+///
+/// The entrypoint decides first: `sdk-*` is headless whatever the cwd.
+/// Then the cwd: a temp, `/var/folders` or scratchpad cwd is a seat even
+/// with a `cli` entrypoint, since no one types at a terminal there. A
+/// worktree cwd is a seat only when no interactive entrypoint says
+/// otherwise, because the owner does work by hand in worktrees. A file
+/// with neither field (a stub, or one still being written) counts as
+/// interactive, so a fresh session is never silently dropped.
+pub fn classify(path: &Path) -> TranscriptKind {
+    use std::io::{BufRead, BufReader};
+    let Ok(f) = fs::File::open(path) else {
+        return TranscriptKind::Interactive;
+    };
+    let mut entrypoint: Option<String> = None;
+    let mut cwd: Option<String> = None;
+    for line in BufReader::new(f).lines().take(200).map_while(Result::ok) {
+        if entrypoint.is_none() {
+            entrypoint = raw_field(&line, "entrypoint").map(str::to_string);
+        }
+        if cwd.is_none() {
+            cwd = raw_field(&line, "cwd").map(str::to_string);
+        }
+        if entrypoint.is_some() && cwd.is_some() {
+            break;
+        }
+    }
+    classify_fields(entrypoint.as_deref(), cwd.as_deref())
+}
+
+/// The decision table behind [`classify`], separated for tests.
+pub fn classify_fields(entrypoint: Option<&str>, cwd: Option<&str>) -> TranscriptKind {
+    if let Some(ep) = entrypoint {
+        if ep.starts_with("sdk-") {
+            return TranscriptKind::Headless(ep.to_string());
+        }
+    }
+    let interactive_ep = matches!(entrypoint, Some("cli") | Some("claude-vscode"));
+    if let Some(c) = cwd {
+        let worktree_only = c.contains("/worktrees/")
+            && !c.contains("/scratchpad")
+            && !c.starts_with("/private/tmp")
+            && !c.starts_with("/var/folders")
+            && !c.starts_with("/private/var/folders");
+        if is_seat_cwd(c) && !(worktree_only && interactive_ep) {
+            return TranscriptKind::Seat;
+        }
+    }
+    TranscriptKind::Interactive
+}
+
+/// Cache of decided kinds. A transcript's first rows never change once
+/// written, so a kind decided from a file that had an entrypoint is final.
+fn kind_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, TranscriptKind>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, TranscriptKind>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// [`classify`] with a process-wide cache. Six modules scan every
+/// transcript each cycle; this keeps that to one read per file per
+/// daemon lifetime. Undecided files (no entrypoint yet) are not cached.
+pub fn classify_cached(path: &Path) -> TranscriptKind {
+    if let Ok(cache) = kind_cache().lock() {
+        if let Some(k) = cache.get(path) {
+            return k.clone();
+        }
+    }
+    let kind = classify(path);
+    let decided = !matches!(kind, TranscriptKind::Interactive) || has_entrypoint(path);
+    if decided {
+        if let Ok(mut cache) = kind_cache().lock() {
+            cache.insert(path.to_path_buf(), kind.clone());
+        }
+    }
+    kind
+}
+
+fn has_entrypoint(path: &Path) -> bool {
+    use std::io::{BufRead, BufReader};
+    let Ok(f) = fs::File::open(path) else {
+        return false;
+    };
+    BufReader::new(f)
+        .lines()
+        .take(200)
+        .map_while(Result::ok)
+        .any(|l| l.contains("\"entrypoint\":\""))
+}
+
+/// Every transcript the owner typed in: [`scan_projects`] narrowed to
+/// [`TranscriptKind::Interactive`]. This is the list every learning
+/// module reads.
+pub fn scan_interactive(projects_dir: &Path) -> Result<Vec<TranscriptFile>> {
+    Ok(scan_projects(projects_dir)?
+        .into_iter()
+        .filter(|f| classify_cached(&f.path) == TranscriptKind::Interactive)
+        .collect())
+}
+
 /// Parse a transcript file into [`TranscriptEntry`] values.
 ///
 /// Bad lines are logged and skipped, not propagated. This is important
@@ -1142,5 +1295,84 @@ mod tests {
 
         let entries = read_transcript(&path).unwrap();
         assert_eq!(entries.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    #[test]
+    fn entrypoint_decides_headless_before_cwd() {
+        assert_eq!(
+            classify_fields(Some("sdk-py"), Some("/Users/me/Code/x")),
+            TranscriptKind::Headless("sdk-py".into())
+        );
+        assert_eq!(
+            classify_fields(Some("sdk-cli"), None),
+            TranscriptKind::Headless("sdk-cli".into())
+        );
+    }
+
+    #[test]
+    fn interactive_entrypoints_in_a_real_project() {
+        for ep in ["cli", "claude-vscode"] {
+            assert_eq!(
+                classify_fields(Some(ep), Some("/Users/me/Code/x")),
+                TranscriptKind::Interactive
+            );
+        }
+    }
+
+    #[test]
+    fn temp_and_scratch_cwds_are_seats_even_for_cli() {
+        for cwd in [
+            "/private/tmp",
+            "/private/tmp/x",
+            "/var/folders/ab/T/y",
+            "/Users/me/x/scratchpad/z",
+        ] {
+            assert_eq!(classify_fields(Some("cli"), Some(cwd)), TranscriptKind::Seat, "{cwd}");
+        }
+    }
+
+    #[test]
+    fn worktree_is_a_seat_unless_typed_in() {
+        let wt = "/Users/me/Code/p/.claude/worktrees/agent-1";
+        assert_eq!(classify_fields(Some("cli"), Some(wt)), TranscriptKind::Interactive);
+        assert_eq!(classify_fields(None, Some(wt)), TranscriptKind::Seat);
+    }
+
+    #[test]
+    fn no_fields_counts_as_interactive() {
+        assert_eq!(classify_fields(None, None), TranscriptKind::Interactive);
+    }
+
+    #[test]
+    fn classify_reads_fields_from_later_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        std::fs::write(
+            &p,
+            "{\"type\":\"last-prompt\"}\n{\"type\":\"user\",\"cwd\":\"/Users/me/Code/x\",\"entrypoint\":\"sdk-cli\"}\n",
+        )
+        .unwrap();
+        assert_eq!(classify(&p), TranscriptKind::Headless("sdk-cli".into()));
+    }
+
+    #[test]
+    fn scan_interactive_drops_headless_and_seats() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("-Users-me-x");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("a.jsonl"), "{\"cwd\":\"/Users/me/x\",\"entrypoint\":\"cli\"}\n").unwrap();
+        std::fs::write(proj.join("b.jsonl"), "{\"cwd\":\"/Users/me/x\",\"entrypoint\":\"sdk-cli\"}\n").unwrap();
+        std::fs::write(proj.join("c.jsonl"), "{\"cwd\":\"/private/tmp\",\"entrypoint\":\"cli\"}\n").unwrap();
+        let ids: Vec<String> = scan_interactive(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|f| f.session_id)
+            .collect();
+        assert_eq!(ids, vec!["a".to_string()]);
     }
 }

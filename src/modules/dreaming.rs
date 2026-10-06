@@ -1063,7 +1063,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
     /// `ProcessedState` so sessions are re-scanned when new turns are appended.
     fn load_session_summaries(&self) -> Result<(Vec<SessionSummary>, Vec<(String, u64)>)> {
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
-        let files = transcript::scan_projects(&projects_dir)?;
+        let files = transcript::scan_interactive(&projects_dir)?;
 
         let processed: ProcessedState = if self.store.exists("dreams/processed.json") {
             self.store
@@ -1926,7 +1926,7 @@ impl<'a> Module for DreamingModule<'a> {
         // Gate: only run if there are new/changed sessions to process.
         // Scan session files and compare sizes against processed state.
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
-        let files = match transcript::scan_projects(&projects_dir) {
+        let files = match transcript::scan_interactive(&projects_dir) {
             Ok(f) => f,
             Err(_) => return Ok(false),
         };

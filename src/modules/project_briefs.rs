@@ -298,7 +298,7 @@ Include only what is specific to this project. The reader already loads the acco
         use crate::transcript;
 
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
-        let files = transcript::scan_projects(&projects_dir)?;
+        let files = transcript::scan_interactive(&projects_dir)?;
         if files.is_empty() {
             return Ok(0);
         }

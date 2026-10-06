@@ -323,7 +323,7 @@ impl<'a> MetacogModule<'a> {
     /// live [`ClaudeClient`].
     pub fn load_new_samples(&self) -> Result<SampleBatch> {
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
-        let files = transcript::scan_projects(&projects_dir)?;
+        let files = transcript::scan_interactive(&projects_dir)?;
 
         // Load ledger of previously-processed sessions.
         let processed: ProcessedState = if self.store.exists("metacog/processed.json") {

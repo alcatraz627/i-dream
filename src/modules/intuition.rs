@@ -255,7 +255,7 @@ impl<'a> IntuitionModule<'a> {
     /// queries at `SessionStart`.
     pub fn collect_valence_batch(&self) -> Result<(u64, u64)> {
         let projects_dir = expand_tilde(&self.config.ingestion.projects_dir);
-        let files = transcript::scan_projects(&projects_dir)?;
+        let files = transcript::scan_interactive(&projects_dir)?;
 
         let mut processed: ProcessedState = if self.store.exists("valence/processed.json") {
             self.store
