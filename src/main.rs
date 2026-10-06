@@ -474,22 +474,75 @@ async fn main() -> Result<()> {
                             c.provenances.join("+")
                         );
                     }
+                    drop(rows);
                     if !dry_run {
-                        let p = reader::persist_recon(&recon, &rows)?;
-                        println!("✓ wrote {}", p.display());
+                        let (_, applied, retry) = reader::daily(&config, &store, now, since).await?;
+                        println!("✓ wrote reader/daily/{}.json", now.format("%Y-%m-%d"));
+                        for (slug, landed) in applied {
+                            println!("✓ applied answers on {slug}:");
+                            for l in landed {
+                                println!("  {} {} {}", l.outcome, l.title, l.detail.unwrap_or_default());
+                            }
+                        }
+                        if let Some(run) = retry {
+                            println!("✓ retried the held weekly run {}: {} item(s)", run.week, run.items.len());
+                        }
                     }
                 }
-                Some(cli::ReaderAction::Run { .. }) | Some(cli::ReaderAction::Apply) => {
-                    anyhow::bail!("reader run/apply land with the naming pass");
+                Some(cli::ReaderAction::Run { since_days, dry_run, force }) => {
+                    let now = chrono::Utc::now();
+                    let since = now - chrono::Duration::days(since_days);
+                    let run = reader::run_weekly(&config, &store, now, since, dry_run, force).await?;
+                    if let Some(reason) = &run.held_by_gate {
+                        println!("held by the usage gate ({reason}); the next daily recon retries within 48h");
+                        return Ok(());
+                    }
+                    println!(
+                        "{}: {} cluster(s) forwarded, {} named, {} rejected, {} foreign id(s) dropped, {} token(s)",
+                        run.week,
+                        run.forwarded.len(),
+                        run.named.items.len(),
+                        run.named.rejected.len(),
+                        run.named.dropped_ids,
+                        run.tokens
+                    );
+                    for n in &run.items {
+                        println!("  {} {:<16} {}", n.cluster, n.kind, n.title);
+                    }
+                    for r in &run.named.rejected {
+                        println!("  rejected: {r}");
+                    }
+                    if let Some(url) = &run.page_url {
+                        println!("✓ decision page {url}");
+                    }
+                }
+                Some(cli::ReaderAction::Apply) => {
+                    let applied = reader::apply_answers(chrono::Utc::now())?;
+                    if applied.is_empty() {
+                        println!("no answered reader page");
+                    }
+                    for (slug, landed) in applied {
+                        println!("✓ {slug}:");
+                        for l in landed {
+                            println!("  {} {} {}", l.outcome, l.title, l.detail.unwrap_or_default());
+                        }
+                    }
                 }
                 None => {
-                    let latest = reader::latest_recon();
+                    let v = reader::view();
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&latest)?);
-                    } else if let Some(r) = latest {
-                        println!("latest recon {} · {} clusters", r.at.format("%Y-%m-%d %H:%M"), r.clusters.len());
+                        println!("{}", serde_json::to_string_pretty(&v)?);
                     } else {
-                        println!("no recon yet: i-dream reader recon");
+                        match &v.recon {
+                            Some(r) => println!(
+                                "latest recon {} · {} clusters · {} weekly run(s) · {} page(s) awaiting you",
+                                r.at.format("%Y-%m-%d %H:%M"),
+                                r.clusters.len(),
+                                v.runs.len(),
+                                v.state.pending_pages.len()
+                            ),
+                            None => println!("no recon yet: i-dream reader recon"),
+                        }
                     }
                 }
             }

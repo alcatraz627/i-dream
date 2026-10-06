@@ -8,7 +8,7 @@
 
 use crate::config::expand_tilde;
 use crate::store::Store;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -420,11 +420,6 @@ fn load_signals(store: &Store, since: DateTime<Utc>) -> Vec<Evidence> {
             })
         })
         .collect()
-}
-
-/// The window the join reads: four weeks, so drift has a baseline.
-pub fn default_since(now: DateTime<Utc>) -> DateTime<Utc> {
-    now - Duration::days(28)
 }
 
 #[cfg(test)]
