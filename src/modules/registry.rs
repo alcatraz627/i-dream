@@ -281,7 +281,21 @@ pub struct Lane {
     pub store: &'static str,
     pub cadence_hours: u64,
     pub check: LaneCheck,
+    pub consumed: Consumed,
 }
+
+/// How a lane's reader proves it read: a file it touches, or the fact that
+/// nobody reads the lane any more.
+pub enum Consumed {
+    /// The consumer touches this file (relative to `$HOME`) each time it reads.
+    By(&'static str),
+    /// The consumer was retired; the lane is written and nobody reads it.
+    Retired(&'static str),
+    /// Read on demand by a person (a dashboard); there is no receipt to age.
+    OnDemand,
+}
+
+const DREAM_PASS_RETIRED: &str = "dream-pass retired 2026-09-18";
 
 /// Every lane the subconscious depends on. Adding a row here surfaces the lane
 /// in the health file and subjects it to the consumer-resolution test.
@@ -295,6 +309,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/subconscious/dreams/journal.jsonl",
         },
+        consumed: Consumed::By(".claude/subconscious/dreams/journal.jsonl"),
     },
     Lane {
         name: "atone",
@@ -305,6 +320,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/atone/events.jsonl",
         },
+        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
     },
     Lane {
         name: "affirm",
@@ -315,6 +331,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/affirm/events.jsonl",
         },
+        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
     },
     Lane {
         name: "ingest-queue",
@@ -323,6 +340,7 @@ pub const LANES: &[Lane] = &[
         store: ".claude/subconscious/dreams/ingest-queue",
         cadence_hours: 48,
         check: LaneCheck::BacklogAge,
+        consumed: Consumed::By(".claude/subconscious/dreams/ingest-queue/_processed"),
     },
     Lane {
         name: "pins",
@@ -333,6 +351,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/pinned/_decay-state.json",
         },
+        consumed: Consumed::By(".claude/pinned/_decay-state.json"),
     },
     Lane {
         name: "valence",
@@ -343,6 +362,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/subconscious/valence/processed.json",
         },
+        consumed: Consumed::By(".claude/subconscious/valence/processed.json"),
     },
     Lane {
         name: "metacog",
@@ -353,6 +373,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/subconscious/metacog/activity.jsonl",
         },
+        consumed: Consumed::By(".claude/subconscious/metacog/audits"),
     },
     Lane {
         name: "sessions-domain",
@@ -363,6 +384,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/sessions-domain/_seen.json",
         },
+        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
     },
     Lane {
         name: "memory-domain",
@@ -373,6 +395,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/memory-domain/_seen.json",
         },
+        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
     },
     Lane {
         name: "ipc",
@@ -381,6 +404,7 @@ pub const LANES: &[Lane] = &[
         store: ".claude-ipc/i-dream-events.jsonl",
         cadence_hours: 168,
         check: LaneCheck::Existence,
+        consumed: Consumed::Retired(DREAM_PASS_RETIRED),
     },
     Lane {
         name: "traces",
@@ -389,6 +413,7 @@ pub const LANES: &[Lane] = &[
         store: ".claude/subconscious/dreams/traces",
         cadence_hours: 0,
         check: LaneCheck::Retained,
+        consumed: Consumed::OnDemand,
     },
     Lane {
         name: "snapshots",
@@ -397,6 +422,7 @@ pub const LANES: &[Lane] = &[
         store: ".claude/subconscious/dreams/snapshots",
         cadence_hours: 0,
         check: LaneCheck::Retained,
+        consumed: Consumed::OnDemand,
     },
     Lane {
         name: "injections",
@@ -405,6 +431,7 @@ pub const LANES: &[Lane] = &[
         store: ".claude/i-dream/injections.jsonl",
         cadence_hours: 0,
         check: LaneCheck::Retained,
+        consumed: Consumed::By(".claude/i-dream/derived/firings-state.json"),
     },
     Lane {
         name: "feedback",
@@ -415,6 +442,7 @@ pub const LANES: &[Lane] = &[
         check: LaneCheck::Freshness {
             signal: ".claude/subconscious/dreams/insight-feedback.jsonl",
         },
+        consumed: Consumed::By(".claude/subconscious/dreams/reinforce-state.json"),
     },
 ];
 
@@ -567,6 +595,37 @@ pub struct LaneHealth {
     pub status: LaneStatus,
     pub reason: String,
     pub consumer: &'static str,
+    /// How long since the producer last wrote the store ("3h"), if it exists.
+    pub producer_age: Option<String>,
+    /// How long since the consumer last read, if it leaves a receipt.
+    pub consumer_age: Option<String>,
+    /// `live`, `stale`, `never`, `retired` or `on-demand`.
+    pub consumer_state: &'static str,
+}
+
+fn worse(a: LaneStatus, b: LaneStatus) -> LaneStatus {
+    let rank = |s| match s {
+        LaneStatus::Green => 0,
+        LaneStatus::Yellow => 1,
+        LaneStatus::Red => 2,
+    };
+    if rank(b) > rank(a) { b } else { a }
+}
+
+/// Age of the newest thing in a store: a file's mtime, or for a directory the
+/// newest non-bookkeeping child.
+fn store_age(path: &Path) -> Option<Duration> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_dir() {
+        return file_age(path);
+    }
+    let newest = std::fs::read_dir(path)
+        .ok()?
+        .flatten()
+        .filter(|e| !is_bookkeeping_entry(e))
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .max()?;
+    Some(SystemTime::now().duration_since(newest).unwrap_or(Duration::ZERO))
 }
 
 impl Lane {
@@ -628,11 +687,38 @@ impl Lane {
                 },
             },
         };
+        // The consumer half: a lane is only healthy if someone reads it.
+        let mut status = status;
+        let mut reason = reason;
+        let (consumer_age, consumer_state) = match &self.consumed {
+            Consumed::OnDemand => (None, "on-demand"),
+            Consumed::Retired(why) => {
+                status = worse(status, LaneStatus::Yellow);
+                reason.push_str(&format!(" · no consumer ({why})"));
+                (None, "retired")
+            }
+            Consumed::By(receipt) => match store_age(&home.join(receipt)) {
+                None => {
+                    status = worse(status, LaneStatus::Yellow);
+                    reason.push_str(" · consumer never ran");
+                    (None, "never")
+                }
+                Some(age) if self.cadence_hours > 0 && age > cadence * 2 => {
+                    status = worse(status, LaneStatus::Yellow);
+                    reason.push_str(&format!(" · last read {}", fmt_age(age)));
+                    (Some(fmt_age(age)), "stale")
+                }
+                Some(age) => (Some(fmt_age(age)), "live"),
+            },
+        };
         LaneHealth {
             lane: self.name,
             status,
             reason,
             consumer: self.consumer,
+            producer_age: store_age(&store_abs).map(fmt_age),
+            consumer_age,
+            consumer_state,
         }
     }
 }
@@ -1290,6 +1376,7 @@ mod lane_health_tests {
             store: "nope/missing.jsonl",
             cadence_hours: 24,
             check: LaneCheck::Existence,
+            consumed: Consumed::OnDemand,
         };
         // Absent store → red.
         assert_eq!(lane.evaluate(home).status, LaneStatus::Red);
@@ -1538,6 +1625,12 @@ mod retained_tests {
         let home = tempfile::tempdir().unwrap();
         let p = home.path().join(injections_lane().store);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        // A fresh read receipt, so only the cap decides the colour.
+        if let Consumed::By(receipt) = injections_lane().consumed {
+            let r = home.path().join(receipt);
+            std::fs::create_dir_all(r.parent().unwrap()).unwrap();
+            std::fs::write(r, "{}").unwrap();
+        }
         let cap = match retention_rule(injections_lane().store).unwrap().policy {
             RetentionPolicy::MaxLines(n) => n,
             _ => unreachable!(),
@@ -1548,5 +1641,49 @@ mod retained_tests {
         assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Yellow);
         std::fs::write(&p, lines(cap * 2)).unwrap();
         assert_eq!(injections_lane().evaluate(home.path()).status, LaneStatus::Red);
+    }
+}
+
+#[cfg(test)]
+mod consumer_tests {
+    use super::*;
+
+    fn lane(consumed: Consumed) -> Lane {
+        Lane {
+            name: "t",
+            producer: "p",
+            consumer: "c",
+            store: "s.jsonl",
+            cadence_hours: 24,
+            check: LaneCheck::Existence,
+            consumed,
+        }
+    }
+
+    #[test]
+    fn a_retired_consumer_says_so_and_is_not_green() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("s.jsonl"), "x").unwrap();
+        let h = lane(Consumed::Retired("dream-pass retired 2026-09-18")).evaluate(home.path());
+        assert_eq!(h.status, LaneStatus::Yellow);
+        assert_eq!(h.consumer_state, "retired");
+        assert!(h.reason.contains("no consumer (dream-pass retired"));
+        assert!(h.producer_age.is_some());
+        assert!(h.consumer_age.is_none());
+    }
+
+    #[test]
+    fn a_live_receipt_carries_its_age_and_a_missing_one_warns() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("s.jsonl"), "x").unwrap();
+        std::fs::write(home.path().join("read.json"), "{}").unwrap();
+        let live = lane(Consumed::By("read.json")).evaluate(home.path());
+        assert_eq!(live.status, LaneStatus::Green);
+        assert_eq!(live.consumer_state, "live");
+        assert!(live.consumer_age.is_some());
+
+        let never = lane(Consumed::By("missing.json")).evaluate(home.path());
+        assert_eq!(never.status, LaneStatus::Yellow);
+        assert_eq!(never.consumer_state, "never");
     }
 }

@@ -610,8 +610,12 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
         .max()
         .unwrap_or(0);
     for l in &r.lanes.lanes {
+        let read = match (l.consumer_state, &l.consumer_age) {
+            (_, Some(age)) => format!("read {age} ago"),
+            (state, None) => state.to_string(),
+        };
         out.push_str(&format!(
-            "  {:6} {:name_w$}  {:reason_w$}  → {}\n",
+            "  {:6} {:name_w$}  {:reason_w$}  → {} ({read})\n",
             lane_word(l.status),
             l.lane,
             l.reason,
@@ -714,6 +718,9 @@ mod tests {
             status,
             reason: reason.to_string(),
             consumer: "test",
+            producer_age: None,
+            consumer_age: None,
+            consumer_state: "on-demand",
         }
     }
 
