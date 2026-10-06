@@ -654,6 +654,11 @@ impl Lane {
                     let (warn, max) = over_cap_bounds(*cap as u64);
                     (classify_bound(n, warn, max), format!("{n} entries (keeps {cap})"))
                 }
+                Some(RetentionPolicy::MaxBytes(cap)) => {
+                    let mb = dir_bytes(&store_abs) / 1_048_576;
+                    let (warn, max) = over_cap_bounds(*cap / 1_048_576);
+                    (classify_bound(mb, warn, max), format!("{mb} MB (keeps {} MB)", cap / 1_048_576))
+                }
                 Some(RetentionPolicy::MaxAgeDays(days)) => match oldest_child_age(&store_abs) {
                     None => (LaneStatus::Green, "empty".to_string()),
                     Some(age) => {
@@ -803,6 +808,49 @@ pub enum RetentionPolicy {
     KeepNewest(usize),
     /// A JSONL file keeps its newest N lines; the older head archives.
     MaxLines(usize),
+    /// An archive directory stays under this many bytes: its oldest entries
+    /// go to the macOS trash, since an archive has nowhere further to archive.
+    MaxBytes(u64),
+}
+
+/// Total size of everything under `path`.
+fn dir_bytes(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return 0 };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    std::fs::read_dir(path)
+        .map(|rd| rd.flatten().map(|e| dir_bytes(&e.path())).sum())
+        .unwrap_or(0)
+}
+
+/// Trash the oldest children of `dir` (by name, which for dated buckets is
+/// age) until the directory is under `cap` bytes. Returns how many went.
+fn trash_dir_over_bytes(dir: &Path, cap: u64) -> usize {
+    let mut children: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+        Err(_) => return 0,
+    };
+    children.sort();
+    let mut total: u64 = children.iter().map(|c| dir_bytes(c)).sum();
+    let mut gone = 0;
+    for c in children {
+        if total <= cap {
+            break;
+        }
+        let size = dir_bytes(&c);
+        match std::process::Command::new("trash").arg(&c).status() {
+            Ok(s) if s.success() => {
+                total = total.saturating_sub(size);
+                gone += 1;
+            }
+            _ => {
+                warn!("retention: could not trash {}", c.display());
+                break;
+            }
+        }
+    }
+    gone
 }
 
 /// One bounded store. `store` is relative to `$HOME`, like `Lane::store`.
@@ -820,6 +868,11 @@ pub const RETENTION: &[RetentionRule] = &[
     RetentionRule {
         store: ".claude/subconscious/dreams/snapshots",
         policy: RetentionPolicy::KeepNewest(10),
+    },
+    // The snapshots' own overflow archive, capped at 2 GB (docs/29 3.4).
+    RetentionRule {
+        store: ".claude/subconscious/dreams/snapshots/_archived",
+        policy: RetentionPolicy::MaxBytes(2 * 1024 * 1024 * 1024),
     },
     RetentionRule {
         store: ".claude/i-dream/injections.jsonl",
@@ -930,6 +983,7 @@ pub fn run_retention_at(home: &Path) -> Vec<ReapReport> {
                 }
                 RetentionPolicy::KeepNewest(n) => reap_dir_keep_newest(&target, n, &date),
                 RetentionPolicy::MaxLines(n) => reap_jsonl_max_lines(&target, n, &date),
+                RetentionPolicy::MaxBytes(n) => trash_dir_over_bytes(&target, n),
             };
             // Janitor ledger (docs/25 item 12). Coarse by design: the reap
             // helpers report counts, not paths, so the token names the
@@ -938,7 +992,7 @@ pub fn run_retention_at(home: &Path) -> Vec<ReapReport> {
             // file-target rule (MaxLines) the bucket lives under the file's
             // PARENT — naming `<file>/_archived/<date>` would record a path
             // that can never exist.
-            if archived > 0 {
+            if archived > 0 && !matches!(r.policy, RetentionPolicy::MaxBytes(_)) {
                 let bucket_root = match r.policy {
                     RetentionPolicy::MaxLines(_) => Path::new(r.store)
                         .parent()
@@ -1670,5 +1724,25 @@ mod consumer_tests {
         let never = lane(Consumed::By("missing.json")).evaluate(home.path());
         assert_eq!(never.status, LaneStatus::Yellow);
         assert_eq!(never.consumer_state, "never");
+    }
+}
+
+#[cfg(test)]
+mod max_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn an_archive_over_its_byte_cap_loses_its_oldest_buckets_first() {
+        let d = tempfile::tempdir().unwrap();
+        for day in ["2026-01-01", "2026-01-02", "2026-01-03"] {
+            let b = d.path().join(day);
+            std::fs::create_dir_all(&b).unwrap();
+            std::fs::write(b.join("s.json"), vec![b'x'; 1000]).unwrap();
+        }
+        let gone = trash_dir_over_bytes(d.path(), 1500);
+        assert_eq!(gone, 2);
+        assert!(d.path().join("2026-01-03").exists(), "the newest bucket stays");
+        assert!(!d.path().join("2026-01-01").exists());
+        assert_eq!(trash_dir_over_bytes(d.path(), 1500), 0, "under the cap, nothing moves");
     }
 }
