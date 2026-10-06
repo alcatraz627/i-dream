@@ -7,14 +7,17 @@ struct DropdownView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var help: HoverHelp
     var openLogs: () -> Void = {}
-    /// The tallest the popover may grow; the groups scroll past it. Nil in
+    /// The popover's fixed height; the row list scrolls inside it. Nil in
     /// the probe, which renders the whole thing.
-    var maxHeight: CGFloat?
+    var height: CGFloat?
 
-    init(model: AppModel, maxHeight: CGFloat? = nil, openLogs: @escaping () -> Void = {}) {
+    static let width: CGFloat = 400
+    static let height: CGFloat = 540
+
+    init(model: AppModel, height: CGFloat? = nil, openLogs: @escaping () -> Void = {}) {
         self.model = model
         self.help = model.help
-        self.maxHeight = maxHeight
+        self.height = height
         self.openLogs = openLogs
     }
 
@@ -22,20 +25,20 @@ struct DropdownView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let r = model.record {
                 strip(r)
-                sinceLine(r)
-                band(r)
+                if r.since.anything && !r.since.first { sinceLine(r) }
                 ribbon(r)
-                if let maxHeight {
-                    ScrollView { groups(r) }.frame(maxHeight: max(160, maxHeight - 420))
+                if height != nil {
+                    ScrollView { groups(r) }.frame(maxHeight: .infinity)
                 } else {
                     groups(r)
                 }
             } else {
                 emptyState
+                if height != nil { Spacer(minLength: 0) }
             }
             footer
         }
-        .frame(width: 424)
+        .frame(width: Self.width, height: height, alignment: .top)
         .background(P.bg)
     }
 
@@ -58,8 +61,7 @@ struct DropdownView: View {
 
     private func strip(_ r: Record) -> some View {
         let mood = r.mood
-        return ZStack(alignment: .topLeading) {
-            Tide(level: mood.word == "calm" ? 0 : mood.word == "settled" ? 1 : mood.word == "restless" ? 2 : 3)
+        return VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 7) {
                     Dot(color: r.daemonRunning ? P.green : P.red)
@@ -84,13 +86,15 @@ struct DropdownView: View {
             }
             .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 9)
         }
+        .fixedSize(horizontal: false, vertical: true)
+        .background { Tide(level: mood.word == "calm" ? 0 : mood.word == "settled" ? 1 : mood.word == "restless" ? 2 : 3) }
         .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 
     private func metaLine(_ r: Record) -> String {
-        let prod = r.lastProductive.map { "productive \(ageText(r.now.timeIntervalSince($0))) ago" } ?? "never productive"
-        let cyc = r.lastCycle.map { "cycle \(ageText(r.now.timeIntervalSince($0))) ago" + (r.idleNow ? ", idle" : "") } ?? ""
-        return "\(r.version) · \(prod)" + (cyc.isEmpty ? "" : " · \(cyc)")
+        let ran = r.lastCycle.map { "ran \(ageText(r.now.timeIntervalSince($0))) ago" } ?? "never ran"
+        let prod = r.lastProductive.map { "found something \(ageText(r.now.timeIntervalSince($0))) ago" } ?? "never found anything"
+        return "\(ran) · \(prod)"
     }
 
     private func stripLink(_ icon: String, _ n: String, _ noun: String, _ d: Dive) -> some View {
@@ -107,8 +111,6 @@ struct DropdownView: View {
 
     @ViewBuilder private var readingAge: some View {
         switch model.reading {
-        case .fresh(let at):
-            Text("read \(ageText(Date().timeIntervalSince(at))) ago").font(F.mono).foregroundStyle(P.fg3)
         case .stale(let at, let why):
             Text("as of \(ageText(Date().timeIntervalSince(at))): \(why)").font(F.mono).foregroundStyle(P.amber).fixedSize(horizontal: false, vertical: true)
         default: EmptyView()
@@ -137,56 +139,23 @@ struct DropdownView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 
-    // MARK: band: small constellation + the two biggest movers
-
-    private func band(_ r: Record) -> some View {
-        HStack(spacing: 0) {
-            Constellation(patterns: r.patterns, associations: r.associations, focus: nil, big: false,
-                          onSelect: { model.open(Dive(pane: .patterns, scope: .pattern($0.id))) }, help: help)
-                .frame(minHeight: 84)
-            VStack(alignment: .leading, spacing: 3) {
-                SectionLabel(text: "biggest movers · 7d")
-                if r.movers.isEmpty {
-                    Text("no slug moved this week").font(F.meta).foregroundStyle(P.fg3)
-                }
-                ForEach(r.movers) { e in
-                    Button { model.open(Dive(pane: .landing, scope: .slug(e.slug))) } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 5) {
-                            Image(systemName: e.delta > 0 ? "arrow.up.right" : "arrow.down.right").font(.system(size: 9))
-                                .foregroundStyle(e.delta > 0 ? P.amber : (e.landing == nil ? P.fg3 : P.green))
-                            Text(e.slug).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 2)
-                            Text("\(e.delta > 0 ? "+" : "")\(e.delta)").font(F.mono).foregroundStyle(P.fg)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-                Text("\(r.patterns.count) of \(r.patternTotal) patterns drawn, \(plural(r.associations.count, "link"))").font(F.mono).foregroundStyle(P.fg3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.horizontal, 10).padding(.vertical, 7)
-            .frame(width: 196, alignment: .leading)
-            .overlay(alignment: .leading) { Rectangle().fill(P.hair).frame(width: 0.5) }
-        }
-        .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
-    }
-
     // MARK: ribbon
 
     private func ribbon(_ r: Record) -> some View {
         HStack(spacing: 0) {
             box("antenna.radiowaves.left.and.right", "Signals", r.sources.count, "sources",
-                "\(r.count(.fresh)) fresh · \(r.count(.stale)) stale · \(r.eventsTotal.formatted()) events",
+                r.count(.stale) + r.dead.count == 0 ? "all fresh" : "\(r.count(.stale)) stale · \(r.dead.count) dead",
                 sev: !r.dead.isEmpty ? .bad : r.count(.stale) > 0 ? .warn : .ok, Dive(pane: .ledger))
             Connector(moving: r.since.newClusters > 0)
             box("text.magnifyingglass", "Reader", r.findings.filter { $0.week == r.runs.first?.week }.count, "findings",
-                "\(r.runs.first?.week ?? "no run") · \(ageText(parseDate(r.runs.first?.at).map { r.now.timeIntervalSince($0) })) ago · \(r.awaitingItems) for you",
+                r.awaitingItems > 0 ? "\(r.awaitingItems) wait on you" : "ran \(ageText(parseDate(r.runs.first?.at).map { r.now.timeIntervalSince($0) })) ago",
                 sev: r.awaitingItems > 0 ? .wait : .ok, Dive(pane: .reader))
             Connector(moving: r.since.newLanded > 0)
             box("tray.and.arrow.down", "Landing", r.landed.count, "landed",
-                "\(r.filed.count) filed · \(r.armed.count) armed · \(r.interventions.live) live nudges",
+                "\(r.armed.count) armed",
                 sev: r.landed.isEmpty ? .none : .ok, Dive(pane: .landing))
         }
+        .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
     }
 
@@ -205,7 +174,7 @@ struct DropdownView: View {
                 }
                 Text(sub).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding(.horizontal, 9).padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 8).fill(P.card))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(P.hair, lineWidth: 0.5))
@@ -236,7 +205,7 @@ struct DropdownView: View {
                 }
                 Spacer(minLength: 6)
                 VStack(alignment: .trailing, spacing: 3) {
-                    if row.age != nil { AgeText(age: row.age, note: row.ageNote) }
+                    if row.age != nil { AgeText(age: row.age, note: nil) }
                     if let a = row.action, let url = row.url {
                         Button { model.openURL(url) } label: {
                             Text(a + " ›").font(F.meta.weight(.semibold)).foregroundStyle(P.blue)
@@ -278,9 +247,9 @@ struct DropdownView: View {
                 .buttonStyle(.plain).foregroundStyle(P.fg2)
             readingAge
             Spacer(minLength: 6)
-            Text(help.text.isEmpty ? "click any row to open it" : help.text)
+            Text(help.text)
                 .font(F.meta).italic().foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 260, alignment: .trailing).multilineTextAlignment(.trailing)
+                .frame(maxWidth: 220, alignment: .trailing).multilineTextAlignment(.trailing)
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .overlay(alignment: .top) { Rectangle().fill(P.hair).frame(height: 0.5) }

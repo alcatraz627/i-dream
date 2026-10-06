@@ -31,7 +31,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         popover.behavior = .transient
         popover.animates = false
         popover.delegate = self
-        popover.contentViewController = NSHostingController(rootView: DropdownView(model: model, maxHeight: (NSScreen.main?.visibleFrame.height ?? 900) - 30, openLogs: { [weak self] in self?.openLogs() }))
+        // A fixed size, so the popover never grows to the height of the
+        // screen; the row list scrolls inside it instead.
+        let host = NSHostingController(rootView: DropdownView(model: model, height: DropdownView.height, openLogs: { [weak self] in self?.openLogs() }))
+        host.sizingOptions = []
+        popover.contentViewController = host
+        popover.contentSize = NSSize(width: DropdownView.width, height: DropdownView.height)
+        NSApp.mainMenu = mainMenu()
 
         model.openDashboard = { [weak self] in self?.showDashboard() }
         model.$record.combineLatest(model.$reading)
@@ -96,6 +102,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         return m
     }
 
+    /// The menu bar the app shows while the dashboard is open. Cmd+W and
+    /// Cmd+Q only work because these items carry them as key equivalents.
+    private func mainMenu() -> NSMenu {
+        let bar = NSMenu()
+        func top(_ title: String, _ items: [NSMenuItem]) {
+            let host = NSMenuItem()
+            let m = NSMenu(title: title)
+            items.forEach(m.addItem)
+            host.submenu = m
+            bar.addItem(host)
+        }
+        func item(_ t: String, _ a: Selector?, _ k: String, _ target: AnyObject? = nil) -> NSMenuItem {
+            let i = NSMenuItem(title: t, action: a, keyEquivalent: k)
+            i.target = target
+            return i
+        }
+        top("i-dream", [
+            item("About i-dream", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), ""),
+            .separator(),
+            item("Hide i-dream", #selector(NSApplication.hide(_:)), "h"),
+            .separator(),
+            item("Quit i-dream", #selector(NSApplication.terminate(_:)), "q"),
+        ])
+        top("File", [
+            item("Refresh", #selector(menuRefresh), "r", self),
+            .separator(),
+            item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
+        ])
+        top("Edit", [
+            item("Copy", #selector(NSText.copy(_:)), "c"),
+            item("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ])
+        let win = [
+            item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+            item("Zoom", #selector(NSWindow.performZoom(_:)), ""),
+        ]
+        top("Window", win)
+        NSApp.windowsMenu = bar.items.last?.submenu
+        return bar
+    }
+
     @objc private func menuDashboard() { model.pane = .flow; showDashboard() }
     @objc private func menuRefresh() { model.refresh() }
     @objc private func menuLogs() { openLogs() }
@@ -125,6 +172,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         }
         model.visible = true
         model.logOpen("dashboard")
+        // While the window is open the app is a regular app: Dock icon,
+        // app-switcher entry, and its own menu bar.
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -137,5 +187,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     func windowWillClose(_ note: Notification) {
         model.markLooked()
         model.visible = popover.isShown
+        // Back to a menu bar item only once the window has gone.
+        DispatchQueue.main.async { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    /// Clicking the Dock icon with the window closed reopens it.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { showDashboard() }
+        return true
     }
 }

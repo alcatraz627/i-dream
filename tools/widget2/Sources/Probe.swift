@@ -51,7 +51,7 @@ enum Probe {
 
         // Status item and dropdown, first look.
         renderStatusItem(m.record, m.reading, appearance, out.appendingPathComponent("status-item-\(tag).png"))
-        render(DropdownView(model: m), appearance, out.appendingPathComponent("dropdown-\(tag).png"))
+        render(DropdownView(model: m, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-\(tag).png"))
 
         // The owner closes it; the next open compares against that look.
         m.markLooked()

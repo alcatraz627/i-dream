@@ -45,7 +45,8 @@ enum StatusFace {
     /// owner: an amber dot and the count of items. Broken: a red dot, and the
     /// number is the age of what broke.
     static func title(_ r: Record?, reading: ReadingState) -> NSAttributedString {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        // The menu bar's own size, so the digits sit level with the neighbours.
+        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
         let out = NSMutableAttributedString()
         func text(_ s: String) { out.append(NSAttributedString(string: s, attributes: [.font: font])) }
         func pip(_ c: NSColor) {

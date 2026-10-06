@@ -55,8 +55,8 @@ cat > "$STAGE/Contents/Info.plist" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>i-dream bar</string>
-  <key>CFBundleDisplayName</key><string>i-dream bar</string>
+  <key>CFBundleName</key><string>i-dream</string>
+  <key>CFBundleDisplayName</key><string>i-dream</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
