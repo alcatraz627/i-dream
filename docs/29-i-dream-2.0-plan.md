@@ -2,7 +2,7 @@
 
 <!-- sessions: span-rot-7c@2026-10-06 -->
 
-Status: **PROPOSAL, revision 2, awaiting owner ruling on the decision page** (`http://localhost:5106/dp/idream-2-0/`, D1 to D14 plus the widget mocks M1 to M4).
+Status: **RULED 2026-10-06 (§8); revision 3; Phase 1 may start. Second visual round in progress.** (`http://localhost:5106/dp/idream-2-0/`, D1 to D14 plus the widget mocks M1 to M4).
 Written 2026-10-06 after the 10-03 span audit and a same-day recon; revised the same day after a skeptical review (`.claude/output/20261006-1145-skeptical-review/review.md`, 49 findings, dispositions in §10). v1 is preserved as branch `v1` and tag `v1.0` on origin. Breaking changes are allowed; nothing here keeps a v1 file format, store path or CLI flag alive except where §6 says the parity ledger keeps it.
 
 Companion evidence: `.claude/output/20261003-audit/` (state), `.claude/output/20261003-span-audit/` (timeline, fixes, handoff), `.claude/output/20261006-plan-2.0/ui-siblings-recon.md` (switchboard-mac and sys-monitor), `.claude/output/20261006-plan-2.0/mocks/` (widget mocks), `.claude/output/20260707-widget-redo/sibling-ideas.md` (20 borrowable UI mechanisms, still valid).
@@ -228,11 +228,27 @@ Cost today (counted tokens from the logs, X3): 10-04 33,716; 10-05 92,846, of wh
 
 ---
 
-## 8. Decision bundle
+## 8. Decision bundle: rulings (owner, 2026-10-06, decision page idream-2-0)
 
-Lives on the decision page `http://localhost:5106/dp/idream-2-0/`. Defaults applied unless flipped: D1 retire metacog and introspection, keep intuition · D2 SessionStart = brief + evidenced intentions · D3 drop HUD, digest, frequency, Journal · D4 land on page + backlog + widget only · D5 leave evictions · D6 narrow git untrack per the `.gitignore` note · D7 weekly Sunday with catch-up · D8 checkpoints + skill usage now · D9 hook server + weekly reader · D10 popover + SwiftUI · **D11 cut the self-loop first** · **D12 retire the atone TL;DR injector** · **D13 supersede the docs/24 wrong-directions explicitly** · **D14 widget after the reader's first two runs**. Plus M1 to M4, the mock picks.
+| id | ruling | note |
+|---|---|---|
+| D1 | **c, keep metacog, introspection and intuition** | "the regular agent usage and run IS the biggest input you're ever gonna get": i-dream must also extract from the agent's internal thoughts, notes and ideas, not only outward signals, and must not depend on explicit owner signals about what to dream on. Phase 3.1 is rewritten: the three modules stay as extractors over classified interactive transcripts, feeding the reader; they do not inject. |
+| D2 | a | SessionStart = project brief + evidenced intentions |
+| D3 | a | drop HUD, Today digest, Change Frequency, Journal tab |
+| D4 | a | land on the decision page, backlog, widget only |
+| D5 | a | leave evictions |
+| D6 | a | narrow git untrack per the `.gitignore` note; 08-16 ruling stands |
+| D7 | **a, with a two-tier cadence** | a **daily deterministic (or sonnet at most) recon** that indexes and structures, so the weekly agent does not go in blind; the **weekly deep review runs Wednesday**, not Sunday (usage resets Monday; a Sunday run eats the saved budget). The weekly agent may go deep, may use `lm` freely with a usage guide, and **may change its own process** when it finds the structure lacking. |
+| D8 | a | checkpoints + skill usage now; sub-agents and goals when a source exists |
+| D9 | a | hook server + weekly reader; no idle LLM cycles. With D1c the three modules run inside the daily and weekly recon, not idle cycles. |
+| D10 | a | NSPopover + SwiftUI, right-click NSMenu |
+| M1 | **d** | A's groups with B's ribbon on top (taller). B alone: disagree. |
+| M2 | a | build the four-pane window; the owner calls the current mock "the base of good" and wants it more engaging and animated |
+| M3 | a, and more | F1 hypnogram chosen for the dropdown; all three fit somewhere; F1 is the time dive, F2 the associations dive, F3 the mood (least interactive, most pleasing). All three to be interactive and to open into specifics. |
+| M4 | **c** | glyph plus one number from the band; the icon itself must be better, the dot vertically centred, and the item may carry more information |
+| D11–D14 | **not on the submitted page** (added after the owner opened it). Applied as defaults: D11 cut the self-loop first; D13 2.0 supersedes the docs/24 wrong-directions (implied by the rulings above); D14 widget work continues in parallel (the owner asked for more mocks). **D12, the atone TL;DR injector, is still open** and asked in chat. |
 
----
+Second visual round requested: more dashboard and fanciful mocks, animated and interactive, coherent with the system; a better status glyph.
 
 ## 9. What happens next
 
