@@ -135,6 +135,28 @@ Decommission the current binary first (quit it; it is not running anyway). Build
 
 Deleted surfaces (need the ruling in D3): HUD, Today-digest submenu, Change-Frequency submenu, Browse/Journal/Search tabs as they exist today (Browse becomes the Signals drill-down; Search folds into it).
 
+**Borrowed from the siblings** (full recon with file:line in `.claude/output/20261006-plan-2.0/ui-siblings-recon.md`; the two projects share no code, so everything is copied, not imported):
+
+| piece | take from | why it fits i-dream |
+|---|---|---|
+| `ReadingState` (loading, fresh, stale, failed, unavailable) and its renderer, "absent is not failed", amber only past a per-reading threshold, old value stays on screen | switchboard `AppSupport.swift:442`, `States.swift:69-110` | every i-dream row is a reading with an age; this is the data-age law from U2/U3 made into one type |
+| Feed contract probe: a `usedFields` list that fails the build when `status --json` drops a field | switchboard `Sessions.swift:51-69` | the widget's only data path is one JSON contract; a silent rename must not become a blank row |
+| Status item: template symbol, image-only when quiet, one 6 pt dot, red for error, yellow for "waiting on you"; warnings never colour it | switchboard `PolicyPanel.swift:1520-1528`, `Hover.swift:224` | U11; the dot is the reader's "items awaiting you" signal |
+| Information order: status strip, then the single most urgent item as a hero, then one-line rows grouped by **who has the next move**; text wraps, never an ellipsis cut (owner ruling) | switchboard `hub/docs/mocks/20261002-dropdown-spec.md` | the dropdown groups become You (reader items), System (stale source, red lane), Quiet |
+| Subprocess runner that drains both pipes off-thread, caps time, SIGTERM then SIGKILL | switchboard `Switchboard.swift:432-482` | every `i-dream … --json` call goes through it; U8 cannot recur |
+| Design kit files to copy: `DesignKit.swift`, `Palette.swift`, `Scale.swift`, `States.swift`, `Motion.swift` | switchboard `Sources/` | one closed green/amber/red scale, S/M/L text scale through `sw()`/`si()`/`sc()`, four motion verbs with Reduce-Motion still forms |
+| Colour only on evidence, from one function shared by glyph, panel and notification | sys-monitor `docs/14-panel-spec.md` 2.1–2.2 | a lane is red because its consumer is dead, not because a percent crossed a line |
+| `Metric<T>` three-state result (measuring, ok, unavailable) drawn as a dash, never a zero | sys-monitor `Model/Metric.swift` | "0 insights" and "no reader has run" must look different |
+| Two-tier cadence: cheap while closed, full only while open; suspend on display sleep and lock | sys-monitor `SamplingCoordinator.swift`, `AppDelegate.swift:199-226` | the v1 widget polled `domain list` every 30 s forever |
+| Notch-aware width profile and occlusion pause for the status item | sys-monitor `GlyphRenderer.swift:64-125`, `StatusItemController.swift:171-187` | the owner's built-in display is notched |
+| Headless render probes for every state in dark and light, plus a demo-states mode that plants one failure per section | switchboard `architecture.md` "Headless checks"; sys-monitor `--probe-panel` | the acceptance screenshots come from these, not from a hand-driven session |
+| LaunchAgent with `RunAtLoad` and `KeepAlive {SuccessfulExit:false}`; ad hoc signature with the bundle id in the designated requirement so grants survive rebuilds; `--status` with a source hash and a STALE warning against the installed copy | switchboard `build.sh:81-90, 113-125`; sys-monitor `build.sh:120-130` | U5; and the installed-binary drift that bit the daemon |
+| Hover text to a footer status line, since tooltips are suppressed in a non-activating accessory | sys-monitor `PanelRootView.swift:4-41` | only if the shell is a panel, see D10 |
+
+Traps to design out from day one, each with a sibling that paid for it: god files (`App.swift` 2070 lines, `PanelRootView.swift` 2135), a user zoom built on `scaleEffect` (removed after four failures, `sys-monitor/docs/15-zoom.md`), `.resizable` borderless panels (AppKit double-click zoom), a probe that asserts only one direction of a fit, light-only palette hexes with a hard-coded dark hover card, FSEvents on view teardown, SwiftUI inside `NSMenuItem.view`.
+
+**Open shell choice (D10).** The 2026-07 review ruled "keep the NSMenu, diet it" when the only siblings were sys-monitor's panel and claude-instances' menu. Switchboard, the owner's newest widget (October 2026), settled on a transient `NSPopover` hosting SwiftUI at 424 pt, with a hover card for glance and a popover for depth, and an `NSMenu` only as the right-click escape hatch. A popover gives live rows, `ReadingState` renders and the wrap-never-ellipsis rule for free; an `NSMenu` freezes text at open and cannot wrap. My lean is the switchboard shape: popover for the dropdown, right-click `NSMenu` with Open Dashboard, Logs, Quit, and the dashboard window for depth.
+
 **Acceptance**: the owner opens the menu and, without the CLI, can answer: is the daemon alive and when did it last work; which signal source is stale; what did the reader find this week and what is waiting on me; is anything I was warned about actually improving. Each answered from a screenshot in dark and light, cited in the build record.
 
 ### Phase 5: Keep-bar (week 4 after Phase 2 lands)
@@ -209,6 +231,8 @@ Current widget rows, each with a 2.0 disposition. A row marked *drop* needs the 
 | D6 | Snapshot archive cap 2 GB and i-dream state untracked in `~/.claude` git | **yes** | §3.4 |
 | D7 | Reader cadence weekly Sunday, usage-gated | **yes** | matches atone-consolidate |
 | D8 | Four new domains (checkpoints, skill-usage, sub-agents, goals) in Phase 2 | **yes** | the owner's 10-06 ask |
+
+Open, no default: **D10** the dropdown shell, `NSPopover` + SwiftUI (switchboard, my lean) or a dieted `NSMenu` (the 2026-07 verdict); see Phase 4.
 
 Open, no default: **D9** whether the daemon keeps running idle dream cycles at all between weekly reader runs, or becomes a pure hook server plus the weekly job. My lean: hook server plus weekly job, with SWS extraction moving into the reader; it removes the last unscheduled LLM spend. Your call.
 
