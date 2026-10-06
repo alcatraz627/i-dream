@@ -7,16 +7,15 @@ struct DropdownView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var help: HoverHelp
     var openLogs: () -> Void = {}
-    /// The popover's fixed height; the row list scrolls inside it. Nil in
+    /// The popover's starting height; the row list scrolls inside it. Nil in
     /// the probe, which renders the whole thing.
     var height: CGFloat?
 
     static let width: CGFloat = 424
     static let height: CGFloat = 540
-    static let heightKey = "ui.dropdownHeight"
 
     /// The height the owner dragged the popover to; the grip at the bottom sets it.
-    @AppStorage(DropdownView.heightKey) private var savedHeight: Double = Double(DropdownView.height)
+    @AppStorage("ui.dropdownHeight") private var savedHeight: Double = Double(DropdownView.height)
     @State private var dragStart: Double?
 
     private var maxHeight: Double { Double((NSScreen.main?.visibleFrame.height ?? 900) - 60) }
@@ -34,8 +33,9 @@ struct DropdownView: View {
             if let r = model.record {
                 strip(r)
                 sinceLine(r)
-                band(r)
-                ribbon(r)
+                // Pinned to their natural height so a resize only grows the row list.
+                band(r).fixedSize(horizontal: false, vertical: true)
+                ribbon(r).fixedSize(horizontal: false, vertical: true)
                 if height != nil {
                     ScrollView { groups(r) }.frame(maxHeight: .infinity)
                 } else {
@@ -120,9 +120,9 @@ struct DropdownView: View {
     }
 
     private func metaLine(_ r: Record) -> String {
-        let ran = r.lastCycle.map { "ran \(ageText(r.now.timeIntervalSince($0))) ago" } ?? "never ran"
-        let prod = r.lastProductive.map { "found something \(ageText(r.now.timeIntervalSince($0))) ago" } ?? "never found anything"
-        return "\(ran) · \(prod)"
+        let prod = r.lastProductive.map { "productive \(ageText(r.now.timeIntervalSince($0))) ago" } ?? "never productive"
+        let cyc = r.lastCycle.map { "cycle \(ageText(r.now.timeIntervalSince($0))) ago" + (r.idleNow ? ", idle" : "") } ?? ""
+        return "\(r.version) · \(prod)" + (cyc.isEmpty ? "" : " · \(cyc)")
     }
 
     private func stripLink(_ icon: String, _ n: String, _ noun: String, _ d: Dive) -> some View {
@@ -188,7 +188,7 @@ struct DropdownView: View {
                                 .foregroundStyle(e.delta > 0 ? P.amber : (e.landing == nil ? P.fg3 : P.green))
                             Text(e.slug).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
                             Spacer(minLength: 2)
-                            Text(signed(e.delta)).font(F.mono).foregroundStyle(P.fg)
+                            Text("\(e.delta > 0 ? "+" : "")\(e.delta)").font(F.mono).foregroundStyle(P.fg)
                         }
                     }
                     .buttonStyle(.plain)
@@ -197,10 +197,9 @@ struct DropdownView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
-            .frame(width: 186, alignment: .leading)
+            .frame(width: 196, alignment: .leading)
             .overlay(alignment: .leading) { Rectangle().fill(P.hair).frame(width: 0.5) }
         }
-        .fixedSize(horizontal: false, vertical: true)
         .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 
@@ -209,18 +208,17 @@ struct DropdownView: View {
     private func ribbon(_ r: Record) -> some View {
         HStack(spacing: 0) {
             box("antenna.radiowaves.left.and.right", "Signals", r.sources.count, "sources",
-                r.count(.stale) + r.dead.count == 0 ? "all fresh" : "\(r.count(.stale)) stale · \(r.dead.count) dead",
+                "\(r.count(.fresh)) fresh · \(r.count(.stale)) stale · \(r.eventsTotal.formatted()) events",
                 sev: !r.dead.isEmpty ? .bad : r.count(.stale) > 0 ? .warn : .ok, Dive(pane: .ledger))
             Connector(moving: r.since.newClusters > 0)
             box("text.magnifyingglass", "Reader", r.findings.filter { $0.week == r.runs.first?.week }.count, "findings",
-                r.awaitingItems > 0 ? "\(r.awaitingItems) wait on you" : "ran \(ageText(parseDate(r.runs.first?.at).map { r.now.timeIntervalSince($0) })) ago",
+                "\(r.runs.first?.week ?? "no run") · \(ageText(parseDate(r.runs.first?.at).map { r.now.timeIntervalSince($0) })) ago · \(r.awaitingItems) for you",
                 sev: r.awaitingItems > 0 ? .wait : .ok, Dive(pane: .reader))
             Connector(moving: r.since.newLanded > 0)
             box("tray.and.arrow.down", "Landing", r.landed.count, "landed",
-                "\(r.armed.count) armed",
+                "\(r.filed.count) filed · \(r.armed.count) armed · \(r.interventions.live) live nudges",
                 sev: r.landed.isEmpty ? .none : .ok, Dive(pane: .landing))
         }
-        .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
     }
 
@@ -239,7 +237,7 @@ struct DropdownView: View {
                 }
                 Text(sub).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 9).padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 8).fill(P.card))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(P.hair, lineWidth: 0.5))
@@ -270,7 +268,7 @@ struct DropdownView: View {
                 }
                 Spacer(minLength: 6)
                 VStack(alignment: .trailing, spacing: 3) {
-                    if row.age != nil { AgeText(age: row.age, note: nil) }
+                    if row.age != nil { AgeText(age: row.age, note: row.ageNote) }
                     if let a = row.action, let url = row.url {
                         Button { model.openURL(url) } label: {
                             Text(a + " ›").font(F.meta.weight(.semibold)).foregroundStyle(P.blue)
@@ -306,15 +304,15 @@ struct DropdownView: View {
 
     private var footer: some View {
         HStack(spacing: 14) {
-            Button { model.open(Dive(pane: .flow)) } label: { Label("Dashboard", systemImage: "moon.zzz").font(F.meta) }
+            Button { model.open(Dive(pane: .flow)) } label: { Label("Dashboard", systemImage: "moon.zzz").font(F.meta).fixedSize() }
                 .buttonStyle(.plain).foregroundStyle(P.fg2)
-            Button(action: openLogs) { Label("Logs", systemImage: "text.alignleft").font(F.meta) }
+            Button(action: openLogs) { Label("Logs", systemImage: "text.alignleft").font(F.meta).fixedSize() }
                 .buttonStyle(.plain).foregroundStyle(P.fg2)
             if help.text.isEmpty { readingAge }
             Spacer(minLength: 6)
             // One short line at a small size, so a hover never changes the footer's height.
             Text(help.text.isEmpty ? "click a row to open it" : help.text)
-                .font(.system(size: 10)).foregroundStyle(P.fg3).fixedSize()
+                .font(.system(size: 10)).italic().foregroundStyle(P.fg3).fixedSize()
         }
         .padding(.horizontal, 14)
         .frame(height: 32)

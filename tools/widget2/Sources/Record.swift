@@ -267,7 +267,6 @@ struct Record {
 }
 
 func plural(_ n: Int, _ noun: String) -> String { "\(n) \(noun)\(n == 1 ? "" : "s")" }
-func signed(_ n: Int) -> String { n > 0 ? "+\(n)" : "\(n)" }
 
 // MARK: - icons for every named thing (docs/30 §6)
 
@@ -530,8 +529,8 @@ enum RecordBuilder {
         }
         for e in r.effects where e.gateCandidate {
             rows.append(Row(
-                id: "gate-" + e.slug, icon: "lock.shield", title: "Needs a hook: \(e.slug)",
-                detail: "\(e.total) events · \(signed(e.last7 - e.prior7)) this week",
+                id: "gate-" + e.slug, icon: "lock.shield", title: "Gate candidate: \(e.slug)",
+                detail: "\(e.total) events in all, \(e.last7) this week against \(e.prior7) the week before; past 20 events a slug needs a hook, not more text",
                 sev: .wait, age: e.last.map { r.now.timeIntervalSince($0) }, ageNote: "last event",
                 dive: Dive(pane: .landing, scope: .slug(e.slug))))
         }
@@ -564,8 +563,8 @@ enum RecordBuilder {
                             detail: s.log?.last_error ?? (s.log?.file ?? ""), sev: .bad, dive: Dive(pane: .flow)))
         }
         if s.build?.daemon_stale == true || s.build?.binary_behind_source == true {
-            rows.append(Row(id: "build", icon: "hammer", title: "Daemon build out of date",
-                            detail: "reinstall to update", sev: .warn, dive: Dive(pane: .flow)))
+            rows.append(Row(id: "build", icon: "hammer", title: "The daemon runs an older build than the source",
+                            detail: "rebuild and reinstall: scripts/install.sh", sev: .warn, dive: Dive(pane: .flow)))
         }
         for j in s.jobs where !j.loaded || (j.last_exit ?? 0) != 0 {
             rows.append(Row(id: "job-" + j.label, icon: "calendar.badge.exclamationmark",
@@ -574,15 +573,14 @@ enum RecordBuilder {
         }
         let worse = r.worsening.filter { !$0.gateCandidate }
         if worse.count > 2 {
-            let top = worse.max { $0.delta < $1.delta }
-            rows.append(Row(id: "worse-many", icon: "arrow.up.right", title: "\(plural(worse.count, "mistake")) rising this week",
-                            detail: top.map { "most: \($0.slug) +\($0.delta)" } ?? "",
+            rows.append(Row(id: "worse-many", icon: "arrow.up.right", title: "\(plural(worse.count, "slug")) worsening this week",
+                            detail: worse.map { "\($0.slug) +\($0.delta)" }.joined(separator: " · ") + " · " + (worse.allSatisfy { $0.landing == nil } ? "none credited to a landing yet" : "some credited"),
                             sev: .warn, age: worse.compactMap(\.last).max().map { r.now.timeIntervalSince($0) }, ageNote: "last event",
                             dive: Dive(pane: .landing, scope: .landingGroup("worsening"))))
         }
         for e in worse where worse.count <= 2 {
-            rows.append(Row(id: "worse-" + e.slug, icon: "arrow.up.right", title: "Rising: \(e.slug)",
-                            detail: "\(e.last7) this week, \(e.prior7) last week",
+            rows.append(Row(id: "worse-" + e.slug, icon: "arrow.up.right", title: "\(e.slug) is worsening",
+                            detail: "\(e.last7) this week against \(e.prior7) the week before · \(e.landing.map { "credited to \($0)" } ?? e.recentLanding ?? "no landing")",
                             sev: .warn, age: e.last.map { r.now.timeIntervalSince($0) }, ageNote: "last event",
                             dive: Dive(pane: .landing, scope: .slug(e.slug))))
         }
@@ -593,26 +591,25 @@ enum RecordBuilder {
         var rows: [Row] = []
         if r.improving.count > 2 {
             let unattributed = r.improving.allSatisfy { $0.landing == nil }
-            let top = r.improving.min { $0.delta < $1.delta }
-            rows.append(Row(id: "better-many", icon: "arrow.down.right", title: "\(plural(r.improving.count, "mistake")) falling this week",
-                            detail: top.map { "most: \($0.slug) \($0.delta)" } ?? "",
+            rows.append(Row(id: "better-many", icon: "arrow.down.right", title: "\(plural(r.improving.count, "slug")) easing this week",
+                            detail: r.improving.map { "\($0.slug) \($0.delta)" }.joined(separator: " · ") + (unattributed ? " · all unattributed" : ""),
                             sev: unattributed ? .none : .ok, age: r.improving.compactMap(\.last).max().map { r.now.timeIntervalSince($0) }, ageNote: "last event",
                             dive: Dive(pane: .landing, scope: .landingGroup("easing")), dim: unattributed))
         }
         for e in r.improving where r.improving.count <= 2 {
-            rows.append(Row(id: "better-" + e.slug, icon: "arrow.down.right", title: "Falling: \(e.slug)",
-                            detail: "\(e.last7) this week, \(e.prior7) last week",
+            rows.append(Row(id: "better-" + e.slug, icon: "arrow.down.right", title: "\(e.slug) is easing",
+                            detail: "\(e.last7) this week against \(e.prior7) the week before · " + (e.landing.map { "credited to \($0)" } ?? e.recentLanding ?? "unattributed"),
                             sev: e.landing == nil ? .none : .ok, age: e.last.map { r.now.timeIntervalSince($0) }, ageNote: "last event",
                             dive: Dive(pane: .landing, scope: .slug(e.slug)), dim: e.landing == nil))
         }
         let fresh = r.count(.fresh)
         rows.append(Row(id: "fresh", icon: "checkmark.circle",
                         title: "\(fresh) of \(r.sources.count) sources fresh",
-                        detail: "\(r.eventsTotal.formatted()) events read",
+                        detail: "\(r.eventsTotal.formatted()) events in the reader's window" + (r.count(.idle) > 0 ? " · \(r.count(.idle)) idle" : ""),
                         sev: .ok, dive: Dive(pane: .ledger, scope: .sourceState(.fresh))))
         if !r.retired.isEmpty {
             rows.append(Row(id: "retired", icon: "archivebox", title: plural(r.retired.count, "retired source"),
-                            detail: "not counted",
+                            detail: r.retired.map(\.id).joined(separator: ", ") + " · excluded from every total",
                             sev: .none, dive: Dive(pane: .ledger, scope: .sourceState(.retired)), dim: true))
         }
         return rows
