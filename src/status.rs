@@ -38,6 +38,132 @@ pub struct StatusReport {
     pub log: Option<LogSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<BuildSection>,
+    /// What the reader last found and what waits on the owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reader: Option<ReaderSummary>,
+    /// Every external domain with what the reader read from it and when.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domains: Option<Vec<DomainRow>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interventions: Option<InterventionSummary>,
+    /// Recurring mistake slugs with their 7-day movement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflect: Option<Vec<crate::reflect::SlugTrend>>,
+    /// Section name to the file or command it is read from. Every section of
+    /// the report names one, so no surface shows a number of unknown origin.
+    pub sources: std::collections::BTreeMap<&'static str, &'static str>,
+}
+
+#[derive(Serialize)]
+pub struct ReaderSummary {
+    pub last_recon: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_weekly: Option<chrono::DateTime<chrono::Utc>>,
+    /// Clusters in the latest recon.
+    pub clusters: usize,
+    /// Decision pages handed to the owner and not yet answered, with URLs.
+    pub awaiting: Vec<AwaitingPage>,
+    /// Items the latest weekly run put on its page.
+    pub latest_items: usize,
+    pub latest_week: Option<String>,
+    /// Outcomes applied so far: filed, armed, declined, noted.
+    pub landed: std::collections::BTreeMap<String, usize>,
+    /// Set while a weekly run waits on the usage gate.
+    pub weekly_held_since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Serialize)]
+pub struct AwaitingPage {
+    pub slug: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct DomainRow {
+    pub name: String,
+    pub events_in_window: usize,
+    pub newest: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Serialize)]
+pub struct InterventionSummary {
+    pub live: usize,
+    pub candidate: usize,
+    pub shadow: usize,
+    /// Would-fire matches recorded in the last seven days.
+    pub fired_7d: usize,
+}
+
+fn gather_reader() -> ReaderSummary {
+    let state = crate::reader::ReaderState::load();
+    let recon = crate::reader::latest_recon();
+    let runs = crate::reader::all_runs();
+    let mut landed = std::collections::BTreeMap::new();
+    for r in &runs {
+        for l in &r.landed {
+            *landed.entry(l.outcome.clone()).or_insert(0) += 1;
+        }
+    }
+    ReaderSummary {
+        last_recon: state.last_recon,
+        last_weekly: state.last_weekly,
+        clusters: recon.as_ref().map(|r| r.clusters.len()).unwrap_or(0),
+        awaiting: state
+            .pending_pages
+            .iter()
+            .map(|s| AwaitingPage {
+                url: format!("http://localhost:5106/dp/{s}/"),
+                slug: s.clone(),
+            })
+            .collect(),
+        latest_items: runs.first().map(|r| r.items.len()).unwrap_or(0),
+        latest_week: runs.first().map(|r| r.week.clone()),
+        landed,
+        weekly_held_since: state.weekly_pending_since,
+    }
+}
+
+fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
+    let items = crate::interventions::load_interventions(&home.join(".claude/i-dream/interventions.json"))
+        .unwrap_or_default();
+    let count = |s: &str| items.iter().filter(|i| i.state == s).count();
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+    let fired_7d = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| {
+            v.get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .is_some_and(|t| t.with_timezone(&chrono::Utc) > cutoff)
+        })
+        .count();
+    InterventionSummary {
+        live: count("live"),
+        candidate: count("candidate"),
+        shadow: count("shadow"),
+        fired_7d,
+    }
+}
+
+/// Where each report section comes from.
+fn sources() -> std::collections::BTreeMap<&'static str, &'static str> {
+    [
+        ("daemon", "~/.claude/subconscious/daemon.pid + process check"),
+        ("state", "~/.claude/subconscious/state.json"),
+        ("lanes", "live file probes per lane (modules/registry.rs LANES)"),
+        ("queue", "~/.claude/subconscious/dreams/ingest-queue"),
+        ("modules", "~/.claude/subconscious/<module> directories"),
+        ("jobs", "~/.claude/scheduled/registry.json + launchctl list"),
+        ("log", "~/.claude/subconscious/logs/i-dream.log.<date>"),
+        ("build", "binary and source mtimes"),
+        ("reader", "~/.claude/i-dream/reader/{state.json,daily,runs}"),
+        ("domains", "~/.claude/i-dream/reader/state.json streams"),
+        ("interventions", "~/.claude/i-dream/{interventions.json,would-fire.jsonl}"),
+        ("reflect", "~/.claude/atone/events.jsonl"),
+    ]
+    .into_iter()
+    .collect()
 }
 
 #[derive(Serialize)]
@@ -216,6 +342,28 @@ pub fn gather(deep: bool) -> Result<StatusReport> {
         (None, None, None)
     };
 
+    let (reader, domains, interventions, reflect) = if deep {
+        let reader_state = crate::reader::ReaderState::load();
+        (
+            Some(gather_reader()),
+            Some(
+                reader_state
+                    .streams
+                    .iter()
+                    .map(|s| DomainRow {
+                        name: s.domain.clone(),
+                        events_in_window: s.events_in_window,
+                        newest: s.newest,
+                    })
+                    .collect(),
+            ),
+            Some(gather_interventions(&home)),
+            Some(crate::reflect::slug_trends(chrono::Utc::now())),
+        )
+    } else {
+        (None, None, None, None)
+    };
+
     Ok(StatusReport {
         daemon,
         state,
@@ -226,6 +374,11 @@ pub fn gather(deep: bool) -> Result<StatusReport> {
         jobs,
         log,
         build,
+        reader,
+        domains,
+        interventions,
+        reflect,
+        sources: sources(),
     })
 }
 
@@ -934,6 +1087,11 @@ mod tests {
             jobs: Some(vec![]),
             log: None,
             build: None,
+            reader: None,
+            domains: None,
+            interventions: None,
+            reflect: None,
+            sources: sources(),
         };
         let v = serde_json::to_value(&report).unwrap();
         assert_eq!(v["daemon"]["status"], "stopped");
@@ -968,6 +1126,11 @@ mod tests {
             jobs: None,
             log: None,
             build: None,
+            reader: None,
+            domains: None,
+            interventions: None,
+            reflect: None,
+            sources: sources(),
         };
         let text = render_text(&report, false);
         assert!(text.contains("Daemon: stopped"));
@@ -996,6 +1159,11 @@ mod tests {
             jobs: None,
             log: None,
             build: None,
+            reader: None,
+            domains: None,
+            interventions: None,
+            reflect: None,
+            sources: sources(),
         };
         let text = render_text(&report, false);
         assert!(text.contains("Queue: 51 pending · oldest 6d"));

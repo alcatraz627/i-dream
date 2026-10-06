@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "i-dream reader --json",
+  "description": "The drill-down contract: the latest recon's clusters, every weekly run with what landed, and the evidence rows the clusters cite.",
+  "type": "object",
+  "required": ["state", "recon", "runs", "evidence"],
+  "properties": {
+    "state": {
+      "type": "object",
+      "required": ["last_recon", "last_weekly", "pending_pages", "streams"]
+    },
+    "recon": {
+      "type": ["object", "null"],
+      "required": ["at", "since", "streams", "evidence_count", "clusters"],
+      "properties": {
+        "clusters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "kind", "key", "summary", "evidence", "domains", "provenances", "first_ts", "last_ts", "score"]
+          }
+        }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {"type": "object", "required": ["week", "forwarded", "named", "items", "landed"]}
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"type": "object", "required": ["id", "domain", "ts", "provenance", "text"]}
+    }
+  }
+}

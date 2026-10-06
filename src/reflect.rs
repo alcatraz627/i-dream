@@ -296,3 +296,36 @@ mod tests {
         assert_eq!(sev_rank("x"), 0);
     }
 }
+
+/// One recurring mistake slug's recent movement, for `status --json`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SlugTrend {
+    pub slug: String,
+    pub severity: String,
+    pub total: usize,
+    /// Events in the last seven days and the seven before.
+    pub last7: usize,
+    pub prior7: usize,
+    /// last7 minus prior7: negative is improving.
+    pub delta7: i64,
+    pub last: DateTime<Utc>,
+}
+
+/// Every recurring (total of two or more) atone slug with its 7-day movement,
+/// most severe and most frequent first.
+pub fn slug_trends(now: DateTime<Utc>) -> Vec<SlugTrend> {
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let (stats, _) = collect_sorted_stats(&home, now);
+    stats
+        .into_iter()
+        .map(|(slug, s)| SlugTrend {
+            slug,
+            severity: s.max_sev,
+            total: s.total,
+            last7: s.last7,
+            prior7: s.prior7,
+            delta7: s.last7 as i64 - s.prior7 as i64,
+            last: s.last,
+        })
+        .collect()
+}
