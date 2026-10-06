@@ -1103,10 +1103,16 @@ impl Daemon {
         let pbm =
             crate::modules::project_briefs::ProjectBriefsModule::new(&self.config, &self.store);
         let mut regen = 0u32;
+        let cwds = pbm.project_cwds();
+        if let Err(e) = pbm.prune_unreachable(&cwds) {
+            warn!("project briefs: prune failed: {e:#}");
+        }
         for (proj, ts) in latest {
-            if !crate::modules::project_briefs::ProjectBriefsModule::brief_is_reachable(&proj) {
+            let Some(cwd) =
+                crate::modules::project_briefs::ProjectBriefsModule::real_cwd_for(&proj, &cwds)
+            else {
                 continue;
-            }
+            };
             let brief_path = self.store.path(&format!("dreams/project-briefs/{proj}.md"));
             // Regenerate if missing OR pattern activity is newer than the brief mtime.
             let needs = !brief_path.exists()
@@ -1118,7 +1124,7 @@ impl Daemon {
             if !needs {
                 continue;
             }
-            match pbm.generate_for_project(client, &proj).await {
+            match pbm.generate_for_project(client, &proj, &cwd).await {
                 Ok((tokens, _)) => {
                     info!("D6 v2: regenerated brief for {proj} ({tokens} tokens)");
                     regen += 1;

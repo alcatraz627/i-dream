@@ -319,6 +319,17 @@ pub fn classify(path: &Path) -> TranscriptKind {
     classify_fields(entrypoint.as_deref(), cwd.as_deref())
 }
 
+/// The working directory a session ran in, from its first rows.
+pub fn first_cwd(path: &Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let f = fs::File::open(path).ok()?;
+    BufReader::new(f)
+        .lines()
+        .take(200)
+        .map_while(Result::ok)
+        .find_map(|l| raw_field(&l, "cwd").map(str::to_string))
+}
+
 /// The decision table behind [`classify`], separated for tests.
 pub fn classify_fields(entrypoint: Option<&str>, cwd: Option<&str>) -> TranscriptKind {
     if let Some(ep) = entrypoint {

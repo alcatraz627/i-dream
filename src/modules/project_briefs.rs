@@ -49,15 +49,40 @@ impl<'a> ProjectBriefsModule<'a> {
     /// names. Idempotent — passing an already-encoded id returns it
     /// unchanged.
     pub fn encode_cwd(cwd: &str) -> String {
-        let trimmed = cwd.trim_start_matches('/');
-        let with_dashes = trimmed.replace('/', "-");
-        // The Claude Code convention prepends a leading dash on absolute paths.
-        // Unify by always prepending one if the input started with '/'.
-        if cwd.starts_with('/') {
-            format!("-{with_dashes}")
-        } else {
-            with_dashes
+        // Claude Code turns every non-alphanumeric character into a dash, so
+        // `/Users/me/.claude` becomes `-Users-me--claude`.
+        cwd.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+
+    /// Recover the directory behind an encoded id by walking the filesystem:
+    /// at each level, pick the entry whose own encoding prefixes what is left.
+    /// Returns `None` when no path on disk encodes to the id.
+    pub fn decode_project_id(id: &str) -> Option<String> {
+        fn walk(dir: &std::path::Path, rest: &str) -> Option<std::path::PathBuf> {
+            if rest.is_empty() {
+                return Some(dir.to_path_buf());
+            }
+            for e in std::fs::read_dir(dir).ok()?.flatten() {
+                if !e.path().is_dir() {
+                    continue;
+                }
+                let name = e.file_name();
+                let enc = ProjectBriefsModule::encode_cwd(&name.to_string_lossy());
+                if rest == enc {
+                    return Some(e.path());
+                }
+                if let Some(tail) = rest.strip_prefix(&format!("{enc}-")) {
+                    if let Some(p) = walk(&e.path(), tail) {
+                        return Some(p);
+                    }
+                }
+            }
+            None
         }
+        let rest = id.strip_prefix('-')?;
+        walk(std::path::Path::new("/"), rest).map(|p| p.to_string_lossy().into_owned())
     }
 
     /// Whether a brief for this project id can ever be read. Session start
@@ -71,6 +96,118 @@ impl<'a> ProjectBriefsModule<'a> {
             && !project_id.starts_with("-private-var-folders-")
             && !project_id.contains("--claude-worktrees-")
             && !project_id.contains("--claude-output")
+    }
+
+    /// Whether a directory is a project a person works in: it exists, it is
+    /// a git root or carries a `.claude/`, and it is not an agent seat.
+    pub fn is_real_project_dir(cwd: &str) -> bool {
+        let p = std::path::Path::new(cwd);
+        let is_home = std::env::var("HOME").map(|h| h.trim_end_matches('/') == cwd.trim_end_matches('/'));
+        p.is_dir()
+            && !is_home.unwrap_or(false)
+            && (p.join(".git").exists() || p.join(".claude").is_dir())
+            && !crate::transcript::is_seat_cwd(cwd)
+    }
+
+    /// Encoded project id → the directory its interactive sessions ran in.
+    /// The dash encoding cannot be decoded (a dash may have been a slash),
+    /// so the transcripts' own cwd is the only honest source.
+    pub fn project_cwds(&self) -> HashMap<String, String> {
+        let dir = crate::config::expand_tilde(&self.config.ingestion.projects_dir);
+        let mut out = HashMap::new();
+        for f in crate::transcript::scan_interactive(&dir).unwrap_or_default() {
+            let id = f
+                .project_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if out.contains_key(&id) {
+                continue;
+            }
+            if let Some(cwd) = crate::transcript::first_cwd(&f.path) {
+                if Self::encode_cwd(&cwd) == id {
+                    out.insert(id, cwd);
+                }
+            }
+        }
+        out
+    }
+
+    /// The real project directory behind an id, or `None` when the id names
+    /// a seat, a vanished directory, or a short-name twin. Falls back to the
+    /// filesystem decode for projects whose transcripts have been archived.
+    pub fn real_cwd_for(project_id: &str, cwds: &HashMap<String, String>) -> Option<String> {
+        if !Self::brief_is_reachable(project_id) {
+            return None;
+        }
+        let cwd = cwds
+            .get(project_id)
+            .cloned()
+            .or_else(|| Self::decode_project_id(project_id))?;
+        Self::is_real_project_dir(&cwd).then_some(cwd)
+    }
+
+    /// Delete every brief that could never be injected, or describes a
+    /// directory that is not a real project. Returns the deleted ids.
+    pub fn prune_unreachable(&self, cwds: &HashMap<String, String>) -> Result<Vec<String>> {
+        let dir = self.store.path("dreams/project-briefs");
+        let mut gone = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            return Ok(gone);
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            let id = p.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
+            if Self::real_cwd_for(&id, cwds).is_none() {
+                std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+                gone.push(id);
+            }
+        }
+        if !gone.is_empty() {
+            info!("Project briefs: pruned {} unreachable brief(s)", gone.len());
+        }
+        Ok(gone)
+    }
+
+    /// What the project says about itself: the README's opening, the
+    /// manifest description, and the top-level names. This is what keeps
+    /// the brief's first line true; patterns alone made the model guess.
+    pub fn project_facts(cwd: &str) -> String {
+        let root = std::path::Path::new(cwd);
+        let mut out = String::new();
+        for readme in ["README.md", "readme.md", "README"] {
+            if let Ok(t) = std::fs::read_to_string(root.join(readme)) {
+                out.push_str(&format!("README opening:\n{}\n\n", truncate(t.trim(), 1500)));
+                break;
+            }
+        }
+        if let Ok(t) = std::fs::read_to_string(root.join("Cargo.toml")) {
+            if let Some(l) = t.lines().find(|l| l.trim_start().starts_with("description")) {
+                out.push_str(&format!("Cargo.toml {}\n", l.trim()));
+            }
+        }
+        if let Ok(t) = std::fs::read_to_string(root.join("package.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
+                if let Some(d) = v.get("description").and_then(|d| d.as_str()) {
+                    out.push_str(&format!("package.json description: {d}\n"));
+                }
+            }
+        }
+        if let Ok(rd) = std::fs::read_dir(root) {
+            let mut names: Vec<String> = rd
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .filter(|n| !n.starts_with('.'))
+                .collect();
+            names.sort();
+            names.truncate(30);
+            out.push_str(&format!("Top-level entries: {}\n", names.join(", ")));
+        }
+        out
     }
 
     /// Synchronous read for the SessionStart hook handler — returns the
@@ -96,8 +233,12 @@ impl<'a> ProjectBriefsModule<'a> {
         &self,
         client: &ClaudeClient,
         project_id: &str,
+        cwd: &str,
     ) -> Result<(u64, std::path::PathBuf)> {
         info!("Project brief: synthesising for {project_id}");
+        if !Self::is_real_project_dir(cwd) {
+            anyhow::bail!("{cwd} is not a real project directory");
+        }
 
         let patterns: Vec<ExtractedPattern> = self
             .store
@@ -149,7 +290,10 @@ impl<'a> ProjectBriefsModule<'a> {
 
         // ── Build prompt ──────────────────────────────────────────────────
         let mut prompt = String::new();
-        prompt.push_str(&format!("project: {project_id}\n\n"));
+        prompt.push_str(&format!("project directory: {cwd}\n\n"));
+        prompt.push_str("What the project says about itself:\n");
+        prompt.push_str(&Self::project_facts(cwd));
+        prompt.push('\n');
         if !top_patterns.is_empty() {
             prompt.push_str(&format!(
                 "Top {} reinforced patterns (occurrences × confidence):\n",
@@ -190,7 +334,7 @@ impl<'a> ProjectBriefsModule<'a> {
 Output a markdown brief with EXACTLY these four sections, no preamble:
 
 ## What this project is about
-1-2 sentences naming the apparent domain and the dominant working style for this project. Use only what the patterns reveal.
+1-2 sentences saying what the project is, taken from what the project says about itself (README, manifest, top-level entries), then the dominant working style the patterns show. Never infer what the project is from the patterns or the directory name.
 
 ## Things to do (or keep doing)
 2-4 bulleted positive patterns or promoted insights that have repeatedly worked here. Phrase as actionable maxims ("prefer X", "always Y").
@@ -261,10 +405,12 @@ Include only what is specific to this project. The reader already loads the acco
                 *counts.entry(proj.clone()).or_insert(0) += 1;
             }
         }
-        let projects: Vec<&String> = counts
+        let cwds = self.project_cwds();
+        self.prune_unreachable(&cwds)?;
+        let projects: Vec<(&String, String)> = counts
             .iter()
-            .filter(|(k, c)| **c >= 3 && Self::brief_is_reachable(k))
-            .map(|(k, _)| k)
+            .filter(|(_, c)| **c >= 3)
+            .filter_map(|(k, _)| Self::real_cwd_for(k, &cwds).map(|cwd| (k, cwd)))
             .collect();
         info!(
             "Project briefs: generating for {} projects (≥3 patterns each)",
@@ -273,8 +419,8 @@ Include only what is specific to this project. The reader already loads the acco
 
         let mut total_tokens = 0u64;
         let mut succeeded = 0u64;
-        for proj in projects {
-            match self.generate_for_project(client, proj).await {
+        for (proj, cwd) in projects {
+            match self.generate_for_project(client, proj, &cwd).await {
                 Ok((tokens, _)) => {
                     total_tokens += tokens;
                     succeeded += 1;
@@ -396,5 +542,88 @@ mod tests {
         // a project_id rather than a cwd.
         let id = "-Users-x-Code-i-dream";
         assert_eq!(ProjectBriefsModule::encode_cwd(id), id);
+    }
+}
+
+#[cfg(test)]
+mod real_dir_tests {
+    use super::*;
+
+    #[test]
+    fn real_dir_needs_git_or_claude_and_no_seat() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("proj");
+        std::fs::create_dir_all(&p).unwrap();
+        let s = p.to_str().unwrap();
+        // tempdir lives under /var/folders or /tmp, a seat path, so even a git
+        // root there is refused.
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        assert!(!ProjectBriefsModule::is_real_project_dir(s));
+        assert!(!ProjectBriefsModule::is_real_project_dir("/definitely/not/here"));
+    }
+
+    #[test]
+    fn real_cwd_for_refuses_twins_and_seats() {
+        let cwds = HashMap::new();
+        assert_eq!(ProjectBriefsModule::real_cwd_for("i-dream", &cwds), None);
+        assert_eq!(ProjectBriefsModule::real_cwd_for("-private-tmp-x", &cwds), None);
+        let home = std::env::var("HOME").unwrap();
+        let mut m = HashMap::new();
+        m.insert("-x".to_string(), home);
+        assert_eq!(ProjectBriefsModule::real_cwd_for("-x", &m), None);
+    }
+
+    #[test]
+    fn prune_removes_unreachable_briefs_only() {
+        let d = tempfile::tempdir().unwrap();
+        let store = Store::new(d.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        let dir = store.path("dreams/project-briefs");
+        std::fs::create_dir_all(&dir).unwrap();
+        for id in ["i-dream", "-private-tmp-abc", "-nowhere-gone"] {
+            std::fs::write(dir.join(format!("{id}.md")), "x").unwrap();
+        }
+        let config = Config::default();
+        let pbm = ProjectBriefsModule::new(&config, &store);
+        let mut gone = pbm.prune_unreachable(&HashMap::new()).unwrap();
+        gone.sort();
+        assert_eq!(gone, vec!["-nowhere-gone", "-private-tmp-abc", "i-dream"]);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn encode_matches_claude_code_for_dots_and_underscores() {
+        assert_eq!(ProjectBriefsModule::encode_cwd("/Users/me/.claude"), "-Users-me--claude");
+        assert_eq!(ProjectBriefsModule::encode_cwd("/a/studio_search_jul_26"), "-a-studio-search-jul-26");
+    }
+
+    #[test]
+    fn decode_walks_the_filesystem_through_dashes_and_dots() {
+        let d = tempfile::tempdir().unwrap();
+        let deep = d.path().join("its-my_config").join(".claude").join("x");
+        std::fs::create_dir_all(&deep).unwrap();
+        let id = ProjectBriefsModule::encode_cwd(deep.to_str().unwrap());
+        assert_eq!(
+            ProjectBriefsModule::decode_project_id(&id).as_deref(),
+            Some(deep.to_str().unwrap())
+        );
+        assert_eq!(ProjectBriefsModule::decode_project_id("-no-such-place-here"), None);
+    }
+
+    #[test]
+    fn home_is_never_a_project() {
+        let home = std::env::var("HOME").unwrap();
+        assert!(!ProjectBriefsModule::is_real_project_dir(&home));
+    }
+
+    #[test]
+    fn facts_read_readme_and_manifest() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("README.md"), "# thing\nA Rust daemon.").unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "[package]\ndescription = \"dreams\"\n").unwrap();
+        let f = ProjectBriefsModule::project_facts(d.path().to_str().unwrap());
+        assert!(f.contains("A Rust daemon."));
+        assert!(f.contains("description = \"dreams\""));
+        assert!(f.contains("Cargo.toml, README.md"));
     }
 }

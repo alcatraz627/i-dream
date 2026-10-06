@@ -175,6 +175,10 @@ pub enum Command {
         /// Accepts both "/Users/.../path" and "-Users-...-path" forms.
         #[arg(long)]
         cwd: Option<String>,
+        /// Only delete briefs for seat paths, short-name twins and vanished
+        /// directories; generate nothing (no model calls).
+        #[arg(long)]
+        prune: bool,
     },
 
     /// Synthesize a weekly briefing from the past 7 days of dream activity.

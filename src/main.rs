@@ -489,14 +489,29 @@ async fn main() -> Result<()> {
             );
         }
 
-        Command::BriefProjects { cwd } => {
+        Command::BriefProjects { cwd, prune } => {
+            use modules::project_briefs::ProjectBriefsModule as Pbm;
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
+            let pbm = Pbm::new(&config, &store);
+            if prune {
+                let gone = pbm.prune_unreachable(&pbm.project_cwds())?;
+                println!("✓ Pruned {} brief(s)", gone.len());
+                for id in gone {
+                    println!("  {id}");
+                }
+                return Ok(());
+            }
             let client = api::ClaudeClient::for_config(&config)?;
-            let pbm = modules::project_briefs::ProjectBriefsModule::new(&config, &store);
             if let Some(c) = cwd {
-                let project_id = modules::project_briefs::ProjectBriefsModule::encode_cwd(&c);
-                let (tokens, path) = pbm.generate_for_project(&client, &project_id).await?;
+                let project_id = Pbm::encode_cwd(&c);
+                let real = if c.starts_with('/') {
+                    c.clone()
+                } else {
+                    Pbm::real_cwd_for(&project_id, &pbm.project_cwds())
+                        .with_context(|| format!("{c} names no real project directory"))?
+                };
+                let (tokens, path) = pbm.generate_for_project(&client, &project_id, &real).await?;
                 println!(
                     "✓ Brief written to {}\n  Tokens used: {tokens} · model {}",
                     path.display(),
