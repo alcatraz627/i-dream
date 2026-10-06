@@ -87,6 +87,8 @@ struct DashboardView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // The selected place is already highlighted; a focus ring here reads as a second selection.
+        .focusEffectDisabled()
     }
 
     /// A dot beside a place only when something there is not green.

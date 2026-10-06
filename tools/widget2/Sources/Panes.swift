@@ -161,7 +161,9 @@ struct PatternsPane: View {
             HStack(alignment: .top, spacing: 12) {
                 Constellation(patterns: r.patterns, associations: r.associations, focus: model.patterns.focus, big: true,
                               dimmed: Set(r.patterns.map(\.id)).subtracting(shown),
+                              cursor: rows[safe: model.patterns.selected]?.id,
                               onSelect: { p in model.patterns.focus = p.id; model.patterns.selected = rows.firstIndex { $0.id == p.id } ?? 0 },
+                              onClear: { model.patterns.focus = nil },
                               help: model.help)
                     .frame(height: 460)
                     .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
@@ -169,7 +171,7 @@ struct PatternsPane: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
-                            if let f = model.patterns.focus, let p = r.patterns.first(where: { $0.id == f }) { card(p) }
+                            if let f = model.patterns.focus, let p = r.patterns.first(where: { $0.id == f }) { card(p).id("focus-card") }
                             if rows.isEmpty { Text(emptyLine).font(F.meta).foregroundStyle(P.fg3).padding(12) }
                             ForEach(Array(rows.enumerated()), id: \.element.id) { i, p in
                                 Button { model.patterns.selected = i; model.patterns.focus = p.id } label: { item(p, current: i == model.patterns.selected) }
@@ -178,6 +180,8 @@ struct PatternsPane: View {
                         }
                     }
                     .onChange(of: model.patterns.selected) { _, i in if let id = rows[safe: i]?.id { proxy.scrollTo(id) } }
+                    // An opened pattern's card sits at the top of the list; bring all of it into view.
+                    .onChange(of: model.patterns.focus) { _, f in if f != nil { withAnimation { proxy.scrollTo("focus-card", anchor: .top) } } }
                 }
                 .frame(width: 380, height: 460)
                 .background(RoundedRectangle(cornerRadius: 10).fill(P.card))

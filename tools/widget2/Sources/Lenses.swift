@@ -143,8 +143,14 @@ struct Constellation: View {
     var focus: String?
     var big = false
     var dimmed: Set<String> = []
+    /// The list row the keyboard is on; its star gets a ring so the map follows j/k.
+    var cursor: String? = nil
     var onSelect: (PatternNode) -> Void = { _ in }
+    var onClear: () -> Void = {}
     var help: HoverHelp?
+
+    /// How close the pointer must be to a star's centre to hover or pick it.
+    private var reach: CGFloat { big ? 22 : 14 }
 
     @State private var hover: String?
     @State private var pan: CGSize = .zero
@@ -181,7 +187,7 @@ struct Constellation: View {
             let size = geo.size
             let byId = Dictionary(patterns.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             let lit: Set<String> = {
-                guard let f = focus ?? hover, let n = byId[f] else { return [] }
+                guard let f = focus ?? hover ?? cursor, let n = byId[f] else { return [] }
                 return Set(n.links + [f])
             }()
             Canvas { ctx, _ in
@@ -213,7 +219,34 @@ struct Constellation: View {
                              with: .color(P.category(p.category).opacity(faded ? 0.12 : 0.35 + p.strength * 0.65)))
                     if p.id == focus {
                         ctx.stroke(Path(ellipseIn: CGRect(x: pt.x - r - 3, y: pt.y - r - 3, width: r * 2 + 6, height: r * 2 + 6)), with: .color(P.blue), lineWidth: 1.2)
+                    } else if p.id == cursor || p.id == hover {
+                        ctx.stroke(Path(ellipseIn: CGRect(x: pt.x - r - 3, y: pt.y - r - 3, width: r * 2 + 6, height: r * 2 + 6)),
+                                   with: .color(P.fg), style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
                     }
+                }
+                // The hovered pattern's text, in a box beside its star.
+                if big, let h = hover, let n = byId[h] {
+                    let pt = place(n, size)
+                    let label = ctx.resolve(Text(n.text).font(.system(size: 11)).foregroundStyle(P.fg))
+                    let boxW: CGFloat = 260
+                    let t = label.measure(in: CGSize(width: boxW - 16, height: .infinity))
+                    let w = t.width + 16, hgt = t.height + 12
+                    let x = pt.x + 14 + w > size.width ? pt.x - 14 - w : pt.x + 14
+                    let y = min(max(pt.y - hgt / 2, 4), size.height - hgt - 4)
+                    let box = CGRect(x: x, y: y, width: w, height: hgt)
+                    ctx.fill(Path(roundedRect: box, cornerRadius: 6), with: .color(P.card2))
+                    ctx.stroke(Path(roundedRect: box, cornerRadius: 6), with: .color(P.hair), lineWidth: 0.5)
+                    ctx.draw(label, in: box.insetBy(dx: 8, dy: 6))
+                }
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if big {
+                    HStack(spacing: 4) {
+                        zoomButton("minus.magnifyingglass") { zoom = max(0.6, zoom / 1.3); zoomStart = zoom }
+                        zoomButton("arrow.counterclockwise") { zoom = 1; zoomStart = 1; pan = .zero; panStart = .zero }
+                        zoomButton("plus.magnifyingglass") { zoom = min(4, zoom * 1.3); zoomStart = zoom }
+                    }
+                    .padding(8)
                 }
             }
             .contentShape(Rectangle())
@@ -221,11 +254,11 @@ struct Constellation: View {
                 switch phase {
                 case .active(let pt):
                     let n = patterns.min { dist(place($0, size), pt) < dist(place($1, size), pt) }
-                    if let n, dist(place(n, size), pt) < 12 {
+                    if let n, dist(place(n, size), pt) < reach {
                         hover = n.id
-                        // The dropdown's footer holds one short line; the full text only fits the dashboard's.
+                        // The pattern text shows in the box beside the star, so the status line stays one short line.
                         help?.text = big
-                            ? "\(n.category) · strength \(String(format: "%.2f", n.strength)) (rank \(n.rank) of \(patterns.count)) · \(n.trend) · \(n.text)"
+                            ? "\(n.category) · strength \(String(format: "%.2f", n.strength)) · rank \(n.rank) of \(patterns.count) · \(n.trend) · click to open"
                             : "\(n.category) · \(n.trend)"
                     } else { hover = nil; help?.text = "" }
                 case .ended: hover = nil; help?.text = ""
@@ -233,7 +266,7 @@ struct Constellation: View {
             }
             .simultaneousGesture(SpatialTapGesture().onEnded { v in
                 let n = patterns.min { dist(place($0, size), v.location) < dist(place($1, size), v.location) }
-                if let n, dist(place(n, size), v.location) < 14 { onSelect(n) }
+                if let n, dist(place(n, size), v.location) < reach { onSelect(n) } else { onClear() }
             })
             .gesture(big ? DragGesture(minimumDistance: 4)
                 .onChanged { v in pan = CGSize(width: panStart.width + v.translation.width, height: panStart.height + v.translation.height) }
@@ -245,6 +278,17 @@ struct Constellation: View {
     }
 
     private func dist(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x - b.x, a.y - b.y) }
+
+    private func zoomButton(_ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 11)).foregroundStyle(P.fg2)
+                .frame(width: 24, height: 22)
+                .background(RoundedRectangle(cornerRadius: 5).fill(P.card2))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(P.hair, lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+    }
 }
 
 // MARK: - Tide

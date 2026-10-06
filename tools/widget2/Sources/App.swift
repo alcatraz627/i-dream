@@ -163,7 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             w.title = "i-dream"
             w.isReleasedWhenClosed = false
             w.contentMinSize = NSSize(width: 1000, height: 600)
-            w.contentView = NSHostingView(rootView: DashboardView(model: model))
+            let host = NSHostingView(rootView: DashboardView(model: model))
+            // Only a minimum size: a hover or a pane change must never resize the owner's window.
+            host.sizingOptions = [.minSize]
+            w.contentView = host
             w.delegate = self
             w.center()
             w.setFrameAutosaveName("i-dream-dashboard")
