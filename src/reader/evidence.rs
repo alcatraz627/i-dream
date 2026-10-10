@@ -306,6 +306,28 @@ pub fn normalise(
             e.provenance = s(raw, "provenance").unwrap_or_else(|| "agent".into());
             e.text = format!("/{}", s(raw, "skill").unwrap_or_default());
         }
+        "seats" => {
+            // One event per sub-agent dispatch, landing or caller feedback.
+            e.session = s(raw, "session_id");
+            e.project = project(raw, "project", cache);
+            e.provenance = "agent".into();
+            let detail = s(raw, "note")
+                .filter(|n| !n.is_empty())
+                .or_else(|| s(raw, "outcome"))
+                .or_else(|| s(raw, "prompt_quality"))
+                .unwrap_or_default();
+            e.text = clip(
+                &format!(
+                    "{} {} seat ({}, persona {}) {}",
+                    s(raw, "kind").unwrap_or_default(),
+                    s(raw, "role").unwrap_or_default(),
+                    s(raw, "model").unwrap_or_default(),
+                    s(raw, "persona").filter(|p| !p.is_empty()).unwrap_or_else(|| "none".into()),
+                    detail
+                ),
+                200,
+            );
+        }
         _ => {
             e.slug = s(raw, "slug");
             e.session = s(raw, "session_id");

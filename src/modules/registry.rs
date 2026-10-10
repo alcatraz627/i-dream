@@ -173,6 +173,7 @@ pub(crate) fn discover_external_manifests() -> Vec<crate::modules::DomainManifes
         home.join(".claude/pinned"),
         home.join(".claude/checkpoints-domain"),
         home.join(".claude/skill-usage-domain"),
+        home.join(".claude/seats-domain"),
     ];
     for root in &sibling_roots {
         let p = root.join(".i-dream-domain.toml");
@@ -781,8 +782,8 @@ pub const KNOWN_ORPHANS: &[&str] = &[
     // ingest-queue and pins left this list when Wave 1 wired the SWS drain
     // and the engine cadence dispatch (2026-07-11); sustained green needs the
     // daemon running the new binary.
-    "ipc", // registered domain, source events never written
-           // sessions-domain and memory-domain removed: extract scripts now in
+    // ipc removed 2026-10-10: its consumer resolves now (the live contract test said so).
+    // sessions-domain and memory-domain removed: extract scripts now in
            // scripts/domains/ and deployed by scripts/install.sh.
 ];
 
