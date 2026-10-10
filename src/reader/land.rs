@@ -154,16 +154,34 @@ pub fn publish(slug: &str, config: &Value) -> Result<String> {
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(dir.join("config.json"), serde_json::to_string_pretty(config)?)?;
     let script = page_script();
-    let check = std::process::Command::new("bash")
-        .arg(&script)
-        .args(["check", slug])
-        .output()
-        .context("run decision-page.sh check")?;
+    // The page server (kanban on :5106) is redeployed often; a check that lands
+    // mid-restart fails only its render step. Retry before giving up.
+    let mut check = None;
+    for attempt in 0..4 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(15));
+        }
+        let out = std::process::Command::new("bash")
+            .arg(&script)
+            .args(["check", slug])
+            .output()
+            .context("run decision-page.sh check")?;
+        let ok = out.status.success();
+        check = Some(out);
+        if ok {
+            break;
+        }
+    }
+    let check = check.expect("at least one attempt");
     if !check.status.success() {
-        anyhow::bail!(
-            "decision page {slug} failed its check:\n{}",
-            String::from_utf8_lossy(&check.stdout)
-        );
+        let stdout = String::from_utf8_lossy(&check.stdout);
+        let detail = format!("{}{}", stdout, String::from_utf8_lossy(&check.stderr));
+        // A valid config whose only failure is rendering still reaches the owner.
+        if stdout.contains("ok  config") {
+            tracing::warn!("decision page {slug} written but did not render after retries:\n{detail}");
+        } else {
+            anyhow::bail!("decision page {slug} failed its check:\n{detail}");
+        }
     }
     let _ = std::process::Command::new("bash")
         .arg(&script)
