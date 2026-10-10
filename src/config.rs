@@ -82,6 +82,15 @@ pub struct IdleConfig {
     pub threshold_hours: u64,
     pub check_interval_minutes: u64,
     pub activity_signal: PathBuf,
+    /// The longest the daemon goes without a cycle when there is new work,
+    /// idle or not. This machine is rarely idle for hours, so waiting for
+    /// idle alone starved the learner. 0 turns the backstop off.
+    #[serde(default = "default_max_gap_hours")]
+    pub max_gap_hours: u64,
+}
+
+fn default_max_gap_hours() -> u64 {
+    24
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -268,6 +277,7 @@ impl Default for Config {
                 threshold_hours: 4,
                 check_interval_minutes: 15,
                 activity_signal: PathBuf::from("~/.claude/subconscious/.last-activity"),
+                max_gap_hours: default_max_gap_hours(),
             },
             budget: BudgetConfig {
                 max_tokens_per_cycle: 50_000,

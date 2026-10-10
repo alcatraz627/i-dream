@@ -431,6 +431,22 @@ impl Daemon {
             return Ok(false);
         }
 
+        // Backstop: a busy machine never reaches the idle threshold, so a cycle
+        // also runs once the last one is older than max_gap_hours. The check
+        // above already skips this when nothing new has happened.
+        let max_gap = self.config.idle.max_gap_hours;
+        if max_gap > 0 {
+            let last_cycle = self.state.lock().ok().and_then(|s| s.last_consolidation);
+            let overdue = match last_cycle {
+                Some(t) => (Utc::now() - t).num_hours() >= max_gap as i64,
+                None => true,
+            };
+            if overdue {
+                info!("No consolidation in {max_gap}h, running without waiting for idle");
+                return Ok(true);
+            }
+        }
+
         let idle_secs = (Utc::now() - last_activity).num_seconds();
 
         let next_dream_secs = threshold_secs - idle_secs;
@@ -3031,6 +3047,28 @@ timeout = "10s"
         let mut d = mk_daemon_with_store(store);
         d.config.idle.activity_signal = dir.path().join("no-such-activity");
         d.state.lock().unwrap().last_consolidation = Some(Utc::now());
+        assert!(!d.should_consolidate().unwrap());
+    }
+
+    #[test]
+    fn should_consolidate_runs_when_overdue_even_while_busy() {
+        let (dir, store) = mk_store();
+        let mut d = mk_daemon_with_store(store);
+        let activity = dir.path().join("activity");
+        std::fs::write(&activity, b"").unwrap();
+        d.config.idle.activity_signal = activity;
+        d.state.lock().unwrap().last_consolidation = Some(Utc::now() - chrono::Duration::hours(25));
+        assert!(d.should_consolidate().unwrap());
+    }
+
+    #[test]
+    fn should_consolidate_waits_while_busy_when_not_overdue() {
+        let (dir, store) = mk_store();
+        let mut d = mk_daemon_with_store(store);
+        let activity = dir.path().join("activity");
+        std::fs::write(&activity, b"").unwrap();
+        d.config.idle.activity_signal = activity;
+        d.state.lock().unwrap().last_consolidation = Some(Utc::now() - chrono::Duration::hours(2));
         assert!(!d.should_consolidate().unwrap());
     }
 
