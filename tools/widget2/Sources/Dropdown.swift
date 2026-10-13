@@ -198,10 +198,11 @@ struct DropdownView: View {
             return "no next run"
         }()
         return HStack(alignment: .top, spacing: 8) {
-            Dot(color: j.lastFailed ? P.red : started != nil || j.held != nil ? P.amber : P.green).padding(.top, 5)
+            // A run in progress outranks the last outcome: it is neither failed nor fine yet.
+            Dot(color: started != nil || j.held != nil ? P.amber : j.lastFailed ? P.red : P.green).padding(.top, 5)
             VStack(alignment: .leading, spacing: 1) {
                 Text(j.title).font(F.body).foregroundStyle(P.fg)
-                Text("\(when) · \(last)").font(F.meta).foregroundStyle(j.lastFailed ? P.red : P.fg2)
+                Text("\(when) · \(last)").font(F.meta).foregroundStyle(j.lastFailed && started == nil ? P.red : P.fg2)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(j.what).font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
             }
@@ -216,7 +217,7 @@ struct DropdownView: View {
                     Button { model.cancelHold(j.name) } label: {
                         Text("Cancel delay").font(F.meta).foregroundStyle(P.blue)
                     }.buttonStyle(.plain)
-                } else if j.delayable {
+                } else if j.delayable && started == nil {
                     Menu {
                         Button("In 1 hour") { model.delayJob(j.name, hours: 1) }
                         Button("In 3 hours") { model.delayJob(j.name, hours: 3) }
