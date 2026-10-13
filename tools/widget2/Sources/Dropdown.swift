@@ -32,6 +32,7 @@ struct DropdownView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let r = model.record {
                 strip(r)
+                nextLine(r)
                 sinceLine(r)
                 // Pinned to their natural height so a resize only grows the row list.
                 band(r).fixedSize(horizontal: false, vertical: true)
@@ -69,6 +70,7 @@ struct DropdownView: View {
 
     private func groups(_ r: Record) -> some View {
         VStack(alignment: .leading, spacing: 0) {
+                schedule(r)
                 group("You", r.you, empty: "nothing waits on you")
                 group("System", r.system, empty: "nothing wrong")
                 group("Quiet", r.quiet, empty: nil)
@@ -146,6 +148,88 @@ struct DropdownView: View {
             Text("as of \(ageText(Date().timeIntervalSince(at))): \(why)").font(F.mono).foregroundStyle(P.amber).fixedSize(horizontal: false, vertical: true)
         default: EmptyView()
         }
+    }
+
+    // MARK: what runs when
+
+    /// The next scheduled run, pinned so it shows at any popover height.
+    private func nextLine(_ r: Record) -> some View {
+        let first = r.jobs.first
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("NEXT").font(F.label).tracking(0.6).foregroundStyle(P.fg3)
+            if let j = first, let at = j.held ?? j.next {
+                Text("\(j.title) \(whenText(at, r.now))\(j.held != nil ? ", delayed" : "")")
+                    .font(F.meta).foregroundStyle(P.fg)
+            } else {
+                Text("nothing scheduled").font(F.meta).foregroundStyle(P.amber)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
+    }
+
+    private func schedule(_ r: Record) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            SectionLabel(text: "Schedule").padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
+            if r.jobs.isEmpty {
+                Text("no i-dream jobs in the gcc schedule").font(F.meta).foregroundStyle(P.amber).padding(.horizontal, 14).padding(.bottom, 6)
+            }
+            ForEach(r.jobs) { j in jobView(j, r) }
+            if let note = model.jobNote {
+                Text(note.text).font(F.meta).foregroundStyle(note.failed ? P.red : P.fg2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14).padding(.vertical, 4)
+            }
+        }
+    }
+
+    private func jobView(_ j: JobRow, _ r: Record) -> some View {
+        let started = model.jobStarted[j.name].flatMap { s in (j.lastRun ?? .distantPast) < s ? s : nil }
+        let last: String = {
+            guard let at = j.lastRun else { return "never run" }
+            return "last ran \(ageText(r.now.timeIntervalSince(at))) ago, \(j.lastFailed ? "failed" : "ok")"
+        }()
+        let when: String = {
+            if let s = started { return "started \(ageText(r.now.timeIntervalSince(s))) ago, running" }
+            if let h = j.held { return "delayed to \(whenText(h, r.now))" }
+            if let n = j.next { return "next \(whenText(n, r.now))" }
+            return "no next run"
+        }()
+        return HStack(alignment: .top, spacing: 8) {
+            Dot(color: j.lastFailed ? P.red : started != nil || j.held != nil ? P.amber : P.green).padding(.top, 5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(j.title).font(F.body).foregroundStyle(P.fg)
+                Text("\(when) · \(last)").font(F.meta).foregroundStyle(j.lastFailed ? P.red : P.fg2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(j.what).font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 6)
+            VStack(alignment: .trailing, spacing: 3) {
+                Button { model.runJob(j.name) } label: {
+                    Text("Run now").font(F.meta.weight(.semibold)).foregroundStyle(started == nil ? P.blue : P.fg3)
+                }
+                .buttonStyle(.plain).disabled(started != nil)
+                .onHover { help.text = $0 ? "starts \(j.title.lowercased()) now" : "" }
+                if j.held != nil {
+                    Button { model.cancelHold(j.name) } label: {
+                        Text("Cancel delay").font(F.meta).foregroundStyle(P.blue)
+                    }.buttonStyle(.plain)
+                } else if j.delayable {
+                    Menu {
+                        Button("In 1 hour") { model.delayJob(j.name, hours: 1) }
+                        Button("In 3 hours") { model.delayJob(j.name, hours: 3) }
+                        Button("Tomorrow 09:00") { model.delayJob(j.name, until: tomorrowAt(9, r.now)) }
+                    } label: {
+                        Text("Later").font(F.meta).foregroundStyle(P.blue)
+                    }
+                    .menuStyle(.borderlessButton).menuIndicator(.visible).fixedSize()
+                }
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 6)
+        .overlay(alignment: .top) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 
     // MARK: since you last looked

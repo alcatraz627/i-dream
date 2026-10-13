@@ -199,6 +199,12 @@ pub enum Command {
         json: bool,
     },
 
+    /// Run a scheduled i-dream job early, or hold it and run it later.
+    Jobs {
+        #[command(subcommand)]
+        action: JobsAction,
+    },
+
     /// Reconnect insights to their patterns by text identity, drop links to
     /// patterns that no longer exist, and archive insights with no evidence
     /// left. The daemon does this every cycle; this runs it once and reports.
@@ -612,6 +618,27 @@ pub enum ReaderAction {
         #[arg(long)]
         agree_all: bool,
     },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum JobsAction {
+    /// Run a job now through the gcc scheduler, clearing any hold on it.
+    Run { name: String },
+    /// Hold a job and run it later instead: give --hours or --until.
+    Delay {
+        name: String,
+        /// Hours from now
+        #[arg(long, conflicts_with = "until")]
+        hours: Option<f64>,
+        /// Local time, YYYY-MM-DDTHH:MM
+        #[arg(long)]
+        until: Option<String>,
+    },
+    /// Drop a job's hold; it runs at its next regular time.
+    Cancel { name: String },
+    /// Run by the one-shot a delay creates. Clears the hold, then runs the job.
+    #[command(hide = true)]
+    Fire { name: String },
 }
 
 #[derive(clap::Subcommand, Debug)]

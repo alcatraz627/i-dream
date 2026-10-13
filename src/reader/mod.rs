@@ -359,7 +359,12 @@ async fn run_weekly_inner(
         state.weekly_failure = None;
     }
     state.save()?;
-    save_run(&run)?;
+    if dry_run {
+        // Kept for inspection, but never read as the week's run.
+        std::fs::write(run_dir(&week)?.join("dry-run.json"), serde_json::to_string_pretty(&run)?)?;
+    } else {
+        save_run(&run)?;
+    }
     Ok(run)
 }
 

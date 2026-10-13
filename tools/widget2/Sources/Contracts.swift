@@ -30,6 +30,11 @@ struct StatusDoc: Decodable {
     struct Lanes: Decodable { var green: Int; var yellow: Int; var red: Int; var lanes: [Lane] }
     struct Queue: Decodable { var depth: Int; var oldest: String? }
     struct Job: Decodable {
+        /// The gcc schedule name, which `i-dream jobs` takes.
+        var name: String?
+        var next_fire: String?
+        var held_until: String?
+        var delayable: Bool?
         var label: String
         var desc: String?
         var schedule: String

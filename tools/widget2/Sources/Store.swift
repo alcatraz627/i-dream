@@ -33,6 +33,10 @@ final class AppModel: ObservableObject {
     @Published var searchFocusToken = 0
     @Published var scaleToken = 0
     @Published var keyLog: [String] = []
+    /// Jobs started from the widget, until the scheduler's history shows the run.
+    @Published var jobStarted: [String: Date] = [:]
+    /// What the last job action said, success or failure.
+    @Published var jobNote: (text: String, failed: Bool)?
     let help = HoverHelp()
     let settings = SettingsModel()
 
@@ -68,6 +72,42 @@ final class AppModel: ObservableObject {
         let line = "{\"ts\":\"\(ISO8601DateFormatter().string(from: Date()))\",\"surface\":\"\(surface)\"}\n"
         if let h = try? FileHandle(forWritingTo: f) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
         else { try? Data(line.utf8).write(to: f) }
+    }
+
+    // MARK: jobs
+
+    /// Start a job now; it runs detached, so this returns at once.
+    func runJob(_ name: String) {
+        jobAction(["jobs", "run", name]) { ok in if ok { self.jobStarted[name] = Date() } }
+    }
+
+    /// Hold a job and run it `hours` from now instead.
+    func delayJob(_ name: String, hours: Double) {
+        jobAction(["jobs", "delay", name, "--hours", String(hours)])
+    }
+
+    /// Hold a job until a given local time.
+    func delayJob(_ name: String, until: Date) {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        jobAction(["jobs", "delay", name, "--until", f.string(from: until)])
+    }
+
+    func cancelHold(_ name: String) {
+        jobAction(["jobs", "cancel", name])
+    }
+
+    private func jobAction(_ args: [String], after: @escaping (Bool) -> Void = { _ in }) {
+        guard let bin = Runner.idreamBinary() else { jobNote = ("the i-dream CLI is not installed", true); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = Runner.run(bin, args, timeout: 40)
+            let text = r.failure ?? String(decoding: r.out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            DispatchQueue.main.async {
+                self.jobNote = (text, r.failure != nil)
+                after(r.ok)
+                self.refresh()
+            }
+        }
     }
 
     // MARK: polling

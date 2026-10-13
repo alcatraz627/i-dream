@@ -391,6 +391,8 @@ pub struct ModuleInit {
 
 #[derive(Serialize)]
 pub struct JobStatus {
+    /// The gcc schedule name, which `i-dream jobs` takes.
+    pub name: String,
     pub label: String,
     pub desc: String,
     pub schedule: String,
@@ -411,6 +413,11 @@ pub struct JobStatus {
     pub last_run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<String>,
+    /// Set while the job is held to run later; its regular fire stands down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether `i-dream jobs delay` accepts this job.
+    pub delayable: bool,
     /// The binary launchd reports for this label. launchd is global per
     /// user, so under a sandboxed $HOME a planted plist with a live label
     /// reads the REAL session's job — this field makes such a collision
@@ -633,8 +640,12 @@ fn gather_jobs() -> Vec<JobStatus> {
     let gateway = sched.join(".gateway").exists();
     let history = std::fs::read_to_string(sched.join("history.jsonl")).unwrap_or_default();
     let runs = last_runs(&history);
+    let holds = crate::jobs::load_holds();
+    let now = chrono::Local::now();
     crate::reader::scheduled_jobs()
         .into_iter()
+        // A delay's one-shot belongs to the job it delays, shown as its hold.
+        .filter(|job| !job.name.contains("-later-"))
         .map(|job| {
             let last = runs.get(&job.name).cloned();
             let installed = job.installed;
@@ -654,11 +665,15 @@ fn gather_jobs() -> Vec<JobStatus> {
                 (false, None, None, None)
             };
             let runner = (gateway && !loaded).then_some("gcc-cron");
+            let held_until = holds.get(&job.name).map(|h| h.until).filter(|u| *u > now.with_timezone(&chrono::Utc));
             JobStatus {
+                delayable: crate::jobs::DELAYABLE.contains(&job.name.as_str()),
+                held_until,
+                next_fire: crate::jobs::next_fire(&job.fire_at, now).map(|t| t.to_rfc3339()),
+                name: job.name,
                 label: job.label,
                 desc: job.description,
                 schedule: job.fire_at,
-                next_fire: None,
                 installed,
                 loaded,
                 pid,

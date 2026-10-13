@@ -104,6 +104,20 @@ struct Row: Identifiable {
     var dim = false
 }
 
+/// One scheduled job: what it does, when it last ran, when it runs next.
+struct JobRow: Identifiable {
+    var id: String { name }
+    var name: String
+    var title: String
+    var what: String
+    var next: Date?
+    /// Set while the job is delayed; it runs at this time instead.
+    var held: Date?
+    var lastRun: Date?
+    var lastFailed: Bool
+    var delayable: Bool
+}
+
 struct Finding: Identifiable {
     var id: String { cluster + week }
     var week: String
@@ -232,6 +246,8 @@ struct Record {
     var weeklyHeldSince: Date?
     /// Set when the weekly review failed or has not produced a page in 8 days.
     var weeklyBroken: (title: String, detail: String, at: Date?)? = nil
+    /// i-dream's scheduled jobs, soonest next run first.
+    var jobs: [JobRow] = []
     var cycles: [CycleMark]
     var cycleFields: [StatusCycleFields]
     var cycleWindowDays: Int
@@ -504,6 +520,7 @@ enum RecordBuilder {
             evidence: Dictionary(r.evidence.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }),
             you: [], system: [], quiet: [], since: since, checks: [])
         rec.weeklyBroken = weeklyBroken(status: s)
+        rec.jobs = jobRows(status: s)
         rec.you = youRows(rec)
         rec.system = systemRows(rec, status: s)
         rec.quiet = quietRows(rec)
@@ -525,6 +542,22 @@ enum RecordBuilder {
             return ("The weekly review is overdue", "no page in over 8 days", parseDate(s.reader.last_weekly))
         }
         return nil
+    }
+
+    static func jobRows(status s: StatusDoc) -> [JobRow] {
+        s.jobs.compactMap { j in
+            guard let name = j.name else { return nil }
+            let (title, what): (String, String) =
+                name.hasSuffix("reader-daily") ? ("Daily dreaming", "reads every signal, runs the pattern extractors, picks up your answers")
+                : name.hasSuffix("reader-weekly") ? ("Weekly review", "names this week's strongest findings on a page for you")
+                : name.hasSuffix("audit-monthly") ? ("Monthly audit", "raises the audit card; acts only in the first week of a month")
+                : (name, j.desc ?? "")
+            return JobRow(name: name, title: title, what: what,
+                          next: parseDate(j.next_fire), held: parseDate(j.held_until),
+                          lastRun: parseDate(j.last_run), lastFailed: j.last_outcome == "failed",
+                          delayable: j.delayable ?? false)
+        }
+        .sorted { ($0.held ?? $0.next ?? .distantFuture) < ($1.held ?? $1.next ?? .distantFuture) }
     }
 
     static func fixHint(_ l: StatusDoc.Lane) -> String? {

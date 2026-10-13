@@ -97,6 +97,26 @@ func ageText(_ t: TimeInterval?) -> String {
     return "\(Int(t / 86400))d"
 }
 
+/// A future time as a person says it: "today 19:35 (in 3h)",
+/// "tomorrow 04:30 (in 12h)", "Tue 13:00 (in 6d)".
+func whenText(_ at: Date, _ now: Date) -> String {
+    let cal = Calendar.current
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm"
+    let day = cal.isDate(at, inSameDayAs: now) ? "today"
+        : cal.isDate(at, inSameDayAs: now.addingTimeInterval(86400)) ? "tomorrow"
+        : { let d = DateFormatter(); d.dateFormat = "EEE"; return d.string(from: at) }()
+    let left = at.timeIntervalSince(now)
+    return "\(day) \(f.string(from: at))" + (left > 0 ? " (in \(ageText(left)))" : "")
+}
+
+/// Tomorrow at the given hour, local time.
+func tomorrowAt(_ hour: Int, _ now: Date) -> Date {
+    let cal = Calendar.current
+    let t = cal.date(byAdding: .day, value: 1, to: now) ?? now
+    return cal.date(bySettingHour: hour, minute: 0, second: 0, of: t) ?? t
+}
+
 struct Dot: View {
     var color: Color
     var size: CGFloat = 7

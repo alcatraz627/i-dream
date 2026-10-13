@@ -11,6 +11,7 @@ mod curves;
 mod firings;
 mod graph_metrics;
 mod interventions;
+mod jobs;
 mod smell;
 mod hooks;
 mod idream_runtime;
@@ -367,12 +368,47 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::Jobs { action } => match action {
+            cli::JobsAction::Run { name } => {
+                let pid = jobs::run_now(&name)?;
+                println!("✓ started {name} (pid {pid}); output goes to ~/.claude/logs/launchd/{name}.out.log");
+            }
+            cli::JobsAction::Delay { name, hours, until } => {
+                let now = chrono::Local::now();
+                let at = match (hours, until) {
+                    (Some(h), _) => now + chrono::Duration::minutes((h * 60.0).round() as i64),
+                    (None, Some(s)) => {
+                        let naive = chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M")
+                            .map_err(|e| anyhow::anyhow!("--until wants YYYY-MM-DDTHH:MM: {e}"))?;
+                        naive
+                            .and_local_timezone(chrono::Local)
+                            .earliest()
+                            .ok_or_else(|| anyhow::anyhow!("{s} does not exist in local time"))?
+                    }
+                    (None, None) => anyhow::bail!("give --hours or --until"),
+                };
+                let h = jobs::delay(&name, at, now)?;
+                println!("✓ {name} held until {}; {} runs it then", at.format("%a %d %b %H:%M"), h.oneshot);
+            }
+            cli::JobsAction::Cancel { name } => match jobs::cancel(&name)? {
+                Some(h) => println!("✓ hold on {name} dropped; {} retired", h.oneshot),
+                None => println!("{name} had no hold"),
+            },
+            cli::JobsAction::Fire { name } => {
+                print!("{}", jobs::fire(&name)?);
+            }
+        },
+
         Command::Reader { action, json } => {
             let config = config::Config::load(&cli.config)?;
             let store = store::Store::new(config.data_dir().clone())?;
             match action {
                 Some(cli::ReaderAction::Recon { since_days, top, dry_run }) => {
                     let now = chrono::Utc::now();
+                    if !dry_run && let Some(until) = jobs::held_until("i-dream-reader-daily", now) {
+                        println!("held until {}; it runs then", until.with_timezone(&chrono::Local).format("%a %d %b %H:%M"));
+                        return Ok(());
+                    }
                     let since = now - chrono::Duration::days(since_days);
                     let (recon, rows) = reader::recon_at(&store, now, since);
                     println!(
@@ -418,6 +454,10 @@ async fn main() -> Result<()> {
                 }
                 Some(cli::ReaderAction::Run { since_days, dry_run, force }) => {
                     let now = chrono::Utc::now();
+                    if !dry_run && !force && let Some(until) = jobs::held_until("i-dream-reader-weekly", now) {
+                        println!("held until {}; it runs then", until.with_timezone(&chrono::Local).format("%a %d %b %H:%M"));
+                        return Ok(());
+                    }
                     let since = now - chrono::Duration::days(since_days);
                     let run = reader::run_weekly(&config, &store, now, since, dry_run, force).await?;
                     if let Some(reason) = &run.held_by_gate {
