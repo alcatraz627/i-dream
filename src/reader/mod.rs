@@ -214,6 +214,15 @@ fn amend_process(week: &str, note: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hook scripts registered in the owner's ~/.claude/settings.json.
+fn registered_hooks() -> std::collections::HashSet<String> {
+    dirs::home_dir()
+        .and_then(|h| std::fs::read_to_string(h.join(".claude/settings.json")).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|v| name::hook_scripts(&v))
+        .unwrap_or_default()
+}
+
 /// Parse the model's answer: the documented object, or a bare array of items.
 fn parse_naming(content: &str) -> Option<name::RawNaming> {
     let json = crate::modules::parse_json_codeblock(content).unwrap_or_else(|| content.trim().to_string());
@@ -299,7 +308,16 @@ async fn run_weekly_inner(
         let batch = name::render_batch(&run.forwarded, &rows, 8);
         std::fs::write(run_dir(&week)?.join("batch.md"), &batch)?;
         let client = crate::api::ClaudeClient::for_config(config)?;
-        let prompt = format!("Week {week}. The clusters:\n\n{batch}");
+        let registered = registered_hooks();
+        let mut hooks: Vec<&String> = registered.iter().collect();
+        hooks.sort();
+        let hooks: Vec<&str> = hooks.iter().map(|s| s.as_str()).collect();
+        let prompt = format!(
+            "Week {week}. The clusters:\n\n{batch}\n\n## Hook scripts already registered in settings.json\n{}\n\n\
+             Never propose registering one of these. If one exists and its mistake still repeats, \
+             name what it fails to catch, or that it only warns instead of blocking.",
+            hooks.join(", ")
+        );
         let resp = client
             .analyze(&process, &prompt, &config.budget.model, 4096, 0.2)
             .await
@@ -308,6 +326,9 @@ async fn run_weekly_inner(
         std::fs::write(run_dir(&week)?.join("response.txt"), &resp.content)?;
         let raw = parse_naming(&resp.content).context("the naming answer was not the documented JSON")?;
         run.named = name::validate(raw, &run.forwarded);
+        name::ground(&mut run.named, &registered, |p| {
+            crate::config::expand_tilde(std::path::Path::new(p)).exists()
+        });
         run.items = land::select(&run.named, &run.forwarded);
         if let Some(note) = run.named.process_note.clone() {
             amend_process(&week, &note)?;
@@ -329,9 +350,12 @@ async fn run_weekly_inner(
             state.pending_pages.push(slug);
         }
     }
-    state.last_weekly = Some(now);
-    state.weekly_pending_since = None;
-    state.weekly_failure = None;
+    // A dry run produces no page, so it must not count as the week's review.
+    if !dry_run {
+        state.last_weekly = Some(now);
+        state.weekly_pending_since = None;
+        state.weekly_failure = None;
+    }
     state.save()?;
     save_run(&run)?;
     Ok(run)

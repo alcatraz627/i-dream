@@ -169,6 +169,63 @@ pub fn validate(raw: RawNaming, clusters: &[Cluster]) -> Validated {
     v
 }
 
+/// The script names a hook command runs, by basename: "~/x/guard.sh --y" → "guard.sh".
+pub fn hook_scripts(settings: &serde_json::Value) -> HashSet<String> {
+    fn walk(v: &serde_json::Value, out: &mut HashSet<String>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, x) in m {
+                    if k == "command"
+                        && let Some(cmd) = x.as_str()
+                    {
+                        out.extend(script_names(cmd));
+                    } else {
+                        walk(x, out);
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = HashSet::new();
+    if let Some(h) = settings.get("hooks") {
+        walk(h, &mut out);
+    }
+    out
+}
+
+fn script_names(text: &str) -> Vec<String> {
+    text.split(|c: char| c.is_whitespace() || "\"'`(),;".contains(c))
+        .filter(|t| t.ends_with(".sh") || t.ends_with(".py"))
+        .filter_map(|t| t.rsplit('/').next().map(str::to_string))
+        .collect()
+}
+
+/// Drop proposals whose premise a lookup disproves, and say why in `rejected`.
+/// The finding itself stays; only the wrong fix goes.
+pub fn ground(v: &mut Validated, registered: &HashSet<String>, exists: impl Fn(&str) -> bool) {
+    for item in &mut v.items {
+        let Some(p) = &item.proposal else { continue };
+        let change = p.change.to_lowercase();
+        let wires = ["register", "wire", "add "].iter().any(|w| change.contains(w));
+        if wires
+            && let Some(s) = script_names(&p.change).into_iter().find(|s| registered.contains(s))
+        {
+            v.rejected.push(format!("{}: proposal dropped, {s} is already registered in settings.json", item.cluster));
+            item.proposal = None;
+            continue;
+        }
+        let target = p.target.trim();
+        let single_path = !target.contains(' ') && (target.starts_with('/') || target.starts_with('~'));
+        let creates = ["create", "add ", "new "].iter().any(|w| change.contains(w));
+        if single_path && !creates && !exists(target) {
+            v.rejected.push(format!("{}: proposal dropped, target {target} does not exist", item.cluster));
+            item.proposal = None;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +314,73 @@ mod tests {
         assert!(b.contains("atone:0") && b.contains("atone:1"));
         assert!(!b.contains("atone:4 |"));
         assert!(b.contains("(+3 more)"));
+    }
+
+    fn proposed(cluster: &str, target: &str, change: &str) -> Named {
+        let mut it = item(cluster, "structural-need", &["atone:a"]);
+        it.proposal = Some(Proposal { target: target.into(), change: change.into() });
+        it
+    }
+
+    #[test]
+    fn hook_scripts_reads_every_command_basename() {
+        let s: serde_json::Value = serde_json::from_str(
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"~/.claude/scripts/hooks/declared-ready-stop.sh"}]}],
+               "PreToolUse":[{"hooks":[{"command":"python3 ~/.claude/g/guard-settings-write.py --strict"}]}]},
+               "statusLine":{"command":"~/not-a-hook.sh"}}"#,
+        )
+        .unwrap();
+        let got = hook_scripts(&s);
+        assert!(got.contains("declared-ready-stop.sh"));
+        assert!(got.contains("guard-settings-write.py"));
+        assert!(!got.contains("not-a-hook.sh"), "only the hooks block counts");
+    }
+
+    /// The four 2026w41 proposals that asked to register a hook that was
+    /// already registered, plus the cases that must survive.
+    #[test]
+    fn ground_drops_fixes_a_lookup_disproves_and_keeps_the_rest() {
+        let registered: HashSet<String> = ["named-next-work-stop.sh", "declared-ready-stop.sh"].iter().map(|s| s.to_string()).collect();
+        let mut v = Validated {
+            items: vec![
+                proposed("c-1", "~/.claude/settings.json Stop hooks",
+                    "Register named-next-work-stop.sh as a Stop hook — the script exists but is not wired."),
+                proposed("c-2", "~/.claude/settings.json Stop hooks",
+                    "Register brand-new-gate.sh as a Stop hook."),
+                proposed("c-3", "~/.claude/rules/missing.md", "Tighten the precheck wording."),
+                proposed("c-4", "~/.claude/rules/missing.md", "Create a rule for this pattern."),
+                proposed("c-5", "skills/gcc-mods/hooks/register.tsx", "Use mode insert, not replace."),
+            ],
+            ..Default::default()
+        };
+        ground(&mut v, &registered, |p| !p.contains("missing"));
+        let kept: Vec<bool> = v.items.iter().map(|i| i.proposal.is_some()).collect();
+        assert_eq!(kept, vec![false, true, false, true, true]);
+        assert_eq!(v.items.len(), 5, "findings stay; only the wrong fixes go");
+        assert!(v.rejected[0].contains("named-next-work-stop.sh is already registered"));
+        assert!(v.rejected[1].contains("does not exist"));
+    }
+
+    /// Replays the real 2026w41 run against the owner's real settings.json.
+    /// Run with `cargo test -- --ignored replay_w41`; prints what it drops.
+    #[test]
+    #[ignore]
+    fn replay_w41() {
+        let home = dirs::home_dir().unwrap();
+        let run: crate::reader::WeeklyRun = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".claude/i-dream/reader/runs/2026w41/run.json")).unwrap(),
+        )
+        .unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+        let mut v = Validated { items: run.items.clone(), ..Default::default() };
+        ground(&mut v, &hook_scripts(&settings), |p| {
+            crate::config::expand_tilde(std::path::Path::new(p)).exists()
+        });
+        for r in &v.rejected {
+            println!("{r}");
+        }
+        let kept = v.items.iter().filter(|i| i.proposal.is_some()).count();
+        println!("kept {kept} of {}", v.items.len());
     }
 }
