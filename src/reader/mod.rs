@@ -313,7 +313,9 @@ async fn run_weekly_inner(
         hooks.sort();
         let hooks: Vec<&str> = hooks.iter().map(|s| s.as_str()).collect();
         let prompt = format!(
-            "Week {week}. The clusters:\n\n{batch}\n\n## Hook scripts already registered in settings.json\n{}\n\n\
+            "Week {week}. `kind` is one of repeat, structural-need, drift or noise; a cluster's \
+             'found by' label says how the join found it and is not its kind. The clusters:\n\n{batch}\n\n\
+             ## Hook scripts already registered in settings.json\n{}\n\n\
              Never propose registering one of these. If one exists and its mistake still repeats, \
              name what it fails to catch, or that it only warns instead of blocking.",
             hooks.join(", ")
@@ -330,7 +332,7 @@ async fn run_weekly_inner(
             crate::config::expand_tilde(std::path::Path::new(p)).exists()
         });
         run.items = land::select(&run.named, &run.forwarded);
-        if let Some(note) = run.named.process_note.clone() {
+        if !dry_run && let Some(note) = run.named.process_note.clone() {
             amend_process(&week, &note)?;
         }
     }

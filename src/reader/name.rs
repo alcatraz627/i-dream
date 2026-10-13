@@ -96,9 +96,9 @@ pub fn render_batch(clusters: &[Cluster], rows: &[Evidence], per_cluster: usize)
     let mut out = String::new();
     for c in clusters {
         out.push_str(&format!(
-            "## {} ({}, score {:.1})\n{}\n",
+            "## {} (found by {}, score {:.1})\n{}\n",
             c.id,
-            c.kind.label(),
+            c.kind.label().replace('-', " "),
             c.score,
             c.summary
         ));
