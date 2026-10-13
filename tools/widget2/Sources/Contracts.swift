@@ -36,7 +36,13 @@ struct StatusDoc: Decodable {
         var installed: Bool
         var loaded: Bool
         var last_exit: Int?
+        /// "gcc-cron" when the shared scheduler runs the job; launchd then
+        /// reports it not loaded, which is expected.
+        var runner: String?
+        var last_run: String?
+        var last_outcome: String?
     }
+    struct WeeklyFailure: Decodable { var at: String; var error: String }
     struct Log: Decodable { var file: String; var warn_count: Int; var error_count: Int; var last_error: String? }
     struct Build: Decodable {
         var version: String
@@ -53,6 +59,8 @@ struct StatusDoc: Decodable {
         var latest_week: String?
         var landed: [String: Int]
         var weekly_held_since: String?
+        var weekly_failure: WeeklyFailure?
+        var weekly_overdue: Bool?
     }
     struct Domain: Decodable { var name: String; var events_in_window: Int; var newest: String? }
     struct Interventions: Decodable { var live: Int; var candidate: Int; var shadow: Int; var fired_7d: Int }

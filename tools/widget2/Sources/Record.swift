@@ -230,6 +230,8 @@ struct Record {
     var logWarns: Int
     var logFile: String?
     var weeklyHeldSince: Date?
+    /// Set when the weekly review failed or has not produced a page in 8 days.
+    var weeklyBroken: (title: String, detail: String, at: Date?)? = nil
     var cycles: [CycleMark]
     var cycleFields: [StatusCycleFields]
     var cycleWindowDays: Int
@@ -501,11 +503,28 @@ enum RecordBuilder {
             associations: s.patterns.associations,
             evidence: Dictionary(r.evidence.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }),
             you: [], system: [], quiet: [], since: since, checks: [])
+        rec.weeklyBroken = weeklyBroken(status: s)
         rec.you = youRows(rec)
         rec.system = systemRows(rec, status: s)
         rec.quiet = quietRows(rec)
         rec.checks = checks(rec, status: s, reader: r)
         return rec
+    }
+
+    /// Whether the weekly review is broken, from the strongest evidence first:
+    /// the reader's own error, then the scheduler's failed run, then age.
+    static func weeklyBroken(status s: StatusDoc) -> (title: String, detail: String, at: Date?)? {
+        if let f = s.reader.weekly_failure {
+            return ("The weekly review failed", f.error, parseDate(f.at))
+        }
+        if let j = s.jobs.first(where: { $0.label.hasSuffix("reader-weekly") }), j.last_outcome == "failed" {
+            return ("The weekly review's last run failed",
+                    "exit \(j.last_exit ?? 0) · next try \(humanSchedule(j.schedule))", parseDate(j.last_run))
+        }
+        if s.reader.weekly_overdue == true {
+            return ("The weekly review is overdue", "no page in over 8 days", parseDate(s.reader.last_weekly))
+        }
+        return nil
     }
 
     static func fixHint(_ l: StatusDoc.Lane) -> String? {
@@ -539,6 +558,11 @@ enum RecordBuilder {
 
     static func systemRows(_ r: Record, status s: StatusDoc) -> [Row] {
         var rows: [Row] = []
+        if let w = r.weeklyBroken {
+            rows.append(Row(id: "weekly", icon: "exclamationmark.triangle", title: w.title, detail: w.detail,
+                            sev: .bad, age: w.at.map { r.now.timeIntervalSince($0) }, ageNote: "since",
+                            dive: Dive(pane: .reader)))
+        }
         if !r.daemonRunning {
             rows.append(Row(id: "daemon", icon: "moon.zzz", title: "The daemon is \(r.daemonWord)",
                             detail: "no cycles run until it starts: i-dream start", sev: .bad,
@@ -566,10 +590,14 @@ enum RecordBuilder {
             rows.append(Row(id: "build", icon: "hammer", title: "The daemon runs an older build than the source",
                             detail: "rebuild and reinstall: scripts/install.sh", sev: .warn, dive: Dive(pane: .flow)))
         }
-        for j in s.jobs where !j.loaded || (j.last_exit ?? 0) != 0 {
+        // The weekly job's failure already has its own row above.
+        for j in s.jobs where !j.label.hasSuffix("reader-weekly") {
+            let failed = j.runner != nil ? j.last_outcome == "failed" : (j.loaded && (j.last_exit ?? 0) != 0)
+            let missing = j.runner == nil && !j.loaded
+            guard failed || missing else { continue }
             rows.append(Row(id: "job-" + j.label, icon: "calendar.badge.exclamationmark",
-                            title: j.loaded ? "\(j.label) last exited \(j.last_exit ?? 0)" : "\(j.label) is not loaded",
-                            detail: j.schedule, sev: .warn, dive: Dive(pane: .flow)))
+                            title: missing ? "\(j.label) is not scheduled" : "\(j.label) last run failed (exit \(j.last_exit ?? 0))",
+                            detail: humanSchedule(j.schedule), sev: .warn, dive: Dive(pane: .flow)))
         }
         let worse = r.worsening.filter { !$0.gateCandidate }
         if worse.count > 2 {

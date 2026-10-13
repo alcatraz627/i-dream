@@ -402,6 +402,15 @@ pub struct JobStatus {
     pub pid: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_exit: Option<i64>,
+    /// "gcc-cron" when the shared gcc scheduler runs the job; launchd then
+    /// reports it as not loaded, which is expected rather than a fault.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<&'static str>,
+    /// The scheduler's last recorded run: when, and "ok" or "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_outcome: Option<String>,
     /// The binary launchd reports for this label. launchd is global per
     /// user, so under a sandboxed $HOME a planted plist with a live label
     /// reads the REAL session's job — this field makes such a collision
@@ -620,9 +629,14 @@ fn lane_word(s: LaneStatus) -> &'static str {
 /// a plist whose label is live in the real session will read the REAL job's
 /// state; the `program` field is carried so that collision is visible.
 fn gather_jobs() -> Vec<JobStatus> {
+    let sched = dirs::home_dir().map(|h| h.join(".claude/scheduled")).unwrap_or_default();
+    let gateway = sched.join(".gateway").exists();
+    let history = std::fs::read_to_string(sched.join("history.jsonl")).unwrap_or_default();
+    let runs = last_runs(&history);
     crate::reader::scheduled_jobs()
         .into_iter()
         .map(|job| {
+            let last = runs.get(&job.name).cloned();
             let installed = job.installed;
             let (loaded, pid, last_exit, program) = if installed {
                 match std::process::Command::new("launchctl")
@@ -639,6 +653,7 @@ fn gather_jobs() -> Vec<JobStatus> {
             } else {
                 (false, None, None, None)
             };
+            let runner = (gateway && !loaded).then_some("gcc-cron");
             JobStatus {
                 label: job.label,
                 desc: job.description,
@@ -647,11 +662,37 @@ fn gather_jobs() -> Vec<JobStatus> {
                 installed,
                 loaded,
                 pid,
-                last_exit,
+                last_exit: if runner.is_some() { last.as_ref().and_then(|r| r.exit) } else { last_exit },
+                runner,
+                last_run: last.as_ref().map(|r| r.ts.clone()),
+                last_outcome: last.map(|r| r.outcome),
                 program,
             }
         })
         .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LastRun {
+    ts: String,
+    outcome: String,
+    exit: Option<i64>,
+}
+
+/// The newest "run" event per job name in the gcc scheduler's history.
+fn last_runs(history: &str) -> std::collections::HashMap<String, LastRun> {
+    let mut out = std::collections::HashMap::new();
+    for line in history.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("ev").and_then(|x| x.as_str()) != Some("run") {
+            continue;
+        }
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+        let (Some(name), Some(ts)) = (s("name"), s("ts")) else { continue };
+        let exit = s("exit").and_then(|e| e.parse().ok());
+        out.insert(name, LastRun { ts, outcome: s("outcome").unwrap_or_default(), exit });
+    }
+    out
 }
 
 /// Extract `"PID" = N;`, `"LastExitStatus" = N;`, and `"Program" = "...";`
@@ -978,7 +1019,12 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
             if let Some(next) = &j.next_fire {
                 line.push_str(&format!(" · next {next}"));
             }
-            if !j.installed {
+            if let Some(runner) = j.runner {
+                line.push_str(&format!(" · run by {runner}"));
+                if let (Some(at), Some(outcome)) = (&j.last_run, &j.last_outcome) {
+                    line.push_str(&format!(" (last run {at}: {outcome})"));
+                }
+            } else if !j.installed {
                 line.push_str(" · plist missing (re-add with ~/.claude/scripts/schedule/schedule.sh)");
             } else if !j.loaded {
                 line.push_str(" · plist present but NOT LOADED");
@@ -1177,6 +1223,19 @@ mod tests {
         // read as "not running", not as PID -5.
         assert_eq!(parse_launchctl_list("\t\"PID\" = -5;\n").0, None);
         assert_eq!(parse_launchctl_list("\t\"PID\" = 0;\n").0, None);
+    }
+
+    #[test]
+    fn last_runs_keeps_the_newest_run_per_job() {
+        let history = r#"{"ts":"2026-10-06T10:03:20Z","ev":"added","name":"w","kind":"weekly"}
+{"ts":"2026-10-06T21:36:42Z","ev":"run","name":"w","outcome":"failed","exit":"1"}
+not json
+{"ts":"2026-10-06T23:01:51Z","ev":"run","name":"d","outcome":"ok","exit":"0"}
+{"ts":"2026-10-07T23:00:40Z","ev":"run","name":"d","outcome":"ok","exit":"0"}"#;
+        let runs = last_runs(history);
+        assert_eq!(runs["w"], LastRun { ts: "2026-10-06T21:36:42Z".into(), outcome: "failed".into(), exit: Some(1) });
+        assert_eq!(runs["d"].ts, "2026-10-07T23:00:40Z");
+        assert_eq!(runs.len(), 2);
     }
 
     // ── freshness_verdicts — pins each verdict's SOURCE ──────────────

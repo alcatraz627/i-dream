@@ -104,8 +104,9 @@ struct DropdownView: View {
                     stripLink("person.crop.circle.badge.exclamationmark", "\(r.awaitingItems)", "for you",
                               Dive(pane: .reader, scope: .run(r.awaitingPages.first?.week ?? "")))
                     stripLink("clock.badge.exclamationmark", "\(r.count(.stale))", "stale", Dive(pane: .ledger, scope: .sourceState(.stale)))
-                    stripLink("xmark.octagon", "\(r.dead.count)", "dead", Dive(pane: .ledger, scope: .sourceState(.dead)))
-                    stripLink("link", "\(r.interventions.live)", "nudges live", Dive(pane: .landing))
+                    let broken = r.system.filter { $0.sev == .bad }.count
+                    stripLink("exclamationmark.triangle", "\(broken)", "broken", Dive(pane: .flow), alert: broken > 0)
+                    stripLink("link", "\(r.interventions.fired_7d)", "nudges fired 7d", Dive(pane: .landing))
                     Spacer(minLength: 0)
                 }
             }
@@ -125,12 +126,12 @@ struct DropdownView: View {
         return "\(r.version) · \(prod)" + (cyc.isEmpty ? "" : " · \(cyc)")
     }
 
-    private func stripLink(_ icon: String, _ n: String, _ noun: String, _ d: Dive) -> some View {
+    private func stripLink(_ icon: String, _ n: String, _ noun: String, _ d: Dive, alert: Bool = false) -> some View {
         Button { model.open(d) } label: {
             HStack(spacing: 3) {
-                Image(systemName: icon).font(.system(size: 10)).foregroundStyle(P.fg2)
-                Text(n).font(F.meta.weight(.semibold)).foregroundStyle(P.fg)
-                Text(noun).font(F.meta).foregroundStyle(P.fg2)
+                Image(systemName: icon).font(.system(size: 10)).foregroundStyle(alert ? P.red : P.fg2)
+                Text(n).font(F.meta.weight(.semibold)).foregroundStyle(alert ? P.red : P.fg)
+                Text(noun).font(F.meta).foregroundStyle(alert ? P.red : P.fg2)
             }
         }
         .buttonStyle(.plain)
@@ -213,10 +214,10 @@ struct DropdownView: View {
             Connector(moving: r.since.newClusters > 0)
             box("text.magnifyingglass", "Reader", r.findings.filter { $0.week == r.runs.first?.week }.count, "findings",
                 "\(r.runs.first?.week ?? "no run") · \(ageText(parseDate(r.runs.first?.at).map { r.now.timeIntervalSince($0) })) ago · \(r.awaitingItems) for you",
-                sev: r.awaitingItems > 0 ? .wait : .ok, Dive(pane: .reader))
+                sev: r.weeklyBroken != nil ? .bad : r.awaitingItems > 0 ? .wait : .ok, Dive(pane: .reader))
             Connector(moving: r.since.newLanded > 0)
             box("tray.and.arrow.down", "Landing", r.landed.count, "landed",
-                "\(r.filed.count) filed · \(r.armed.count) armed · \(r.interventions.live) live nudges",
+                "\(r.filed.count) filed · \(r.armed.count) armed · \(r.interventions.fired_7d) nudges fired 7d",
                 sev: r.landed.isEmpty ? .none : .ok, Dive(pane: .landing))
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
