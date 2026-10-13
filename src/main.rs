@@ -424,6 +424,10 @@ async fn main() -> Result<()> {
                         println!("held by the usage gate ({reason}); the next daily recon retries within 48h");
                         return Ok(());
                     }
+                    if let Some(reason) = &run.skipped {
+                        println!("skipped: {reason}; --force replaces a page that is still unanswered");
+                        return Ok(());
+                    }
                     println!(
                         "{}: {} cluster(s) forwarded, {} named, {} rejected, {} foreign id(s) dropped, {} token(s)",
                         run.week,

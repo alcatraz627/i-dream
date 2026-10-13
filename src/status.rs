@@ -76,6 +76,10 @@ pub struct ReaderSummary {
     pub landed: std::collections::BTreeMap<String, usize>,
     /// Set while a weekly run waits on the usage gate.
     pub weekly_held_since: Option<chrono::DateTime<chrono::Utc>>,
+    /// The last weekly run that errored, until a later one succeeds.
+    pub weekly_failure: Option<crate::reader::WeeklyFailure>,
+    /// No successful weekly run in 8 days, whatever the cause.
+    pub weekly_overdue: bool,
 }
 
 #[derive(Serialize)]
@@ -126,6 +130,10 @@ fn gather_reader() -> ReaderSummary {
         latest_week: runs.first().map(|r| r.week.clone()),
         landed,
         weekly_held_since: state.weekly_pending_since,
+        weekly_overdue: state
+            .last_weekly
+            .is_none_or(|t| chrono::Utc::now() - t > chrono::Duration::days(8)),
+        weekly_failure: state.weekly_failure,
     }
 }
 

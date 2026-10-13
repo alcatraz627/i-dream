@@ -39,6 +39,10 @@ pub struct ReaderState {
     /// Decision pages handed to the owner and not yet answered.
     #[serde(default)]
     pub pending_pages: Vec<String>,
+    /// The last weekly run that failed, kept until a later run succeeds so the
+    /// widget can say the review is broken instead of showing nothing.
+    #[serde(default)]
+    pub weekly_failure: Option<WeeklyFailure>,
     /// Per-domain read summary from the last recon.
     #[serde(default)]
     pub streams: Vec<StreamRead>,
@@ -60,6 +64,13 @@ impl ReaderState {
         std::fs::rename(&tmp, &path)?;
         Ok(())
     }
+}
+
+/// A weekly run that ended in an error: when, and the error's text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeeklyFailure {
+    pub at: DateTime<Utc>,
+    pub error: String,
 }
 
 /// One recon: the evidence read and the clusters it joined to.
@@ -146,6 +157,9 @@ pub struct WeeklyRun {
     /// The usage gate's reason when the run stood down.
     #[serde(default)]
     pub held_by_gate: Option<String>,
+    /// Why the run did nothing because this week already has a page.
+    #[serde(default)]
+    pub skipped: Option<String>,
     /// What applying the owner's answers did, once they answered.
     #[serde(default)]
     pub landed: Vec<land::Landed>,
@@ -212,8 +226,26 @@ fn parse_naming(content: &str) -> Option<name::RawNaming> {
 }
 
 /// The weekly deep run: recon, one bounded naming call, the decision page.
-/// With `dry_run` the clusters are named but no page is built.
+/// With `dry_run` the clusters are named but no page is built. A failure is
+/// recorded in the reader state before it is returned.
 pub async fn run_weekly(
+    config: &crate::config::Config,
+    store: &Store,
+    now: DateTime<Utc>,
+    since: DateTime<Utc>,
+    dry_run: bool,
+    force: bool,
+) -> Result<WeeklyRun> {
+    let result = run_weekly_inner(config, store, now, since, dry_run, force).await;
+    if let Err(e) = &result {
+        let mut state = ReaderState::load();
+        state.weekly_failure = Some(WeeklyFailure { at: now, error: format!("{e:#}") });
+        state.save()?;
+    }
+    result
+}
+
+async fn run_weekly_inner(
     config: &crate::config::Config,
     store: &Store,
     now: DateTime<Utc>,
@@ -228,6 +260,22 @@ pub async fn run_weekly(
         ..Default::default()
     };
     let mut state = ReaderState::load();
+
+    // One page per ISO week. A second run in the same week used to overwrite
+    // the page, and an answer already given would then apply to new items.
+    if let Some(prior) = load_run(&week).filter(|p| p.page_slug.is_some()) {
+        let slug = prior.page_slug.clone().unwrap_or_default();
+        if !force {
+            run.skipped = Some(format!("{week} already has a page ({slug})"));
+            state.weekly_pending_since = None;
+            state.save()?;
+            return Ok(run);
+        }
+        if !dry_run && !state.pending_pages.contains(&slug) {
+            anyhow::bail!("{slug} was already answered; refusing to replace it");
+        }
+    }
+
     if !force && let Some(reason) = crate::daemon::shared_usage_gate_closed() {
         state.weekly_pending_since.get_or_insert(now);
         state.save()?;
@@ -283,6 +331,7 @@ pub async fn run_weekly(
     }
     state.last_weekly = Some(now);
     state.weekly_pending_since = None;
+    state.weekly_failure = None;
     state.save()?;
     save_run(&run)?;
     Ok(run)
