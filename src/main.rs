@@ -395,7 +395,10 @@ async fn main() -> Result<()> {
                 None => println!("{name} had no hold"),
             },
             cli::JobsAction::Fire { name } => {
-                print!("{}", jobs::fire(&name)?);
+                let code = jobs::fire(&name)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
             }
         },
 

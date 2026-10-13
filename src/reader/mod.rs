@@ -214,6 +214,32 @@ fn amend_process(week: &str, note: &str) -> Result<()> {
     Ok(())
 }
 
+/// What each hook did over the window, from ~/.claude/hooks/warn-events.jsonl:
+/// per hook id, how many fires were real blocks, dry-run blocks, soft notes,
+/// nudges or muted. Busiest hooks first.
+fn hook_actions(since: DateTime<Utc>) -> Vec<(String, std::collections::BTreeMap<String, usize>)> {
+    let Some(body) = dirs::home_dir().and_then(|h| std::fs::read_to_string(h.join(".claude/hooks/warn-events.jsonl")).ok())
+    else {
+        return vec![];
+    };
+    let mut by: std::collections::HashMap<String, std::collections::BTreeMap<String, usize>> = Default::default();
+    for line in body.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let s = |k: &str| v.get(k).and_then(|x| x.as_str());
+        if s("kind") != Some("warn") {
+            continue;
+        }
+        let (Some(hook), Some(ts)) = (s("hook_id"), s("ts").and_then(|t| t.parse::<DateTime<Utc>>().ok())) else { continue };
+        if ts < since {
+            continue;
+        }
+        *by.entry(hook.to_string()).or_default().entry(s("action").unwrap_or("unlabelled").to_string()).or_insert(0) += 1;
+    }
+    let mut out: Vec<_> = by.into_iter().collect();
+    out.sort_by_key(|(h, m)| (std::cmp::Reverse(m.values().sum::<usize>()), h.clone()));
+    out
+}
+
 /// Hook scripts registered in the owner's ~/.claude/settings.json.
 fn registered_hooks() -> std::collections::HashSet<String> {
     dirs::home_dir()
@@ -312,12 +338,21 @@ async fn run_weekly_inner(
         let mut hooks: Vec<&String> = registered.iter().collect();
         hooks.sort();
         let hooks: Vec<&str> = hooks.iter().map(|s| s.as_str()).collect();
+        let actions: String = hook_actions(now - chrono::Duration::days(14))
+            .iter()
+            .take(40)
+            .map(|(h, m)| format!("- {h}: {}\n", m.iter().map(|(a, n)| format!("{n} {a}")).collect::<Vec<_>>().join(", ")))
+            .collect();
         let prompt = format!(
             "Week {week}. `kind` is one of repeat, structural-need, drift or noise; a cluster's \
              'found by' label says how the join found it and is not its kind. The clusters:\n\n{batch}\n\n\
              ## Hook scripts already registered in settings.json\n{}\n\n\
              Never propose registering one of these. If one exists and its mistake still repeats, \
-             name what it fails to catch, or that it only warns instead of blocking.",
+             name what it fails to catch, or that it only warns instead of blocking.\n\n\
+             ## What each hook did in the last 14 days\n\
+             block = stopped the turn or tool call; block-dry = would have blocked but runs in dry-run; \
+             soft and nudge = advisory only; muted = suppressed by a mute file. Base any claim about \
+             whether a hook blocks on these counts, not on its name.\n{actions}",
             hooks.join(", ")
         );
         let resp = client
@@ -573,4 +608,19 @@ pub fn republish(week: &str) -> Result<String> {
     let rows: Vec<Evidence> = body.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     let cfg = land::page_config(week, &run.items, &run.forwarded, &rows, run.named.process_note.as_deref());
     land::publish(&land::page_slug(week), &cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Prints the live hook-action counts the weekly prompt carries, to check
+    /// them against warn-events.jsonl. `cargo test -- --ignored live_hook_actions`
+    #[test]
+    #[ignore]
+    fn live_hook_actions() {
+        for (h, m) in super::hook_actions(chrono::Utc::now() - chrono::Duration::days(14)) {
+            if ["declared-ready", "dense-briefing-shapes", "named-next-work", "prose-smell"].contains(&h.as_str()) {
+                println!("{h}: {m:?}");
+            }
+        }
+    }
 }

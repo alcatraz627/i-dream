@@ -138,8 +138,7 @@ pub fn run_now(name: &str) -> Result<u32> {
         std::fs::OpenOptions::new().create(true).append(true).open(logs.join(format!("{name}.{ext}.log")))
     };
     let child = std::process::Command::new("bash")
-        .arg(schedule_tool()?)
-        .args(["run", name])
+        .arg(job_script(name)?)
         .stdin(std::process::Stdio::null())
         .stdout(open("out")?)
         .stderr(open("err")?)
@@ -182,12 +181,24 @@ pub fn delay(name: &str, until: DateTime<Local>, now: DateTime<Local>) -> Result
 }
 
 /// What the one-shot runs at the delayed time: clear the hold, then run the
-/// job through the scheduler so its history shows the fire.
-pub fn fire(name: &str) -> Result<String> {
+/// job's own script so its history shows the fire.
+pub fn fire(name: &str) -> Result<i32> {
     let mut holds = load_holds();
     holds.remove(name);
     save_holds(&holds)?;
-    schedule(&["run", name])
+    let status = std::process::Command::new("bash").arg(job_script(name)?).status().context("run the job script")?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// The wrapper gcc-schedule generated for a job. Running it is what a
+/// scheduled fire does, including the run record in the scheduler's history;
+/// `gcc-schedule run` skips that record.
+fn job_script(name: &str) -> Result<PathBuf> {
+    let p = dirs::home_dir().context("home")?.join(".claude/scheduled").join(name).join("script.sh");
+    if !p.exists() {
+        bail!("no script for {name} at {}", p.display());
+    }
+    Ok(p)
 }
 
 #[cfg(test)]
