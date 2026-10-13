@@ -43,4 +43,10 @@ Stage 3 stays marked UNCONFIRMED until the weekly data exists.
 | 4 widget | f93e078: Reader card turns red, a "weekly review failed / overdue" row leads System, the strip shows a red "N broken" count at any height, job rows only for a real failure, nudges shown as fired in 7 days (0) not live (39). | Probe renders read in dark and light; live popover not opened |
 | 5 delivery | Open; owner call. | |
 
+### Second round, 2026-10-13 afternoon
+
+- Atone: owner said yes. `[consolidation] enabled = false` in `~/.claude/atone/.i-dream-domain.toml`; `--read-only` now honoured and the latest-event lookup fixed (`~/.claude` c885da4, read-only run left the backlog at 768 lines). The daemon log confirming the step is gone: UNCONFIRMED until its next cycle.
+- Schedule on the widget (5e46273, de6bd0b): a pinned NEXT line and a Schedule group with Run now, Later and Cancel delay, backed by `i-dream jobs`. Exercised: delay, hold stand-down, cancel against the live scheduler; Run now on the daily job (a real dream pass, $0.82) and on the audit job (recorded in history).
+- Hook counts: the weekly prompt carries 14 days of block, soft and nudge counts per hook. They show declared-ready blocks (25), dense-briefing never blocks (68 soft), named-next-work barely fires (1).
+
 Also corrected: `~/.claude/i-dream/reader/PROCESS.md` carried the false 2026w41 "hooks are absent" note into every run; it is marked corrected.
