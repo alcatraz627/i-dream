@@ -337,6 +337,16 @@ struct SessionSummary {
     reply_length: usize,
 }
 
+/// Why a dream phase did not run, for the trace: switched off in config, or
+/// the earlier phases already spent the cycle budget.
+fn skip_reason(enabled: bool, spent: u64, budget: u64) -> String {
+    if !enabled {
+        "disabled in config".to_string()
+    } else {
+        format!("cycle budget exhausted by earlier phases ({spent} of {budget} tokens spent)")
+    }
+}
+
 /// Truncate a string at a char (not byte) boundary, appending "…" if cut.
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -534,7 +544,8 @@ struct QueueInsights {
 }
 
 impl QueueEntry {
-    /// An entry with nothing to say — no insights, no pending items.
+    /// An entry with nothing to say: no insights and no real pending items.
+    /// The writer's "(no tasks ... captured)" filler line is not a pending item.
     fn is_trivial(&self) -> bool {
         let i = &self.insights;
         i.worked.is_empty()
@@ -542,7 +553,7 @@ impl QueueEntry {
             && i.gotchas.is_empty()
             && i.notes.is_empty()
             && i.feedback.is_empty()
-            && self.pending.is_empty()
+            && self.pending.iter().all(|p| p.trim_start().starts_with("_(no tasks"))
     }
 
     /// Identity for within-queue dedup: the contract id — the transcript UUID,
@@ -2096,7 +2107,7 @@ impl<'a> Module for DreamingModule<'a> {
             tracer.note(
                 TracePhase::Wake,
                 EventKind::PhaseSkipped,
-                "disabled in config or budget exhausted",
+                skip_reason(self.config.modules.dreaming.wake_enabled, total_tokens, budget),
             )?;
         }
 
@@ -2403,6 +2414,21 @@ mod tests {
             vec![("a.json", "duplicate"), ("e.json", "trivial")]
         );
         assert_eq!(plan.deferred, 0);
+    }
+
+    #[test]
+    fn queue_placeholder_pending_alone_is_trivial() {
+        let mut q = queue_entry(Some("u"), "s", "2026-05-01", &[]);
+        q.pending = vec!["_(no tasks or workspace todos captured at compaction)_".into()];
+        assert!(q.is_trivial());
+        q.pending.push("ship the fix".into());
+        assert!(!q.is_trivial(), "a real pending item keeps it");
+    }
+
+    #[test]
+    fn skip_reason_names_budget_or_config() {
+        assert_eq!(skip_reason(false, 0, 25_000), "disabled in config");
+        assert!(skip_reason(true, 27_893, 25_000).contains("27893 of 25000"));
     }
 
     /// A checkpoint whose session the transcript scanner already read must STILL
