@@ -163,6 +163,18 @@ pub struct WeeklyRun {
     /// What applying the owner's answers did, once they answered.
     #[serde(default)]
     pub landed: Vec<land::Landed>,
+    /// The start of the window the run read.
+    #[serde(default)]
+    pub since: Option<DateTime<Utc>>,
+    /// Recorded mistakes in the window, all problems included.
+    #[serde(default)]
+    pub atone_total: usize,
+    /// What each hook did in the 14 days before the run, as sent to the model.
+    #[serde(default)]
+    pub hook_actions: Vec<(String, std::collections::BTreeMap<String, usize>)>,
+    /// Open items on the gcc backlog when the page was built.
+    #[serde(default)]
+    pub backlog_open: Option<usize>,
 }
 
 fn run_dir(week: &str) -> Result<PathBuf> {
@@ -257,7 +269,76 @@ fn parse_naming(content: &str) -> Option<name::RawNaming> {
     }
     serde_json::from_str::<Vec<name::Named>>(&json)
         .ok()
-        .map(|items| name::RawNaming { items, process_note: None })
+        .map(|items| name::RawNaming { items, ..Default::default() })
+}
+
+/// The answer's shape and the voice rules for the owner-facing fields. Code
+/// owns this so an amended PROCESS.md on disk cannot carry a stale schema.
+pub const ANSWER_SCHEMA: &str = r#"## Who reads this
+The owner reads this page as the person Claude worked for, not as an engineer of the
+gcc. Write every owner-facing field (title, happened[].what, why_repeats, fix,
+guard.plain, guard.gap, summary) as plain sentences about what Claude did to them.
+Never put an evidence id, cluster id, hook id, script or file name, slug, or the
+words "gcc", "backlog", "atone", "gate" or "cluster" in those fields. Counts are added
+by the page; do not write numbers in guard.gap.
+
+`happened` lists the times it happened, one per cited evidence row, each a sentence
+about what Claude did. The page adds the date and project from the evidence row.
+`guard.hook_id` is a hook id from the 14-day list above, or null when nothing tries
+to stop it; `guard.verdict` is yes, partly or no.
+
+## Merge
+If two clusters are the same problem seen two ways, name it once and list the other
+cluster ids in "merged". A cluster is named or merged, never both.
+
+## Answer with JSON only
+{"summary": "…",
+ "items": [{"cluster": "c-…", "merged": ["c-…"], "kind": "repeat",
+   "title": "Said it works without checking where you would see it",
+   "happened": [{"evidence_id": "atone:…", "what": "told you the deploy script was simplest and certain; it had never been run, and it failed when you ran it."}],
+   "why_repeats": "…", "fix": "…",
+   "guard": {"hook_id": "declared-ready", "plain": "A check on \"done\" and \"works\" claims", "verdict": "partly", "gap": "\"proven on the Pi\" and \"green on the laptop\" get through"},
+   "why": "…", "evidence_ids": ["atone:…"],
+   "proposal": {"target": "…", "change": "…"}}],
+ "process_note": null}
+"#;
+
+/// Forget a guard's hook id when no hook by that id acted in the window, so
+/// the page never quotes counts for a hook the model made up. The guard's
+/// plain name and verdict stay.
+pub fn drop_unknown_hooks(v: &mut name::Validated, actions: &[(String, std::collections::BTreeMap<String, usize>)]) {
+    for item in &mut v.items {
+        if let Some(g) = &mut item.guard
+            && let Some(h) = &g.hook_id
+            && !actions.iter().any(|(id, _)| id == h)
+        {
+            g.hook_id = None;
+        }
+    }
+}
+
+/// Recorded mistakes (atone rows) whose time falls in `[since, at]`.
+pub fn count_atone(rows: &[Evidence], since: DateTime<Utc>, at: DateTime<Utc>) -> usize {
+    let ids: std::collections::HashSet<&str> = rows
+        .iter()
+        .filter(|e| e.domain == "atone" && e.ts >= since && e.ts <= at)
+        .map(|e| e.id.as_str())
+        .collect();
+    ids.len()
+}
+
+/// Open proposals in a proposals.jsonl body; a row with no status counts as
+/// open, the same default `propose.sh list` uses.
+pub fn count_open_proposals(body: &str) -> usize {
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("status").and_then(|s| s.as_str()).unwrap_or("open") == "open")
+        .count()
+}
+
+fn backlog_open() -> Option<usize> {
+    let body = std::fs::read_to_string(dirs::home_dir()?.join(".claude/proposals.jsonl")).ok()?;
+    Some(count_open_proposals(&body))
 }
 
 /// The weekly deep run: recon, one bounded naming call, the decision page.
@@ -292,6 +373,7 @@ async fn run_weekly_inner(
     let mut run = WeeklyRun {
         week: week.clone(),
         at: Some(now),
+        since: Some(since),
         ..Default::default()
     };
     let mut state = ReaderState::load();
@@ -321,6 +403,9 @@ async fn run_weekly_inner(
     let (recon, rows) = recon_at(store, now, since);
     persist_recon(&recon, &rows)?;
     run.forwarded = join::forward(&recon.clusters, now, 20);
+    run.atone_total = count_atone(&rows, since, now);
+    run.hook_actions = hook_actions(now - chrono::Duration::days(14));
+    run.backlog_open = backlog_open();
 
     // Project briefs regenerate weekly (docs/29 3.1), for projects whose
     // patterns moved since their brief was written.
@@ -338,7 +423,8 @@ async fn run_weekly_inner(
         let mut hooks: Vec<&String> = registered.iter().collect();
         hooks.sort();
         let hooks: Vec<&str> = hooks.iter().map(|s| s.as_str()).collect();
-        let actions: String = hook_actions(now - chrono::Duration::days(14))
+        let actions: String = run
+            .hook_actions
             .iter()
             .take(40)
             .map(|(h, m)| format!("- {h}: {}\n", m.iter().map(|(a, n)| format!("{n} {a}")).collect::<Vec<_>>().join(", ")))
@@ -352,17 +438,18 @@ async fn run_weekly_inner(
              ## What each hook did in the last 14 days\n\
              block = stopped the turn or tool call; block-dry = would have blocked but runs in dry-run; \
              soft and nudge = advisory only; muted = suppressed by a mute file. Base any claim about \
-             whether a hook blocks on these counts, not on its name.\n{actions}",
+             whether a hook blocks on these counts, not on its name.\n{actions}\n\n{ANSWER_SCHEMA}",
             hooks.join(", ")
         );
         let resp = client
-            .analyze(&process, &prompt, &config.budget.model, 4096, 0.2)
+            .analyze(&process, &prompt, &config.budget.model, 8192, 0.2)
             .await
             .context("reader naming call")?;
         run.tokens = resp.tokens_used;
         std::fs::write(run_dir(&week)?.join("response.txt"), &resp.content)?;
         let raw = parse_naming(&resp.content).context("the naming answer was not the documented JSON")?;
         run.named = name::validate(raw, &run.forwarded);
+        drop_unknown_hooks(&mut run.named, &run.hook_actions);
         name::ground(&mut run.named, &registered, |p| {
             crate::config::expand_tilde(std::path::Path::new(p)).exists()
         });
@@ -612,6 +699,47 @@ pub fn republish(week: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A run.json written before the page fields existed still loads.
+    #[test]
+    fn old_runs_still_load() {
+        let body = r#"{"week":"2026w41","at":"2026-10-06T14:44:00Z","forwarded":[],
+            "named":{"items":[],"rejected":[],"dropped_ids":0},
+            "items":[{"cluster":"c-0d4db80b","kind":"repeat","title":"t","why":"w",
+                      "evidence_ids":["atone:a"],"proposal":{"target":"x","change":"y"}}],
+            "page_slug":"idream-reader-2026w41","tokens":66766}"#;
+        let run: WeeklyRun = serde_json::from_str(body).unwrap();
+        assert_eq!(run.items.len(), 1);
+        assert!(run.items[0].happened.is_empty() && run.items[0].merged.is_empty());
+        assert!(run.items[0].guard.is_none() && run.items[0].fix.is_empty());
+        assert!(run.since.is_none() && run.backlog_open.is_none());
+        assert_eq!(run.atone_total, 0);
+        assert!(run.named.summary.is_empty());
+    }
+
+    #[test]
+    fn open_proposals_count_a_missing_status_as_open() {
+        let body = "{\"id\":\"a\",\"status\":\"open\"}\n{\"id\":\"b\"}\n{\"id\":\"c\",\"status\":\"done\"}\nnot json\n";
+        assert_eq!(count_open_proposals(body), 2);
+    }
+
+    #[test]
+    fn a_made_up_hook_id_is_forgotten() {
+        let mut v = name::Validated {
+            items: vec![name::Named {
+                guard: Some(name::Guard { hook_id: Some("invented".into()), plain: "p".into(), verdict: "no".into(), gap: String::new() }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let actions = vec![("declared-ready".to_string(), std::collections::BTreeMap::from([("block".to_string(), 3)]))];
+        drop_unknown_hooks(&mut v, &actions);
+        let g = v.items[0].guard.as_ref().unwrap();
+        assert!(g.hook_id.is_none());
+        assert_eq!(g.plain, "p");
+    }
+
     /// Prints the live hook-action counts the weekly prompt carries, to check
     /// them against warn-events.jsonl. `cargo test -- --ignored live_hook_actions`
     #[test]

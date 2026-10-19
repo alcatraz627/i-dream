@@ -12,17 +12,56 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// What one cluster was named as.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Named {
     pub cluster: String,
+    /// Other clusters this problem absorbs; their evidence is citable too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged: Vec<String>,
     /// repeat, structural-need, drift or noise.
     pub kind: String,
+    /// The problem as the owner would say it happened to them.
     pub title: String,
+    /// The machine-facing reason, kept for the backlog proposal body.
     #[serde(default)]
     pub why: String,
     pub evidence_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<Proposal>,
+    /// Dated instances. The model writes `what`; the page takes the date and
+    /// project from the evidence row, never from the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub happened: Vec<Instance>,
+    /// Why it keeps happening, in owner voice, no hook ids or script names.
+    #[serde(default)]
+    pub why_repeats: String,
+    /// The proposed fix in plain words, no paths.
+    #[serde(default)]
+    pub fix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<Guard>,
+}
+
+/// One time the problem happened, tied to the evidence row that records it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Instance {
+    pub evidence_id: String,
+    pub what: String,
+}
+
+/// What tries to stop the problem today, and whether it works.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Guard {
+    /// A hook id from the 14-day action list, or None for "nothing".
+    #[serde(default)]
+    pub hook_id: Option<String>,
+    /// The check named in owner words: "A check on done and works claims".
+    pub plain: String,
+    /// yes, partly or no.
+    pub verdict: String,
+    /// What it misses, one clause, no numbers (the page adds the counts).
+    #[serde(default)]
+    pub gap: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -37,6 +76,10 @@ pub struct Proposal {
 pub struct RawNaming {
     #[serde(default)]
     pub items: Vec<Named>,
+    /// Two or three sentences for the top of the page: the habits behind the
+    /// problems and the state of the checks meant to stop them.
+    #[serde(default)]
+    pub summary: String,
     /// The weekly run may amend its own process (ruling D7).
     #[serde(default)]
     pub process_note: Option<String>,
@@ -48,6 +91,9 @@ pub struct Validated {
     pub items: Vec<Named>,
     pub rejected: Vec<String>,
     pub dropped_ids: usize,
+    /// The model's lead paragraph for the page.
+    #[serde(default)]
+    pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_note: Option<String>,
 }
@@ -62,7 +108,7 @@ You are reading clusters a deterministic join found across the owner's local sig
 recorded mistakes (atone), affirmed good behaviour (affirm), session pins, gcc
 improvement proposals, core-dumps with unfinished items, corrections the owner typed,
 hook telemetry and skill use. Each cluster lists its evidence as
-`id | domain | provenance | date | excerpt`.
+`id | domain | provenance | date | project | excerpt`.
 
 For each cluster, decide what it is:
 - repeat: the same lesson keeps coming back from independent places.
@@ -72,19 +118,16 @@ For each cluster, decide what it is:
 - drift: something is getting worse week over week.
 - noise: the join matched on something incidental. Saying so is useful.
 
-Give each a title the owner would recognise in five words or so, and a one-sentence why
-that cites what the evidence shows. Cite only evidence ids listed under that cluster.
+The answer's fields and its JSON shape are given after the clusters, in the prompt
+itself; follow that schema. The owner-facing fields are written for the person Claude
+worked for. `why` is one sentence for the backlog that cites what the evidence shows.
+Cite only evidence ids listed under that cluster (or a cluster you merge).
 Where a change would help, draft one: `target` is the file, hook id, rule or mute file
 it touches, and `change` is one sentence. Do not propose more text injected into
 sessions; that lever has been measured and does not move these counts.
 
 If this process itself is missing something you needed, say so in `process_note`;
 it is appended to this file and read next week.
-
-Answer with JSON only:
-{"items": [{"cluster": "c-…", "kind": "repeat", "title": "…", "why": "…",
-  "evidence_ids": ["atone:…"], "proposal": {"target": "…", "change": "…"}}],
- "process_note": null}
 
 ## Amendments
 "#;
@@ -106,11 +149,12 @@ pub fn render_batch(clusters: &[Cluster], rows: &[Evidence], per_cluster: usize)
         ev.sort_by(|a, b| b.ts.cmp(&a.ts));
         for e in ev.iter().take(per_cluster) {
             out.push_str(&format!(
-                "- {} | {} | {} | {} | {}\n",
+                "- {} | {} | {} | {} | {} | {}\n",
                 e.id,
                 e.domain,
                 e.provenance,
                 e.ts.format("%Y-%m-%d"),
+                e.project.as_deref().unwrap_or("-"),
                 e.text
             ));
         }
@@ -125,6 +169,10 @@ pub fn render_batch(clusters: &[Cluster], rows: &[Evidence], per_cluster: usize)
 /// Keep what the batch can vouch for. Unknown clusters, unknown kinds, empty
 /// titles and items whose every evidence id is foreign are rejected; foreign
 /// ids inside an otherwise good item are dropped and counted.
+///
+/// A cluster belongs to one problem only, whether that problem names it or
+/// merges it. Named clusters are collected in a first pass so a merge of a
+/// cluster that a later item names is caught as a double claim.
 pub fn validate(raw: RawNaming, clusters: &[Cluster]) -> Validated {
     let owned: HashMap<&str, HashSet<&str>> = clusters
         .iter()
@@ -132,14 +180,16 @@ pub fn validate(raw: RawNaming, clusters: &[Cluster]) -> Validated {
         .collect();
     let mut v = Validated {
         process_note: raw.process_note.filter(|n| !n.trim().is_empty()),
+        summary: raw.summary.trim().to_string(),
         ..Default::default()
     };
     let mut seen: HashSet<String> = HashSet::new();
-    for mut item in raw.items {
-        let Some(ids) = owned.get(item.cluster.as_str()) else {
+    let mut named: Vec<Named> = vec![];
+    for item in raw.items {
+        if !owned.contains_key(item.cluster.as_str()) {
             v.rejected.push(format!("{}: not a cluster in this batch", item.cluster));
             continue;
-        };
+        }
         if !KINDS.contains(&item.kind.as_str()) {
             v.rejected.push(format!("{}: unknown kind '{}'", item.cluster, item.kind));
             continue;
@@ -152,6 +202,27 @@ pub fn validate(raw: RawNaming, clusters: &[Cluster]) -> Validated {
             v.rejected.push(format!("{}: named twice", item.cluster));
             continue;
         }
+        named.push(item);
+    }
+    'items: for mut item in named {
+        // Claims land only when every merge is good, so a rejected item
+        // leaves its other merges free for a later item.
+        let mut claims: HashSet<String> = HashSet::new();
+        for m in &item.merged {
+            if !owned.contains_key(m.as_str()) {
+                v.rejected.push(format!("{}: merges unknown {m}", item.cluster));
+                continue 'items;
+            }
+            if seen.contains(m) || !claims.insert(m.clone()) {
+                v.rejected.push(format!("{}: merges {m}, already claimed", item.cluster));
+                continue 'items;
+            }
+        }
+        let ids: HashSet<&str> = std::iter::once(item.cluster.as_str())
+            .chain(item.merged.iter().map(String::as_str))
+            .filter_map(|c| owned.get(c))
+            .flat_map(|s| s.iter().copied())
+            .collect();
         let before = item.evidence_ids.len();
         item.evidence_ids.retain(|id| ids.contains(id.as_str()));
         v.dropped_ids += before - item.evidence_ids.len();
@@ -159,11 +230,26 @@ pub fn validate(raw: RawNaming, clusters: &[Cluster]) -> Validated {
             v.rejected.push(format!("{}: cites no evidence the cluster owns", item.cluster));
             continue;
         }
+        let before = item.happened.len();
+        item.happened
+            .retain(|h| ids.contains(h.evidence_id.as_str()) && !h.what.trim().is_empty());
+        v.dropped_ids += before - item.happened.len();
+        if let Some(g) = &item.guard
+            && !["yes", "partly", "no"].contains(&g.verdict.as_str())
+        {
+            item.guard = None;
+        }
+        // The owner-facing fields are what the page shows; filing does not need them.
+        if item.kind != "noise" && (item.happened.is_empty() || item.fix.trim().is_empty()) {
+            v.rejected.push(format!("{}: no dated instance or no plain fix", item.cluster));
+            continue;
+        }
         if let Some(p) = &item.proposal
             && (p.target.trim().is_empty() || p.change.trim().is_empty())
         {
             item.proposal = None;
         }
+        seen.extend(claims);
         v.items.push(item);
     }
     v
@@ -248,6 +334,7 @@ mod tests {
         }
     }
 
+    /// A well-formed item: its first cited id is also its one dated instance.
     fn item(cluster: &str, kind: &str, ids: &[&str]) -> Named {
         Named {
             cluster: cluster.into(),
@@ -255,7 +342,13 @@ mod tests {
             title: "t".into(),
             why: "w".into(),
             evidence_ids: ids.iter().map(|s| s.to_string()).collect(),
-            proposal: None,
+            happened: ids
+                .first()
+                .map(|id| Instance { evidence_id: id.to_string(), what: "it happened".into() })
+                .into_iter()
+                .collect(),
+            fix: "a plain fix".into(),
+            ..Default::default()
         }
     }
 
@@ -270,6 +363,7 @@ mod tests {
                 item("c-1", "bogus", &["atone:a"]),
             ],
             process_note: Some("  ".into()),
+            ..Default::default()
         };
         let v = validate(raw, &cs);
         assert_eq!(v.items.len(), 1);
@@ -288,8 +382,65 @@ mod tests {
         let cs = vec![cluster("c-1", &["atone:a"])];
         let mut it = item("c-1", "structural-need", &["atone:a"]);
         it.proposal = Some(Proposal { target: "".into(), change: "x".into() });
-        let v = validate(RawNaming { items: vec![it], process_note: None }, &cs);
+        let v = validate(RawNaming { items: vec![it], ..Default::default() }, &cs);
         assert!(v.items[0].proposal.is_none());
+    }
+
+    #[test]
+    fn merge_claims_each_cluster_once() {
+        let cs = vec![
+            cluster("c-1", &["atone:a"]),
+            cluster("c-2", &["atone:b"]),
+            cluster("c-3", &["atone:c"]),
+            cluster("c-4", &["atone:d"]),
+        ];
+        let merging = |c: &str, ids: &[&str], merged: &[&str]| {
+            let mut it = item(c, "repeat", ids);
+            it.merged = merged.iter().map(|s| s.to_string()).collect();
+            it
+        };
+        let raw = RawNaming {
+            items: vec![
+                // Good: c-1 absorbs c-2, so c-2's evidence becomes citable.
+                merging("c-1", &["atone:a", "atone:b"], &["c-2"]),
+                // Merges a cluster the batch does not have.
+                merging("c-3", &["atone:c"], &["c-9"]),
+                // Merges c-2 again, already claimed by c-1.
+                merging("c-4", &["atone:d"], &["c-2"]),
+                // A second naming of c-3 is a double claim too.
+                merging("c-3", &["atone:c"], &["c-1"]),
+            ],
+            ..Default::default()
+        };
+        let v = validate(raw, &cs);
+        assert_eq!(v.items.len(), 1, "rejected: {:?}", v.rejected);
+        assert_eq!(v.items[0].evidence_ids, vec!["atone:a".to_string(), "atone:b".to_string()]);
+        assert!(v.rejected.iter().any(|r| r.contains("merges unknown c-9")), "{:?}", v.rejected);
+        assert!(v.rejected.iter().any(|r| r == "c-4: merges c-2, already claimed"), "{:?}", v.rejected);
+        assert!(v.rejected.iter().any(|r| r == "c-3: named twice"), "{:?}", v.rejected);
+
+        // A named cluster cannot be merged by an item that comes before it.
+        let raw = RawNaming {
+            items: vec![merging("c-1", &["atone:a"], &["c-2"]), item("c-2", "repeat", &["atone:b"])],
+            ..Default::default()
+        };
+        let v = validate(raw, &cs);
+        assert_eq!(v.items.len(), 1);
+        assert_eq!(v.items[0].cluster, "c-2");
+        assert_eq!(v.rejected, vec!["c-1: merges c-2, already claimed".to_string()]);
+    }
+
+    #[test]
+    fn a_page_item_needs_an_owned_instance_and_a_fix() {
+        let cs = vec![cluster("c-1", &["atone:a"]), cluster("c-2", &["atone:b"])];
+        let mut foreign = item("c-1", "repeat", &["atone:a"]);
+        foreign.happened = vec![Instance { evidence_id: "atone:zz".into(), what: "x".into() }];
+        let mut no_fix = item("c-2", "repeat", &["atone:b"]);
+        no_fix.fix = " ".into();
+        let v = validate(RawNaming { items: vec![foreign, no_fix], ..Default::default() }, &cs);
+        assert!(v.items.is_empty());
+        assert_eq!(v.rejected.len(), 2);
+        assert_eq!(v.dropped_ids, 1, "the foreign instance is counted as dropped");
     }
 
     #[test]

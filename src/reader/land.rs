@@ -378,6 +378,7 @@ mod tests {
                 target: target.into(),
                 change: "Add a gate".into(),
             }),
+            ..Default::default()
         }
     }
 
