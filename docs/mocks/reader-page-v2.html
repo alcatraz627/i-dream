@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What went wrong with Claude, 15 Sep to 13 Oct</title>
+<style>
+/*
+ * colors.css — a drop-in colour system for a generated HTML page.
+ *
+ * Copy this into a <style> block (or link it) and the page has a full palette,
+ * a dark and a light mode, and the five variables the dark/light toggle in
+ * conventions/html-output.md expects. Dark is the default, per that rule.
+ *
+ * HOW IT IS PUT TOGETHER — two layers, and the split is the whole point:
+ *
+ *   Layer 0   the ramps. Raw colour, every family 50 -> 950. Nothing outside
+ *             this file's Layer 1 should ever name a ramp step directly.
+ *   Layer 1   the slots. --bg, --text, --brand, --ok-soft and friends. This is
+ *             what your markup uses. Both modes set the same slot names to
+ *             different ramp steps, which is why the toggle is one class flip
+ *             and not a second stylesheet.
+ *
+ * TO REBRAND: change the hue numbers in Layer 0 and stop. Every slot, both
+ * modes, and every element follow, because nothing downstream hardcodes a
+ * colour. That is the property worth protecting — the moment a page writes
+ * `color: #4a9` somewhere, dark mode has a hole in it.
+ *
+ * The hues here are deliberate placeholders (brand 250, accent 190), not any
+ * real product's identity. Swap them.
+ *
+ * Ramps are OKLCH: oklch(lightness chroma hue). Lightness falls evenly down the
+ * ramp; chroma peaks around 500 and eases off both ends, which is what keeps a
+ * 50 from looking muddy and a 950 from looking neon.
+ */
+
+/* ── Layer 0 — ramps (never name these in your markup) ─────────────────── */
+:root {
+  /* neutral — chrome, text, borders, surfaces */
+  --p-neutral-50: oklch(0.985 0.002 255);
+  --p-neutral-100: oklch(0.96 0.004 255);
+  --p-neutral-200: oklch(0.92 0.006 255);
+  --p-neutral-300: oklch(0.86 0.01 255);
+  --p-neutral-400: oklch(0.7 0.018 255);
+  --p-neutral-500: oklch(0.55 0.025 255);
+  --p-neutral-600: oklch(0.45 0.028 255);
+  --p-neutral-700: oklch(0.37 0.03 255);
+  --p-neutral-800: oklch(0.29 0.028 255);
+  --p-neutral-900: oklch(0.22 0.022 255);
+  --p-neutral-950: oklch(0.15 0.016 255);
+
+  /* brand — the one colour a reader should associate with the page */
+  --p-brand-50: oklch(0.97 0.02 250);
+  --p-brand-100: oklch(0.94 0.04 250);
+  --p-brand-200: oklch(0.88 0.07 250);
+  --p-brand-300: oklch(0.81 0.1 250);
+  --p-brand-400: oklch(0.72 0.13 250);
+  --p-brand-500: oklch(0.63 0.15 250);
+  --p-brand-600: oklch(0.55 0.145 250);
+  --p-brand-700: oklch(0.47 0.125 251);
+  --p-brand-800: oklch(0.4 0.1 251);
+  --p-brand-900: oklch(0.33 0.078 252);
+  --p-brand-950: oklch(0.25 0.05 252);
+
+  /* accent — a second voice, for highlights the brand shouldn't claim */
+  --p-accent-50: oklch(0.97 0.02 190);
+  --p-accent-100: oklch(0.94 0.042 190);
+  --p-accent-200: oklch(0.89 0.068 190);
+  --p-accent-300: oklch(0.83 0.092 190);
+  --p-accent-400: oklch(0.75 0.108 190);
+  --p-accent-500: oklch(0.66 0.115 191);
+  --p-accent-600: oklch(0.57 0.108 192);
+  --p-accent-700: oklch(0.48 0.092 193);
+  --p-accent-800: oklch(0.4 0.076 193);
+  --p-accent-900: oklch(0.33 0.058 194);
+  --p-accent-950: oklch(0.25 0.04 194);
+
+  /* success */
+  --p-success-50: oklch(0.97 0.02 150);
+  --p-success-100: oklch(0.94 0.045 150);
+  --p-success-200: oklch(0.88 0.072 150);
+  --p-success-300: oklch(0.81 0.1 150);
+  --p-success-400: oklch(0.72 0.118 150);
+  --p-success-500: oklch(0.63 0.13 150);
+  --p-success-600: oklch(0.55 0.12 150);
+  --p-success-700: oklch(0.47 0.104 150);
+  --p-success-800: oklch(0.4 0.086 150);
+  --p-success-900: oklch(0.33 0.068 150);
+  --p-success-950: oklch(0.25 0.045 150);
+
+  /* warning */
+  --p-warning-50: oklch(0.98 0.025 85);
+  --p-warning-100: oklch(0.95 0.055 85);
+  --p-warning-200: oklch(0.91 0.09 83);
+  --p-warning-300: oklch(0.86 0.125 81);
+  --p-warning-400: oklch(0.81 0.148 78);
+  --p-warning-500: oklch(0.76 0.155 75);
+  --p-warning-600: oklch(0.67 0.142 70);
+  --p-warning-700: oklch(0.58 0.125 65);
+  --p-warning-800: oklch(0.49 0.105 60);
+  --p-warning-900: oklch(0.41 0.085 55);
+  --p-warning-950: oklch(0.32 0.06 50);
+
+  /* danger */
+  --p-danger-50: oklch(0.97 0.018 25);
+  --p-danger-100: oklch(0.93 0.04 25);
+  --p-danger-200: oklch(0.87 0.08 25);
+  --p-danger-300: oklch(0.8 0.12 25);
+  --p-danger-400: oklch(0.73 0.165 26);
+  --p-danger-500: oklch(0.65 0.2 27);
+  --p-danger-600: oklch(0.58 0.195 27);
+  --p-danger-700: oklch(0.5 0.175 27);
+  --p-danger-800: oklch(0.43 0.15 27);
+  --p-danger-900: oklch(0.36 0.12 27);
+  --p-danger-950: oklch(0.28 0.085 27);
+
+  /* info */
+  --p-info-50: oklch(0.97 0.018 230);
+  --p-info-100: oklch(0.94 0.04 230);
+  --p-info-200: oklch(0.88 0.065 230);
+  --p-info-300: oklch(0.81 0.09 230);
+  --p-info-400: oklch(0.72 0.11 230);
+  --p-info-500: oklch(0.63 0.125 230);
+  --p-info-600: oklch(0.55 0.115 230);
+  --p-info-700: oklch(0.47 0.1 230);
+  --p-info-800: oklch(0.4 0.082 230);
+  --p-info-900: oklch(0.33 0.065 230);
+  --p-info-950: oklch(0.25 0.045 230);
+}
+
+/* ── Layer 1 — slots, dark (the default) ───────────────────────────────── */
+:root {
+  /* The five the toggle in html-output.md depends on. Keep these names. */
+  --bg: var(--p-neutral-950);
+  --surface: var(--p-neutral-900);
+  --text: var(--p-neutral-100);
+  --dim: var(--p-neutral-400);
+  --border: var(--p-neutral-800);
+
+  /* Room to build with: a raised surface for cards on cards, and two quieter
+     text tiers, so hierarchy comes from the palette instead of from opacity. */
+  --surface-2: var(--p-neutral-800);
+  --text-2: var(--p-neutral-300);
+  --text-3: var(--p-neutral-500);
+
+  --brand: var(--p-brand-400);
+  --brand-content: var(--p-neutral-950);
+  --brand-hover: var(--p-brand-300);
+  --accent: var(--p-accent-400);
+  --accent-content: var(--p-neutral-950);
+
+  /* Status comes in pairs: -soft backs a pill or a row tint, -line is the ink
+     or rule that sits on it. Using them together is what keeps a status
+     readable in both modes without a per-mode override at the callsite. */
+  --ok-soft: oklch(0.28 0.05 150);
+  --ok-line: var(--p-success-300);
+  --warn-soft: oklch(0.3 0.06 75);
+  --warn-line: var(--p-warning-300);
+  --err-soft: oklch(0.29 0.06 27);
+  --err-line: var(--p-danger-300);
+  --info-soft: oklch(0.28 0.05 230);
+  --info-line: var(--p-info-300);
+
+  --shadow-sm: 0 2px 5px -1px oklch(0 0 0 / 0.45), 0 1px 2px -1px oklch(0 0 0 / 0.4);
+  --shadow-md: 0 8px 18px -4px oklch(0 0 0 / 0.55), 0 3px 6px -3px oklch(0 0 0 / 0.4);
+  --shadow-lg: 0 22px 44px -10px oklch(0 0 0 / 0.65), 0 8px 16px -8px oklch(0 0 0 / 0.45);
+
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 1rem;
+
+  color-scheme: dark;
+}
+
+/* ── Layer 1 — slots, light ────────────────────────────────────────────── */
+/* `body.light` is the toggle's contract (html-output.md). The [data-theme]
+   selector is here too so this file also works on pages that theme from the
+   root element; drop whichever one your page doesn't use. */
+body.light,
+:root[data-theme="light"] {
+  --bg: var(--p-neutral-50);
+  --surface: oklch(1 0 0);
+  --text: var(--p-neutral-900);
+  --dim: var(--p-neutral-500);
+  --border: var(--p-neutral-200);
+
+  --surface-2: var(--p-neutral-100);
+  --text-2: var(--p-neutral-700);
+  --text-3: var(--p-neutral-500);
+
+  /* A step deeper than dark's brand: filled controls read light text here, and
+     the airy 400 that works on a near-black page cannot hold white. */
+  --brand: var(--p-brand-600);
+  --brand-content: oklch(1 0 0);
+  --brand-hover: var(--p-brand-700);
+  --accent: var(--p-accent-600);
+  --accent-content: oklch(1 0 0);
+
+  --ok-soft: var(--p-success-100);
+  --ok-line: var(--p-success-700);
+  /* 900, not 700: the mid warning ink drops under 4.5:1 on its own soft tint at
+     pill sizes. Warning is the one family where the obvious pairing fails. */
+  --warn-soft: var(--p-warning-100);
+  --warn-line: var(--p-warning-900);
+  --err-soft: var(--p-danger-100);
+  --err-line: var(--p-danger-700);
+  --info-soft: var(--p-info-100);
+  --info-line: var(--p-info-700);
+
+  --shadow-sm: 0 2px 4px -1px oklch(0.3 0.02 255 / 0.12), 0 1px 2px -1px oklch(0.3 0.02 255 / 0.1);
+  --shadow-md: 0 6px 14px -3px oklch(0.3 0.02 255 / 0.18), 0 3px 6px -3px oklch(0.3 0.02 255 / 0.12);
+  --shadow-lg: 0 18px 36px -8px oklch(0.3 0.02 255 / 0.26), 0 6px 12px -6px oklch(0.3 0.02 255 / 0.14);
+
+  color-scheme: light;
+}
+
+/* A floor to build on, so a page that just includes this file already reads
+   correctly in both modes instead of inheriting the browser's white. */
+body {
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* The shared look for every HTML page an agent builds: reports, previews, decision
+   pages, shared Artifacts. Colours come from conventions/html-assets/colors.css, which
+   pagekit.py inlines above this file. Nothing here names a colour directly, so a theme
+   change is one edit in colors.css. Guide: conventions/pages.md */
+
+:root {
+  --kit-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --kit-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --kit-width: 1100px;
+  --kit-measure: 74ch;
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 96px; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 var(--kit-sans); }
+
+/* The bar stays on top. Table headers stop just under it. */
+.kit-bar { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--border); }
+.kit-bar-inner { max-width: var(--kit-width); margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.kit-title { font: 600 17px/1.2 var(--kit-sans); margin: 0; margin-right: auto; }
+.kit-theme { font: 500 12.5px var(--kit-sans); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.kit-theme:focus-visible, .kit-tab:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.kit-tabs { display: flex; flex-wrap: wrap; gap: 5px; max-width: var(--kit-width); margin: 0 auto; padding: 0 16px 10px; }
+.kit-tab { font: 500 12.5px var(--kit-sans); color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.kit-tab[aria-selected="true"] { color: var(--brand-content); background: var(--brand); border-color: var(--brand); }
+
+.kit-page { max-width: var(--kit-width); margin: 0 auto; padding: 28px 16px 80px; }
+.kit-page h1 { font: 600 30px/1.15 var(--kit-sans); margin: 0 0 14px; text-wrap: balance; }
+.kit-page h2 { font: 600 20px/1.25 var(--kit-sans); margin: 40px 0 12px; text-wrap: balance; }
+.kit-page h3 { font: 600 16px/1.3 var(--kit-sans); margin: 28px 0 8px; }
+.kit-page h4 { font: 600 14px/1.3 var(--kit-sans); margin: 20px 0 6px; }
+.kit-page p, .kit-page li { max-width: var(--kit-measure); }
+.kit-page p { margin: 0 0 12px; }
+.kit-page ul, .kit-page ol { padding-left: 22px; margin: 0 0 14px; }
+.kit-page li { margin: 5px 0; }
+.kit-page a { color: var(--brand); }
+.kit-page code { font: 13px var(--kit-mono); background: var(--surface-2); padding: 1px 5px; border-radius: var(--radius-sm); }
+.kit-page pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 14px; overflow-x: auto; font: 13px/1.45 var(--kit-mono); }
+.kit-page pre code { background: none; padding: 0; }
+.kit-dim { color: var(--dim); }
+
+/* Tables. pagekit.size_columns sets each column's width from what it holds. */
+.kit-table-wrap { overflow-x: auto; }
+.kit-page table { border-collapse: collapse; width: 100%; margin: 14px 0 20px; font-size: 14px; table-layout: fixed; }
+.kit-page table.kit-wide { min-width: 1400px; }
+.kit-page th, .kit-page td { overflow-wrap: anywhere; vertical-align: top; text-align: left; }
+.kit-page thead { position: relative; z-index: 2; }
+.kit-page thead th { font: 600 11px var(--kit-sans); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); padding: 8px 10px; border-bottom: 2px solid var(--border); background: var(--bg); }
+.kit-page thead.kit-stuck th { background: var(--surface); box-shadow: 0 1px 0 var(--border), var(--shadow-sm); }
+.kit-page td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
+.kit-page td:first-child { font-weight: 500; }
+.kit-page tr:hover td { background: var(--surface-2); }
+.kit-page td p { margin: 0 0 4px; max-width: none; }
+.kit-page td ul { margin: 0; padding-left: 16px; }
+.kit-page td li { margin: 2px 0; max-width: none; }
+
+/* Labelled lists that sit side by side, for things a reader compares. */
+.kit-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 12px 0 22px; align-items: start; }
+.kit-col { background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--border); border-radius: var(--radius-md); padding: 10px 14px 8px; }
+.kit-col.kit-good { border-top-color: var(--ok-line); }
+.kit-col.kit-warn { border-top-color: var(--warn-line); }
+.kit-col.kit-bad { border-top-color: var(--err-line); }
+.kit-col > h4 { font: 600 11px var(--kit-sans); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); margin: 0 0 6px; }
+.kit-col ul { margin: 0; padding-left: 18px; }
+.kit-col li { max-width: none; font-size: 14px; margin: 4px 0; }
+
+/* A card of key and value pairs, for what a page is and who it is for. */
+.kit-card { display: grid; grid-template-columns: 120px 1fr; gap: 6px 16px; padding: 14px 18px; margin: 0 0 24px; background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--brand); border-radius: var(--radius-md); font-size: 14px; }
+.kit-card > .k { font: 600 11px var(--kit-sans); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); padding-top: 3px; }
+
+/* The one sentence a reader must not miss. */
+.kit-key { margin: 16px 0; padding: 12px 18px; border-left: 3px solid var(--brand); background: var(--surface-2); border-radius: 0 var(--radius-md) var(--radius-md) 0; }
+.kit-key p { margin: 0; max-width: none; }
+
+/* Status notes. Use the word as well as the colour. */
+.kit-note { margin: 14px 0; padding: 10px 14px; border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius-md); background: var(--surface); }
+.kit-note.kit-good { border-left-color: var(--ok-line); background: var(--ok-soft); }
+.kit-note.kit-warn { border-left-color: var(--warn-line); background: var(--warn-soft); }
+.kit-note.kit-bad { border-left-color: var(--err-line); background: var(--err-soft); }
+.kit-note.kit-info { border-left-color: var(--info-line); background: var(--info-soft); }
+.kit-note p { margin: 0; max-width: none; }
+
+.kit-chip { display: inline-block; font: 500 11.5px var(--kit-mono); padding: 0 6px; border-radius: var(--radius-sm); line-height: 18px; background: var(--surface-2); border: 1px solid var(--border); }
+
+[hidden] { display: none !important; }
+@media (max-width: 640px) { .kit-page h1 { font-size: 24px; } .kit-card { grid-template-columns: 1fr; } }
+@media print { .kit-bar, .kit-theme { display: none; } body { background: #fff; color: #000; } }
+
+
+</style>
+</head>
+<body>
+<header class="kit-bar"><div class="kit-bar-inner"><h1 class="kit-title">What went wrong with Claude, 15 Sep to 13 Oct</h1><button type="button" class="kit-theme" data-kit-theme>Light</button></div></header>
+<main class="kit-page">
+<p>You corrected Claude <strong>31 times</strong> in these four weeks. Most of it comes down to two habits: saying something works before checking it where you would see it, and answering with a briefing instead of the answer. Both have a check that is meant to stop them. One mostly works but has holes; the other only warns and has never once stopped a reply.</p>
+<table><colgroup><col style="width:21.7%"><col style="width:26.1%"><col style="width:26.1%"><col style="width:26.1%"></colgroup>
+<thead>
+<tr>
+<th>Problem</th>
+<th>Times you caught it (4 weeks)</th>
+<th>What tries to stop it today</th>
+<th>Is that working? (last 2 weeks)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1. Said it works without checking where you would see it</td>
+<td>6</td>
+<td>A check on "done" and "works" claims</td>
+<td>Partly. It stopped 25 replies, but "proven on the Pi" and "green on the laptop" get through</td>
+</tr>
+<tr>
+<td>2. Handed you a page or preview to review without looking at it first</td>
+<td>4</td>
+<td>Nothing</td>
+<td>No</td>
+</tr>
+<tr>
+<td>3. Stated links and CI status from memory as if checked</td>
+<td>5</td>
+<td>A check on structural claims</td>
+<td>No. It fired once in two weeks</td>
+</tr>
+<tr>
+<td>4. Answered with a briefing instead of the answer</td>
+<td>11</td>
+<td>A briefing check, plus a reply-length check added today</td>
+<td>No. The briefing check warned 65 times and never stopped a reply</td>
+</tr>
+<tr>
+<td>5. Writing that reads like AI (em-dashes, vague RCAs)</td>
+<td>4</td>
+<td>An em-dash check</td>
+<td>Partly. Catches em-dashes in replies, misses PR bodies and RCAs</td>
+</tr>
+<tr>
+<td>6. Said a skill was not installed when it was</td>
+<td>1</td>
+<td>A check on "does not exist" claims, for code only</td>
+<td>No. It never fires on skill names</td>
+</tr>
+</tbody>
+</table>
+<h2 id="1-said-it-works-without-checking-where-you-would-see-it">1. Said it works without checking where you would see it</h2>
+<p><strong>What happened</strong></p>
+<ul>
+<li>16 Sep, versable-foundry: told you <code>deploy.sh</code> was "simplest and certain". It had never been run, and it failed when you ran it.</li>
+<li>18 Sep, versable-foundry: called PR #14 "one click merge". It could not merge at all; you caught it.</li>
+<li>24 Sep, slack-automation: reported the Pin command done three times. Each time it had only passed on the laptop, and each time it failed in production.</li>
+<li>30 Sep, claude-instances: said clicking a thumbnail opens it full size without clicking one. It did not.</li>
+<li>10 Oct, ~/.claude: turned on a terminal wrapper for every session after a 19-second test. It later froze a live session's screen.</li>
+<li>10 Oct, switchboard-mac: said the notes store was "proven from the Pi and the Mac" and asked you to review. The phone showed no notes.</li>
+</ul>
+<p><strong>Why it keeps happening.</strong> Claude checks on the surface it can reach (a file, a curl, the laptop) and reports that as if it were the surface you use. The check that exists catches the words "done" and "works", and stopped 25 replies in two weeks, but it does not catch "proven on", "green on" or "passing on" a machine.</p>
+<p><strong>Proposed fix.</strong> Extend the check: a claim that something is proven, green or passing on a named machine is stopped unless something run this turn produced output from that machine.</p>
+<h2 id="2-handed-you-a-page-or-preview-to-review-without-looking-at-it-first">2. Handed you a page or preview to review without looking at it first</h2>
+<p><strong>What happened</strong></p>
+<ul>
+<li>6 Oct, i-dream: the first weekly review page put each item's evidence in one run-on paragraph. It was noticed and left for next week; you found it unreadable and accepted everything unread.</li>
+<li>10 Oct, better-file-browser: shipped the versions view without once using it; you met raw filenames in the sidebar.</li>
+<li>12 Oct, enhancement-product: pointed you at five report mocks that had never been rendered.</li>
+<li>12 Oct, enhancement-product: handed you the redesign as a 297-pixel tile, without looking at the page.</li>
+</ul>
+<p><strong>Why it keeps happening.</strong> Nothing checks for this. The rule says to look at a page before handing it over, and text rules have not moved this count.</p>
+<p><strong>Proposed fix.</strong> A new check: when a reply hands you a link to a local page or preview, it is stopped unless that page was opened and screenshotted this turn.</p>
+<h2 id="3-stated-links-and-ci-status-from-memory-as-if-checked">3. Stated links and CI status from memory as if checked</h2>
+<p><strong>What happened</strong></p>
+<ul>
+<li>8 Oct, enhancement-product: gave you a wrong workflow file and the wrong dashboard for e2e runs.</li>
+<li>8 Oct, enhancement-product: opened with "Phase 3 is green" from a plan doc. CI had 2 failures and 23 tests that never ran, hidden by a setting that never fails the build.</li>
+<li>8 Oct, enhancement-product: told you the release PR would merge clean. It still conflicted.</li>
+<li>8 Oct, enhancement-product: asked you which backend pairs with each frontend, when the app's config already says.</li>
+<li>9 Oct, enhancement-product: gave you <code>dashboard.scraperapi.com</code>, which came from memory, an hour after being corrected for the same thing.</li>
+</ul>
+<p><strong>Why it keeps happening.</strong> Claude treats what it remembers or what a plan doc says as the current state. The check meant for this looks at claims about code, and fired once in two weeks.</p>
+<p><strong>Proposed fix.</strong> A link or a CI status in a reply is stopped unless a command this turn returned it.</p>
+<h2 id="4-answered-with-a-briefing-instead-of-the-answer">4. Answered with a briefing instead of the answer</h2>
+<p><strong>What happened</strong></p>
+<ul>
+<li>18 Sep, three projects: long decorated status replies; you called one "word salad".</li>
+<li>30 Sep, staging-enhancement-product: a 13-row table and caveats for a one-line question.</li>
+<li>6 Oct, slack-automation: a paragraph restating a plan when nothing needed deciding.</li>
+<li>12 Oct, slack-automation, one session with six slips: an eight-row table for "what is gated on me" right after you asked it to cut the word salad; twelve commands for you to paste instead of a script; "the token's scopes are unknown" when one call would show them; a question you had already settled; a checkpoint you did not ask for; and a checkpoint that squeezed an hour of your corrections into one line.</li>
+</ul>
+<p><strong>Why it keeps happening.</strong> The briefing check only warns. It warned 65 times in two weeks and never stopped a reply, so the reply goes out anyway. A reply-length check added today has stopped 4.</p>
+<p><strong>Proposed fix.</strong> Make the briefing check stop the reply when it opens with a table, a list or a file path before a plain answer. If it starts catching good replies, it goes back to warning.</p>
+<h2 id="5-writing-that-reads-like-ai">5. Writing that reads like AI</h2>
+<p><strong>What happened</strong></p>
+<ul>
+<li>15 Sep, slack-automation: a PR body with em-dashes, caught by the PR check before it went up.</li>
+<li>23 Sep, speedway: three drafts of a PR body set on the PR with a "Verdict" line and a list that read as blame.</li>
+<li>30 Sep, slack-automation: em-dashes in replies to you during the test window.</li>
+<li>5 Oct, enhancement-product: an incident write-up that hid the customers and people involved behind vague words.</li>
+</ul>
+<p><strong>Why it keeps happening.</strong> The em-dash check covers replies to you and stopped 6, but PR bodies set later and written documents are not checked at all.</p>
+<p><strong>Proposed fix.</strong> Run the same check on PR bodies and on incident write-ups before they are saved.</p>
+<h2 id="6-said-a-skill-was-not-installed-when-it-was">6. Said a skill was not installed when it was</h2>
+<p><strong>What happened</strong></p>
+<ul>
+<li>9 Oct, enhancement-product: you ran <code>/adversarial-review</code>; Claude said it was not installed, because the session's skill list was cut short, and sent a stand-in reviewer that had to be stopped.</li>
+</ul>
+<p><strong>Why it keeps happening.</strong> Once only so far. The check for "does not exist" claims looks at code, not skill names.</p>
+<p><strong>Proposed fix.</strong> Small: before saying a skill is missing, look in <code>~/.claude/skills/</code>. Worth doing only if it happens again.</p>
+<hr />
+<p><strong>What agreeing does today.</strong> Each fix you agree to becomes a proposal on the gcc backlog, which holds 285 open items and is not worked through automatically. Nothing on this page gets built just by agreeing. That is the next thing to settle.</p>
+</main>
+<script>
+// Behaviour every page shares: the theme switch, tables that scroll inside
+// their own box, table headers that follow the reader, and plain tabs.
+// Inlined into a page by pagekit.py. Guide: conventions/pages.md
+(function () {
+  const root = document.documentElement;
+
+  // Theme. Dark is the default; the choice is remembered when the browser allows it.
+  function readTheme() { try { return localStorage.getItem('kit-theme'); } catch (e) { return null; } }
+  function applyTheme(t) {
+    root.dataset.theme = t;
+    document.body.classList.toggle('light', t === 'light');
+    document.querySelectorAll('[data-kit-theme]').forEach(b => { b.textContent = t === 'light' ? 'Dark' : 'Light'; b.setAttribute('aria-label', 'Switch to ' + (t === 'light' ? 'dark' : 'light') + ' theme'); });
+  }
+  applyTheme(readTheme() || root.dataset.theme || 'dark');
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-kit-theme]'); if (!b) return;
+    const next = root.dataset.theme === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    try { localStorage.setItem('kit-theme', next); } catch (err) {}
+  });
+
+  // Every table scrolls sideways inside its own box, never the whole page.
+  document.querySelectorAll('.kit-page table').forEach(t => {
+    if (t.parentElement.classList.contains('kit-table-wrap')) return;
+    const w = document.createElement('div'); w.className = 'kit-table-wrap';
+    t.parentNode.insertBefore(w, t); w.appendChild(t);
+  });
+
+  // Table headers follow the reader. CSS sticky cannot do this, because a
+  // header cannot stick past the scroll box its table sits in.
+  const bar = document.querySelector('.kit-bar');
+  let queued = false;
+  function stick() {
+    queued = false;
+    const top = bar ? bar.getBoundingClientRect().bottom : 0;
+    document.querySelectorAll('.kit-page table').forEach(t => {
+      const h = t.tHead; if (!h || t.offsetParent === null) return;
+      const box = t.getBoundingClientRect();
+      const dy = (box.top < top && box.bottom - h.offsetHeight - 40 > top) ? Math.round(top - box.top) : 0;
+      h.style.transform = dy ? 'translateY(' + dy + 'px)' : '';
+      h.classList.toggle('kit-stuck', dy > 0);
+    });
+  }
+  function queue() { if (!queued) { queued = true; requestAnimationFrame(stick); } }
+  window.addEventListener('scroll', queue, { passive: true });
+  window.addEventListener('resize', queue);
+
+  // Tabs. A button with data-kit-tab="x" shows the element with data-kit-panel="x".
+  const tabs = Array.from(document.querySelectorAll('[data-kit-tab]'));
+  function show(name) {
+    tabs.forEach(t => t.setAttribute('aria-selected', String(t.dataset.kitTab === name)));
+    document.querySelectorAll('[data-kit-panel]').forEach(p => { p.hidden = p.dataset.kitPanel !== name; });
+    window.scrollTo(0, 0); queue();
+  }
+  tabs.forEach(t => t.addEventListener('click', () => { show(t.dataset.kitTab); try { history.replaceState(null, '', '#' + t.dataset.kitTab); } catch (e) {} }));
+  if (tabs.length) {
+    const wanted = (location.hash || '').slice(1);
+    show(tabs.some(t => t.dataset.kitTab === wanted) ? wanted : tabs[0].dataset.kitTab);
+  }
+})();
+
+
+</script>
+</body>
+</html>
