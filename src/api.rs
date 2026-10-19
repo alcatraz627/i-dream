@@ -373,16 +373,7 @@ impl ClaudeClient {
         let full_prompt = format!("{system}\n\n---\n\n{prompt}");
 
         let mut child = tokio::process::Command::new(&self.claude_path)
-            .args([
-                "--print",
-                "--model",
-                model,
-                "--append-system-prompt",
-                format_override,
-                "--no-session-persistence",
-                "--output-format",
-                "json",
-            ])
+            .args(cli_args(model, format_override))
             // Run in /tmp so no project CLAUDE.md is discovered.
             .current_dir("/tmp")
             // Mark the child so i-dream's own hooks stand down: without this the
@@ -474,6 +465,28 @@ impl ClaudeClient {
     }
 }
 
+/// Arguments for one dream-phase `claude` call.
+///
+/// `--safe-mode` drops the user's CLAUDE.md, rules, hooks, MCP servers and
+/// skills, which otherwise add about 63k input tokens to every call and blow
+/// the phase budget. Unlike `--bare` it keeps OAuth subscription auth.
+/// `--tools ""` removes the built-in tool schemas: a phase is prompt in, text out.
+fn cli_args<'a>(model: &'a str, format_override: &'a str) -> Vec<&'a str> {
+    vec![
+        "--print",
+        "--model",
+        model,
+        "--safe-mode",
+        "--tools",
+        "",
+        "--append-system-prompt",
+        format_override,
+        "--no-session-persistence",
+        "--output-format",
+        "json",
+    ]
+}
+
 /// Classify a reqwest send-side error (network, DNS, TLS, timeout).
 ///
 /// Almost all send errors are worth retrying at least once: they
@@ -555,6 +568,20 @@ fn backoff_delay(attempt: u32, config: &RetryConfig) -> Duration {
 pub(crate) mod tests {
     use super::*;
     use reqwest::StatusCode;
+
+    #[test]
+    fn cli_args_strip_inherited_context_and_keep_oauth() {
+        let a = cli_args("haiku", "OVERRIDE");
+        assert!(a.contains(&"--safe-mode"));
+        let t = a.iter().position(|x| *x == "--tools").unwrap();
+        assert_eq!(a[t + 1], "");
+        // --bare would drop OAuth auth; --system-prompt would break subscription routing.
+        assert!(!a.contains(&"--bare"));
+        assert!(!a.contains(&"--system-prompt"));
+        let m = a.iter().position(|x| *x == "--model").unwrap();
+        assert_eq!(a[m + 1], "haiku");
+        assert!(a.contains(&"--no-session-persistence"));
+    }
 
     // ── classify_status ────────────────────────────────────────
 
