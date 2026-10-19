@@ -89,9 +89,20 @@ async fn main() -> Result<()> {
         Command::Verify { history, json } => {
             let home = dirs::home_dir().context("cannot resolve home directory")?;
             if history {
-                for (day, failed) in verify::history(&home) {
-                    let rows = if failed.is_empty() { "ok".to_string() } else { failed.join(", ") };
-                    println!("{day}  {rows}");
+                let days = verify::history(&home, chrono::Utc::now());
+                if json {
+                    let rows: Vec<_> =
+                        days.iter().map(|(d, f)| serde_json::json!({"day": d.to_string(), "failing": f})).collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else {
+                    for (day, failed) in &days {
+                        let rows = if failed.is_empty() { "ok".to_string() } else { failed.join(", ") };
+                        println!("{day}  {rows}");
+                    }
+                }
+                // Same contract as the plain check: today red means exit 1.
+                if days.last().is_some_and(|(_, f)| !f.is_empty()) {
+                    std::process::exit(1);
                 }
                 return Ok(());
             }

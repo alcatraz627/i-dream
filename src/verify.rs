@@ -158,8 +158,15 @@ pub fn journal_checks(entries: &[DreamEntry], as_of: DateTime<Utc>) -> Vec<Check
 }
 
 /// Delivery rows: did live nudges and hints actually reach a session?
-/// `delivered` holds the 8-hex id prefixes found in hook attachment records.
-pub fn delivery_checks(items: &[Intervention], delivered: &HashSet<String>) -> Vec<Check> {
+/// `delivered` holds the 8-hex id prefixes found in hook attachment records;
+/// `None` means the transcripts could not be read, which is UNKNOWN, not FAIL.
+pub fn delivery_checks(items: &[Intervention], delivered: Option<&HashSet<String>>) -> Vec<Check> {
+    let Some(delivered) = delivered else {
+        return ["nudge-delivery", "hint-delivery"]
+            .into_iter()
+            .map(|r| Check::new(r, Verdict::Unknown, "session transcripts could not be read"))
+            .collect();
+    };
     let row = |name: &'static str, form: &str| {
         let live: Vec<String> = items
             .iter()
@@ -191,8 +198,12 @@ pub fn reader_check(state: Option<&ReaderState>, now: DateTime<Utc>) -> Check {
     if s.pending_pages.is_empty() {
         return Check::new("reader-answered", Verdict::Pass, "no page waiting on the owner");
     }
-    let Some(since) = s.last_weekly else {
-        return Check::new("reader-answered", Verdict::Unknown, "pages pending but no weekly run time");
+    // A later weekly run moves last_weekly without answering older pages, so
+    // the age comes from the oldest page's own week; last_weekly is only the
+    // fallback for a slug that does not name a week.
+    let oldest = s.pending_pages.iter().filter_map(|p| page_week_start(p)).min().or(s.last_weekly);
+    let Some(since) = oldest else {
+        return Check::new("reader-answered", Verdict::Unknown, "pages pending but no date for them");
     };
     let days = (now - since).num_days();
     Check::new(
@@ -203,6 +214,15 @@ pub fn reader_check(state: Option<&ReaderState>, now: DateTime<Utc>) -> Check {
             s.pending_pages.join(", ")
         ),
     )
+}
+
+/// The earliest moment a page for `idream-reader-<year>w<week>` can exist:
+/// the Monday of that ISO week. The weekly run lands mid-week, so this errs
+/// toward calling a page old a day or two early, never late.
+fn page_week_start(slug: &str) -> Option<DateTime<Utc>> {
+    let (year, week) = slug.rsplit_once('-')?.1.split_once('w')?;
+    let d = NaiveDate::from_isoywd_opt(year.parse().ok()?, week.parse().ok()?, chrono::Weekday::Mon)?;
+    Some(d.and_hms_opt(0, 0, 0)?.and_utc())
 }
 
 /// Not measured yet: needs per-slug weekly counts before and after each
@@ -218,33 +238,47 @@ pub fn effect_check() -> Check {
 /// Scan session transcripts modified within the window for `[i-dream:<id>]`
 /// tags inside hook attachment records. Text quoted in conversation is not a
 /// delivery, so only lines whose record type is `attachment` count.
-pub fn scan_delivered(projects: &Path, now: DateTime<Utc>) -> HashSet<String> {
-    let cutoff = std::time::SystemTime::from(now - Duration::days(DELIVERY_WINDOW_DAYS));
+/// Sub-agent transcripts (`<session>/subagents/*.jsonl`) are included: sub-agents
+/// receive nudges too. Returns `None` when the projects folder cannot be read.
+pub fn scan_delivered(projects: &Path, now: DateTime<Utc>) -> Option<HashSet<String>> {
+    let since = now - Duration::days(DELIVERY_WINDOW_DAYS);
     let mut found = HashSet::new();
-    let Ok(dirs) = std::fs::read_dir(projects) else { return found };
-    for dir in dirs.flatten() {
-        let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
-        for f in files.flatten() {
+    let mut stack = vec![std::fs::read_dir(projects).ok()?];
+    while let Some(entries) = stack.pop() {
+        for f in entries.flatten() {
             let p = f.path();
+            let Ok(meta) = f.metadata() else { continue };
+            if meta.is_dir() {
+                if let Ok(sub) = std::fs::read_dir(&p) {
+                    stack.push(sub);
+                }
+                continue;
+            }
             if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let fresh = f.metadata().and_then(|m| m.modified()).map(|t| t >= cutoff).unwrap_or(false);
+            // The file time only skips files untouched in the window; each
+            // record is then judged by its own timestamp, because a resumed old
+            // session carries old deliveries in a freshly modified file.
+            let fresh = meta.modified().map(|t| t >= std::time::SystemTime::from(since)).unwrap_or(false);
             if !fresh {
                 continue;
             }
             let Ok(file) = std::fs::File::open(&p) else { continue };
             for line in std::io::BufReader::new(file).split(b'\n').map_while(|l| l.ok()) {
-                collect_tags(&line, &mut found);
+                collect_tags(&line, since, &mut found);
             }
         }
     }
-    found
+    Some(found)
 }
 
-fn collect_tags(line: &[u8], found: &mut HashSet<String>) {
+fn collect_tags(line: &[u8], since: DateTime<Utc>, found: &mut HashSet<String>) {
     const TAG: &[u8] = b"[i-dream:";
     if !contains(line, TAG) || !contains(line, b"\"type\":\"attachment\"") {
+        return;
+    }
+    if record_time(line).is_none_or(|t| t < since) {
         return;
     }
     let mut rest = line;
@@ -257,6 +291,14 @@ fn collect_tags(line: &[u8], found: &mut HashSet<String>) {
     }
 }
 
+/// The record's own top-level `"timestamp":"…"` value.
+fn record_time(line: &[u8]) -> Option<DateTime<Utc>> {
+    const KEY: &[u8] = b"\"timestamp\":\"";
+    let start = find(line, KEY)? + KEY.len();
+    let len = line[start..].iter().position(|b| *b == b'"')?;
+    std::str::from_utf8(&line[start..start + len]).ok()?.parse().ok()
+}
+
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
@@ -265,19 +307,40 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     find(hay, needle).is_some()
 }
 
-fn load_journal(home: &Path) -> Vec<DreamEntry> {
-    std::fs::read_to_string(home.join(".claude/subconscious/dreams/journal.jsonl"))
-        .unwrap_or_default()
+/// The parsed journal plus how many lines would not parse. Dropped lines are
+/// reported, because a schema drift that stops the newest row parsing would
+/// otherwise leave the rows judging an older, healthier cycle.
+fn load_journal(home: &Path) -> (Vec<DreamEntry>, usize) {
+    let body = std::fs::read_to_string(home.join(".claude/subconscious/dreams/journal.jsonl")).unwrap_or_default();
+    let mut dropped = 0;
+    let entries = body
         .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).map_err(|_| dropped += 1).ok())
+        .collect();
+    (entries, dropped)
 }
 
 pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
-    let mut checks = journal_checks(&load_journal(home), now);
-    let items = crate::interventions::load_interventions(&home.join(".claude/i-dream/interventions.json"))?;
-    let delivered = scan_delivered(&home.join(".claude/projects"), now);
-    checks.extend(delivery_checks(&items, &delivered));
+    let (journal, dropped) = load_journal(home);
+    let mut checks = journal_checks(&journal, now);
+    if dropped > 0 {
+        checks.push(Check::new(
+            "journal-readable",
+            Verdict::Unknown,
+            format!("{dropped} journal line(s) did not parse; the cycle rows may be judging an older cycle"),
+        ));
+    }
+    // A broken interventions file must not hide every other row.
+    match crate::interventions::load_interventions(&home.join(".claude/i-dream/interventions.json")) {
+        Ok(items) => {
+            let delivered = scan_delivered(&home.join(".claude/projects"), now);
+            checks.extend(delivery_checks(&items, delivered.as_ref()));
+        }
+        Err(e) => checks.extend(["nudge-delivery", "hint-delivery"].into_iter().map(|r| {
+            Check::new(r, Verdict::Unknown, format!("interventions.json unreadable: {e:#}"))
+        })),
+    }
     let reader: Option<ReaderState> = std::fs::read_to_string(home.join(".claude/i-dream/reader/state.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
@@ -286,25 +349,25 @@ pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
     Ok(Report { as_of: now, checks })
 }
 
-/// One line per calendar day the journal spans, including days with no
-/// cycle (so a gap shows as `cycle-ran`): which replayable rows failed at
-/// that day's end.
-pub fn history(home: &Path) -> Vec<(NaiveDate, Vec<&'static str>)> {
-    history_of(&load_journal(home))
+/// One line per calendar day from the first journal entry through `today`,
+/// including days with no cycle (so a gap shows as `cycle-ran`): which
+/// replayable rows failed at that day's end.
+pub fn history(home: &Path, now: DateTime<Utc>) -> Vec<(NaiveDate, Vec<&'static str>)> {
+    history_of(&load_journal(home).0, now)
 }
 
-fn history_of(entries: &[DreamEntry]) -> Vec<(NaiveDate, Vec<&'static str>)> {
-    let (Some(first), Some(last)) = (
-        entries.iter().map(|e| e.timestamp.date_naive()).min(),
-        entries.iter().map(|e| e.timestamp.date_naive()).max(),
-    ) else {
+/// Today is judged as of `now`, not its end, so a cycle still due tonight
+/// does not read as missed.
+fn history_of(entries: &[DreamEntry], now: DateTime<Utc>) -> Vec<(NaiveDate, Vec<&'static str>)> {
+    let last = now.date_naive();
+    let Some(first) = entries.iter().map(|e| e.timestamp.date_naive()).min() else {
         return vec![];
     };
     first
         .iter_days()
         .take_while(|d| *d <= last)
         .map(|d| {
-            let end = d.and_hms_opt(23, 59, 59).unwrap().and_utc();
+            let end = d.and_hms_opt(23, 59, 59).unwrap().and_utc().min(now);
             let failed = journal_checks(entries, end)
                 .into_iter()
                 .filter(|c| c.verdict == Verdict::Fail)
@@ -436,14 +499,24 @@ mod tests {
         let mut j = regression_journal();
         j.retain(|e| e.timestamp.format("%d").to_string() != "04");
         j.push(entry(12, 6, 12, 0, 0, 2.5, 90.0));
-        let h = history_of(&j);
+        let h = history_of(&j, at(14));
         let on = |d: u32| &h.iter().find(|(day, _)| day.format("%d").to_string() == format!("{d:02}")).unwrap().1;
         assert!(on(4).is_empty(), "a one-day gap is inside the 36h limit");
         assert!(on(5).is_empty());
         assert!(on(6).contains(&"cycle-budget"));
         assert!(on(8).contains(&"rem-associations"));
         assert!(on(10).contains(&"cycle-ran"), "two empty days fail cycle-ran");
-        assert_eq!(h.len(), 10, "every calendar day from the 3rd to the 12th");
+        assert!(on(14).contains(&"cycle-ran"), "days after the last cycle are replayed too");
+        assert_eq!(h.len(), 12, "every calendar day from the 3rd through today, the 14th");
+    }
+
+    #[test]
+    fn a_failing_row_fails_the_report_and_unknown_does_not() {
+        let row = |v| Check::new("x", v, "");
+        let report = |vs: Vec<Verdict>| Report { as_of: at(5), checks: vs.into_iter().map(row).collect() };
+        assert!(report(vec![Verdict::Pass, Verdict::Unknown]).ok());
+        assert!(!report(vec![Verdict::Pass, Verdict::Fail]).ok());
+        assert!(!report(vec![Verdict::Unknown, Verdict::Fail]).ok());
     }
 
     #[test]
@@ -476,38 +549,89 @@ mod tests {
     fn delivery_fails_when_no_live_hint_reached_a_session() {
         let items = vec![item("aaaaaaaa11", "nudge", "live"), item("bbbbbbbb22", "hint", "live")];
         let delivered: HashSet<String> = ["aaaaaaaa".to_string()].into();
-        let c = delivery_checks(&items, &delivered);
+        let c = delivery_checks(&items, Some(&delivered));
         assert_eq!(verdict(&c, "nudge-delivery"), Verdict::Pass);
         assert_eq!(verdict(&c, "hint-delivery"), Verdict::Fail);
+        let c = delivery_checks(&items, None);
+        assert_eq!(verdict(&c, "hint-delivery"), Verdict::Unknown, "unreadable transcripts are not a failure");
     }
 
     #[test]
     fn delivery_ignores_non_live_items() {
         let items = vec![item("cccccccc33", "hint", "shadow")];
         let delivered: HashSet<String> = ["cccccccc".to_string()].into();
-        let c = delivery_checks(&items, &delivered);
+        let c = delivery_checks(&items, Some(&delivered));
         assert_eq!(verdict(&c, "hint-delivery"), Verdict::Unknown);
     }
 
+    const NEW: &str = r#""timestamp":"2026-10-08T10:00:00Z""#;
+
     #[test]
     fn only_attachment_records_count_as_delivery() {
+        let since = at(1);
         let mut found = HashSet::new();
-        collect_tags(br#"{"type":"assistant","text":"see [i-dream:deadbeef] here"}"#, &mut found);
+        let line = |body: &str| format!(r#"{{{NEW},{body}}}"#).into_bytes();
+        collect_tags(&line(r#""type":"assistant","text":"see [i-dream:deadbeef] here""#), since, &mut found);
         assert!(found.is_empty(), "a quoted tag is not a delivery");
-        collect_tags(br#"{"type":"attachment","x":"[i-dream:deadbeef] body [i-dream:0123abcd] b"}"#, &mut found);
+        collect_tags(&line(r#""type":"attachment","x":"[i-dream:deadbeef] b [i-dream:0123abcd] b""#), since, &mut found);
         assert_eq!(found.len(), 2);
-        collect_tags(br#"{"type":"attachment","x":"[i-dream:nothex!!] [i-dream:abc]"}"#, &mut found);
+        collect_tags(&line(r#""type":"attachment","x":"[i-dream:nothex!!] [i-dream:abc]""#), since, &mut found);
         assert_eq!(found.len(), 2, "malformed tags are skipped");
+    }
+
+    #[test]
+    fn an_old_record_in_a_fresh_file_is_not_a_recent_delivery() {
+        let mut found = HashSet::new();
+        let old = br#"{"timestamp":"2026-09-01T10:00:00Z","type":"attachment","x":"[i-dream:deadbeef]"}"#;
+        collect_tags(old, at(1), &mut found);
+        assert!(found.is_empty());
+        let undated = br#"{"type":"attachment","x":"[i-dream:deadbeef]"}"#;
+        collect_tags(undated, at(1), &mut found);
+        assert!(found.is_empty(), "a record with no time cannot prove a recent delivery");
+    }
+
+    #[test]
+    fn scan_reads_subagent_transcripts_and_reports_a_missing_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("proj/sess/subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        let rec = format!(r#"{{"timestamp":"{}","type":"attachment","x":"[i-dream:feedf00d]"}}"#, Utc::now().to_rfc3339());
+        std::fs::write(sub.join("agent-1.jsonl"), rec).unwrap();
+        let found = scan_delivered(dir.path(), Utc::now()).unwrap();
+        assert!(found.contains("feedf00d"), "{found:?}");
+        assert!(scan_delivered(&dir.path().join("absent"), Utc::now()).is_none());
+    }
+
+    #[test]
+    fn a_broken_interventions_file_leaves_the_other_rows_standing() {
+        let home = tempfile::tempdir().unwrap();
+        let d = home.path().join(".claude/i-dream");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("interventions.json"), "{broken").unwrap();
+        let r = gather(home.path(), at(5)).unwrap();
+        assert_eq!(verdict(&r.checks, "hint-delivery"), Verdict::Unknown);
+        assert!(r.checks.iter().any(|c| c.row == "cycle-ran"), "journal rows still reported");
     }
 
     #[test]
     fn reader_page_waiting_too_long_fails() {
         let mut s = ReaderState::default();
         assert_eq!(reader_check(Some(&s), at(20)).verdict, Verdict::Pass);
+        // 2026w42 starts Monday 2026-10-12.
         s.pending_pages = vec!["idream-reader-2026w42".into()];
         s.last_weekly = Some(at(13));
         assert_eq!(reader_check(Some(&s), at(19)).verdict, Verdict::Pass);
         assert_eq!(reader_check(Some(&s), at(21)).verdict, Verdict::Fail);
         assert_eq!(reader_check(None, at(21)).verdict, Verdict::Unknown);
+    }
+
+    #[test]
+    fn a_later_weekly_run_does_not_make_an_old_page_young() {
+        let s = ReaderState {
+            pending_pages: vec!["idream-reader-2026w41".into(), "idream-reader-2026w43".into()],
+            last_weekly: Some(at(20)),
+            ..Default::default()
+        };
+        assert_eq!(reader_check(Some(&s), at(21)).verdict, Verdict::Fail, "w41 began 2026-10-05");
     }
 }
