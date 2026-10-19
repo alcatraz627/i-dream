@@ -194,6 +194,11 @@ fn instances<'a>(item: &'a Named, by_id: &HashMap<&str, &'a Evidence>) -> Vec<(&
             .collect()
     };
     out.sort_by_key(|(e, _)| e.ts);
+    // The same row cited twice, or two rows saying the same thing on the same
+    // day, is one line to a reader.
+    let mut ids: HashSet<String> = HashSet::new();
+    let mut lines: HashSet<(String, String)> = HashSet::new();
+    out.retain(|(e, what)| ids.insert(e.id.clone()) && lines.insert((e.ts.format("%F").to_string(), what.clone())));
     out
 }
 
@@ -217,7 +222,9 @@ pub fn report_markdown(run: &WeeklyRun, rows: &[Evidence]) -> String {
     } else {
         format!("the {} problems below account for {sum}", items.len())
     };
-    let times = if run.atone_total == 1 { "once".to_string() } else { format!("{} times", run.atone_total) };
+    // A run from before the total was stored counts it from the same rows.
+    let total = if run.since.is_none() { super::count_atone(rows, since, at) } else { run.atone_total };
+    let times = if total == 1 { "once".to_string() } else { format!("{total} times") };
     md.push_str(&format!(
         "Claude was corrected **{times}** in these {} weeks; {below}.",
         number_word(weeks)
@@ -280,81 +287,38 @@ pub fn report_markdown(run: &WeeklyRun, rows: &[Evidence]) -> String {
     md
 }
 
-/// The page's config.json for this week's items.
-pub fn page_config(week: &str, items: &[Named], _clusters: &[Cluster], rows: &[Evidence], note: Option<&str>) -> Value {
-    let by_ev: HashMap<&str, &Evidence> = rows.iter().map(|e| (e.id.as_str(), e)).collect();
-    let mut groups = serde_json::Map::new();
+/// Where the week's report is served: beside the decision page's config, in
+/// the same registry directory the :5106 server reads.
+pub fn report_url(slug: &str) -> String {
+    format!("http://localhost:5106/dp/{slug}/page.html")
+}
+
+/// The agree surface: one card per problem, numbered as on the report, each
+/// saying only the plain fix. The full write-up lives at `report_url`.
+pub fn page_config(week: &str, items: &[Named], at: DateTime<Utc>, report_url: &str) -> Value {
     let sections: Vec<Value> = items
         .iter()
-        .map(|n| {
-            // Three short slots that sort into reading order (the kit sorts
-            // keys): what agreeing does, how much evidence, two headlines.
-            let cited: Vec<&Evidence> = n
-                .evidence_ids
-                .iter()
-                .filter_map(|id| by_ev.get(id.as_str()).copied())
-                .collect();
-            let headline = |e: &Evidence| e.text.split(": ").next().unwrap_or(&e.text).trim().to_string();
-            let mut newest = cited.clone();
-            newest.sort_by(|a, b| b.ts.cmp(&a.ts));
-            let mut examples: Vec<String> = vec![];
-            for e in newest {
-                let h = headline(e);
-                if !h.is_empty() && !examples.contains(&h) && examples.len() < 2 {
-                    examples.push(h);
-                }
-            }
-            let mut domains: Vec<&str> = cited.iter().map(|e| e.domain.as_str()).collect();
-            domains.sort();
-            domains.dedup();
-            let latest = cited.iter().map(|e| e.ts).max();
-            let evidence = format!(
-                "{} event(s) from {}{}",
-                n.evidence_ids.len(),
-                domains.join(", "),
-                latest.map(|t| format!(", latest {}", t.format("%b %d"))).unwrap_or_default()
-            );
-            let change = match &n.proposal {
-                Some(p) if mute_target(&p.target).is_some() => {
-                    format!("Re-arms a muted gate: {} goes to the trash.", p.target)
-                }
-                Some(p) if n.kind == "repeat" || n.kind == "structural-need" => {
-                    format!("Files to the gcc backlog: {} (in {})", p.change, p.target)
-                }
-                Some(p) => format!("Noted only. Suggested: {} (in {})", p.change, p.target),
-                None => "Noted only; nothing is filed.".to_string(),
+        .enumerate()
+        .map(|(i, n)| {
+            let fix = match (n.fix.trim(), &n.proposal) {
+                ("", Some(p)) => p.change.trim(),
+                (f, _) => f,
             };
-            let mut slots = serde_json::Map::new();
-            slots.insert("CHANGE".into(), json!(change));
-            slots.insert("EVIDENCE".into(), json!(evidence));
-            if !examples.is_empty() {
-                slots.insert("EXAMPLE".into(), json!(examples.join(" · ")));
-            }
-            let group = n.kind.clone();
-            groups.entry(group.clone()).or_insert_with(|| {
-                json!({"context": match group.as_str() {
-                    "structural-need" => "a missing hook, gate, skill fix or default",
-                    "drift" => "getting worse week over week",
-                    _ => "the same lesson from independent places",
-                }})
-            });
             json!({
-                "id": n.cluster,
-                "group": group,
+                "id": (i + 1).to_string(),
                 "title": n.title,
-                "prio": if n.kind == "structural-need" || n.kind == "drift" { "MUST" } else { "SHOULD" },
-                "read": n.why,
-                "slots": slots,
+                "read": format!("Proposed fix: {fix}"),
             })
         })
         .collect();
-    // Two sentences only; a process note lives in reader/PROCESS.md, not here.
-    let _ = note;
+    // The link stops at whitespace when the page linkifies it, so the period
+    // after the URL keeps a space before it.
     let intro = format!(
-        "What the reader found this week ({week}). Untouched = agreed: agreeing does what CHANGE says; DISAGREE drops it."
+        "The full write-up, with what happened and why: {report_url} . \
+         Untick a fix you do not want; ticked fixes go on the gcc backlog as proposals."
     );
     json!({
-        "title": format!("i-dream reader, {week}"),
+        "title": format!("What went wrong with Claude, week of {}", at.format("%-d %b")),
         "storageKey": page_slug(week),
         "copyHeader": format!("idream reader {week}"),
         "intro": intro,
@@ -365,17 +329,62 @@ pub fn page_config(week: &str, items: &[Named], _clusters: &[Cluster], rows: &[E
             "topic": "weekly reader findings",
             "created": Utc::now().format("%Y-%m-%d").to_string(),
         },
-        "groups": groups,
+        "groups": {},
         "decisions": [],
         "sections": sections,
     })
 }
 
-/// Write the page, verify it renders, and mark it awaiting the owner.
-/// Returns the page URL.
-pub fn publish(slug: &str, config: &Value) -> Result<String> {
+/// The owner's verdict per item cluster, from an answer that names items by
+/// their page position (`2: DISAGREE`). A page published before positions
+/// were used names them by cluster id; either form declines the item.
+pub fn verdicts_by_cluster(answer: &str, items: &[Named]) -> HashMap<String, bool> {
+    let positions: Vec<String> = (1..=items.len()).map(|i| i.to_string()).collect();
+    let clusters: Vec<String> = items.iter().map(|n| n.cluster.clone()).collect();
+    let by_pos = parse_answer(answer, &positions);
+    let by_cluster = parse_answer(answer, &clusters);
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let agreed = by_pos[&positions[i]] && by_cluster[&n.cluster];
+            (n.cluster.clone(), agreed)
+        })
+        .collect()
+}
+
+/// Write the report beside the page and render it with the shared page kit.
+/// A render failure leaves page.md in place and is logged, so the agree page
+/// still reaches the owner and `i-dream reader page <week>` can retry.
+fn write_report(dir: &Path, report_md: &str) -> Result<()> {
+    let md = dir.join("page.md");
+    std::fs::write(&md, report_md)?;
+    let kit = crate::config::expand_tilde(Path::new("~/.claude/scripts/pages/pagekit.py"));
+    let out = std::process::Command::new("uv")
+        .args(["run", "--with", "markdown", "python3"])
+        .arg(&kit)
+        .arg(&md)
+        .arg(dir.join("page.html"))
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::warn!(
+            "report {} did not render: {}{}",
+            md.display(),
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        ),
+        Err(e) => tracing::warn!("report {} did not render: {e}", md.display()),
+    }
+    Ok(())
+}
+
+/// Write the report and the page, verify the page renders, and mark it
+/// awaiting the owner. Returns the page URL.
+pub fn publish(slug: &str, config: &Value, report_md: &str) -> Result<String> {
     let dir = pages_dir()?.join(slug);
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    write_report(&dir, report_md)?;
     std::fs::write(dir.join("config.json"), serde_json::to_string_pretty(config)?)?;
     let script = page_script();
     // The page server (kanban on :5106) is redeployed often; a check that lands
@@ -608,12 +617,65 @@ mod tests {
 
     #[test]
     fn untouched_means_agreed_and_disagree_drops() {
-        let ids = vec!["c-1".to_string(), "c-2".to_string(), "c-3".to_string()];
-        let v = parse_answer("idream reader 2026w41:\nc-2: DISAGREE\nc-3: agree — fine\nzz: DISAGREE", &ids);
-        assert_eq!(v["c-1"], true);
-        assert_eq!(v["c-2"], false);
-        assert_eq!(v["c-3"], true);
-        assert!(!v.contains_key("zz"));
+        let ids = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+        let v = parse_answer("idream reader 2026w41:\n2: DISAGREE\n3: agree, fine\n12: DISAGREE", &ids);
+        assert_eq!(v["1"], true);
+        assert_eq!(v["2"], false);
+        assert_eq!(v["3"], true);
+        assert!(!v.contains_key("12"));
+    }
+
+    #[test]
+    fn answer_ids_map_back_by_position() {
+        let items = vec![named("c-aa", "repeat", "~/a.md"), named("c-bb", "repeat", "~/b.md"), named("c-cc", "drift", "")];
+        let v = verdicts_by_cluster("idream reader 2026w42:\n2: DISAGREE", &items);
+        assert_eq!(v["c-aa"], true);
+        assert_eq!(v["c-bb"], false, "item 2 on the page is the second cluster");
+        assert_eq!(v["c-cc"], true);
+        // A page published with cluster ids still declines by id.
+        let old = verdicts_by_cluster("c-cc: DISAGREE", &items);
+        assert_eq!((old["c-aa"], old["c-bb"], old["c-cc"]), (true, true, false));
+        // And the verdicts drive apply: the declined item files nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let out = apply(&items, &v, &dir.path().join("f.jsonl"), Utc::now(), |n| Ok(format!("prop-{}", n.cluster)), |_| Ok(())).unwrap();
+        assert_eq!(out.iter().map(|l| l.outcome.as_str()).collect::<Vec<_>>(), vec!["filed", "declined", "noted"]);
+    }
+
+    #[test]
+    fn the_agree_page_is_numbered_and_links_the_report() {
+        let (run, _) = mock_week();
+        let url = report_url("idream-reader-2026w42");
+        let cfg = page_config("2026w42", &run.items, run.at.unwrap(), &url);
+        assert_eq!(cfg["title"], "What went wrong with Claude, week of 13 Oct");
+        let ids: Vec<&str> = cfg["sections"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["1", "2"]);
+        assert_eq!(cfg["sections"][0]["read"], "Proposed fix: Extend the check to claims about a named machine.");
+        let intro = cfg["intro"].as_str().unwrap();
+        assert!(intro.contains("http://localhost:5106/dp/idream-reader-2026w42/page.html ."), "{intro}");
+        let text = cfg.to_string();
+        assert!(!text.contains("c-0d4db80b") && !text.contains("CHANGE") && !text.contains("EVIDENCE"));
+    }
+
+    /// Builds the 2026w42 report from the real saved run and that day's
+    /// evidence, and writes it for eyeballing. No model call.
+    /// `cargo test -- --ignored replay_w42_page`
+    #[test]
+    #[ignore]
+    fn replay_w42_page() {
+        let dir = dirs::home_dir().unwrap().join(".claude/i-dream/reader");
+        let run: WeeklyRun =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("runs/2026w42/run.json")).unwrap()).unwrap();
+        let day = run.at.unwrap().format("%Y-%m-%d").to_string();
+        let rows: Vec<Evidence> = std::fs::read_to_string(dir.join(format!("daily/{day}.evidence.jsonl")))
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let md = report_markdown(&run, &rows);
+        let out = std::env::temp_dir().join("idream-replay-w42-page.md");
+        std::fs::write(&out, &md).unwrap();
+        println!("{}", out.display());
+        println!("{md}");
     }
 
     #[test]
@@ -860,10 +922,12 @@ mod tests {
         run.items[1].happened = vec![
             inst("atone:m4", "on 3 Jan, in another-project, the first review page was unreadable."),
             inst("atone:missing", "this row is not in the evidence."),
+            inst("atone:m4", "cited a second time."),
         ];
         let md = report_markdown(&run, &rows);
         assert!(md.contains("- 6 Oct, i-dream: on 3 Jan, in another-project, the first review page"), "{md}");
         assert!(!md.contains("this row is not in the evidence"));
+        assert!(!md.contains("cited a second time"), "one row is one line");
     }
 
     #[test]

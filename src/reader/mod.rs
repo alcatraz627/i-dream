@@ -461,8 +461,8 @@ async fn run_weekly_inner(
 
     if !dry_run && !run.items.is_empty() {
         let slug = land::page_slug(&week);
-        let cfg = land::page_config(&week, &run.items, &run.forwarded, &rows, run.named.process_note.as_deref());
-        let url = land::publish(&slug, &cfg)?;
+        let cfg = land::page_config(&week, &run.items, now, &land::report_url(&slug));
+        let url = land::publish(&slug, &cfg, &land::report_markdown(&run, &rows))?;
         run.page_slug = Some(slug.clone());
         run.page_url = Some(url);
         state = ReaderState::load();
@@ -530,8 +530,7 @@ pub fn apply_answers_with(
         } else {
             "all items agreed in chat".to_string()
         };
-        let ids: Vec<String> = run.items.iter().map(|n| n.cluster.clone()).collect();
-        let verdicts = land::parse_answer(&text, &ids);
+        let verdicts = land::verdicts_by_cluster(&text, &run.items);
         let landed = land::apply(
             &run.items,
             &verdicts,
@@ -689,12 +688,14 @@ pub fn scheduled_jobs() -> Vec<ScheduledJob> {
 /// Rebuild a week's decision page from its saved run and that day's evidence.
 pub fn republish(week: &str) -> Result<String> {
     let run = load_run(week).with_context(|| format!("no saved run for {week}"))?;
-    let day = run.at.context("run has no timestamp")?.format("%Y-%m-%d").to_string();
+    let at = run.at.context("run has no timestamp")?;
+    let day = at.format("%Y-%m-%d").to_string();
     let body = std::fs::read_to_string(reader_dir()?.join("daily").join(format!("{day}.evidence.jsonl")))
         .unwrap_or_default();
     let rows: Vec<Evidence> = body.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-    let cfg = land::page_config(week, &run.items, &run.forwarded, &rows, run.named.process_note.as_deref());
-    land::publish(&land::page_slug(week), &cfg)
+    let slug = land::page_slug(week);
+    let cfg = land::page_config(week, &run.items, at, &land::report_url(&slug));
+    land::publish(&slug, &cfg, &land::report_markdown(&run, &rows))
 }
 
 #[cfg(test)]
