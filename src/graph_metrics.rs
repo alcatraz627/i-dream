@@ -43,7 +43,7 @@
 //! returns an empty map — the actual community-detection lands in v2 with
 //! either a Louvain port or `petgraph-graphml`-based alternative.
 
-use crate::modules::dreaming::{Association, ExtractedPattern};
+use crate::modules::dreaming::{Association, ExtractedPattern, backfill_occurrence_history};
 use crate::store::Store;
 
 use anyhow::Result;
@@ -286,8 +286,13 @@ fn label_propagation_communities(
 /// Idempotent — overwrites the metrics file each call. Returns the metrics
 /// in case the caller wants to use them directly.
 pub fn compute_and_persist(store: &Store) -> Result<GraphMetrics> {
-    let patterns: Vec<ExtractedPattern> =
+    let mut patterns: Vec<ExtractedPattern> =
         store.read_json("dreams/patterns.json").unwrap_or_default();
+    let backfilled = backfill_occurrence_history(&mut patterns);
+    if backfilled > 0 {
+        store.write_json("dreams/patterns.json", &patterns)?;
+        info!("graph_metrics: backfilled occurrence_history for {} legacy patterns", backfilled);
+    }
     let associations: Vec<Association> = store
         .read_json("dreams/associations.json")
         .unwrap_or_default();
