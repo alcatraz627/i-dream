@@ -5,7 +5,7 @@ import SwiftUI
 /// PNG and every announced gesture can be exercised without a click.
 ///
 ///   i-dream-bar --probe <out-dir> [--appearance light|dark]
-///               [--fixture <status.json> <reader.json>] [--demo-states]
+///               [--fixture <status.json> <reader.json>] [--verify <verify.json>] [--demo-states]
 ///
 /// Writes status-item, dropdown and one PNG per dashboard pane, plus
 /// `drive.txt`: every dropdown row's dive and every Work pane's key map,
@@ -21,6 +21,8 @@ enum Probe {
             fixture = (URL(fileURLWithPath: a), URL(fileURLWithPath: b))
         }
         let demo = args.contains("--demo-states")
+        let verify = args.firstIndex(of: "--verify").flatMap { args[safe: $0 + 1] }
+            .flatMap { AppModel.fetchVerify(file: URL(fileURLWithPath: $0)) }
 
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.accessory)
@@ -40,7 +42,7 @@ enum Probe {
             m.defaults = suite
             m.openLogEnabled = false
             m.openURL = { _ in }
-            m.record = RecordBuilder.build(status: s, reader: r, now: now, fetchedAt: at, lastLook: m.lastLook)
+            m.record = RecordBuilder.build(status: s, reader: r, now: now, fetchedAt: at, lastLook: m.lastLook, verify: verify)
             m.reading = .fresh(at)
             return m
         }

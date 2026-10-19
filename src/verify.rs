@@ -510,6 +510,18 @@ mod tests {
         assert_eq!(h.len(), 12, "every calendar day from the 3rd through today, the 14th");
     }
 
+    /// The widget decodes this document: row, lowercase verdict and detail
+    /// on every check, plus as_of.
+    #[test]
+    fn json_report_carries_the_fields_the_widget_reads() {
+        let r = Report { as_of: at(5), checks: vec![Check::new("hint-delivery", Verdict::Fail, "0 of 17")] };
+        let v = serde_json::to_value(&r).unwrap();
+        assert!(v["as_of"].is_string());
+        assert_eq!(v["checks"][0]["row"], "hint-delivery");
+        assert_eq!(v["checks"][0]["verdict"], "fail");
+        assert_eq!(v["checks"][0]["detail"], "0 of 17");
+    }
+
     #[test]
     fn a_failing_row_fails_the_report_and_unknown_does_not() {
         let row = |v| Check::new("x", v, "");

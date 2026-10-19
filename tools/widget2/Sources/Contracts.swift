@@ -126,6 +126,15 @@ struct StatusDoc: Decodable {
     var sources: [String: String]
 }
 
+/// `i-dream verify --json`: one row per pipeline stage, from docs/35. The CLI
+/// exits 1 when a row fails and still prints the whole document, so the
+/// widget reads stdout whatever the exit status.
+struct VerifyDoc: Decodable {
+    struct Check: Decodable { var row: String; var verdict: String; var detail: String }
+    var as_of: String
+    var checks: [Check]
+}
+
 struct ReaderDoc: Decodable {
     struct Stream: Decodable { var domain: String; var path: String?; var events_in_window: Int; var newest: String? }
     struct State: Decodable {

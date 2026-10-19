@@ -3,7 +3,7 @@
 #
 #   tools/widget2/probe.sh <out-dir> [path/to/i-dream]
 #
-# Captures `status --json` and `reader --json` once, back to back, so both
+# Captures `status --json`, `reader --json` and `verify --json` once, back to back, so both
 # documents describe the same moment, then runs the app's headless probe on
 # that pair in each appearance. Exit status is the number of FAIL lines.
 
@@ -15,9 +15,11 @@ APP="$HERE/build/i-dream-bar.app/Contents/MacOS/i-dream-bar"
 mkdir -p "$OUT"
 "$BIN" status --json > "$OUT/status.json"
 "$BIN" reader --json > "$OUT/reader.json"
+# verify exits 1 when a row fails; the document is still the point.
+"$BIN" verify --json > "$OUT/verify.json" || true
 fails=0
 for ap in dark light; do
-  "$APP" --probe "$OUT" --appearance "$ap" --fixture "$OUT/status.json" "$OUT/reader.json" --demo-states > /dev/null || fails=$((fails + $?))
+  "$APP" --probe "$OUT" --appearance "$ap" --fixture "$OUT/status.json" "$OUT/reader.json" --verify "$OUT/verify.json" --demo-states > /dev/null || fails=$((fails + $?))
 done
 echo "probe: $fails FAIL lines; see $OUT/drive-dark.txt and $OUT/drive-light.txt"
 exit "$fails"

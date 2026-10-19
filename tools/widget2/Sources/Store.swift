@@ -43,6 +43,10 @@ final class AppModel: ObservableObject {
     var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
     var openDashboard: () -> Void = {}
     var fixture: (status: URL, reader: URL)?
+    /// Last `verify --json` read, kept between its slower refreshes (the check
+    /// scans a week of transcripts, about a second and a half).
+    private var verify: VerifyDoc?
+    private var verifyAt: Date?
     var fixedNow: Date?
     private var timer: Timer?
     private var asleep = false
@@ -140,9 +144,13 @@ final class AppModel: ObservableObject {
 
     func refresh(completion: (() -> Void)? = nil) {
         let fixture = self.fixture
+        let due = fixture == nil && (verifyAt.map { Date().timeIntervalSince($0) > 300 } ?? true)
         DispatchQueue.global(qos: .utility).async {
             let result = Self.fetch(fixture: fixture)
+            let fresh = due ? Self.fetchVerify() : nil
             DispatchQueue.main.async {
+                if due { self.verifyAt = Date() }
+                if let fresh { self.verify = fresh }
                 self.apply(result)
                 completion?()
             }
@@ -151,6 +159,22 @@ final class AppModel: ObservableObject {
 
     /// Synchronous load for the headless probe, which has no run loop to wait on.
     func loadNow() { apply(Self.fetch(fixture: fixture)) }
+
+    /// The outcome rows. A feed that cannot be read is nil and the dropdown
+    /// shows no outcome rows; it never fails the whole record.
+    static func fetchVerify(file: URL? = nil) -> VerifyDoc? {
+        let data: Data
+        if let file {
+            guard let d = try? Data(contentsOf: file) else { return nil }
+            data = d
+        } else {
+            guard let bin = Runner.idreamBinary() else { return nil }
+            let r = Runner.run(bin, ["verify", "--json"], timeout: 25)
+            guard r.launched, !r.timedOut else { return nil }
+            data = r.out
+        }
+        return try? JSONDecoder().decode(VerifyDoc.self, from: data)
+    }
 
     enum Fetch { case ok(StatusDoc, ReaderDoc, Date), fail(String), absent(String) }
 
@@ -179,7 +203,7 @@ final class AppModel: ObservableObject {
     func apply(_ f: Fetch) {
         switch f {
         case .ok(let s, let r, let at):
-            record = RecordBuilder.build(status: s, reader: r, now: fixedNow ?? Date(), fetchedAt: at, lastLook: lastLook)
+            record = RecordBuilder.build(status: s, reader: r, now: fixedNow ?? Date(), fetchedAt: at, lastLook: lastLook, verify: verify)
             reading = .fresh(at)
         case .fail(let why):
             if case .fresh(let at) = reading, record != nil { reading = .stale(at, why) }

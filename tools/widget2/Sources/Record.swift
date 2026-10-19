@@ -261,6 +261,8 @@ struct Record {
     var quiet: [Row]
     var since: Since
     var checks: [String]
+    /// Pipeline outcome rows from `verify --json`; nil when that feed was unavailable.
+    var outcomes: [VerifyDoc.Check]? = nil
 
     // Derived totals, each from its rows.
     var live: [Source] { sources }
@@ -281,7 +283,8 @@ struct Record {
         let s = "\(plural(awaitingItems, "item")) waiting on you · \(plural(count(.stale), "stale source")) · \(plural(dead.count, "dead source")) · \(plural(retired.count, "retired source"))"
         return (w, s, dead.isEmpty && daemonRunning ? (awaitingItems > 0 ? .wait : .ok) : .bad)
     }
-    var statusSev: Sev { (!daemonRunning || !dead.isEmpty) ? .bad : awaitingItems > 0 ? .wait : .none }
+    var failingOutcomes: [VerifyDoc.Check] { (outcomes ?? []).filter { $0.verdict == "fail" } }
+    var statusSev: Sev { (!daemonRunning || !dead.isEmpty || !failingOutcomes.isEmpty) ? .bad : awaitingItems > 0 ? .wait : .none }
 }
 
 func plural(_ n: Int, _ noun: String) -> String { "\(n) \(noun)\(n == 1 ? "" : "s")" }
@@ -340,7 +343,7 @@ private let laneToDomain = ["ipc": "claude-ipc", "pins": "pinned"]
 // MARK: - building the record
 
 enum RecordBuilder {
-    static func build(status s: StatusDoc, reader r: ReaderDoc, now: Date, fetchedAt: Date, lastLook: LastLook?) -> Record {
+    static func build(status s: StatusDoc, reader r: ReaderDoc, now: Date, fetchedAt: Date, lastLook: LastLook?, verify: VerifyDoc? = nil) -> Record {
         // Sources: lanes and domains joined by name.
         var byName: [String: Source] = [:]
         var order: [String] = []
@@ -520,6 +523,7 @@ enum RecordBuilder {
             evidence: Dictionary(r.evidence.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a }),
             you: [], system: [], quiet: [], since: since, checks: [])
         rec.weeklyBroken = weeklyBroken(status: s)
+        rec.outcomes = verify?.checks
         rec.jobs = jobRows(status: s)
         rec.you = youRows(rec)
         rec.system = systemRows(rec, status: s)
@@ -601,6 +605,10 @@ enum RecordBuilder {
                             detail: "no cycles run until it starts: i-dream start", sev: .bad,
                             age: r.lastCycle.map { r.now.timeIntervalSince($0) }, ageNote: "last cycle",
                             dive: Dive(pane: .flow)))
+        }
+        for c in r.failingOutcomes {
+            rows.append(Row(id: "outcome-" + c.row, icon: "exclamationmark.triangle", title: "\(c.row) outcome is failing",
+                            detail: c.detail, sev: .bad, dive: Dive(pane: .flow)))
         }
         for src in r.dead {
             rows.append(Row(id: "src-" + src.id, icon: src.icon, title: "\(src.id) is dead", detail: src.fix ?? src.reason,
