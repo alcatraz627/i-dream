@@ -284,7 +284,7 @@ impl Default for Config {
                 max_gap_hours: default_max_gap_hours(),
             },
             budget: BudgetConfig {
-                max_tokens_per_cycle: 50_000,
+                max_tokens_per_cycle: 70_000,
                 max_runtime_minutes: 10,
                 model: "claude-sonnet-4-6".into(),
                 model_heavy: "claude-opus-4-6".into(),
@@ -414,9 +414,9 @@ mod tests {
     }
 
     #[test]
-    fn default_config_budget_is_50k_tokens() {
+    fn default_config_budget_is_70k_tokens() {
         let config = Config::default();
-        assert_eq!(config.budget.max_tokens_per_cycle, 50_000);
+        assert_eq!(config.budget.max_tokens_per_cycle, 70_000);
     }
 
     #[test]

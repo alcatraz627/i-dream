@@ -347,6 +347,51 @@ fn skip_reason(enabled: bool, spent: u64, budget: u64) -> String {
     }
 }
 
+/// How one dreaming cycle's token allowance is divided between its phases.
+///
+/// Each phase gets a fixed share (SWS 45, REM 35, Wake 20 percent) so a heavy
+/// early phase can never starve a later one; Wake in particular always keeps
+/// its slice even when SWS and REM ran at their limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhaseBudgets {
+    sws: u64,
+    rem: u64,
+    wake: u64,
+}
+
+impl PhaseBudgets {
+    fn split(total: u64) -> Self {
+        let sws = total * 45 / 100;
+        let rem = total * 35 / 100;
+        Self { sws, rem, wake: total - sws - rem }
+    }
+}
+
+/// Fixed cost of every CLI call (system prompt, tool schemas) in tokens.
+const CALL_OVERHEAD_TOKENS: u64 = 3_400;
+/// Output tokens SWS typically emits for its JSON pattern list.
+const SWS_OUTPUT_RESERVE: u64 = 5_500;
+/// Overhead plus output tokens REM typically spends outside its digest.
+const REM_FIXED_TOKENS: u64 = 7_900;
+/// Rough size of one REM digest line, in chars.
+const REM_CHARS_PER_SCHEMA: u64 = 300;
+/// Never shrink the SWS dump or the REM digest below these floors.
+const SWS_MIN_DUMP_CHARS: usize = 4_000;
+const REM_MIN_SCHEMAS: usize = 5;
+
+/// How many chars of session text SWS may put in its prompt to stay inside
+/// `slice` tokens, assuming about 4 chars per token.
+fn sws_dump_char_budget(slice: u64, max_chars: usize) -> usize {
+    let input_tokens = slice.saturating_sub(CALL_OVERHEAD_TOKENS + SWS_OUTPUT_RESERVE);
+    ((input_tokens * 4) as usize).clamp(SWS_MIN_DUMP_CHARS, max_chars)
+}
+
+/// How many schemas REM may list in its digest to stay inside `slice` tokens.
+fn rem_schema_budget(slice: u64, max_schemas: usize) -> usize {
+    let digest_tokens = slice.saturating_sub(REM_FIXED_TOKENS);
+    ((digest_tokens * 4 / REM_CHARS_PER_SCHEMA) as usize).clamp(REM_MIN_SCHEMAS, max_schemas)
+}
+
 /// Truncate a string at a char (not byte) boundary, appending "…" if cut.
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -743,7 +788,7 @@ impl<'a> DreamingModule<'a> {
     pub async fn run_sws(
         &self,
         client: &ClaudeClient,
-        _budget: u64,
+        budget: u64,
         tracer: &DreamTracer<'_>,
     ) -> Result<(u64, u64, u64)> {
         info!("SWS Phase: Compressing session data into structured learnings");
@@ -790,6 +835,10 @@ impl<'a> DreamingModule<'a> {
         // Also tags every line with the project_id (D2) so the model can spot
         // cross-project regularities. Kept compact: one block per turn,
         // ~700 chars worst case → ~40 turns per 30KB cap.
+        // The slice decides how much text goes in: transcripts take up to
+        // three quarters of it, the queue the rest (bounded by its own cap).
+        let dump_chars = sws_dump_char_budget(budget, 30_000 + QUEUE_DUMP_BUDGET);
+        let transcript_cap = (dump_chars * 3 / 4).min(30_000);
         let mut dump = String::new();
         for s in &summaries {
             let correction_tag = if s.is_correction { " [CORRECTION]" } else { "" };
@@ -815,7 +864,7 @@ impl<'a> DreamingModule<'a> {
                 },
                 tools_str,
             ));
-            if dump.len() > 30_000 {
+            if dump.len() > transcript_cap {
                 dump.push_str("...(truncated)\n");
                 break;
             }
@@ -825,9 +874,10 @@ impl<'a> DreamingModule<'a> {
         // deep backlog can't starve transcript signal. Only blocks that made
         // it into the prompt are archived as consumed later.
         let queue_dump_start = dump.len();
+        let queue_cap = QUEUE_DUMP_BUDGET.min(dump_chars.saturating_sub(dump.len()));
         let mut queue_fed = 0usize;
         for (_path, q) in &drain.feed {
-            if dump.len() - queue_dump_start > QUEUE_DUMP_BUDGET {
+            if dump.len() - queue_dump_start > queue_cap {
                 break;
             }
             dump.push_str(&format_queue_block(q));
@@ -1277,7 +1327,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
     pub async fn run_rem(
         &self,
         client: &ClaudeClient,
-        _budget: u64,
+        budget: u64,
         tracer: &DreamTracer<'_>,
     ) -> Result<(u64, u64)> {
         info!("REM Phase: Exploring creative associations");
@@ -1321,7 +1371,8 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
         // (how often a lesson was actually observed) rather than by the
         // confidence of a single assertion. Falls back to raw patterns when
         // the merge has not run yet.
-        const MAX_PATTERNS_FOR_REM: usize = 50;
+        // The phase slice can lower the cap below 50 so the call fits.
+        let max_patterns_for_rem = rem_schema_budget(budget, 50);
         let schemas = crate::consolidation::schemas::load_schemas(self.store);
 
         let pattern_digest: String = if !schemas.is_empty() {
@@ -1332,7 +1383,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
             );
             schemas
                 .iter()
-                .take(MAX_PATTERNS_FOR_REM)
+                .take(max_patterns_for_rem)
                 .map(|s| {
                     format!(
                         "[{}] ({}, valence={}, conf={:.2}, seen {}×): {}",
@@ -1348,7 +1399,7 @@ Output ONLY a JSON array of objects. No preamble, no commentary."#;
                     .partial_cmp(&a.confidence)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            sorted_patterns.truncate(MAX_PATTERNS_FOR_REM);
+            sorted_patterns.truncate(max_patterns_for_rem);
             sorted_patterns
                 .iter()
                 .map(|p| {
@@ -2033,17 +2084,16 @@ impl<'a> Module for DreamingModule<'a> {
         )?;
 
         let mut total_tokens = 0u64;
-        let mut remaining = budget;
+        let slices = PhaseBudgets::split(budget);
         let mut sessions_analyzed = 0u64;
         let mut patterns_extracted = 0u64;
         let mut associations_found = 0u64;
         let mut insights_promoted = 0u64;
 
         // Phase 1: SWS
-        if self.config.modules.dreaming.sws_enabled && remaining > 0 {
-            let (tokens, sessions, patterns) = self.run_sws(client, remaining, &tracer).await?;
+        if self.config.modules.dreaming.sws_enabled && slices.sws > 0 {
+            let (tokens, sessions, patterns) = self.run_sws(client, slices.sws, &tracer).await?;
             total_tokens += tokens;
-            remaining = remaining.saturating_sub(tokens);
             sessions_analyzed = sessions;
             patterns_extracted = patterns;
         } else {
@@ -2085,10 +2135,9 @@ impl<'a> Module for DreamingModule<'a> {
         }
 
         // Phase 2: REM
-        if self.config.modules.dreaming.rem_enabled && remaining > 0 {
-            let (tokens, assocs) = self.run_rem(client, remaining, &tracer).await?;
+        if self.config.modules.dreaming.rem_enabled && slices.rem > 0 {
+            let (tokens, assocs) = self.run_rem(client, slices.rem, &tracer).await?;
             total_tokens += tokens;
-            remaining = remaining.saturating_sub(tokens);
             associations_found = assocs;
         } else {
             tracer.note(
@@ -2099,8 +2148,8 @@ impl<'a> Module for DreamingModule<'a> {
         }
 
         // Phase 3: Wake
-        if self.config.modules.dreaming.wake_enabled && remaining > 0 {
-            let (tokens, promoted) = self.run_wake(client, remaining, &tracer).await?;
+        if self.config.modules.dreaming.wake_enabled && slices.wake > 0 {
+            let (tokens, promoted) = self.run_wake(client, slices.wake, &tracer).await?;
             total_tokens += tokens;
             insights_promoted = promoted;
         } else {
@@ -2423,6 +2472,42 @@ mod tests {
         assert!(q.is_trivial());
         q.pending.push("ship the fix".into());
         assert!(!q.is_trivial(), "a real pending item keeps it");
+    }
+
+    #[test]
+    fn phase_budgets_split_45_35_20_and_sum_to_total() {
+        let b = PhaseBudgets::split(35_000);
+        assert_eq!((b.sws, b.rem, b.wake), (15_750, 12_250, 7_000));
+        for total in [0u64, 1, 99, 25_000, 35_001] {
+            let b = PhaseBudgets::split(total);
+            assert_eq!(b.sws + b.rem + b.wake, total);
+        }
+    }
+
+    #[test]
+    fn sws_and_rem_shrink_input_to_fit_their_slice() {
+        let b = PhaseBudgets::split(35_000);
+        let full = 30_000 + QUEUE_DUMP_BUDGET;
+        let small = PhaseBudgets::split(20_000);
+        assert!(sws_dump_char_budget(b.sws, full) < full);
+        assert!(sws_dump_char_budget(small.sws, full) < sws_dump_char_budget(b.sws, full));
+        assert!(rem_schema_budget(small.rem, 50) < 50, "tight slice lists fewer schemas");
+        assert_eq!(rem_schema_budget(1_000_000, 50), 50, "never above the cap");
+        assert_eq!(sws_dump_char_budget(0, full), SWS_MIN_DUMP_CHARS, "floor holds");
+        assert_eq!(rem_schema_budget(0, 50), REM_MIN_SCHEMAS);
+    }
+
+    /// SWS and REM spending their whole slices leaves Wake's slice untouched:
+    /// the split is fixed up front, not carved from what is left.
+    #[test]
+    fn wake_keeps_its_slice_when_sws_and_rem_used_theirs() {
+        let b = PhaseBudgets::split(35_000);
+        let spent = b.sws + b.rem;
+        assert!(spent < 35_000);
+        assert_eq!(b.wake, 7_000);
+        assert!(b.wake > 0);
+        // Even overspending earlier phases (27,893 against a 25k cycle) cannot shrink it.
+        assert_eq!(PhaseBudgets::split(25_000).wake, 5_000);
     }
 
     #[test]

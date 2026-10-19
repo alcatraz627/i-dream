@@ -3449,7 +3449,7 @@ fn render_glossary_section() -> String {
 
   <div class="glossary-card">
     <div class="glossary-term">Token Budget</div>
-    <div class="glossary-def">The maximum output tokens allowed per consolidation cycle (<code>max_tokens_per_cycle</code>, default 50 000). Each module phase consumes a fraction: Dreaming 50%, Metacog 25%, Introspection the remainder.</div>
+    <div class="glossary-def">The maximum output tokens allowed per consolidation cycle (<code>max_tokens_per_cycle</code>, default 70 000). Each module phase consumes a fraction: Dreaming 50%, Metacog 25%, Introspection the remainder.</div>
   </div>
 
   <div class="glossary-card">
