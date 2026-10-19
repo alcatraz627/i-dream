@@ -222,6 +222,10 @@ pub struct HooksConfig {
     /// would-fires). Felt-metabolism Phase 2.
     #[serde(default = "default_true")]
     pub pre_tool_use: bool,
+    /// Install the synchronous UserPromptSubmit hook that delivers compiled
+    /// hints as additionalContext when the prompt matches their trigger.
+    #[serde(default = "default_true")]
+    pub user_prompt_hint: bool,
 }
 
 fn default_true() -> bool {
@@ -337,6 +341,7 @@ impl Default for Config {
                 pre_compact: true,
                 user_prompt_submit: true,
                 pre_tool_use: true,
+                user_prompt_hint: true,
             },
             ingestion: IngestionConfig::default(),
             limits: LimitsConfig::default(),
