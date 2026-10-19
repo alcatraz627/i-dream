@@ -27,6 +27,7 @@ mod status;
 mod store;
 mod thread;
 mod transcript;
+mod verify;
 mod widget;
 
 use anyhow::{Context, Result};
@@ -82,6 +83,26 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", status::render_text(&report, verbose));
+            }
+        }
+
+        Command::Verify { history, json } => {
+            let home = dirs::home_dir().context("cannot resolve home directory")?;
+            if history {
+                for (day, failed) in verify::history(&home) {
+                    let rows = if failed.is_empty() { "ok".to_string() } else { failed.join(", ") };
+                    println!("{day}  {rows}");
+                }
+                return Ok(());
+            }
+            let report = verify::gather(&home, chrono::Utc::now())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", verify::render_text(&report));
+            }
+            if !report.ok() {
+                std::process::exit(1);
             }
         }
 

@@ -62,6 +62,16 @@ pub enum Command {
         json: bool,
     },
 
+    /// Check that the pipeline produces its outcomes (docs/35); exits 1 on a failing row
+    Verify {
+        /// Replay the journal-backed rows for every day the journal covers
+        #[arg(long)]
+        history: bool,
+        /// Emit the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manually trigger a dream cycle
     Dream {
         /// Run specific phase only (sws, rem, wake, or all)
