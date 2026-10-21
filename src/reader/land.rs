@@ -536,7 +536,13 @@ pub fn apply(
             continue;
         }
         let fp = fingerprint(&p.target, &p.change);
-        if let Some(prev) = live.get(&fp) {
+        // The model rewords the same cluster's advice week to week, so a
+        // cluster already filed within the TTL counts too, not just the
+        // exact wording.
+        let prev = live
+            .get(&fp)
+            .or_else(|| live.values().find(|f| f.cluster == n.cluster));
+        if let Some(prev) = prev {
             out.push(landed("already-filed", prev.proposal_id.clone()));
             continue;
         }
@@ -718,6 +724,24 @@ mod tests {
         let later = now + Duration::days(REFILE_TTL_DAYS + 1);
         let third = apply(&items, &verdicts, &ledger, later, |_| { filed += 1; Ok("prop-x".into()) }, |_| Ok(())).unwrap();
         assert_eq!(third[0].outcome, "filed", "the fingerprint expires after its TTL");
+    }
+
+    #[test]
+    fn a_reworded_cluster_is_not_filed_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("filed.jsonl");
+        let verdicts: HashMap<String, bool> = [("c-1".to_string(), true)].into();
+        let mut filed = 0;
+        let now = Utc::now();
+        let week1 = vec![named("c-1", "repeat", "~/x/hook.sh")];
+        apply(&week1, &verdicts, &ledger, now, |_| { filed += 1; Ok("prop-1".into()) }, |_| Ok(())).unwrap();
+        let mut week2 = vec![named("c-1", "repeat", "~/x/other.sh")];
+        week2[0].proposal.as_mut().unwrap().change = "a differently worded fix".into();
+        let later = now + Duration::days(13);
+        let out = apply(&week2, &verdicts, &ledger, later, |_| { filed += 1; Ok("prop-2".into()) }, |_| Ok(())).unwrap();
+        assert_eq!(out[0].outcome, "already-filed");
+        assert_eq!(out[0].detail.as_deref(), Some("prop-1"));
+        assert_eq!(filed, 1);
     }
 
     #[test]
