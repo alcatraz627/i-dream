@@ -259,6 +259,20 @@ impl EffortSignals {
     }
 }
 
+/// Never send fewer sample chars than this, even on a starved budget.
+const MIN_SAMPLE_CHARS: usize = 4_000;
+
+/// How many chars of execution units fit in this cycle's token budget once
+/// the call overhead, the system prompt and the response are paid for,
+/// capped at the effort level's own ceiling. Same idea as SWS's dump sizing.
+fn sample_char_budget(budget: u64, response_tokens: u32, system_chars: usize, max_chars: usize) -> usize {
+    let fixed = crate::modules::dreaming::CALL_OVERHEAD_TOKENS
+        + response_tokens as u64
+        + (system_chars / 4) as u64;
+    let chars = (budget.saturating_sub(fixed) * 4) as usize;
+    chars.clamp(MIN_SAMPLE_CHARS, max_chars.max(MIN_SAMPLE_CHARS))
+}
+
 /// Implement Ord so we can use std::cmp::min for budget capping.
 impl PartialOrd for EffortLevel {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
@@ -491,7 +505,12 @@ Output as JSON matching this shape:
         // instead of raw-truncating (which would send malformed JSON).
         // Newer sessions come first due to rev() scan, so the budget
         // naturally prioritizes recent activity.
-        let sample_budget = params.sample_budget_chars;
+        let sample_budget = sample_char_budget(
+            budget,
+            params.max_response_tokens,
+            system_prompt.len(),
+            params.sample_budget_chars,
+        );
         let total_units = batch.units.len();
         let mut budget_units: Vec<&ExecutionUnit> = Vec::new();
         let mut running_len = 2usize; // account for "[]" wrapper
@@ -1089,6 +1108,16 @@ mod tests {
             budget_tokens: 25_000,
         };
         assert_eq!(signals.classify(), EffortLevel::Deep);
+    }
+
+    #[test]
+    fn samples_shrink_to_fit_the_cycle_budget() {
+        // 2026-10-20: a 22k budget picked Deep's 80k-char ceiling and spent 31k.
+        let chars = sample_char_budget(22_284, 8_192, 8_000, 80_000);
+        let spend = crate::modules::dreaming::CALL_OVERHEAD_TOKENS + 8_192 + 2_000 + (chars / 4) as u64;
+        assert!(spend <= 22_284, "estimated spend {spend} fits the budget");
+        assert_eq!(sample_char_budget(1_000_000, 8_192, 8_000, 80_000), 80_000, "ceiling holds");
+        assert_eq!(sample_char_budget(0, 8_192, 8_000, 80_000), MIN_SAMPLE_CHARS, "floor holds");
     }
 
     #[test]

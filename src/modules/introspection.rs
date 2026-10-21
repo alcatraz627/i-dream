@@ -192,6 +192,14 @@ impl<'a> IntrospectionModule<'a> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn chain_sample_follows_the_leftover_budget() {
+        assert_eq!(chain_char_budget(3_523, 1_500), MIN_CHAIN_CHARS, "starved run keeps the floor");
+        assert_eq!(chain_char_budget(200_000, 1_500), MAX_CHAIN_CHARS, "rich run keeps the old ceiling");
+        let mid = chain_char_budget(15_000, 1_500);
+        assert!(mid > MIN_CHAIN_CHARS && mid < MAX_CHAIN_CHARS, "{mid}");
+    }
+
     // ── available_chains: directory scanning ───────────────────
     // Controls whether should_run() triggers a weekly analysis.
     // Must correctly count only .jsonl files and handle empty dirs.
@@ -442,6 +450,24 @@ impl CompactChain {
     }
 }
 
+/// The response cap for the weekly analysis call.
+const RESPONSE_TOKENS: u32 = 4096;
+/// Chain sample bounds: the floor keeps a starved weekly run worth making,
+/// the ceiling is the old fixed size.
+const MIN_CHAIN_CHARS: usize = 8_000;
+const MAX_CHAIN_CHARS: usize = 40_000;
+
+/// How many chars of chains fit in this cycle's leftover token budget once
+/// the call overhead, system prompt and response are paid for. Introspection
+/// runs last and gets what is left, so the floor can overrun a tiny budget,
+/// but by a bounded amount.
+fn chain_char_budget(budget: u64, system_chars: usize) -> usize {
+    let fixed = crate::modules::dreaming::CALL_OVERHEAD_TOKENS
+        + RESPONSE_TOKENS as u64
+        + (system_chars / 4) as u64;
+    ((budget.saturating_sub(fixed) * 4) as usize).clamp(MIN_CHAIN_CHARS, MAX_CHAIN_CHARS)
+}
+
 /// Stratified sampling of reasoning chains for analysis.
 ///
 /// Groups chains by session, then picks up to 3 per session (the longest,
@@ -571,7 +597,7 @@ impl<'a> Module for IntrospectionModule<'a> {
         Ok(true)
     }
 
-    async fn run(&self, client: &ClaudeClient, _budget: u64) -> Result<u64> {
+    async fn run(&self, client: &ClaudeClient, budget: u64) -> Result<u64> {
         info!("Running weekly introspection analysis");
 
         // Chain collection already happened in should_run(). Load all
@@ -646,8 +672,7 @@ Output ONLY the JSON object. No markdown fences, no commentary, no explanation."
         //   1. Group chains by session
         //   2. Sample up to 3 chains per session (long, medium, short)
         //   3. Sample across as many sessions as fit in the budget
-        const MAX_CHARS: usize = 40_000;
-        let sampled = sample_chains_stratified(&chains, MAX_CHARS);
+        let sampled = sample_chains_stratified(&chains, chain_char_budget(budget, system_prompt.len()));
         let serialized = serde_json::to_string(&sampled)?;
 
         info!(
@@ -671,7 +696,7 @@ Output ONLY the JSON object. No markdown fences, no commentary, no explanation."
         );
 
         let response = client
-            .analyze(system_prompt, &prompt, &self.config.budget.model, 4096, 0.2)
+            .analyze(system_prompt, &prompt, &self.config.budget.model, RESPONSE_TOKENS, 0.2)
             .await?;
 
         // Best-effort parse into ReasoningPatterns. The LLM sometimes

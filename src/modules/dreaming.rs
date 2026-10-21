@@ -368,7 +368,7 @@ impl PhaseBudgets {
 }
 
 /// Fixed cost of every CLI call (system prompt, tool schemas) in tokens.
-const CALL_OVERHEAD_TOKENS: u64 = 3_400;
+pub(crate) const CALL_OVERHEAD_TOKENS: u64 = 3_400;
 /// Output tokens SWS typically emits for its JSON pattern list.
 const SWS_OUTPUT_RESERVE: u64 = 5_500;
 /// Overhead plus output tokens REM typically spends outside its digest.
