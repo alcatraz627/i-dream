@@ -112,7 +112,7 @@ pub fn working_cell(guard: Option<&Guard>, actions: &[(String, BTreeMap<String, 
     let gap = g.gap.trim();
     match (counts, gap.is_empty()) {
         (Some(c), true) => format!("{verdict}. {c}"),
-        (Some(c), false) => format!("{verdict}. {c}, but {gap}"),
+        (Some(c), false) => format!("{verdict}. {c}, but {}", lower_first(gap)),
         (None, true) => verdict,
         (None, false) => {
             let mut gap = gap.to_string();
@@ -121,6 +121,20 @@ pub fn working_cell(guard: Option<&Guard>, actions: &[(String, BTreeMap<String, 
             }
             format!("{verdict}. {gap}")
         }
+    }
+}
+
+/// Lowercases a leading capital so a clause reads on after "but", leaving
+/// acronyms and ids ("PR", "CI") alone.
+fn lower_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match (chars.next(), chars.next()) {
+        (Some(a), Some(b)) if a.is_ascii_uppercase() && !b.is_ascii_uppercase() => {
+            let mut out = s.to_string();
+            out[..1].make_ascii_lowercase();
+            out
+        }
+        _ => s.to_string(),
     }
 }
 
@@ -613,6 +627,14 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn gap_after_but_reads_as_one_sentence() {
+        assert_eq!(lower_first("Does not check structure"), "does not check structure");
+        assert_eq!(lower_first("PR bodies pass"), "PR bodies pass");
+        assert_eq!(lower_first("\"green on\" gets through"), "\"green on\" gets through");
+        assert_eq!(lower_first(""), "");
     }
 
     #[test]
