@@ -437,6 +437,50 @@ pub fn publish(slug: &str, config: &Value, report_md: &str) -> Result<String> {
     Ok(format!("http://localhost:5106/dp/{slug}/"))
 }
 
+/// The owner's free-text note per item cluster: whatever follows the verdict
+/// word on an item's answer line (`1: agree — needs a checklist`). Items
+/// without a note are absent.
+pub fn notes_by_cluster(answer: &str, items: &[Named]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in answer.lines() {
+        let Some((id, rest)) = line.split_once(':') else { continue };
+        let id = id.trim();
+        let cluster = match id.parse::<usize>() {
+            Ok(pos) if (1..=items.len()).contains(&pos) => &items[pos - 1].cluster,
+            _ => match items.iter().find(|n| n.cluster == id) {
+                Some(n) => &n.cluster,
+                None => continue,
+            },
+        };
+        let rest = rest.trim();
+        let lower = rest.to_ascii_lowercase();
+        let after = ["disagree", "agree"]
+            .iter()
+            .find(|w| lower.starts_with(*w))
+            .map_or(rest, |w| &rest[w.len()..]);
+        let note = after.trim_start_matches(|c: char| c.is_whitespace() || "—–-,:;".contains(c)).trim();
+        if !note.is_empty() {
+            out.insert(cluster.clone(), note.to_string());
+        }
+    }
+    out
+}
+
+/// Append the owner's note to a filed proposal's update trail.
+pub fn attach_note(proposal_id: &str, note: &str, week: &str) -> Result<()> {
+    let script = crate::config::expand_tilde(Path::new("~/.claude/scripts/propose.sh"));
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .args(["update", proposal_id, &format!("Owner ({week} reader page): {note}")])
+        .env("I_DREAM_CHILD", "1")
+        .output()
+        .context("run propose.sh update")?;
+    if !out.status.success() {
+        anyhow::bail!("propose.sh update failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    Ok(())
+}
+
 /// The owner's verdict per item id: true = agreed. Items the answer does not
 /// mention were left untouched, which the page contract counts as agreed.
 pub fn parse_answer(answer: &str, ids: &[String]) -> HashMap<String, bool> {
@@ -633,6 +677,17 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn notes_come_from_the_text_after_the_verdict() {
+        let items = vec![named("c-a", "repeat", "~/x"), named("c-b", "repeat", "~/y"), named("c-c", "repeat", "~/z")];
+        let answer = "idream reader 2026w43:\n1: agree — True, needs a checklist: block and allow\n2: agree\nc-c: disagree, not useful";
+        let notes = notes_by_cluster(answer, &items);
+        assert_eq!(notes["c-a"], "True, needs a checklist: block and allow");
+        assert!(!notes.contains_key("c-b"), "a bare verdict carries no note");
+        assert_eq!(notes["c-c"], "not useful");
+        assert!(notes_by_cluster("12: agree — stray", &items).is_empty(), "unknown position ignored");
     }
 
     #[test]

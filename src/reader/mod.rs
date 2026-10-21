@@ -539,6 +539,16 @@ pub fn apply_answers_with(
             |n| land::file_with_propose(n, &week),
             land::arm_with_trash,
         )?;
+        // A note on an item the owner agreed to travels with its proposal.
+        let notes = land::notes_by_cluster(&text, &run.items);
+        for l in &landed {
+            let (Some(note), Some(id)) = (notes.get(&l.cluster), l.detail.as_deref()) else { continue };
+            if matches!(l.outcome.as_str(), "filed" | "already-filed") {
+                if let Err(e) = land::attach_note(id, note, &week) {
+                    tracing::warn!("reader: could not attach the owner's note to {id}: {e}");
+                }
+            }
+        }
         std::fs::write(run_dir(&week)?.join("answer.txt"), &text)?;
         // The yield monitor judges whether reviews lead to action.
         let acted = landed
