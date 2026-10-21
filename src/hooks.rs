@@ -482,6 +482,9 @@ fn write_user_prompt_hint_hook(dir: &std::path::Path) -> Result<()> {
 # i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
 # not feed the surface (it was downvoting its own intentions, 2026-10-06).
 [ -n "${I_DREAM_CHILD:-}" ] && exit 0
+# Hints are for a person at a terminal or editor; headless runs (claude -p
+# linters, jurors) only pay for them. Mirrors events::is_interactive_entrypoint.
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in ""|cli|claude-vscode) ;; *) exit 0 ;; esac
 # i-dream: UserPromptSubmit hint hook, registered SYNCHRONOUS (no "async").
 # stdout carries at most one hookSpecificOutput/additionalContext JSON.
 # Mute: touch ~/.claude/.no-idream-hints
@@ -502,6 +505,10 @@ except Exception:
 prompt = data.get("prompt", "") or ""
 ipath = _p.expanduser("~/.claude/i-dream/interventions.json")
 if not isinstance(prompt, str) or not prompt or not _p.exists(ipath):
+    sys.exit(0)
+# Machine-written prompts (task notifications, seat briefs) are not the owner
+# talking, whatever the entrypoint says.
+if prompt.lstrip().startswith(("<task-notification>", "You are", "You enforce")):
     sys.exit(0)
 try:
     items = json.load(open(ipath))
@@ -623,11 +630,12 @@ fn write_pre_tool_use_hook(dir: &std::path::Path) -> Result<()> {
 # i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
 # not feed the daemon (it was downvoting its own intentions, 2026-10-06).
 [ -n "${I_DREAM_CHILD:-}" ] && exit 0
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in ""|cli|claude-vscode) ;; *) exit 0 ;; esac
 # i-dream: PreToolUse hook — compiled-intervention nudges (advisory only).
 # stdout carries at most one hookSpecificOutput/additionalContext JSON.
 HOOK_INPUT=$(cat)
 IDREAM_INPUT="$HOOK_INPUT" python3 << 'PYEOF' 2>/dev/null || true
-import sys, re, json, time, os
+import sys, re, json, time, os, hashlib
 import os.path as _p
 
 raw = os.environ.get("IDREAM_INPUT", "")
@@ -638,7 +646,7 @@ try:
 except Exception:
     sys.exit(0)
 
-tool = data.get("tool_name", "") or ""
+tool =data.get("tool_name", "") or ""
 ipath = _p.expanduser("~/.claude/i-dream/interventions.json")
 if not tool or not _p.exists(ipath):
     sys.exit(0)
@@ -705,9 +713,32 @@ try:
                 "tool": tool, "ts": int(time.time())}) + "\n")
 except Exception:
     pass
-if live:
+def _first_time(it):
+    # Once per nudge per session: the same nudge on every Write was the bulk
+    # of the noise. Atomic create, so concurrent tool calls cannot both win.
+    sid8 = "".join(c for c in sid[:64] if c.isalnum() or c in "-_")
+    if not sid8:
+        return True
+    d = _p.expanduser("~/.claude/.inject-once/idream-nudge/s-" + sid8)
+    key = hashlib.sha1(str(it.get("id", "")).encode("utf-8", "replace")).hexdigest()[:16]
+    try:
+        os.makedirs(d, exist_ok=True)
+        os.close(os.open(_p.join(d, key), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return False
+    except Exception:
+        pass
+    return True
+
+shown = []
+for it in live:
+    if _first_time(it):
+        shown.append(it)
+    if len(shown) == 2:
+        break
+if shown:
     lines = ["[i-dream:%s] %s" % (str(it.get("id", ""))[:8], it.get("body", ""))
-             for it in live[:2]]
+             for it in shown]
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "additionalContext": "\n".join(lines)}}))
@@ -778,11 +809,21 @@ mod tests {
     }
 
     fn run_hook_script(script: &std::path::Path, home: &std::path::Path, input: &str) -> String {
+        run_hook_script_as(script, home, input, "cli")
+    }
+
+    fn run_hook_script_as(
+        script: &std::path::Path,
+        home: &std::path::Path,
+        input: &str,
+        entrypoint: &str,
+    ) -> String {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let mut child = Command::new("bash")
             .arg(script)
             .env("HOME", home)
+            .env("CLAUDE_CODE_ENTRYPOINT", entrypoint)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -952,6 +993,57 @@ mod tests {
 
         let miss = run_hook_script(&script, &home, &hint_payload("unrelated words", "sid-hint-3"));
         assert!(miss.trim().is_empty(), "no match, no stdout: {miss}");
+    }
+
+    /// Headless sessions and machine-written prompts get no hints and leave
+    /// no ledger rows; an editor session still does.
+    #[test]
+    fn hint_hook_skips_headless_sessions_and_machine_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        write_user_prompt_hint_hook(&hooks).unwrap();
+        let home = dir.path().join("home");
+        intervention_fixture(&home);
+        let script = hooks.join("user-prompt-hint.sh");
+
+        let headless = run_hook_script_as(&script, &home, &hint_payload("deploy it", "sid-h1"), "sdk-cli");
+        assert!(headless.trim().is_empty(), "claude -p gets nothing: {headless}");
+        let machine = run_hook_script(&script, &home, &hint_payload("You are a juror. deploy", "sid-h2"));
+        assert!(machine.trim().is_empty(), "seat brief gets nothing: {machine}");
+        assert!(!home.join(".claude/i-dream/would-fire.jsonl").exists(), "nothing ledgered");
+
+        let editor = run_hook_script_as(&script, &home, &hint_payload("deploy it", "sid-h3"), "claude-vscode");
+        assert!(editor.contains("[i-dream:liveHint]"), "editor session sees it: {editor}");
+    }
+
+    /// A live nudge shows once per session, and never in a headless run.
+    #[test]
+    fn nudge_hook_shows_once_per_session_and_skips_headless() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        write_pre_tool_use_hook(&hooks).unwrap();
+        let home = dir.path().join("home");
+        intervention_fixture(&home);
+        let script = hooks.join("pre-tool-use.sh");
+        let input = |sid: &str| {
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "rg -rn x ."},
+                "cwd": "/x/proj", "session_id": sid})
+            .to_string()
+        };
+
+        let headless = run_hook_script_as(&script, &home, &input("sid-n0"), "sdk-cli");
+        assert!(headless.trim().is_empty(), "headless gets nothing: {headless}");
+        let first = run_hook_script(&script, &home, &input("sid-n1"));
+        assert!(first.contains("[i-dream:liveNudg]"), "first call nudges: {first}");
+        let second = run_hook_script(&script, &home, &input("sid-n1"));
+        assert!(second.trim().is_empty(), "same session, silent: {second}");
+        let other = run_hook_script(&script, &home, &input("sid-n2"));
+        assert!(other.contains("[i-dream:liveNudg]"), "new session nudges again");
+
+        let wf = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap();
+        assert_eq!(wf.lines().count(), 6, "three interactive calls ledger live+shadow each");
     }
 
     /// Three hints that all answer a bare "continue" deliver as one, and no
