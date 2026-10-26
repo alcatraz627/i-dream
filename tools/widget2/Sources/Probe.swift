@@ -21,6 +21,7 @@ enum Probe {
             fixture = (URL(fileURLWithPath: a), URL(fileURLWithPath: b))
         }
         let demo = args.contains("--demo-states")
+        let indexFile = args.firstIndex(of: "--index").flatMap { args[safe: $0 + 1] }.map { URL(fileURLWithPath: $0) }
         let verify = args.firstIndex(of: "--verify").flatMap { args[safe: $0 + 1] }
             .flatMap { AppModel.fetchVerify(file: URL(fileURLWithPath: $0)) }
 
@@ -140,6 +141,46 @@ enum Probe {
         log.append(StatusFace.title(mc.record, reading: mc.reading).string.contains("new") ? "FAIL menu bar: count stays after the owner looked" : "PASS menu bar: count clears once looked")
         // Put back the baseline the later renders compare against.
         m.markLooked()
+
+        // Search everything: every kind in the index is found by its id, and
+        // items the panes do not carry (a pattern past the top 90, evidence
+        // outside the recon) are found by their words and open somewhere.
+        if let indexFile {
+            let ms = model(status, reader)
+            ms.indexFixture = indexFile
+            ms.loadIndex(sync: true)
+            if let doc = ms.index {
+                for kind in SearchIndex.kinds {
+                    guard let e = doc.entries.first(where: { $0.kind == kind }) else { log.append("FAIL search \(kind): none in the index"); continue }
+                    let found = SearchIndex.flat(SearchIndex.results(doc, e.id.uppercased())).contains(e)
+                    log.append(found ? "PASS search \(kind): \(e.id) found, case ignored" : "FAIL search \(kind): \(e.id) not found by its id")
+                }
+                let shownPatterns = Set(ms.record!.patterns.map(\.id))
+                let shownEvidence = Set(ms.record!.evidence.keys)
+                let deep: [(String, IndexEntry?)] = [
+                    ("pattern past the top 90", doc.entries.first { $0.kind == "pattern" && !shownPatterns.contains($0.id) }),
+                    ("evidence outside the recon", doc.entries.first { $0.kind == "evidence" && !shownEvidence.contains($0.id) }),
+                ]
+                for (what, e) in deep {
+                    guard let e else { log.append("FAIL search \(what): the index has none"); continue }
+                    let words = e.title.components(separatedBy: " ").filter { $0.count > 4 }.prefix(3).joined(separator: " ")
+                    ms.globalSearch = GlobalSearch(open: true, query: words)
+                    let hit = SearchIndex.flat(SearchIndex.results(doc, words)).contains(e)
+                    ms.openResult(e)
+                    let opened = ms.globalSearch.detail == e || ms.home(e) != nil
+                    log.append(hit && opened ? "PASS search \(what): \"\(words)\" finds and opens \(e.id)" : "FAIL search \(what): \"\(words)\" found=\(hit) opened=\(opened)")
+                }
+                ms.pane = .reader
+                ms.globalSearch = GlobalSearch(open: true, query: "claim reading")
+                render(DashboardView(model: ms, fullHeight: false).frame(height: 760), appearance, out.appendingPathComponent("search-\(tag).png"), width: 1280)
+                if let e = deep.last?.1 {
+                    ms.globalSearch = GlobalSearch(open: true, query: "x", detail: e)
+                    render(DashboardView(model: ms, fullHeight: false).frame(height: 760), appearance, out.appendingPathComponent("search-detail-\(tag).png"), width: 1280)
+                }
+            } else {
+                log.append("FAIL search: \(ms.indexError ?? "index not read")")
+            }
+        }
 
         // Every dropdown row is a dive, scoped to its entity.
         let rec = m.record!

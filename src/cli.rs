@@ -62,6 +62,13 @@ pub enum Command {
         json: bool,
     },
 
+    /// Everything i-dream knows about as one searchable list (the widget's ⌘K reads it)
+    Index {
+        /// Emit the full list as JSON; without it, print counts per kind.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Check that the pipeline produces its outcomes (docs/35); exits 1 on a failing row
     Verify {
         /// Replay the journal-backed rows for every day the journal covers

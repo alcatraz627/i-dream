@@ -15,6 +15,7 @@ mod jobs;
 mod smell;
 mod hooks;
 mod idream_runtime;
+mod index;
 mod logging;
 mod modules;
 mod pin;
@@ -83,6 +84,18 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", status::render_text(&report, verbose));
+            }
+        }
+
+        Command::Index { json } => {
+            let home = dirs::home_dir().context("cannot resolve home directory")?;
+            let doc = index::gather(&home);
+            if json {
+                println!("{}", serde_json::to_string(&doc)?);
+            } else {
+                for (kind, n) in &doc.counts {
+                    println!("{kind:<12} {n}");
+                }
             }
         }
 

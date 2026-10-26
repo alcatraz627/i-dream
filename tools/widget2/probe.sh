@@ -17,9 +17,10 @@ mkdir -p "$OUT"
 "$BIN" reader --json > "$OUT/reader.json"
 # verify exits 1 when a row fails; the document is still the point.
 "$BIN" verify --json > "$OUT/verify.json" || true
+"$BIN" index --json > "$OUT/index.json"
 fails=0
 for ap in dark light; do
-  "$APP" --probe "$OUT" --appearance "$ap" --fixture "$OUT/status.json" "$OUT/reader.json" --verify "$OUT/verify.json" --demo-states > /dev/null || fails=$((fails + $?))
+  "$APP" --probe "$OUT" --appearance "$ap" --fixture "$OUT/status.json" "$OUT/reader.json" --verify "$OUT/verify.json" --index "$OUT/index.json" --demo-states > /dev/null || fails=$((fails + $?))
 done
 # First look: a local vision model ($0, on this Mac) reads each dropdown as a
 # newcomer would. Its answer must agree with the dropdown's own You section:

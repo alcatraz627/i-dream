@@ -54,6 +54,43 @@ final class AppModel: ObservableObject {
     private var asleep = false
     var visible = false { didSet { if visible != oldValue { reschedule() } } }
 
+    // MARK: search everything
+
+    @Published var globalSearch = GlobalSearch()
+    @Published var index: IndexDoc?
+    @Published var indexError: String?
+    private var indexAt: Date?
+    /// The probe hands in a saved `index --json` instead of running the binary.
+    var indexFixture: URL?
+
+    /// Reads `i-dream index --json`, at most once a minute.
+    func loadIndex(sync: Bool = false) {
+        if let at = indexAt, Date().timeIntervalSince(at) < 60, index != nil { return }
+        let fixture = indexFixture
+        let work = { () -> (doc: IndexDoc?, error: String?) in
+            let data: Data
+            if let fixture {
+                guard let d = try? Data(contentsOf: fixture) else { return (nil, "index fixture could not be read") }
+                data = d
+            } else {
+                guard let bin = Runner.idreamBinary() else { return (nil, "i-dream binary not found") }
+                let r = Runner.run(bin, ["index", "--json"], timeout: 30)
+                guard r.launched, !r.timedOut else { return (nil, "index --json did not finish") }
+                data = r.out
+            }
+            do { return (try JSONDecoder().decode(IndexDoc.self, from: data), nil) }
+            catch { return (nil, "index --json could not be read: \(error)") }
+        }
+        let apply = { (res: (doc: IndexDoc?, error: String?)) in
+            if let d = res.doc { self.index = d; self.indexError = nil; self.indexAt = Date() } else { self.indexError = res.error }
+        }
+        if sync { apply(work()); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = work()
+            DispatchQueue.main.async { apply(res) }
+        }
+    }
+
     // MARK: last look
 
     static let lookKey = "lastLook"

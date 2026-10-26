@@ -326,6 +326,34 @@ pub struct AssociationRow {
 }
 
 fn gather_patterns(home: &Path) -> PatternsSection {
+    let (rows, associations, by_category, total) = pattern_rows_full(home);
+    let linked: std::collections::HashSet<&str> = associations
+        .iter()
+        .flat_map(|a| [a.a.as_str(), a.b.as_str()])
+        .collect();
+    let top: Vec<PatternRow> = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(i, r)| *i < PATTERN_TOP || linked.contains(r.id.as_str()))
+        .map(|(_, r)| r)
+        .collect();
+    PatternsSection {
+        total,
+        by_category,
+        top,
+        associations,
+    }
+}
+
+/// Every pattern, strongest first, and every live association.
+pub(crate) fn pattern_rows(home: &Path) -> (Vec<PatternRow>, Vec<AssociationRow>) {
+    let (rows, associations, _, _) = pattern_rows_full(home);
+    (rows, associations)
+}
+
+type PatternParts = (Vec<PatternRow>, Vec<AssociationRow>, std::collections::BTreeMap<String, usize>, usize);
+
+fn pattern_rows_full(home: &Path) -> PatternParts {
     use crate::consolidation::views::stable_id;
     use crate::modules::dreaming::{Association, ExtractedPattern};
     let dir = home.join(".claude/subconscious/dreams");
@@ -352,10 +380,6 @@ fn gather_patterns(home: &Path) -> PatternsSection {
             hypothesis: a.hypothesis.clone(),
             confidence: a.confidence,
         })
-        .collect();
-    let linked: std::collections::HashSet<&str> = associations
-        .iter()
-        .flat_map(|a| [a.a.as_str(), a.b.as_str()])
         .collect();
     let mut rows: Vec<PatternRow> = pats
         .iter()
@@ -386,18 +410,7 @@ fn gather_patterns(home: &Path) -> PatternsSection {
         })
         .collect();
     rows.sort_by(|a, b| b.strength.total_cmp(&a.strength));
-    let top: Vec<PatternRow> = rows
-        .into_iter()
-        .enumerate()
-        .filter(|(i, r)| *i < PATTERN_TOP || linked.contains(r.id.as_str()))
-        .map(|(_, r)| r)
-        .collect();
-    PatternsSection {
-        total: pats.len(),
-        by_category,
-        top,
-        associations,
-    }
+    (rows, associations, by_category, pats.len())
 }
 
 /// Where each report section comes from.
@@ -771,7 +784,7 @@ fn log_tail(text: &str, n: usize) -> Vec<String> {
     lines[lines.len().saturating_sub(n)..].iter().map(|l| l.to_string()).collect()
 }
 
-fn gather_jobs() -> Vec<JobStatus> {
+pub(crate) fn gather_jobs() -> Vec<JobStatus> {
     let sched = dirs::home_dir().map(|h| h.join(".claude/scheduled")).unwrap_or_default();
     let gateway = sched.join(".gateway").exists();
     let history = std::fs::read_to_string(sched.join("history.jsonl")).unwrap_or_default();

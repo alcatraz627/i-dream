@@ -24,6 +24,14 @@ struct DashboardView: View {
         }
         .fixedSize(horizontal: false, vertical: fullHeight)
         .background(P.win)
+        .overlay(alignment: .top) {
+            if model.globalSearch.open {
+                ZStack(alignment: .top) {
+                    Color.black.opacity(0.25).onTapGesture { model.globalSearch.open = false }
+                    SearchPanel(model: model).padding(.top, 48)
+                }
+            }
+        }
         .id(model.scaleToken)
     }
 
@@ -124,7 +132,7 @@ struct DashboardView: View {
 
     private var keyHint: String {
         switch model.pane {
-        case .ledger, .patterns, .reader, .landing: "j k move · return opens · esc backs out · / search · f first filter"
+        case .ledger, .patterns, .reader, .landing: "j k move · return opens · esc backs out · / search this pane · ⌘K search everything · f first filter"
         case .flow: "j k move between cycles · return loads one · esc clears the range"
         case .changes: "click a change to open where it happened"
         case .settings: ""
