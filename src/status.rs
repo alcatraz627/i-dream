@@ -112,8 +112,9 @@ pub struct InterventionSummary {
     /// Live interventions shown in the last seven days, once per session.
     pub fired_7d: usize,
     /// Each live hint or nudge, with when and how it went live, so the
-    /// widget can say what changed and why.
-    pub live_items: Vec<LiveItem>,
+    /// widget can say what changed and why. Absent when the store could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_items: Option<Vec<LiveItem>>,
 }
 
 #[derive(Serialize)]
@@ -166,8 +167,8 @@ fn gather_reader() -> ReaderSummary {
 }
 
 fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
-    let items = crate::interventions::load_interventions(&home.join(".claude/i-dream/interventions.json"))
-        .unwrap_or_default();
+    let loaded = crate::interventions::load_interventions(&home.join(".claude/i-dream/interventions.json")).ok();
+    let items = loaded.clone().unwrap_or_default();
     let count = |s: &str| items.iter().filter(|i| i.state == s).count();
     let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
     let ledger = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap_or_default();
@@ -177,17 +178,21 @@ fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
         candidate: count("candidate"),
         shadow: count("shadow"),
         fired_7d,
-        live_items: items
-            .iter()
-            .filter(|i| i.state == "live")
-            .map(|i| LiveItem {
-                id: i.id.clone(),
-                slug: i.slug.clone(),
-                form: i.form.clone(),
-                promoted: i.promoted,
-                promoted_by: i.promoted_by.clone(),
-            })
-            .collect(),
+        // Absent rather than empty when the file could not be read or read
+        // empty (it may be mid-write): an empty list would tell the widget
+        // that every hint it knew had gone, and the next read that all came back.
+        live_items: loaded.filter(|v| !v.is_empty()).map(|v| {
+            v.iter()
+                .filter(|i| i.state == "live")
+                .map(|i| LiveItem {
+                    id: i.id.clone(),
+                    slug: i.slug.clone(),
+                    form: i.form.clone(),
+                    promoted: i.promoted,
+                    promoted_by: i.promoted_by.clone(),
+                })
+                .collect()
+        }),
     }
 }
 
@@ -1271,6 +1276,20 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_hint_list_is_absent_when_the_store_reads_empty_or_bad() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/i-dream");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Missing, empty (mid-write) and unparseable all leave no list, so the
+        // widget never reads "every hint has gone" and then "all came back".
+        assert!(gather_interventions(home.path()).live_items.is_none());
+        std::fs::write(dir.join("interventions.json"), "").unwrap();
+        assert!(gather_interventions(home.path()).live_items.is_none());
+        std::fs::write(dir.join("interventions.json"), "{not json").unwrap();
+        assert!(gather_interventions(home.path()).live_items.is_none());
+    }
 
     #[test]
     fn atone_recordings_are_counted_per_week_oldest_first() {

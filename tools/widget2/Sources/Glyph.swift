@@ -60,7 +60,7 @@ enum StatusFace {
             if case .unavailable = reading { text(" —") } else if case .failed = reading { text(" !") }
             return out
         }
-        let n = r.since.changes.count
+        let n = r.since.unseen.count
         if n > 0 { text(" \(n) new") }
         if r.statusSev == .bad {
             text(" ")
@@ -78,10 +78,10 @@ enum StatusFace {
     static func tooltip(_ r: Record?) -> String {
         guard let r else { return "i-dream" }
         var parts = ["last productive cycle " + ageText(r.lastProductive.map { r.now.timeIntervalSince($0) }) + " ago"]
-        if !r.since.changes.isEmpty { parts.insert("\(plural(r.since.changes.count, "change")) since you last looked", at: 0) }
+        if !r.since.unseen.isEmpty { parts.insert("\(plural(r.since.unseen.count, "change")) since you last looked", at: 0) }
         if r.awaitingItems > 0 { parts.append("\(plural(r.awaitingItems, "item")) waiting on you") }
-        if !r.dead.isEmpty { parts.append("\(plural(r.dead.count, "dead source"))") }
-        if !r.daemonRunning { parts.append("daemon \(r.daemonWord)") }
+        if let d = r.dead.first { parts.append("\(plural(r.dead.count, "dead source")), \(d.id): \(d.reason)") }
+        if !r.daemonRunning { parts.append("daemon \(r.daemonWord), last cycle \(ageText(r.lastCycle.map { r.now.timeIntervalSince($0) })) ago") }
         return parts.joined(separator: " · ")
     }
 }

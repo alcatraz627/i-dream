@@ -304,7 +304,7 @@ struct DropdownView: View {
                 }
             }
             ForEach(Array(shown)) { c in
-                ChangeRow(change: c, now: r.now, unseen: true) { model.open($0) }
+                ChangeRow(change: c, now: r.now, unseen: c.counts) { model.open($0) }
             }
             if s.changes.count > shown.count {
                 Button { model.open(Dive(pane: .changes)) } label: {

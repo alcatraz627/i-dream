@@ -78,7 +78,7 @@ enum Glossary {
         ]
         case .changes: [
             ("change", "Something i-dream did or noticed since you last closed the menu or this window, with what caused it."),
-            ("new", "Not seen yet: it arrived after your last look. The menu bar number counts these."),
+            ("new", "Not seen yet: it arrived after your last look. The menu bar number counts these, except the daily row of uncredited moves."),
             ("went live", "A hint or nudge is now shown to sessions, either because you approved it or because its mistake kept coming back."),
             ("proposal", "A proposal you filed from a weekly finding changed status, such as open to done."),
             ("job failed", "A scheduled job's last run ended with an error; the cause is the last line of its log."),

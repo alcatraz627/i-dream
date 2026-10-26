@@ -214,6 +214,7 @@ struct Since {
     var newRun: Bool
     /// Each change in plain words with its cause; its count is the menu bar number.
     var changes: [Change] = []
+    var unseen: [Change] { changes.filter(\.counts) }
     var anything: Bool { newClusters + newLanded + newAwaiting + movedEffects > 0 || newRun || !changes.isEmpty }
 }
 
@@ -240,6 +241,9 @@ struct Change: Identifiable, Codable, Equatable {
         default: return Dive(pane: p)
         }
     }
+    /// Whether it counts toward the menu bar number. Uncredited moves are the
+    /// 7-day window sliding: kept in the history, never counted.
+    var counts: Bool { !id.hasPrefix("effects:") }
     var kindWord: String {
         switch kind {
         case "hint": "went live"
@@ -609,8 +613,10 @@ enum RecordBuilder {
             out.append(Change(id: id, kind: kind, text: text, cause: cause, seen: r.now, pane: pane.rawValue, scopeKind: sk, scopeValue: sv))
         }
         let totals = Dictionary(r.effects.map { ($0.slug, $0.total) }, uniquingKeysWith: { a, _ in a })
-        if let known = ll.liveIds.map(Set.init) {
-            for i in s.interventions.live_items ?? [] where !known.contains(i.id) {
+        // No baseline (an older build's look) or no list this read: no hint rows,
+        // rather than every live hint at once.
+        if let known = ll.liveIds.map(Set.init), let live = s.interventions.live_items {
+            for i in live where !known.contains(i.id) {
                 let cause = i.promoted_by == "owner-flip" ? "you approved it"
                     : "its mistake kept coming back" + (totals[i.slug].map { " (\($0) recorded)" } ?? "")
                 add("hint:\(i.id)", "hint", "a \(i.form) about \(i.slug) is now shown to sessions", cause, .landing, "slug", i.slug)
@@ -619,16 +625,20 @@ enum RecordBuilder {
         if let known = ll.proposalStatus {
             for l in r.landed {
                 guard let st = l.proposal_status, let was = known[landedKey(l)], was != st else { continue }
-                add("proposal:\(landedKey(l)):\(st)", "proposal", "the proposal for \"\(l.title)\" is now \(st)", "it was \(was); you filed it from a weekly finding", .reader, "cluster", l.cluster)
+                add("proposal:\(landedKey(l)):\(st)", "proposal", "the proposal for \"\(l.title)\" is now \(st)", "the backlog now lists it as \(st), not \(was); you filed it from a weekly finding", .reader, "cluster", l.cluster)
             }
         }
         for j in r.jobs where j.lastFailed {
             guard let at = j.lastRun, at > ll.at else { continue }
             // The error line says why; the last line is often an unrelated INFO.
             let lines = j.logTail.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            let tail = lines.last(where: { $0.range(of: #"\b(ERROR|error|failed|panicked)\b"#, options: .regularExpression) != nil }) ?? lines.last
-            add("job:\(j.name):\(Int(at.timeIntervalSince1970))", "job", "\(j.title) failed \(ageText(r.now.timeIntervalSince(at))) ago",
-                tail.map { "its log says: \($0)" } ?? "exit was not zero; the log is empty", .flow)
+            func has(_ l: String, _ re: String) -> Bool { l.range(of: re, options: .regularExpression) != nil }
+            let err = lines.last(where: { has($0, #"\b(ERROR|panicked)\b"#) })
+                ?? lines.last(where: { has($0, #"\b(error|failed)\b"#) && !has($0, #"\b(WARN|INFO|DEBUG)\b"#) })
+            let cause = err.map { "its log says: \($0)" }
+                ?? lines.last.map { "it exited with an error and logged no error line; its last line is: \($0)" }
+                ?? "it exited with an error and its log is empty"
+            add("job:\(j.name):\(Int(at.timeIntervalSince1970))", "job", "\(j.title) failed \(ageText(r.now.timeIntervalSince(at))) ago", cause, .flow)
         }
         if let run = r.runs.first, ll.week != run.week {
             add("run:\(run.week)", "run", "the weekly review for \(run.week) named \(plural(run.items.count, "finding"))", "the weekly review ran", .reader, "run", run.week)
@@ -637,9 +647,12 @@ enum RecordBuilder {
         if !newIds.isEmpty, let at = r.reconAt {
             add("recon:\(Int(at.timeIntervalSince1970))", "recon", "\(plural(newIds.count, "new cluster")) in the daily recon", "the daily recon joined new evidence", .reader)
         }
-        for l in r.landed {
-            guard let at = parseDate(l.ts), at > ll.at else { continue }
-            add("landed:\(l.cluster):\(l.outcome)", "landed", "\(l.outcome): \(l.title)", "you answered it on the decision page", .landing)
+        // One answered page lands several findings at the same moment: one row per answer.
+        let fresh = r.landed.filter { l in parseDate(l.ts).map { $0 > ll.at } ?? false }
+        for (ts, group) in Dictionary(grouping: fresh, by: \.ts).sorted(by: { $0.key > $1.key }) {
+            let outcomes = Dictionary(grouping: group, by: \.outcome).sorted { $0.key < $1.key }.map { "\($0.value.count) \($0.key)" }
+            let text = group.count == 1 ? "\(group[0].outcome): \(group[0].title)" : "\(plural(group.count, "finding")) landed: " + outcomes.joined(separator: ", ")
+            add("landed:\(ts)", "landed", text, "your answers on the weekly decision page were applied", .landing)
         }
         if r.awaitingItems > ll.awaitingItems {
             add("awaiting:\(r.runs.first?.week ?? "?"):\(r.awaitingItems)", "awaiting", "\(plural(r.awaitingItems - ll.awaitingItems, "more item")) waiting on you",
@@ -828,11 +841,13 @@ enum RecordBuilder {
         return out
     }
 
-    static func snapshotLook(_ r: Record) -> LastLook {
+    /// What the owner just saw. A list this read could not carry (the hints)
+    /// keeps the previous look's baseline rather than losing it.
+    static func snapshotLook(_ r: Record, previous: LastLook? = nil) -> LastLook {
         LastLook(at: r.now, clusterIds: r.reconClusters.map(\.id), landed: r.landed.count,
                  awaitingItems: r.awaitingItems, week: r.runs.first?.week,
                  slugLast7: Dictionary(r.effects.map { ($0.slug, $0.last7) }, uniquingKeysWith: { a, _ in a }),
-                 liveIds: r.interventions.live_items?.map(\.id),
+                 liveIds: r.interventions.live_items?.map(\.id) ?? previous?.liveIds,
                  proposalStatus: Dictionary(r.landed.compactMap { l in l.proposal_status.map { (landedKey(l), $0) } }, uniquingKeysWith: { a, _ in a }))
     }
 

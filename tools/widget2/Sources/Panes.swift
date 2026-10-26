@@ -714,13 +714,13 @@ struct ChangesPane: View {
     var r: Record
 
     var body: some View {
-        let unseen = Set(r.since.changes.map(\.id))
+        let unseen = Set(r.since.unseen.map(\.id))
         let history = model.changeHistory
         VStack(alignment: .leading, spacing: 10) {
             PaneHeader(pane: .changes, sub: "Everything i-dream did or noticed, each with its cause, newest first. Amber rows arrived since you last looked; the menu bar number counts them. Click a row to open where it happened.")
             Text("\(plural(unseen.count, "unseen change")) · \(plural(history.count, "change")) kept")
                 .font(F.meta).foregroundStyle(P.fg2)
-            VStack(alignment: .leading, spacing: 6) {
+            LazyVStack(alignment: .leading, spacing: 6) {
                 ForEach(history) { c in
                     ChangeRow(change: c, now: r.now, unseen: unseen.contains(c.id)) { model.open($0) }
                 }

@@ -102,7 +102,7 @@ struct DashboardView: View {
         case .ledger: return !r.dead.isEmpty ? .bad : r.count(.stale) > 0 ? .warn : nil
         case .reader: return r.awaitingItems > 0 ? .wait : nil
         case .landing: return r.effects.contains { $0.gateCandidate } ? .wait : nil
-        case .changes: return r.since.changes.isEmpty ? nil : .wait
+        case .changes: return r.since.unseen.isEmpty ? nil : .wait
         default: return nil
         }
     }

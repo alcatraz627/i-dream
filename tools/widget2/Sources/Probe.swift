@@ -106,7 +106,25 @@ enum Probe {
         }
         log.append(rc.since.changes.allSatisfy { !$0.cause.isEmpty } ? "PASS change causes: every row says why" : "FAIL change causes: a row has no cause")
         let face = StatusFace.title(rc, reading: mc.reading).string
-        log.append(face.contains("\(rc.since.changes.count) new") ? "PASS menu bar: reads \"\(face.trimmingCharacters(in: .whitespaces))\"" : "FAIL menu bar: reads \"\(face)\", not the \(rc.since.changes.count) unseen changes")
+        log.append(face.contains("\(rc.since.unseen.count) new") ? "PASS menu bar: reads \"\(face.trimmingCharacters(in: .whitespaces))\"" : "FAIL menu bar: reads \"\(face)\", not the \(rc.since.unseen.count) unseen changes")
+        log.append(rc.since.unseen.contains { $0.id.hasPrefix("effects:") } ? "FAIL menu bar: counts the 7-day window sliding" : "PASS menu bar: the 7-day window row is kept but not counted")
+        let landedRows = rc.since.changes.filter { $0.kind == "landed" }
+        log.append(Set(landedRows.map(\.id)).count == landedRows.count ? "PASS landed: one row per answer, no repeated ids" : "FAIL landed: repeated ids")
+        // A look saved by an older build has no hint or proposal baseline: no
+        // rows of those kinds, rather than every one at once.
+        let oldJSON = #"{"at":\#(past.timeIntervalSinceReferenceDate),"clusterIds":[],"landed":0,"awaitingItems":0,"slugLast7":{}}"#
+        if let old = try? JSONDecoder().decode(LastLook.self, from: Data(oldJSON.utf8)) {
+            let n = RecordBuilder.changes(rc, since: old, status: status).filter { ["hint", "proposal"].contains($0.kind) }.count
+            log.append(n == 0 ? "PASS old look: decodes, no hint or proposal flood" : "FAIL old look: \(n) hint or proposal rows from a look with no baseline")
+        } else { log.append("FAIL old look: an older build's look does not decode") }
+        // A read where the hints store was unreadable carries no list: no rows,
+        // and the look taken then keeps the old baseline.
+        var blip = status
+        blip.interventions.live_items = nil
+        let blipRows = RecordBuilder.changes(rc, since: look, status: blip).filter { $0.kind == "hint" }.count
+        var blipRec = rc; blipRec.interventions = blip.interventions
+        let kept = RecordBuilder.snapshotLook(blipRec, previous: look).liveIds == look.liveIds
+        log.append(blipRows == 0 && kept ? "PASS hints blip: an unreadable hints store reports nothing and keeps the baseline" : "FAIL hints blip: rows=\(blipRows) baseline kept=\(kept)")
         for c in rc.since.changes {
             let d = model(status, reader)
             var opened = false

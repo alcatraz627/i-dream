@@ -68,7 +68,7 @@ final class AppModel: ObservableObject {
     /// baseline for the next "since you last looked".
     func markLooked() {
         guard let r = record else { return }
-        lastLook = RecordBuilder.snapshotLook(r)
+        lastLook = RecordBuilder.snapshotLook(r, previous: lastLook)
         // What was just seen is no longer unseen, so the menu bar count clears now
         // rather than at the next read.
         record?.since = Since(first: false, ago: 0, newClusters: 0, newLanded: 0, newAwaiting: 0, movedEffects: 0, newRun: false)
