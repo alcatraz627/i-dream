@@ -12,11 +12,25 @@ The source report, with every citation checked, is `.claude/output/20261021-1948
 
 1. Run the queued Claude adversarial review first (section C). Done 2026-10-26; its findings are section D and notes under A and B.
 2. Fix the clear bugs: A1, A2, A3 (retargeted), A4 (with its warning), then D1, D2, D4, D6. They are small and unblock measurement. D3 and D5 follow.
-   Built and installed 2026-10-26: A1, A2/D6, A3, A4, D1, D2, D4. Each has a test that failed before its fix. Two still wait on a live run: the spend total and cycle-ran row fill in after the next daily run, and metacog's skip path shows on its next oversize batch. A4 kept the usage limits as a fallback only: the account-wide usage gate decides when it exists, so cycles are not shut off by the transcript count.
+   Built and installed 2026-10-26:
+   - A1, A2/D6, A3, A4, D1, D2 and D4, each with a test that failed first.
+   - The spend total and cycle-ran row fill in after the next daily run.
+   - Metacog's skip path shows on its next oversize batch.
+   - The usage limits are a fallback; the account-wide gate decides.
 3. Then the design items (B1 to B4), each with the owner's ruling noted before building.
 
 Owner ruling 2026-10-26 on the follow-up suggestions (`.claude/output/20261026-1703-adversarial-review/behavioral-display-suggestions.md`): "Ideas look good, daily is fine as long as it doesn't dent my claude usage. 3 and 5 are fine, lets go on all". So: daily verify rows that re-check each fix (no model calls); a first-look probe test on the local vision model; Landing says "not measured" until B1 lands; intentions fire once per session start, skip bare-word triggers and CLAUDE.md repeats, and votes land only on what the corrected turn showed (this settles B2's delivery side and B3); the monthly audit raises an adversarial-review card rather than spending tokens on its own.
-   Built and installed 2026-10-26. verify gained delivery-agrees, firing-scan and metacog-calls rows. The probe asks the local vision model, three times per theme, whether a newcomer must act, and fails when that disagrees with the You section; You now leads the dropdown and Run now reads as an optional link. Landing, the dropdown and the dashboard say effect is not measured. A session spends one fire per rule however many start events arrive, a question is no longer read as a correction, and a vote lands only on rules sharing a word with the prompt. Wake triggers skip generic words, and REM is handed the standing rule titles and told not to restate them; a word-overlap filter was tried first and dropped because on the 13 live rules it could not tell a paraphrase from a new rule. The monthly audit brief now carries an adversarial pass, run only when the owner starts the card.
+   Built and installed 2026-10-26:
+   - verify checks that delivery counts agree, that the firing scan runs, and that metacog never sends nothing.
+   - The probe fails when a newcomer's read disagrees with the You section.
+   - You leads the dropdown; Run now reads as an optional link.
+   - Effect panels say not measured.
+   - One fire per rule per session; questions are not corrections.
+   - Votes land only on rules that share a word with the prompt.
+   - Wake triggers skip generic words.
+   - REM gets the standing rule titles and is told not to repeat them.
+   - Word overlap could not spot a reworded rule, so it was dropped.
+   - The monthly audit card carries an adversarial pass.
 
 ## A. Clear bugs
 
