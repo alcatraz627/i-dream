@@ -267,11 +267,44 @@ fn sessions(home: &Path, out: &mut Vec<Entry>) {
         let mut e = entry(
             "session",
             &sid,
-            format!("session {}", &sid[..sid.len().min(8)]),
+            format!("session {}", sid.chars().take(8).collect::<String>()),
             format!("shown {} live item(s) between {} and {} UTC", items.len(), when(first), when(last)),
         );
         e.at = DateTime::from_timestamp(last, 0);
         e.related = items.into_iter().collect();
         out.push(e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn odd_rows_are_skipped_and_never_panic() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join(".claude/i-dream")).unwrap();
+        std::fs::create_dir_all(h.join(".claude/subconscious/intentions")).unwrap();
+        std::fs::write(
+            h.join(".claude/i-dream/would-fire.jsonl"),
+            "{\"id\":\"a\",\"sid\":\"ü\",\"state\":\"live\",\"ts\":1}\n\
+             {\"id\":\"b\",\"sid\":\"aéééééééé-long\",\"state\":\"live\",\"ts\":2}\n\
+             {\"id\":\"c\",\"sid\":\"x\",\"state\":\"shadow\",\"ts\":3}\nnot json\n",
+        )
+        .unwrap();
+        std::fs::write(h.join(".claude/proposals.jsonl"), "{\"title\":\"no id\"}\n{\"id\":\"p1\",\"title\":\"t\"}\n").unwrap();
+        std::fs::write(h.join(".claude/subconscious/intentions/registry.jsonl"), "{\"id\":\"i1\"}\n{}\n").unwrap();
+        let mut out = vec![];
+        sessions(h, &mut out);
+        proposals(h, &mut out);
+        intentions(h, &mut out);
+        let ids: Vec<(&str, &str)> = out.iter().map(|e| (e.kind, e.id.as_str())).collect();
+        // Shadow rows are not "shown"; a proposal or intention without an id is skipped.
+        assert_eq!(
+            ids,
+            vec![("session", "aéééééééé-long"), ("session", "ü"), ("proposal", "p1"), ("intention", "i1")]
+        );
+        assert_eq!(out[0].title, "session aééééééé");
     }
 }
