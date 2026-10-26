@@ -40,6 +40,8 @@ struct ListState: Equatable {
 
 extension Pane {
     static let lists: [Pane] = [.proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs]
+    /// The five work panes, in sidebar order; ⌘1 to ⌘5 open them.
+    static let work: [Pane] = [.flow, .ledger, .patterns, .reader, .landing]
 }
 
 extension AppModel {

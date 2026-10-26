@@ -401,6 +401,16 @@ enum Probe {
             render(DashboardView(model: d, fullHeight: true), appearance, out.appendingPathComponent("drive-\(p.rawValue)-\(tag).png"), width: 1280)
         }
 
+        // ⌘1 to ⌘5 reach the five work panes from a list, and close a search.
+        let ck = model(status, reader)
+        ck.pane = .hints
+        ck.globalSearch.open = true
+        let reached = (1...5).map { n -> Pane in _ = ck.commandKey(String(n)); return ck.pane }
+        let ignored = !ck.commandKey("6") && !ck.commandKey("0")
+        log.append(reached == Pane.work && !ck.globalSearch.open && ignored
+                   ? "PASS keys ⌘1–5: open Flow, Ledger, Patterns, Reader, Landing; ⌘6 and ⌘0 do nothing"
+                   : "FAIL keys ⌘1–5: reached \(reached.map(\.title)), search open \(ck.globalSearch.open), others ignored \(ignored)")
+
         // Flow: a dragged range re-aggregates the stages; a cycle click loads its lines.
         let f = model(status, reader)
         f.pane = .flow

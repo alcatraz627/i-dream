@@ -382,6 +382,19 @@ final class AppModel: ObservableObject {
         .sorted { abs($0.delta) != abs($1.delta) ? abs($0.delta) > abs($1.delta) : $0.total > $1.total }
     }
 
+    /// The ⌘ shortcuts, which work anywhere in the dashboard: ⌘K searches
+    /// everything, ⌘[ goes back, ⌘1 to ⌘5 open the five work panes.
+    func commandKey(_ c: String) -> Bool {
+        if c == "k" { toggleSearch(); return true }
+        if c == "[" { goBack(); return true }
+        if let n = Int(c), let p = Pane.work[safe: n - 1] {
+            globalSearch.open = false
+            open(Dive(pane: p))
+            return true
+        }
+        return false
+    }
+
     // MARK: the one key map, on every Work pane
 
     /// j and k move, return opens, esc backs out, slash focuses search, f

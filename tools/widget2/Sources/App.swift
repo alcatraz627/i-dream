@@ -51,8 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
             guard let self, let w = self.window, e.window === w else { return e }
             let typing = w.firstResponder is NSText
             let bareCommand = e.modifierFlags.intersection([.command, .shift, .option, .control]) == .command
-            if bareCommand, e.charactersIgnoringModifiers == "k" { self.model.toggleSearch(); return nil }
-            if bareCommand, e.charactersIgnoringModifiers == "[" { self.model.goBack(); return nil }
+            if bareCommand, self.model.commandKey(e.charactersIgnoringModifiers ?? "") { return nil }
             if self.model.globalSearch.open { return self.model.searchKey(e.keyCode) ? nil : e }
             let key: String? = e.keyCode == 53 ? "esc" : e.keyCode == 36 ? "\r" : e.charactersIgnoringModifiers
             guard let key, e.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return e }

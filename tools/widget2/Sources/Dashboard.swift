@@ -134,8 +134,8 @@ struct DashboardView: View {
 
     private var keyHint: String {
         switch model.pane {
-        case .ledger, .patterns, .reader, .landing: "j k move · return opens · esc backs out · / search this pane · ⌘K search everything · f first filter"
-        case .flow: "j k move between cycles · return loads one · esc clears the range · ⌘K search everything"
+        case .ledger, .patterns, .reader, .landing: "j k move · return opens · esc backs out · / search this pane · ⌘K search everything · f first filter · ⌘1–5 panes"
+        case .flow: "j k move between cycles · return loads one · esc clears the range · ⌘K search everything · ⌘1–5 panes"
         case .changes: "click a change to open where it happened · ⌘K search everything"
         case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs: "j k move · return opens · esc backs out · / search this list · f first chip · ⌘[ back · ⌘K search everything"
         case .settings: ""
