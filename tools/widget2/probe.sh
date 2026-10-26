@@ -34,7 +34,7 @@ if command -v lm >/dev/null; then
     votes_nothing=0
     answer=""
     for _ in 1 2 3; do
-      a="$(lm see "$img" "You are seeing this menu for the first time. Is there anything YOU (the person reading) must do right now? Answer in one line starting with NOTHING or ACTION: <what>." | head -1)"
+      a="$(lm see "$img" "You are seeing this menu for the first time. Is there anything YOU (the person reading) must do right now? Answer in one line starting with NOTHING or ACTION: <what>.")"; a="${a%%$'\n'*}"
       answer="$answer | $a"
       # A small model sometimes writes "ACTION: nothing"; that is a NOTHING.
       if printf '%s' "$a" | rg -qi '^(NOTHING|ACTION:\s*(nothing|none)\b)'; then votes_nothing=$((votes_nothing + 1)); fi
@@ -50,6 +50,37 @@ if command -v lm >/dev/null; then
   done
 else
   echo "SKIP first-look: lm not installed" | tee -a "$OUT/first-look.txt"
+fi
+# Meaning: on each pane with its term list open, the screen's exact text (read
+# without a model) must carry each named term's definition. A small vision
+# model was tried first and answered "not shown" while the definition sat on
+# screen, so the check reads the text, not a model's opinion of it.
+if command -v lm >/dev/null; then
+  while IFS='|' read -r pane term phrase; do
+    [ -z "$pane" ] && continue
+    for ap in dark light; do
+      img="$OUT/terms-$pane-$ap.png"
+      txt="$(lm see "$img" --ocr < /dev/null | tr '\n' ' ' | tr -s ' ')"
+      if printf '%s' "$txt" | rg -qiF "$phrase"; then
+        echo "PASS meaning-$pane-$ap: '$term' is explained on screen" | tee -a "$OUT/first-look.txt"
+      else
+        echo "FAIL meaning-$pane-$ap: '$term' has no explanation on screen (looked for: $phrase)" | tee -a "$OUT/first-look.txt"
+        fails=$((fails + 1))
+      fi
+    done
+  done <<'TERMS'
+flow|productive|extracted at least one pattern
+flow|recon|join of every signal stream
+ledger|stale|longer than its cadence
+ledger|EVENTS|28-day window
+patterns|valence|good (positive) or a problem
+patterns|drawn|strongest patterns and the ones they link to
+reader|join key|What the rows in a cluster share
+reader|noise|not worth your time
+landing|slug|A mistake type from the atone log
+landing|gate candidate|needs a hook, not more text
+landing|shadow|only being counted
+TERMS
 fi
 echo "probe: $fails FAIL lines; see $OUT/drive-dark.txt, $OUT/drive-light.txt and $OUT/first-look.txt"
 exit "$fails"

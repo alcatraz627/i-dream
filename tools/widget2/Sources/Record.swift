@@ -256,6 +256,17 @@ struct Record {
     var weeklyBroken: (title: String, detail: String, at: Date?)? = nil
     /// i-dream's scheduled jobs, soonest next run first.
     var jobs: [JobRow] = []
+    /// Atone recordings per ISO week, oldest first.
+    var atoneWeeks: [StatusDoc.AtoneWeek] = []
+    /// Why effect is not measured, in numbers from the atone log rather than a
+    /// date written into the source.
+    var recordingNote: String {
+        guard let lo = atoneWeeks.map(\.count).min(), let hi = atoneWeeks.map(\.count).max(), !atoneWeeks.isEmpty else {
+            return "effect is not measured: weekly moves count atone recordings, not mistakes"
+        }
+        let span = "\(atoneWeeks.first!.week) to \(atoneWeeks.last!.week)"
+        return "effect is not measured: weekly moves count atone recordings, which ranged from \(lo) to \(hi) a week over \(span) (\(atoneWeeks.map { String($0.count) }.joined(separator: " · ")))"
+    }
     var cycles: [CycleMark]
     var cycleFields: [StatusCycleFields]
     var cycleWindowDays: Int
@@ -536,6 +547,7 @@ enum RecordBuilder {
         rec.weeklyBroken = weeklyBroken(status: s)
         rec.outcomes = verify?.checks
         rec.jobs = jobRows(status: s)
+        rec.atoneWeeks = s.reader.atone_weeks ?? []
         rec.you = youRows(rec)
         rec.system = systemRows(rec, status: s)
         rec.quiet = quietRows(rec)
@@ -664,12 +676,12 @@ enum RecordBuilder {
     }
 
     // Week-on-week mistake moves are not shown as trends: they count atone
-    // recordings, and recording itself fell about fivefold in week 38.
+    // recordings, and how often atone is filed changes on its own.
     static func quietRows(_ r: Record) -> [Row] {
         var rows: [Row] = []
         if !r.worsening.isEmpty || !r.improving.isEmpty {
             rows.append(Row(id: "effect-unmeasured", icon: "ruler", title: "Effect not measured yet",
-                            detail: "weekly moves count how often atone is filed, which fell about fivefold in week 38, so they are not shown as trends",
+                            detail: r.recordingNote + ", so they are not shown as trends",
                             sev: .none, dive: Dive(pane: .landing), dim: true))
         }
         let fresh = r.count(.fresh)

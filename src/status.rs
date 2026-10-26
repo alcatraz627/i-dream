@@ -62,7 +62,16 @@ pub struct StatusReport {
 }
 
 #[derive(Serialize)]
+pub struct AtoneWeek {
+    pub week: String,
+    pub count: u32,
+}
+
+#[derive(Serialize)]
 pub struct ReaderSummary {
+    /// Mistakes recorded with atone in each of the last ten ISO weeks, oldest
+    /// first. Effect panels quote it: they count recordings, not mistakes.
+    pub atone_weeks: Vec<AtoneWeek>,
     pub last_recon: Option<chrono::DateTime<chrono::Utc>>,
     pub last_weekly: Option<chrono::DateTime<chrono::Utc>>,
     /// Clusters in the latest recon.
@@ -114,7 +123,14 @@ fn gather_reader() -> ReaderSummary {
             *landed.entry(l.outcome.clone()).or_insert(0) += 1;
         }
     }
+    let atone_log = dirs::home_dir()
+        .and_then(|h| std::fs::read_to_string(h.join(".claude/atone/events.jsonl")).ok())
+        .unwrap_or_default();
     ReaderSummary {
+        atone_weeks: atone_weeks(&atone_log, chrono::Utc::now(), 10)
+            .into_iter()
+            .map(|(week, count)| AtoneWeek { week, count })
+            .collect(),
         last_recon: state.last_recon,
         last_weekly: state.last_weekly,
         clusters: recon.as_ref().map(|r| r.clusters.len()).unwrap_or(0),
@@ -670,6 +686,30 @@ fn lane_word(s: LaneStatus) -> &'static str {
 /// keeps a fresh sandbox from querying it at all, but a sandbox that plants
 /// a plist whose label is live in the real session will read the REAL job's
 /// state; the `program` field is carried so that collision is visible.
+/// How many mistakes were recorded with atone in each of the last `n` ISO
+/// weeks, oldest first, labelled like "2026-W43". Surfaces quote this instead
+/// of a hard-coded claim about when recording changed.
+fn atone_weeks(log: &str, now: chrono::DateTime<chrono::Utc>, n: usize) -> Vec<(String, u32)> {
+    use chrono::Datelike;
+    let label = |d: chrono::DateTime<chrono::Utc>| {
+        let w = d.iso_week();
+        format!("{}-W{:02}", w.year(), w.week())
+    };
+    let mut weeks: Vec<(String, u32)> =
+        (0..n).rev().map(|i| (label(now - chrono::Duration::weeks(i as i64)), 0)).collect();
+    for ts in log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("ts")?.as_str()?.parse::<chrono::DateTime<chrono::Utc>>().ok())
+    {
+        let key = label(ts);
+        if let Some(w) = weeks.iter_mut().find(|w| w.0 == key) {
+            w.1 += 1;
+        }
+    }
+    weeks
+}
+
 /// How to run a job by hand in a terminal you can watch, and what that does.
 ///
 /// The scheduler runs these headless. The audit and the weekly review are
@@ -1207,6 +1247,17 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atone_recordings_are_counted_per_week_oldest_first() {
+        let now: chrono::DateTime<chrono::Utc> = "2026-10-26T12:00:00Z".parse().unwrap();
+        let log = "{\"ts\":\"2026-10-25T10:00:00Z\"}\n{\"ts\":\"2026-10-24T10:00:00Z\"}\n\
+                   {\"ts\":\"2026-10-15T10:00:00Z\"}\nnot json\n{\"ts\":\"2026-01-01T00:00:00Z\"}\n";
+        let w = atone_weeks(log, now, 3);
+        // 26 Oct 2026 is a Monday, so it opens W44; the 24th and 25th are W43.
+        assert_eq!(w.iter().map(|x| x.1).collect::<Vec<_>>(), vec![1, 2, 0]);
+        assert_eq!(w[2].0, "2026-W44");
+    }
 
     #[test]
     fn every_i_dream_job_has_a_command_to_run_it_by_hand() {

@@ -187,13 +187,32 @@ struct SidebarPrefs: View {
 struct PaneHeader: View {
     var pane: Pane
     var sub: String
+    @State private var open = false
+    @Environment(\.termsOpen) private var forced
     var body: some View {
+        let showing = open || forced
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
                 Image(systemName: pane.icon).font(.system(size: 14)).foregroundStyle(P.fg2)
                 Text(pane.title).font(F.head).foregroundStyle(P.fg)
+                Button { open.toggle() } label: {
+                    Label(showing ? "hide terms" : "what the words mean", systemImage: "questionmark.circle")
+                        .font(F.meta).foregroundStyle(P.blue)
+                }
+                .buttonStyle(.plain)
             }
             Text(sub).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
+            if showing {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Glossary.terms(pane), id: \.0) { term, meaning in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(term).font(F.meta.weight(.semibold)).foregroundStyle(P.fg).frame(width: 150, alignment: .leading)
+                            Text(meaning).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(10).background(RoundedRectangle(cornerRadius: 7).fill(P.card)).padding(.top, 6)
+            }
         }
         .padding(.bottom, 10)
     }
@@ -314,7 +333,7 @@ struct FlowPane: View {
                   ["gates armed from your answers", "\(r.interventions.live) live nudges overall"],
                   Dive(pane: .landing))
             stage("ruler", "Effect", r.effects.filter { $0.delta != 0 }.count, "moved, not measured",
-                  age: 7 * 86400, ["weekly moves count atone recordings, not mistakes", "recording fell about fivefold in week 38", "a real measure waits on the before/after design"],
+                  age: 7 * 86400, [r.recordingNote, "a real measure waits on the before/after design"],
                   Dive(pane: .landing))
         }
     }

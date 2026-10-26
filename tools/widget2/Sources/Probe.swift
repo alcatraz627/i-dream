@@ -89,6 +89,12 @@ enum Probe {
             let d = model(status, reader)
             d.pane = p
             render(DashboardView(model: d, fullHeight: true), appearance, out.appendingPathComponent("dash-\(p.rawValue)-\(tag).png"), width: 1280)
+            // The same pane with its term list open, for the meaning check.
+            // The pane's header with its term list open, alone: some panes grow
+            // past the height the text reader can read, and every pane uses
+            // this one header.
+            render(PaneHeader(pane: p, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
+                   appearance, out.appendingPathComponent("terms-\(p.rawValue)-\(tag).png"), width: 1000)
         }
 
         // Settings, both tabs, from the live `config --json`. The tab choice is

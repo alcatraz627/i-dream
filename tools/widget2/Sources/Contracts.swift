@@ -61,7 +61,9 @@ struct StatusDoc: Decodable {
         var binary_behind_source: Bool?
     }
     struct Awaiting: Decodable { var slug: String; var url: String }
+    struct AtoneWeek: Decodable { var week: String; var count: Int }
     struct Reader: Decodable {
+        var atone_weeks: [AtoneWeek]?
         var last_recon: String?
         var last_weekly: String?
         var clusters: Int

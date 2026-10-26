@@ -150,6 +150,23 @@ struct PatternsPane: View {
     @ObservedObject var model: AppModel
     var r: Record
 
+    /// What the map's marks mean: size and light are strength, the halo colour
+    /// is the trend, a line is an association.
+    private var mapLegend: some View {
+        HStack(spacing: 10) {
+            legendItem(Circle().fill(P.fg2).frame(width: 9, height: 9), "bigger, brighter: stronger")
+            legendItem(Circle().stroke(P.red, lineWidth: 2).frame(width: 9, height: 9), "worsening")
+            legendItem(Circle().stroke(P.green, lineWidth: 2).frame(width: 9, height: 9), "reinforced")
+            legendItem(Rectangle().fill(P.teal).frame(width: 12, height: 1.5), "association")
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(P.bg.opacity(0.85)))
+    }
+
+    private func legendItem(_ mark: some View, _ text: String) -> some View {
+        HStack(spacing: 4) { mark; Text(text).font(F.meta).foregroundStyle(P.fg2) }
+    }
+
     var body: some View {
         let rows = model.patternRows()
         let shown = Set(rows.map(\.id))
@@ -168,6 +185,7 @@ struct PatternsPane: View {
                     .frame(height: 460)
                     .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(P.hair, lineWidth: 0.5))
+                    .overlay(alignment: .bottomLeading) { mapLegend.padding(8) }
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
@@ -550,7 +568,7 @@ struct LandingPane: View {
     var body: some View {
         let effects = model.landingEffects()
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .landing, sub: "Where findings went and whether anything moved. An effect is credited only to a fix that is in place: a hook you armed, or a filed proposal that is now done. A proposal still open has changed nothing yet; every other movement reads unattributed. Effect is not measured yet: the moves below count atone recordings, which fell about fivefold in week 38, not mistakes.")
+            PaneHeader(pane: .landing, sub: "Where findings went and whether anything moved. An effect is credited only to a fix that is in place: a hook you armed, or a filed proposal that is now done. A proposal still open has changed nothing yet; every other movement reads unattributed. The " + r.recordingNote + ".")
             Text("\(r.interventions.live) live nudges · \(r.interventions.candidate) candidates · \(r.interventions.shadow) in shadow · \(r.interventions.fired_7d) fired in the last 7 days · heed is not measured yet")
                 .font(F.meta).foregroundStyle(P.fg2)
             highlights
