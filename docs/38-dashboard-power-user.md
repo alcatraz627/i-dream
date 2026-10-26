@@ -35,4 +35,7 @@ The plan these slices built is `.claude/output/20261026-dashboard-inventory/plan
 - Evidence rows and atone events open as rows in the Evidence list, not in a separate sheet.
 - The Patterns, Ledger and Landing rows and the dropdown's job rows have no Open in Claude line; the dropdown keeps its by-hand commands.
 - Armed gates is empty because no weekly answer has armed a hook yet.
-- The first-look check, where a small local vision model reads the dropdown as a newcomer would, sometimes flips its answer on an unchanged image. Two of the last three runs read the "Run now" links as a chore. Treat a single failure there as a flake and re-run before acting on it.
+
+## The first-look check was right
+
+The first-look check, where a small local vision model reads the dropdown as a newcomer would, failed twice during this work. It was first written off as the model flipping on an unchanged image. It was not: both failing images showed a row the passing ones did not, "The daemon runs an older build than the source", which appears whenever i-dream's source is newer than the installed build. That row had no owner and no next step while "You" said nothing waited, so a newcomer read "Run now" as the fix. Re-rendering the same state with only that row removed turned the answer from ACTION to NOTHING. The row now says plainly that a change to i-dream is in progress and sits under Quiet; a daemon that has not restarted onto the installed build keeps its own warning. The probe now runs the first-look check on that state too.

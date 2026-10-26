@@ -324,6 +324,8 @@ struct Record {
     var weeklyBroken: (title: String, detail: String, at: Date?)? = nil
     /// i-dream's scheduled jobs, soonest next run first.
     var jobs: [JobRow] = []
+    /// i-dream's source changed after the installed build: someone is working on it.
+    var sourceAhead = false
     /// Atone recordings per ISO week, oldest first.
     var atoneWeeks: [StatusDoc.AtoneWeek] = []
     /// Why effect is not measured, in numbers from the atone log rather than a
@@ -615,6 +617,7 @@ enum RecordBuilder {
         rec.weeklyBroken = weeklyBroken(status: s)
         rec.outcomes = verify?.checks
         rec.jobs = jobRows(status: s)
+        rec.sourceAhead = s.build?.binary_behind_source == true && s.build?.daemon_stale != true
         rec.atoneWeeks = s.reader.atone_weeks ?? []
         rec.you = youRows(rec)
         rec.system = systemRows(rec, status: s)
@@ -797,9 +800,11 @@ enum RecordBuilder {
             rows.append(Row(id: "log", icon: "xmark.octagon", title: "\(plural(r.logErrors, "error")) in today's daemon log",
                             detail: s.log?.last_error ?? (s.log?.file ?? ""), sev: .bad, dive: Dive(pane: .flow)))
         }
-        if s.build?.daemon_stale == true || s.build?.binary_behind_source == true {
-            rows.append(Row(id: "build", icon: "hammer", title: "The daemon runs an older build than the source",
-                            detail: "rebuild and reinstall: scripts/install.sh", sev: .warn, dive: Dive(pane: .flow)))
+        // The installed build is newer than the running daemon: a real fault.
+        // Source newer than the build is a change in progress, and goes under Quiet.
+        if s.build?.daemon_stale == true {
+            rows.append(Row(id: "build", icon: "hammer", title: "The daemon is still running the previous build",
+                            detail: "it moves to the installed build when restarted: scripts/install.sh restarts it", sev: .warn, dive: Dive(pane: .flow)))
         }
         // The weekly job's failure already has its own row above.
         for j in s.jobs where !j.label.hasSuffix("reader-weekly") {
@@ -821,6 +826,11 @@ enum RecordBuilder {
             rows.append(Row(id: "effect-unmeasured", icon: "ruler", title: "Effect not measured yet",
                             detail: r.recordingNote + ", so they are not shown as trends",
                             sev: .none, dive: Dive(pane: .landing), dim: true))
+        }
+        if r.sourceAhead {
+            rows.append(Row(id: "source-ahead", icon: "hammer", title: "A change to i-dream is in progress",
+                            detail: "its source is newer than the installed build; the next install brings it in. Nothing for you to do.",
+                            sev: .none, dive: Dive(pane: .flow), dim: true))
         }
         let fresh = r.count(.fresh)
         rows.append(Row(id: "fresh", icon: "checkmark.circle",

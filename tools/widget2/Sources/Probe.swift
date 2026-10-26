@@ -58,6 +58,13 @@ enum Probe {
         renderStatusItem(m.record, m.reading, appearance, out.appendingPathComponent("status-item-\(tag).png"))
         render(DropdownView(model: m, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-\(tag).png"))
 
+        // The same dropdown while someone is changing i-dream (source newer than
+        // the installed build): the first-look check reads this one too.
+        var building = status
+        building.build?.binary_behind_source = true
+        building.build?.daemon_stale = false
+        render(DropdownView(model: model(building, reader), height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-inprogress-\(tag).png"))
+
         // Every job row opened: what it runs, how to run it by hand, its log.
         let mj = model(status, reader)
         mj.openJobs = Set(mj.record!.jobs.map(\.name))

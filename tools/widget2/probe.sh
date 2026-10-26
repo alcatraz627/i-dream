@@ -27,8 +27,9 @@ done
 # "nothing waits on you" means a newcomer should conclude there is nothing to
 # do. A red row that reads as a chore for the owner fails here.
 if command -v lm >/dev/null; then
-  for ap in dark light; do
-    img="$OUT/dropdown-$ap.png"
+  for shot in dropdown-dark dropdown-light dropdown-inprogress-dark dropdown-inprogress-light; do
+    ap="$shot"
+    img="$OUT/$shot.png"
     expect="ACTION"
     if lm see "$img" --ocr | tr '\n' ' ' | tr -s ' ' | rg -qi "nothing waits on you"; then expect="NOTHING"; fi
     # Three reads, majority wins: one small-model read flips on the same image.
