@@ -646,9 +646,14 @@ fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, S
     for r in jsonl(&sub.join("logs/signals.jsonl")) {
         let ev = r.get("event").unwrap_or(&r);
         let Some(sid) = ev.get("session_id").and_then(|v| v.as_str()) else { continue };
+        // Same reading as the daemon's votes: headless runs say nothing, and a
+        // prompt that both corrects and praises says nothing clear.
+        if ev.get("entrypoint").and_then(|v| v.as_str()).is_some_and(|ep| !crate::events::is_interactive_entrypoint(ep)) {
+            continue;
+        }
         let corr = ev.get("correction").and_then(|v| v.as_bool()) == Some(true);
         let praise = ev.get("positive").and_then(|v| v.as_bool()) == Some(true);
-        if !corr && !praise {
+        if corr == praise {
             continue;
         }
         let at = r.get("received_at").and_then(|v| v.as_str()).and_then(parse_ts);
@@ -670,9 +675,11 @@ fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, S
     }
     // intention -> sessions it was shown to
     let mut shown_to: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut reminded: std::collections::HashSet<String> = Default::default();
     for f in jsonl(&sub.join("intentions/fired.jsonl")) {
         if let (Some(i), Some(sid)) = (f.get("intention_id").and_then(|v| v.as_str()), f.get("session_id").and_then(|v| v.as_str())) {
             shown_to.entry(i.to_string()).or_default().insert(sid.to_string());
+            reminded.insert(sid.to_string());
         }
     }
     let have: std::collections::HashSet<String> = out.iter().filter(|e| e.kind == "session").map(|e| e.id.clone()).collect();
@@ -684,7 +691,11 @@ fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, S
             "session",
             sid,
             format!("session {}", sid.chars().take(8).collect::<String>()),
-            "i-dream showed it nothing live; it is listed for what it said back",
+            if reminded.contains(sid) {
+                "shown only reminders that have since expired; listed for what it said back"
+            } else {
+                "i-dream showed it nothing live; it is listed for what it said back"
+            },
         );
         e.at = said.get(sid).and_then(|s| s.2);
         e.fields.insert("shown", "0".into());
@@ -704,7 +715,8 @@ fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, S
                 let (u, d) = by_intention.get(&e.id).cloned().unwrap_or_default();
                 e.fields.insert("votes", tally(u, d));
                 let seen = shown_to.get(&e.id);
-                e.fields.insert("shown to", format!("{} session(s)", seen.map_or(0, |s| s.len())));
+                let n = seen.map_or(0, |s| s.len());
+                e.fields.insert("shown to", format!("{n} session{}", if n == 1 { "" } else { "s" }));
                 e.related.extend(seen.into_iter().flatten().cloned());
             }
             _ => {}
@@ -726,7 +738,10 @@ mod tests {
         std::fs::write(sub.join("logs/signals.jsonl"),
             "{\"received_at\":\"2026-10-26T10:00:00Z\",\"event\":{\"session_id\":\"s1\",\"correction\":true,\"positive\":false}}\n\
              {\"event\":{\"session_id\":\"s1\",\"correction\":false,\"positive\":true}}\n\
-             {\"event\":{\"session_id\":\"s1\",\"correction\":false,\"positive\":false}}\n").unwrap();
+             {\"event\":{\"session_id\":\"s1\",\"correction\":false,\"positive\":false}}\n\
+             {\"event\":{\"session_id\":\"s1\",\"correction\":true,\"positive\":true}}\n\
+             {\"event\":{\"session_id\":\"s1\",\"entrypoint\":\"sdk-cli\",\"correction\":true,\"positive\":false}}\n\
+             {\"event\":{\"session_id\":\"s3\",\"entrypoint\":\"sdk-py\",\"correction\":true,\"positive\":false}}\n").unwrap();
         std::fs::write(sub.join("dreams/insight-feedback.jsonl"),
             "{\"sid\":\"s1\",\"intention_id\":\"i1\",\"rating\":\"down\"}\n{\"sid\":\"s2\",\"intention_id\":\"i1\",\"rating\":\"up\"}\n").unwrap();
         std::fs::write(sub.join("intentions/fired.jsonl"),
@@ -740,7 +755,10 @@ mod tests {
         assert_eq!((s2.fields["corrections"].as_str(), s2.fields["votes"].as_str()), ("none", "1 up"));
         let i1 = out.iter().find(|e| e.id == "i1").unwrap();
         assert_eq!(i1.fields["votes"], "1 down, 1 up");
-        assert_eq!(i1.fields["shown to"], "1 session(s)");
+        assert_eq!(i1.fields["shown to"], "1 session");
+        assert!(out.iter().all(|e| e.id != "s3"), "a headless session is not listed");
+        assert!(s1.detail.contains("expired"), "{}", s1.detail);
+        assert!(s2.detail.contains("nothing live"), "{}", s2.detail);
     }
 
     #[test]

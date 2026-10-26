@@ -20,7 +20,7 @@ The plan these slices built is `.claude/output/20261026-dashboard-inventory/plan
 - Proposals filed from a weekly finding show and link that finding.
 - Insights link the intention each one produced.
 - Sessions say "not checked yet" for cited until a firing scan has judged that session, and show how often you corrected or praised Claude in each and the votes that cast.
-- Intentions show how many sessions saw each one and the votes it drew.
+- Intentions show how many sessions saw each one and the votes it drew. Only live intentions are listed; the 1,500-odd that expired are not, so their history is not shown. Session counts skip headless runs and prompts that both corrected and praised, the same reading the daemon votes with.
 - Evidence rows show the file they were read from.
 - Cycles and runs lists every scheduled run of an i-dream job, retired jobs included, with its outcome, exit code, failure reason and its own lines from the job's log. Below them are the consolidation passes the daemon journaled.
 
