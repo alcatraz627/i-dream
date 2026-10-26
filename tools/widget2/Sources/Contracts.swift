@@ -76,7 +76,8 @@ struct StatusDoc: Decodable {
         var weekly_overdue: Bool?
     }
     struct Domain: Decodable { var name: String; var events_in_window: Int; var newest: String? }
-    struct Interventions: Decodable { var live: Int; var candidate: Int; var shadow: Int; var fired_7d: Int }
+    struct Interventions: Decodable { var live: Int; var candidate: Int; var shadow: Int; var fired_7d: Int; var live_items: [LiveItem]? }
+    struct LiveItem: Decodable { var id: String; var slug: String; var form: String; var promoted: String?; var promoted_by: String? }
     struct Slug: Decodable {
         var slug: String
         var severity: String

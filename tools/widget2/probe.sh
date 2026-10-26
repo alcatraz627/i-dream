@@ -82,6 +82,7 @@ landing|slug|A mistake type from the atone log
 landing|gate candidate|needs a hook, not more text
 landing|shadow|only being counted
 settings|usage guard|account-wide usage gate is missing
+changes|went live|either because you approved it
 TERMS
 fi
 echo "probe: $fails FAIL lines; see $OUT/drive-dark.txt, $OUT/drive-light.txt and $OUT/first-look.txt"

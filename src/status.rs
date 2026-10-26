@@ -111,6 +111,18 @@ pub struct InterventionSummary {
     pub shadow: usize,
     /// Live interventions shown in the last seven days, once per session.
     pub fired_7d: usize,
+    /// Each live hint or nudge, with when and how it went live, so the
+    /// widget can say what changed and why.
+    pub live_items: Vec<LiveItem>,
+}
+
+#[derive(Serialize)]
+pub struct LiveItem {
+    pub id: String,
+    pub slug: String,
+    pub form: String,
+    pub promoted: Option<chrono::DateTime<chrono::Utc>>,
+    pub promoted_by: Option<String>,
 }
 
 fn gather_reader() -> ReaderSummary {
@@ -165,6 +177,17 @@ fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
         candidate: count("candidate"),
         shadow: count("shadow"),
         fired_7d,
+        live_items: items
+            .iter()
+            .filter(|i| i.state == "live")
+            .map(|i| LiveItem {
+                id: i.id.clone(),
+                slug: i.slug.clone(),
+                form: i.form.clone(),
+                promoted: i.promoted,
+                promoted_by: i.promoted_by.clone(),
+            })
+            .collect(),
     }
 }
 

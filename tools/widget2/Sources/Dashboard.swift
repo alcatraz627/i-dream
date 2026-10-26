@@ -36,6 +36,7 @@ struct DashboardView: View {
                             case .patterns: PatternsPane(model: model, r: r)
                             case .reader: ReaderPane(model: model, r: r)
                             case .landing: LandingPane(model: model, r: r)
+                            case .changes: ChangesPane(model: model, r: r)
                             case .settings: SettingsPane(model: model)
                             }
                         } else {
@@ -57,6 +58,8 @@ struct DashboardView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach([Pane.flow, .ledger, .patterns, .reader, .landing]) { p in navItem(p) }
+            SectionLabel(text: "lists").padding(.horizontal, 6).padding(.top, 10)
+            navItem(.changes)
             Spacer()
             if let r = model.record {
                 SectionLabel(text: "last 7 days").padding(.horizontal, 6)
@@ -99,6 +102,7 @@ struct DashboardView: View {
         case .ledger: return !r.dead.isEmpty ? .bad : r.count(.stale) > 0 ? .warn : nil
         case .reader: return r.awaitingItems > 0 ? .wait : nil
         case .landing: return r.effects.contains { $0.gateCandidate } ? .wait : nil
+        case .changes: return r.since.changes.isEmpty ? nil : .wait
         default: return nil
         }
     }
@@ -122,6 +126,7 @@ struct DashboardView: View {
         switch model.pane {
         case .ledger, .patterns, .reader, .landing: "j k move · return opens · esc backs out · / search · f first filter"
         case .flow: "j k move between cycles · return loads one · esc clears the range"
+        case .changes: "click a change to open where it happened"
         case .settings: ""
         }
     }
@@ -289,6 +294,9 @@ struct FlowPane: View {
         if s.newClusters > 0 { parts.append(plural(s.newClusters, "new cluster")) }
         if s.newLanded > 0 { parts.append("\(s.newLanded) landed") }
         if s.movedEffects > 0 { parts.append(plural(s.movedEffects, "effect") + " moved") }
+        if s.changes.contains(where: { $0.kind == "hint" }) { parts.append("a hint went live") }
+        if s.changes.contains(where: { $0.kind == "job" }) { parts.append("a job failed") }
+        if s.changes.contains(where: { $0.kind == "proposal" }) { parts.append("a proposal moved") }
         return "Since you last looked \(ageText(s.ago)) ago: " + (parts.isEmpty ? "nothing moved." : parts.joined(separator: ", ") + ".")
     }
 

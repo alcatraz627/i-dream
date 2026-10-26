@@ -678,3 +678,56 @@ struct LandingPane: View {
         .padding(.leading, 20)
     }
 }
+
+// MARK: - Changes
+
+/// One change, as a row: what kind, what happened, why, and a click that
+/// opens where it happened.
+struct ChangeRow: View {
+    var change: Change
+    var now: Date
+    var unseen: Bool
+    var open: (Dive) -> Void
+
+    var body: some View {
+        Button { open(change.dive) } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Dot(color: unseen ? P.amber : P.fg3, size: 6)
+                Text(change.kindWord.uppercased()).font(F.label).tracking(0.6).foregroundStyle(P.fg3).frame(width: 74, alignment: .leading)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(change.text).font(F.meta).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
+                    Text("because " + change.cause).font(F.meta).foregroundStyle(P.fg2).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 6)
+                AgeText(age: now.timeIntervalSince(change.seen))
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Every change i-dream has reported, newest first: the menu's "since you
+/// last looked" strip, kept as history.
+struct ChangesPane: View {
+    @ObservedObject var model: AppModel
+    var r: Record
+
+    var body: some View {
+        let unseen = Set(r.since.changes.map(\.id))
+        let history = model.changeHistory
+        VStack(alignment: .leading, spacing: 10) {
+            PaneHeader(pane: .changes, sub: "Everything i-dream did or noticed, each with its cause, newest first. Amber rows arrived since you last looked; the menu bar number counts them. Click a row to open where it happened.")
+            Text("\(plural(unseen.count, "unseen change")) · \(plural(history.count, "change")) kept")
+                .font(F.meta).foregroundStyle(P.fg2)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(history) { c in
+                    ChangeRow(change: c, now: r.now, unseen: unseen.contains(c.id)) { model.open($0) }
+                }
+                if history.isEmpty {
+                    Text("nothing yet: changes are counted from your first look onwards").font(F.meta).foregroundStyle(P.fg3)
+                }
+            }.card()
+        }
+    }
+}

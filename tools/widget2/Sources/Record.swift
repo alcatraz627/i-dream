@@ -8,7 +8,7 @@ import Foundation
 // quietly disagreeing.
 
 enum Pane: String, CaseIterable, Identifiable {
-    case flow, ledger, patterns, reader, landing, settings
+    case flow, ledger, patterns, reader, landing, changes, settings
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -17,6 +17,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .patterns: "Patterns"
         case .reader: "Reader"
         case .landing: "Landing"
+        case .changes: "Changes"
         case .settings: "Settings"
         }
     }
@@ -27,6 +28,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .patterns: "point.3.connected.trianglepath.dotted"
         case .reader: "text.magnifyingglass"
         case .landing: "tray.and.arrow.down"
+        case .changes: "clock.arrow.circlepath"
         case .settings: "slider.horizontal.3"
         }
     }
@@ -210,7 +212,47 @@ struct Since {
     var newAwaiting: Int
     var movedEffects: Int
     var newRun: Bool
-    var anything: Bool { newClusters + newLanded + newAwaiting + movedEffects > 0 || newRun }
+    /// Each change in plain words with its cause; its count is the menu bar number.
+    var changes: [Change] = []
+    var anything: Bool { newClusters + newLanded + newAwaiting + movedEffects > 0 || newRun || !changes.isEmpty }
+}
+
+/// One thing that changed since the owner last looked, said with what caused
+/// it, and where to go to see it. Kept in the Changes history, so it stores
+/// plain values rather than a `Dive`.
+struct Change: Identifiable, Codable, Equatable {
+    /// Stable across reads, so the history keeps one row per change.
+    var id: String
+    var kind: String
+    var text: String
+    var cause: String
+    var seen: Date
+    var pane: String
+    var scopeKind: String?
+    var scopeValue: String?
+
+    var dive: Dive {
+        let p = Pane(rawValue: pane) ?? .flow
+        switch (scopeKind, scopeValue) {
+        case ("slug", let v?): return Dive(pane: p, scope: .slug(v))
+        case ("cluster", let v?): return Dive(pane: p, scope: .cluster(v))
+        case ("run", let v?): return Dive(pane: p, scope: .run(v))
+        default: return Dive(pane: p)
+        }
+    }
+    var kindWord: String {
+        switch kind {
+        case "hint": "went live"
+        case "proposal": "proposal"
+        case "job": "job failed"
+        case "run": "weekly run"
+        case "recon": "recon"
+        case "landed": "landed"
+        case "awaiting": "for you"
+        case "effect": "moved"
+        default: kind
+        }
+    }
 }
 
 /// The owner's last look, stored locally so "since you last looked" is real.
@@ -221,6 +263,10 @@ struct LastLook: Codable {
     var awaitingItems: Int
     var week: String?
     var slugLast7: [String: Int]
+    /// Optional so a last look saved by an older build still decodes; a
+    /// missing baseline reports no change of that kind rather than all of them.
+    var liveIds: [String]? = nil
+    var proposalStatus: [String: String]? = nil
 }
 
 struct Record {
@@ -552,7 +598,68 @@ enum RecordBuilder {
         rec.system = systemRows(rec, status: s)
         rec.quiet = quietRows(rec)
         rec.checks = checks(rec, status: s, reader: r)
+        if let ll = lastLook { rec.since.changes = changes(rec, since: ll, status: s) }
         return rec
+    }
+
+    /// What changed since the last look, one row per change, each with its cause.
+    static func changes(_ r: Record, since ll: LastLook, status s: StatusDoc) -> [Change] {
+        var out: [Change] = []
+        func add(_ id: String, _ kind: String, _ text: String, _ cause: String, _ pane: Pane, _ sk: String? = nil, _ sv: String? = nil) {
+            out.append(Change(id: id, kind: kind, text: text, cause: cause, seen: r.now, pane: pane.rawValue, scopeKind: sk, scopeValue: sv))
+        }
+        let totals = Dictionary(r.effects.map { ($0.slug, $0.total) }, uniquingKeysWith: { a, _ in a })
+        if let known = ll.liveIds.map(Set.init) {
+            for i in s.interventions.live_items ?? [] where !known.contains(i.id) {
+                let cause = i.promoted_by == "owner-flip" ? "you approved it"
+                    : "its mistake kept coming back" + (totals[i.slug].map { " (\($0) recorded)" } ?? "")
+                add("hint:\(i.id)", "hint", "a \(i.form) about \(i.slug) is now shown to sessions", cause, .landing, "slug", i.slug)
+            }
+        }
+        if let known = ll.proposalStatus {
+            for l in r.landed {
+                guard let st = l.proposal_status, let was = known[landedKey(l)], was != st else { continue }
+                add("proposal:\(landedKey(l)):\(st)", "proposal", "the proposal for \"\(l.title)\" is now \(st)", "it was \(was); you filed it from a weekly finding", .reader, "cluster", l.cluster)
+            }
+        }
+        for j in r.jobs where j.lastFailed {
+            guard let at = j.lastRun, at > ll.at else { continue }
+            // The error line says why; the last line is often an unrelated INFO.
+            let lines = j.logTail.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            let tail = lines.last(where: { $0.range(of: #"\b(ERROR|error|failed|panicked)\b"#, options: .regularExpression) != nil }) ?? lines.last
+            add("job:\(j.name):\(Int(at.timeIntervalSince1970))", "job", "\(j.title) failed \(ageText(r.now.timeIntervalSince(at))) ago",
+                tail.map { "its log says: \($0)" } ?? "exit was not zero; the log is empty", .flow)
+        }
+        if let run = r.runs.first, ll.week != run.week {
+            add("run:\(run.week)", "run", "the weekly review for \(run.week) named \(plural(run.items.count, "finding"))", "the weekly review ran", .reader, "run", run.week)
+        }
+        let newIds = Set(r.reconClusters.map(\.id)).subtracting(ll.clusterIds)
+        if !newIds.isEmpty, let at = r.reconAt {
+            add("recon:\(Int(at.timeIntervalSince1970))", "recon", "\(plural(newIds.count, "new cluster")) in the daily recon", "the daily recon joined new evidence", .reader)
+        }
+        for l in r.landed {
+            guard let at = parseDate(l.ts), at > ll.at else { continue }
+            add("landed:\(l.cluster):\(l.outcome)", "landed", "\(l.outcome): \(l.title)", "you answered it on the decision page", .landing)
+        }
+        if r.awaitingItems > ll.awaitingItems {
+            add("awaiting:\(r.runs.first?.week ?? "?"):\(r.awaitingItems)", "awaiting", "\(plural(r.awaitingItems - ll.awaitingItems, "more item")) waiting on you",
+                "the weekly review put them on a page", .reader)
+        }
+        // A move credited to a fix is news on its own; the rest is the 7-day
+        // window sliding, so it is one row, not one per mistake type.
+        var rose = 0, fell = 0
+        for e in r.effects {
+            guard let was = ll.slugLast7[e.slug], was != e.last7 else { continue }
+            if let fix = e.landing {
+                add("effect:\(e.slug):\(e.last7)", "effect", "\(e.slug): \(was) to \(e.last7) in the last 7 days", "credited to \(fix)", .landing, "slug", e.slug)
+            } else if e.last7 > was { rose += 1 } else { fell += 1 }
+        }
+        if rose + fell > 0 {
+            let day = ISO8601DateFormatter.string(from: r.now, timeZone: .current, formatOptions: [.withFullDate])
+            add("effects:\(day)", "effect", "\(plural(rose + fell, "mistake type")) moved in the last 7 days: \(rose) up, \(fell) down",
+                "the 7-day window moved; no fix in place explains these", .landing)
+        }
+        return out
     }
 
     /// Whether the weekly review is broken, from the strongest evidence first:
@@ -724,6 +831,11 @@ enum RecordBuilder {
     static func snapshotLook(_ r: Record) -> LastLook {
         LastLook(at: r.now, clusterIds: r.reconClusters.map(\.id), landed: r.landed.count,
                  awaitingItems: r.awaitingItems, week: r.runs.first?.week,
-                 slugLast7: Dictionary(r.effects.map { ($0.slug, $0.last7) }, uniquingKeysWith: { a, _ in a }))
+                 slugLast7: Dictionary(r.effects.map { ($0.slug, $0.last7) }, uniquingKeysWith: { a, _ in a }),
+                 liveIds: r.interventions.live_items?.map(\.id),
+                 proposalStatus: Dictionary(r.landed.compactMap { l in l.proposal_status.map { (landedKey(l), $0) } }, uniquingKeysWith: { a, _ in a }))
     }
+
+    /// One landing: a cluster id can come back in a later week, so the id alone is not unique.
+    static func landedKey(_ l: ReaderDoc.Landed) -> String { "\(l.cluster)@\(l.ts)" }
 }

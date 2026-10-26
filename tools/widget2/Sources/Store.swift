@@ -66,7 +66,32 @@ final class AppModel: ObservableObject {
     }
     /// Called when a surface closes: what the owner just saw becomes the
     /// baseline for the next "since you last looked".
-    func markLooked() { if let r = record { lastLook = RecordBuilder.snapshotLook(r) } }
+    func markLooked() {
+        guard let r = record else { return }
+        lastLook = RecordBuilder.snapshotLook(r)
+        // What was just seen is no longer unseen, so the menu bar count clears now
+        // rather than at the next read.
+        record?.since = Since(first: false, ago: 0, newClusters: 0, newLanded: 0, newAwaiting: 0, movedEffects: 0, newRun: false)
+    }
+
+    // MARK: change history
+
+    static let historyKey = "changeHistory"
+    /// Every change ever reported, newest first, capped. Kept locally, like the last look.
+    var changeHistory: [Change] {
+        get { defaults.data(forKey: Self.historyKey).flatMap { try? JSONDecoder().decode([Change].self, from: $0) } ?? [] }
+        set { defaults.set(try? JSONEncoder().encode(Array(newValue.prefix(500))), forKey: Self.historyKey) }
+    }
+    /// Adds this read's changes to the history, once each, keeping when each was first seen.
+    func recordChanges(_ cs: [Change]) {
+        guard !cs.isEmpty else { return }
+        var h = changeHistory
+        let known = Set(h.map(\.id))
+        let fresh = cs.filter { !known.contains($0.id) }
+        guard !fresh.isEmpty else { return }
+        h.insert(contentsOf: fresh, at: 0)
+        changeHistory = h
+    }
 
     /// One line per opening, kept locally so the keep-bar can count use.
     var openLogEnabled = true
@@ -206,6 +231,7 @@ final class AppModel: ObservableObject {
         switch f {
         case .ok(let s, let r, let at):
             record = RecordBuilder.build(status: s, reader: r, now: fixedNow ?? Date(), fetchedAt: at, lastLook: lastLook, verify: verify)
+            recordChanges(record?.since.changes ?? [])
             reading = .fresh(at)
         case .fail(let why):
             if case .fresh(let at) = reading, record != nil { reading = .stale(at, why) }
@@ -314,7 +340,7 @@ final class AppModel: ObservableObject {
             case .reader: readerCards().count
             case .landing: landingEffects().count
             case .flow: record?.cycles.count ?? 0
-            case .settings: 0
+            case .settings, .changes: 0
             }
         }()
         func move(_ d: Int) {
@@ -324,7 +350,7 @@ final class AppModel: ObservableObject {
             case .reader: reader.selected = clamp(reader.selected + d, n)
             case .landing: landing.selected = clamp(landing.selected + d, n)
             case .flow: flow.selected = clamp(flow.selected + d, n); flow.cycle = record?.cycles[safe: flow.selected]?.id
-            case .settings: break
+            case .settings, .changes: break
             }
         }
         switch key {
@@ -337,7 +363,7 @@ final class AppModel: ObservableObject {
             case .reader: let id = readerCards()[safe: reader.selected]?.cluster; reader.expanded = reader.expanded == id ? nil : id
             case .landing: landing.focus = landingEffects()[safe: landing.selected]?.slug
             case .flow: if let c = record?.cycles[safe: flow.selected] { flow.cycle = c.id; if let d = c.dive { open(d) } }
-            case .settings: break
+            case .settings, .changes: break
             }
         case "esc":
             switch pane {
@@ -346,7 +372,7 @@ final class AppModel: ObservableObject {
             case .reader: if reader.expanded != nil { reader.expanded = nil } else { reader = ReaderFilter() }
             case .landing: if landing.focus != nil { landing.focus = nil } else { landing = LandingFilter() }
             case .flow: flow = FlowFilter()
-            case .settings: break
+            case .settings, .changes: break
             }
         case "/": if pane == .flow { return false }; searchFocusToken += 1
         case "f":
@@ -355,7 +381,7 @@ final class AppModel: ObservableObject {
             case .patterns: if let c = record?.patternsByCategory.keys.sorted().first { toggle(&patterns.cats, c) }
             case .reader: toggle(&reader.kinds, "structural-need")
             case .landing: toggle(&landing.groups, "worsening")
-            case .flow, .settings: return false
+            case .flow, .settings, .changes: return false
             }
         default: return false
         }

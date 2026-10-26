@@ -76,6 +76,14 @@ enum Glossary {
             ("LAST", "How long ago a mistake of that type was last recorded."),
             ("CREDITED TO", "The fix that explains the move, \"too soon to credit\", or \"unattributed\"."),
         ]
+        case .changes: [
+            ("change", "Something i-dream did or noticed since you last closed the menu or this window, with what caused it."),
+            ("new", "Not seen yet: it arrived after your last look. The menu bar number counts these."),
+            ("went live", "A hint or nudge is now shown to sessions, either because you approved it or because its mistake kept coming back."),
+            ("proposal", "A proposal you filed from a weekly finding changed status, such as open to done."),
+            ("job failed", "A scheduled job's last run ended with an error; the cause is the last line of its log."),
+            ("moved", "A mistake type's count over the last 7 days changed, with the fix it is credited to, if any."),
+        ]
         case .settings: [
             ("idle time", "How long you must be away before the daemon runs a cycle."),
             ("usage guard", "Token limits used only when the account-wide usage gate is missing."),

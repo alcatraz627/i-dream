@@ -31,6 +31,7 @@ enum Probe {
 
         let suite = UserDefaults(suiteName: "dev.i-dream.bar.probe")!
         suite.removeObject(forKey: AppModel.lookKey)
+        suite.removeObject(forKey: AppModel.historyKey)
 
         guard case .ok(let status, let reader, let at) = AppModel.fetch(fixture: fixture) else {
             if case .fail(let why) = AppModel.fetch(fixture: fixture) { FileHandle.standardError.write(Data("probe: \(why)\n".utf8)) }
@@ -43,6 +44,7 @@ enum Probe {
             m.openLogEnabled = false
             m.openURL = { _ in }
             m.record = RecordBuilder.build(status: s, reader: r, now: now, fetchedAt: at, lastLook: m.lastLook, verify: verify)
+            m.recordChanges(m.record?.since.changes ?? [])
             m.reading = .fresh(at)
             return m
         }
@@ -71,7 +73,55 @@ enum Probe {
         m.markLooked()
         let m2 = model(status, reader)
         render(DropdownView(model: m2), appearance, out.appendingPathComponent("dropdown-relook-\(tag).png"))
+        let noise = m2.record!.since.changes
+        log.append(noise.isEmpty ? "PASS relook: nothing changed, no change reported" : "FAIL relook: nothing changed but it reports " + noise.map(\.text).joined(separator: "; "))
         log.append(m2.record!.since.first ? "FAIL since-last-look: second open still says first look" : "PASS since-last-look: second open compares (\(m2.record!.since.anything ? "something moved" : "nothing moved"))")
+
+        // One change of each kind against a made-up older look: each must
+        // become a row with a cause, the menu bar must count them, and each
+        // row must open where it happened.
+        let mc = model(status, reader)
+        var rc = mc.record!
+        let past = now.addingTimeInterval(-2 * 86400)
+        if !rc.landed.isEmpty {
+            rc.landed[0].ts = ISO8601DateFormatter().string(from: now.addingTimeInterval(-3600))
+            rc.landed[0].proposal_status = "done"
+        }
+        if !rc.jobs.isEmpty { rc.jobs[0].lastFailed = true; rc.jobs[0].lastRun = now.addingTimeInterval(-1800) }
+        let live = status.interventions.live_items ?? []
+        let look = LastLook(at: past, clusterIds: Array(rc.reconClusters.map(\.id).dropFirst()), landed: 0,
+                            awaitingItems: max(0, rc.awaitingItems - 1), week: "an older week",
+                            slugLast7: Dictionary(rc.effects.map { ($0.slug, $0.last7 + 1) }, uniquingKeysWith: { a, _ in a }),
+                            liveIds: live.dropFirst().map(\.id),
+                            proposalStatus: rc.landed.first.map { [RecordBuilder.landedKey($0): "open"] } ?? [:])
+        rc.since.changes = RecordBuilder.changes(rc, since: look, status: status)
+        rc.since.first = false
+        rc.since.ago = 2 * 86400
+        mc.record = rc
+        mc.recordChanges(rc.since.changes)
+        let kinds = Set(rc.since.changes.map(\.kind))
+        let wanted = ["hint", "proposal", "job", "run", "recon", "landed", "effect"] + (rc.awaitingItems > 0 ? ["awaiting"] : [])
+        for k in wanted {
+            log.append(kinds.contains(k) ? "PASS change \(k): \(rc.since.changes.first { $0.kind == k }!.text)" : "FAIL change \(k): no row for it")
+        }
+        log.append(rc.since.changes.allSatisfy { !$0.cause.isEmpty } ? "PASS change causes: every row says why" : "FAIL change causes: a row has no cause")
+        let face = StatusFace.title(rc, reading: mc.reading).string
+        log.append(face.contains("\(rc.since.changes.count) new") ? "PASS menu bar: reads \"\(face.trimmingCharacters(in: .whitespaces))\"" : "FAIL menu bar: reads \"\(face)\", not the \(rc.since.changes.count) unseen changes")
+        for c in rc.since.changes {
+            let d = model(status, reader)
+            var opened = false
+            d.openDashboard = { opened = true }
+            d.open(c.dive)
+            log.append("\(opened && d.pane == c.dive.pane && scopeHolds(d, c.dive) ? "PASS" : "FAIL") change \"\(c.kind)\" -> \(c.dive.pane.title) \(describe(c.dive.scope))")
+        }
+        renderStatusItem(rc, mc.reading, appearance, out.appendingPathComponent("status-item-changes-\(tag).png"))
+        render(DropdownView(model: mc, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-changes-\(tag).png"))
+        mc.pane = .changes
+        render(DashboardView(model: mc, fullHeight: true), appearance, out.appendingPathComponent("dash-changes-fixture-\(tag).png"), width: 1280)
+        mc.markLooked()
+        log.append(StatusFace.title(mc.record, reading: mc.reading).string.contains("new") ? "FAIL menu bar: count stays after the owner looked" : "PASS menu bar: count clears once looked")
+        // Put back the baseline the later renders compare against.
+        m.markLooked()
 
         // Every dropdown row is a dive, scoped to its entity.
         let rec = m.record!
@@ -87,7 +137,7 @@ enum Probe {
         // Dashboard panes at full height.
         render(PaneHeader(pane: .settings, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
                appearance, out.appendingPathComponent("terms-settings-\(tag).png"), width: 1000)
-        for p in [Pane.flow, .ledger, .patterns, .reader, .landing] {
+        for p in [Pane.flow, .ledger, .patterns, .reader, .landing, .changes] {
             let d = model(status, reader)
             d.pane = p
             render(DashboardView(model: d, fullHeight: true), appearance, out.appendingPathComponent("dash-\(p.rawValue)-\(tag).png"), width: 1280)

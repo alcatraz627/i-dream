@@ -1,7 +1,7 @@
 import AppKit
 
-/// The menu bar face: the sleep-wave glyph, the hours since the last cycle
-/// that produced something, and one dot only when something needs the owner.
+/// The menu bar face: the sleep-wave glyph, how many changes the owner has not
+/// seen yet, and one dot only when something needs the owner.
 enum StatusFace {
     /// Two stacked sine waves, the lower one fainter: a sleeper's breathing.
     /// A template image, so the menu bar tints it for dark, light and
@@ -41,9 +41,9 @@ enum StatusFace {
         return img
     }
 
-    /// The text beside the glyph. Quiet: the hours alone. Waiting on the
-    /// owner: an amber dot and the count of items. Broken: a red dot, and the
-    /// number is the age of what broke.
+    /// The text beside the glyph: the count of unseen changes, or nothing when
+    /// there are none. Then a red dot when something is broken, or an amber
+    /// dot and the count of items when something waits on the owner.
     static func title(_ r: Record?, reading: ReadingState) -> NSAttributedString {
         // The menu bar's own size, so the digits sit level with the neighbours.
         let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.menuBarFont(ofSize: 0).pointSize, weight: .regular)
@@ -60,15 +60,13 @@ enum StatusFace {
             if case .unavailable = reading { text(" —") } else if case .failed = reading { text(" !") }
             return out
         }
-        let broken = r.statusSev == .bad
-        if broken {
-            let age: TimeInterval? = !r.daemonRunning ? r.lastCycle.map { r.now.timeIntervalSince($0) } : r.dead.first?.writtenAge
-            text(" " + (age.map { "\(max(1, Int($0 / 86400)))d" } ?? "—") + " ")
+        let n = r.since.changes.count
+        if n > 0 { text(" \(n) new") }
+        if r.statusSev == .bad {
+            text(" ")
             pip(.systemRed)
             return out
         }
-        let h = r.hoursSinceProductive
-        text(" " + (h.map { $0 < 48 ? "\(Int($0))h" : "\(Int($0 / 24))d" } ?? "—"))
         if r.awaitingItems > 0 {
             text(" ")
             pip(NSColor(srgbRed: 0.85, green: 0.64, blue: 0.11, alpha: 1))
@@ -80,6 +78,7 @@ enum StatusFace {
     static func tooltip(_ r: Record?) -> String {
         guard let r else { return "i-dream" }
         var parts = ["last productive cycle " + ageText(r.lastProductive.map { r.now.timeIntervalSince($0) }) + " ago"]
+        if !r.since.changes.isEmpty { parts.insert("\(plural(r.since.changes.count, "change")) since you last looked", at: 0) }
         if r.awaitingItems > 0 { parts.append("\(plural(r.awaitingItems, "item")) waiting on you") }
         if !r.dead.isEmpty { parts.append("\(plural(r.dead.count, "dead source"))") }
         if !r.daemonRunning { parts.append("daemon \(r.daemonWord)") }

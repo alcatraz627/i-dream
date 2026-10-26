@@ -295,9 +295,23 @@ struct DropdownView: View {
         if s.movedEffects > 0 { parts.append(plural(s.movedEffects, "effect") + " moved") }
         let lead = s.first ? "FIRST LOOK" : "SINCE YOU LAST LOOKED, \(ageText(s.ago).uppercased()) AGO"
         let body = s.first ? "nothing to compare yet; the next open compares against this one" : (parts.isEmpty ? "nothing moved" : parts.joined(separator: " · "))
-        return HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(lead).font(F.label).tracking(0.6).foregroundStyle(P.fg3)
-            Text(body).font(F.meta).foregroundStyle(s.anything ? P.fg : P.fg2).fixedSize(horizontal: false, vertical: true)
+        let shown = s.changes.prefix(4)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(lead).font(F.label).tracking(0.6).foregroundStyle(P.fg3)
+                if s.changes.isEmpty {
+                    Text(body).font(F.meta).foregroundStyle(s.anything ? P.fg : P.fg2).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            ForEach(Array(shown)) { c in
+                ChangeRow(change: c, now: r.now, unseen: true) { model.open($0) }
+            }
+            if s.changes.count > shown.count {
+                Button { model.open(Dive(pane: .changes)) } label: {
+                    Text("and \(s.changes.count - shown.count) more · open Changes").font(F.meta).foregroundStyle(P.teal)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(.horizontal, 14).padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
