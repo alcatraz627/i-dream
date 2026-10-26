@@ -127,9 +127,8 @@ struct SearchPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(P.fg3)
-                TextField("search everything: a pattern, slug, proposal, session, any word", text: $model.globalSearch.query)
+                TextField("search everything: a pattern, slug, proposal, session, any word", text: query)
                     .textFieldStyle(.plain).font(F.body).focused($focused)
-                    .onChange(of: model.globalSearch.query) { _, _ in model.globalSearch.selected = 0; model.globalSearch.detail = nil }
                 Text(indexNote).font(F.mono).foregroundStyle(P.fg3)
             }
             .padding(12)
@@ -157,10 +156,23 @@ struct SearchPanel: View {
             }
         }
         .frame(width: 720)
-        .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
+        // Opaque: the pane underneath must not show through the results.
+        .background(RoundedRectangle(cornerRadius: 10).fill(P.side))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(P.hair))
         .shadow(radius: 18)
         .onAppear { focused = true }
+    }
+
+    /// Typing starts a fresh search: the selection goes to the top and an open card closes.
+    private var query: Binding<String> {
+        // The field writes its value back when it takes focus; only a real edit resets.
+        Binding(get: { model.globalSearch.query }, set: { q in
+            guard q != model.globalSearch.query else { return }
+            model.globalSearch.query = q
+            model.globalSearch.selected = 0
+            model.globalSearch.detail = nil
+            model.globalSearch.trail = []
+        })
     }
 
     private var indexNote: String {
