@@ -28,8 +28,10 @@ Everything on screen is one of these stages, with how fresh it is.
 | Constellation | the pattern graph; decoration at this size, click it to open Patterns |
 | Biggest movers | which recurring mistakes went up or down this week |
 | Signals → Reader → Landing | the loop's three stages with counts |
-| Schedule | the three jobs; **Run now** starts one, **Later** holds it |
+| Schedule | the three jobs, each with a one-line description; **Run early** starts one ahead of schedule, **Later** holds it |
 | You | items needing a decision, such as a gate candidate (a mistake that keeps repeating despite hints and probably needs a blocking hook) |
+| System | i-dream's own health; nothing there needs you unless You says so, and the note says when failing outcomes are re-checked |
+| Quiet | things worth knowing that need nothing from you |
 
 ## The dashboard (the minutes view)
 
@@ -40,6 +42,21 @@ Open it from the dropdown's footer. Five panes, in the order you'd use them:
 - **Patterns** is the pattern map. It is browsable, but it is i-dream's working memory, not something you need to act on.
 - **Reader** holds past weekly runs and their evidence. Use it when you want to know why a finding appeared.
 - **Landing** is the long answer to "is any of this working": every named finding, where it landed, and a table of every mistake with last week vs this week. A `↘` with a negative number is a mistake easing.
+
+## Getting around
+
+Each pane says what it is in one line; "about this view" beside the title explains the rest and defines its words. Under Lists, every kind of item has its own searchable list (changes, proposals, hints and nudges, intentions, insights, sessions, evidence, armed gates, cycles and runs). Open a row to see its facts, the ids it points at as links, and an Open in Claude line that copies a ready prompt.
+
+| Key | Does |
+|---|---|
+| ⌘K | search everything |
+| ⌘1 to ⌘5 | Flow, Ledger, Patterns, Reader, Landing |
+| ⌘[ | back |
+| j / k | move |
+| return / esc | open / close |
+| / | search this pane |
+
+The menu bar number counts changes you have not seen yet; the dropdown lists each with its cause. Details: `docs/38-dashboard-power-user.md`.
 
 ## Words you'll see
 

@@ -362,7 +362,7 @@ struct FlowPane: View {
                   ["gates armed from your answers", "\(r.interventions.live) live nudges overall"],
                   Dive(pane: .landing))
             stage("ruler", "Effect", r.effects.filter { $0.delta != 0 }.count, "moved, not measured",
-                  age: 7 * 86400, [r.recordingNote, "a real measure waits on the before/after design"],
+                  age: 7 * 86400, [r.recordingShort, "a real measure waits on the before/after design"],
                   Dive(pane: .landing))
         }
     }
@@ -404,7 +404,17 @@ struct FlowPane: View {
                     Dot(color: c.produced ? P.green : P.fg3)
                     Text(c.produced ? "produced" : "idle").font(F.meta).foregroundStyle(P.fg2)
                 }
-                ForEach(c.lines, id: \.self) { Text($0).font(F.mono).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true) }
+                // Each line is "label   value"; the gap marks where the label ends.
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 2) {
+                    ForEach(c.lines, id: \.self) { l in
+                        let cut = l.range(of: "  ")
+                        GridRow {
+                            Text(cut.map { String(l[..<$0.lowerBound]) } ?? "").font(F.meta).foregroundStyle(P.fg3)
+                            Text(cut.map { String(l[$0.upperBound...]).trimmingCharacters(in: .whitespaces) } ?? l)
+                                .font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
                 if let d = c.dive {
                     Button("Open this run in Reader") { model.open(d) }.buttonStyle(.plain).font(F.meta).foregroundStyle(P.blue)
                 }

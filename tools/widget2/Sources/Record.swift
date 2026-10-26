@@ -328,6 +328,12 @@ struct Record {
     var sourceAhead = false
     /// Atone recordings per ISO week, oldest first.
     var atoneWeeks: [StatusDoc.AtoneWeek] = []
+    /// When failing outcomes are next re-judged: the daily reader run. Saying
+    /// when keeps a red row from reading as a chore for the owner.
+    var nextRecheck: Date? {
+        jobs.first { $0.name.hasSuffix("reader-daily") }.flatMap { $0.held ?? $0.next }
+    }
+
     /// Why effect is not measured, in numbers from the atone log rather than a
     /// date written into the source.
     var recordingNote: String {
@@ -336,6 +342,13 @@ struct Record {
         }
         let span = "\(atoneWeeks.first!.week) to \(atoneWeeks.last!.week)"
         return "effect is not measured: weekly moves count atone recordings, which ranged from \(lo) to \(hi) a week over \(span) (\(atoneWeeks.map { String($0.count) }.joined(separator: " · ")))"
+    }
+    /// The same reason in one short line, for places too small for the numbers.
+    var recordingShort: String {
+        guard let lo = atoneWeeks.map(\.count).min(), let hi = atoneWeeks.map(\.count).max() else {
+            return "weekly moves count atone recordings, not mistakes"
+        }
+        return "atone recordings swing from \(lo) to \(hi) a week on their own"
     }
     var cycles: [CycleMark]
     var cycleFields: [StatusCycleFields]
@@ -775,13 +788,11 @@ enum RecordBuilder {
         // A failing outcome that names a dead source says the same thing twice;
         // the source row carries the age and the fix, so it alone is shown.
         let deadIds = Set(r.dead.map(\.id))
-        // Outcomes are re-judged on the next daily run; saying when keeps a red
-        // row from reading as a chore for the owner.
-        let nextDaily = r.jobs.first { $0.name.hasSuffix("reader-daily") }.flatMap { $0.held ?? $0.next }
-        let retry = nextDaily.map { " · re-checked on its own \(whenText($0, r.now))" } ?? ""
+        // When outcomes are re-judged is said once, in the System note
+        // (Record.nextRecheck), not on every red row.
         for c in r.failingOutcomes where !deadIds.contains(c.row) {
             rows.append(Row(id: "outcome-" + c.row, icon: "exclamationmark.triangle", title: "\(c.row) outcome is failing",
-                            detail: c.detail + retry, sev: .bad, dive: Dive(pane: .flow)))
+                            detail: c.detail, sev: .bad, dive: Dive(pane: .flow)))
         }
         for src in r.dead {
             rows.append(Row(id: "src-" + src.id, icon: src.icon, title: "\(src.id) is dead", detail: src.fix ?? src.reason,
@@ -824,7 +835,7 @@ enum RecordBuilder {
         var rows: [Row] = []
         if !r.worsening.isEmpty || !r.improving.isEmpty {
             rows.append(Row(id: "effect-unmeasured", icon: "ruler", title: "Effect not measured yet",
-                            detail: r.recordingNote + ", so they are not shown as trends",
+                            detail: r.recordingShort + ", so moves are not shown as trends",
                             sev: .none, dive: Dive(pane: .landing), dim: true))
         }
         if r.sourceAhead {

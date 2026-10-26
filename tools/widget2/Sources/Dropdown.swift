@@ -71,11 +71,11 @@ struct DropdownView: View {
     private func groups(_ r: Record) -> some View {
         VStack(alignment: .leading, spacing: 0) {
                 // Whether anything needs the owner is the first answer, above
-                // the schedule's Run now buttons, which are optional.
+                // the schedule's Run early buttons, which are optional.
                 group("You", r.you, empty: "Nothing waits on you. i-dream runs on its own schedule.", emptyProminent: true)
                 schedule(r)
                 group("System", r.system, empty: "nothing wrong",
-                      note: "i-dream's own health. It catches up on its next run; nothing here needs you unless You above says so.")
+                      note: "i-dream's own health. Failing outcomes are re-checked on their own \(r.nextRecheck.map { whenText($0, r.now) } ?? "at the next run"); nothing here needs you unless You above says so.")
                 group("Quiet", r.quiet, empty: nil)
                 if !r.checks.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
@@ -220,7 +220,7 @@ struct DropdownView: View {
                 Text("\(when) · \(last)").font(F.meta).foregroundStyle(j.lastFailed && !running ? P.red : P.fg2)
                     .fixedSize(horizontal: false, vertical: true)
                 // What the job does is what tells a newcomer it runs by itself;
-                // without it, the probe's first-look check reads Run now as a chore.
+                // without it, the probe's first-look check reads the run button as a chore.
                 Text(j.what).font(F.meta).foregroundStyle(P.fg3).lineLimit(open ? nil : 1).truncationMode(.tail)
                     .fixedSize(horizontal: false, vertical: open)
                 if open { jobDetail(j) }

@@ -28,10 +28,10 @@ Goal, as the decision the owner leaves with: glance at any surface and know what
 | ID | Rule | Check |
 |---|---|---|
 | D-COPY-01 | Every pane and list subtitle is one sentence, at most 90 characters; anything longer moves into the `?` term list | probe line over the subtitle table |
-| D-COPY-02 | Open in Claude shows as a label with Copy and Show; the command text appears only after Show | OCR of opened-row and detail renders |
-| D-COPY-03 | Opened rows show fields as aligned label/value lines, not " · " strings | OCR of opened-row render |
-| D-TYPE-01 | Monospace only for ids, paths, commands, ages and counts | `checks/readability.sh` enumerates allowed sites, exits non-zero on others |
-| D-DROP-01 | A closed dropdown row is at most two lines | probe OCR line count per job row |
+| D-COPY-02 | Open in Claude shows as a label with Copy and Show; the command text appears only after Show | probe `folded-*` OCR lines on detail-patterns, detail-ledger, dash-hints, search-detail |
+| D-COPY-03 | Opened rows show fields as aligned label/value lines, not " · " strings | render review; `FieldLines.restates` checked by the validator against 5,739 live entries |
+| D-TYPE-01 | Monospace only for ids, paths, commands, ages and counts | `checks/readability.sh` (run by probe.sh) enumerates allowed sites, exits non-zero on others |
+| D-DROP-01 | A closed dropdown job row is at most three lines: title, status, and its description clipped to one line; the run button reads "Run early" (relaxed from two lines: hiding the description made the first-look check read the button as a chore, see docs/38) | first-look check reads NOTHING; render review |
 | D-ERGO-01 | ⌘1 to ⌘5 jump to the five panes (additive; nothing existing rebinds) | probe key lines |
 | D-PARITY | Every row of the table above still passes | probe 0 FAIL dark+light |
 
@@ -45,6 +45,6 @@ Goal, as the decision the owner leaves with: glance at any surface and know what
 ## Hand-off
 
 - Executor: `/bloop`, validator attack list = the D-* rows verbatim.
-- Evidence: validator report under `.claude/output/` and its path recorded here.
+- Evidence: validator report .claude/output/20261027-readability-validation/validator.md (ISSUES-FOUND; fixed in the follow-up commit).
 - Commit scope: `tools/widget2/Sources/*.swift`, `tools/widget2/probe.sh`, `tools/widget2/checks/readability.sh`, `src/index.rs` (detail fields), docs/38. Scoped `git add` only.
 - Files are held by this session only.

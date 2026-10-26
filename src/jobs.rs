@@ -1,6 +1,6 @@
 //! Running i-dream's scheduled jobs early or late.
 //!
-//! The jobs themselves live in the gcc scheduler. "Run now" runs one through
+//! The jobs themselves live in the gcc scheduler. "Run early" runs one through
 //! `gcc-schedule run`, so the run is recorded like a scheduled fire. "Later"
 //! puts a hold on the job, which makes its regular fire stand down, and adds a
 //! one-shot gcc job that runs it at the chosen time. Holds live in

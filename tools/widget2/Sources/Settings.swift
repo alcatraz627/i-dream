@@ -598,7 +598,7 @@ struct AllSettingsTab: View {
     private func row(_ name: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(name).font(F.meta).foregroundStyle(P.fg2).frame(width: 190, alignment: .leading)
-            Text(value).font(F.mono).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
+            Text(value).font(value.contains(" ") ? F.meta : F.mono).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
         }

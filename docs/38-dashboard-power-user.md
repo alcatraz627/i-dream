@@ -32,9 +32,15 @@ The plan these slices built is `.claude/output/20261026-dashboard-inventory/plan
 
 - The daemon journals only consolidation passes that read something, so Cycles and runs holds fewer cycles than the daemon's own count.
 - Evidence rows and atone events open as rows in the Evidence list, not in a separate sheet.
-- The Patterns, Ledger and Landing rows and the dropdown's job rows have no Open in Claude line; the dropdown keeps its by-hand commands.
+- The dropdown's job rows have no Open in Claude line; they keep their by-hand commands.
 - Armed gates is empty because no weekly answer has armed a hook yet.
 
 ## The first-look check was right
 
 The first-look check, where a small local vision model reads the dropdown as a newcomer would, failed twice during this work. It was first written off as the model flipping on an unchanged image. It was not: both failing images showed a row the passing ones did not, "The daemon runs an older build than the source", which appears whenever i-dream's source is newer than the installed build. That row had no owner and no next step while "You" said nothing waited, so a newcomer read "Run now" as the fix. Re-rendering the same state with only that row removed turned the answer from ACTION to NOTHING. The row now says plainly that a change to i-dream is in progress and sits under Quiet; a daemon that has not restarted onto the installed build keeps its own warning. The probe now runs the first-look check on that state too.
+
+## Reading at a glance
+
+Every pane says what it is in one line under its title. The longer explanation sits behind "about this view", above the terms. Opened items list their facts as a label beside a value, and skip what the row's own columns already show. The Open in Claude prompt stays folded behind "show command", and a run's log shows its first eight lines with the rest one click away. Monospace is kept for ids, paths, commands, log lines and number columns; `tools/widget2/checks/readability.sh`, which the probe runs, fails on any other use until it is added to the reviewed list beside it. The probe also reads four opened items and fails if one prints the Claude prompt instead of "show command". In the menu, the System note says once when failing outcomes are next re-checked, rather than every red row repeating it, and the effect rows give the reason in one line, with the weekly numbers kept in Landing. ⌘1 to ⌘5 open Flow, Ledger, Patterns, Reader and Landing from anywhere in the dashboard.
+
+The menu's job rows were meant to shrink to two lines. They keep a third, the job's description clipped to one line, and the button reads "Run early" rather than "Run now". With the descriptions hidden, the first-look check read the same menu as "Run Daily dreaming now" in dark; restoring them alone was not enough either, because a five-minute change in two ages flipped the reading back. "Run early" says the button is optional, and the check has read NOTHING on all three renders since, on data that failed before.

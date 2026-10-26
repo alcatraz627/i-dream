@@ -12,7 +12,7 @@ enum Copy {
         case .ledger: ("Every input stream, when it was last written and when it was last read.",
                        "Lanes are the streams the daemon measures; domains are the ones the reader reads. A row older than twice its cadence is dimmed.")
         case .patterns: ("The strongest patterns, placed by category and linked by associations.",
-                         "Stars are sized and lit by strength. Hover a star to probe it, click to open it, drag to pan, pinch to zoom.")
+                         "Stars are placed by category, sized and lit by strength. Hover a star to probe it, click to open it, drag to pan, pinch to zoom.")
         case .reader: ("What the reader found: the daily recon and the findings each weekly run named.",
                        "The daily recon joins every stream without a model; the weekly run names the strongest clusters and puts them on a page for you. Click a run to load it, and a card to open its evidence.")
         case .landing: ("Where each finding went, and whether anything moved after.",
@@ -35,7 +35,7 @@ enum Copy {
                      "Retired jobs are included, each run with its outcome, exit code and its own lines from the job's log. Passes that read nothing are not journaled, so there are fewer passes than the daemon's cycle count.")
         case .gates: ("Hooks your answers on a weekly page switched on.",
                       "They block; the hints and nudges beside them only advise.")
-        case .settings: ("Controls change what i-dream does; All settings shows the rest.", nil)
+        case .settings: ("Controls change what i-dream does; All settings shows the rest, read-only.", nil)
         }
     }
 }

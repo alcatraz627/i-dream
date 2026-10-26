@@ -246,7 +246,7 @@ struct IdChip: View {
     var body: some View {
         HStack(spacing: 3) {
             Button { model.openId(id) } label: {
-                Text(label ?? id).font(.system(size: 9.5 * F.k, design: .monospaced)).foregroundStyle(P.blue).lineLimit(1)
+                Text(label ?? id).font(.system(size: 9.5 * F.k, design: label == nil ? .monospaced : .default)).foregroundStyle(P.blue).lineLimit(1)
             }
             .buttonStyle(.plain)
             .help("open \(id)")

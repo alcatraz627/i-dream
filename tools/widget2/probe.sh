@@ -89,5 +89,22 @@ hints|cited|no scan has judged it
 gates|armed gate|Unlike a hint, it acts
 TERMS
 fi
+# Folded: an opened item offers the Open in Claude prompt behind "show
+# command" and never prints it until asked.
+if command -v lm >/dev/null; then
+  for shot in detail-patterns detail-ledger dash-hints search-detail; do
+    for ap in dark light; do
+      txt="$(lm see "$OUT/$shot-$ap.png" --ocr < /dev/null | tr '\n' ' ' | tr -s ' ')"
+      if printf '%s' "$txt" | rg -qiF "show command" && ! printf '%s' "$txt" | rg -qiF "Look into this"; then
+        echo "PASS folded-$shot-$ap: Open in Claude shows 'show command', not the prompt" | tee -a "$OUT/first-look.txt"
+      else
+        echo "FAIL folded-$shot-$ap: the prompt is printed, or 'show command' is missing" | tee -a "$OUT/first-look.txt"
+        fails=$((fails + 1))
+      fi
+    done
+  done
+fi
+# Prose set in monospace reads as a blob; every monospace use is on a reviewed list.
+bash "$HERE/checks/readability.sh" | tee -a "$OUT/first-look.txt" || fails=$((fails + 1))
 echo "probe: $fails FAIL lines; see $OUT/drive-dark.txt, $OUT/drive-light.txt and $OUT/first-look.txt"
 exit "$fails"
