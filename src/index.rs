@@ -227,10 +227,11 @@ fn intentions(home: &Path, out: &mut Vec<Entry>) {
         let fired = i.get("fire_count").and_then(|v| v.as_u64()).unwrap_or(0);
         let max = i.get("max_fires").and_then(|v| v.as_u64()).unwrap_or(0);
         let source = i.pointer("/action/source").and_then(|v| v.as_str()).unwrap_or_default();
+        let title = if msg.is_empty() { format!("intention with no message ({})", keywords.join(", ")) } else { msg };
         let mut e = entry(
             "intention",
             id,
-            msg,
+            title,
             format!("keywords {} · fired {fired} of {max} · from {source}", keywords.join(", ")),
         );
         e.at = i.get("created").and_then(|v| v.as_str()).and_then(parse_ts);

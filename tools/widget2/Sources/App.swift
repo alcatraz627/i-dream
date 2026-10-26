@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
             guard let self, let w = self.window, e.window === w else { return e }
             let typing = w.firstResponder is NSText
-            if e.modifierFlags.contains(.command), e.charactersIgnoringModifiers == "k" { self.model.toggleSearch(); return nil }
+            if e.modifierFlags.intersection([.command, .shift, .option, .control]) == .command, e.charactersIgnoringModifiers == "k" { self.model.toggleSearch(); return nil }
             if self.model.globalSearch.open { return self.model.searchKey(e.keyCode) ? nil : e }
             let key: String? = e.keyCode == 53 ? "esc" : e.keyCode == 36 ? "\r" : e.charactersIgnoringModifiers
             guard let key, e.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return e }

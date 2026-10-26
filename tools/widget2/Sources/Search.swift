@@ -6,9 +6,23 @@ struct IndexDoc: Decodable {
     var generated: String
     var counts: [String: Int]
     var entries: [IndexEntry]
+
+    private enum CodingKeys: String, CodingKey { case generated, counts, entries }
+
+    /// One row per item: a finding named in several weekly runs, or an
+    /// evidence row read on several days, keeps its newest copy.
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        generated = try c.decode(String.self, forKey: .generated)
+        counts = try c.decode([String: Int].self, forKey: .counts)
+        let all = try c.decode([IndexEntry].self, forKey: .entries)
+        var newest: [String: Int] = [:]
+        for (i, e) in all.enumerated() where (newest[e.uid].map { (all[$0].at ?? "") < (e.at ?? "") } ?? true) { newest[e.uid] = i }
+        entries = all.enumerated().filter { newest[$0.element.uid] == $0.offset }.map(\.element)
+    }
 }
 
-struct IndexEntry: Decodable, Identifiable, Equatable {
+struct IndexEntry: Decodable, Equatable {
     var kind: String
     var id: String
     var title: String
@@ -17,7 +31,23 @@ struct IndexEntry: Decodable, Identifiable, Equatable {
     var related: [String]?
     /// Unique across kinds: a slug and a hint can share an id.
     var uid: String { kind + ":" + id }
-    var haystack: String { (id + " " + title + " " + detail).lowercased() }
+    /// Lowercased once at load, since every keystroke searches every row.
+    private(set) var haystack = ""
+    private(set) var titleLow = ""
+
+    private enum CodingKeys: String, CodingKey { case kind, id, title, detail, at, related }
+
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        kind = try c.decode(String.self, forKey: .kind)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        detail = try c.decode(String.self, forKey: .detail)
+        at = try c.decodeIfPresent(String.self, forKey: .at)
+        related = try c.decodeIfPresent([String].self, forKey: .related)
+        titleLow = title.lowercased()
+        haystack = (id + " " + title + " " + detail).lowercased()
+    }
 }
 
 /// The ⌘K search: what is typed, which result is selected, and the item
@@ -42,16 +72,15 @@ enum SearchIndex {
     static func results(_ doc: IndexDoc?, _ query: String) -> [(kind: String, shown: [IndexEntry], total: Int)] {
         let words = query.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
         guard let doc, !words.isEmpty else { return [] }
-        let hits = doc.entries.filter { e in let h = e.haystack; return words.allSatisfy { h.contains($0) } }
+        let hits = doc.entries.filter { e in words.allSatisfy { e.haystack.contains($0) } }
         let byKind = Dictionary(grouping: hits, by: \.kind)
         return kinds.compactMap { k in
             guard let all = byKind[k], !all.isEmpty else { return nil }
-            let sorted = all.sorted { a, b in
-                let ta = words.allSatisfy { a.title.lowercased().contains($0) }
-                let tb = words.allSatisfy { b.title.lowercased().contains($0) }
-                if ta != tb { return ta }
-                return (a.at ?? "") > (b.at ?? "")
-            }
+            let keyed = all.map { e in (e, words.allSatisfy { e.titleLow.contains($0) }) }
+            let sorted = keyed.sorted { a, b in
+                if a.1 != b.1 { return a.1 }
+                return (a.0.at ?? "") > (b.0.at ?? "")
+            }.map(\.0)
             return (k, Array(sorted.prefix(perKind)), all.count)
         }
     }
@@ -129,7 +158,7 @@ struct SearchPanel: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(P.fg3)
                 TextField("search everything: a pattern, slug, proposal, session, any word", text: query)
                     .textFieldStyle(.plain).font(F.body).focused($focused)
-                Text(indexNote).font(F.mono).foregroundStyle(P.fg3)
+                Text(indexNote).font(F.mono).foregroundStyle(model.indexError != nil && model.index == nil ? P.amber : P.fg3).lineLimit(1).fixedSize()
             }
             .padding(12)
             .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
@@ -141,13 +170,12 @@ struct SearchPanel: View {
                         ForEach(groups, id: \.kind) { g in
                             Text("\(g.kind)s · \(g.total)\(g.total > g.shown.count ? ", first \(g.shown.count) shown" : "")".uppercased())
                                 .font(F.label).tracking(0.6).foregroundStyle(P.fg3).padding(.top, 8).padding(.horizontal, 12)
-                            ForEach(g.shown) { e in
+                            ForEach(g.shown, id: \.uid) { e in
                                 resultRow(e, selected: flat.firstIndex(of: e) == model.globalSearch.selected)
                             }
                         }
                         if groups.isEmpty {
-                            Text(model.globalSearch.query.isEmpty ? "Type any part of anything. ↑ ↓ move, return opens, esc closes." : "nothing matches every word")
-                                .font(F.meta).foregroundStyle(P.fg3).padding(12)
+                            Text(emptyText).font(F.meta).foregroundStyle(P.fg3).lineLimit(4).padding(12)
                         }
                     }
                     .padding(.bottom, 8)
@@ -163,6 +191,11 @@ struct SearchPanel: View {
         .onAppear { focused = true }
     }
 
+    private var emptyText: String {
+        if model.index == nil, let e = model.indexError { return "The index could not be read, so there is nothing to search: \(e.prefix(200))" }
+        return model.globalSearch.query.isEmpty ? "Type any part of anything. ↑ ↓ move, return opens, esc closes." : "nothing matches every word"
+    }
+
     /// Typing starts a fresh search: the selection goes to the top and an open card closes.
     private var query: Binding<String> {
         // The field writes its value back when it takes focus; only a real edit resets.
@@ -176,7 +209,7 @@ struct SearchPanel: View {
     }
 
     private var indexNote: String {
-        guard let i = model.index else { return model.indexError ?? "reading the index…" }
+        guard let i = model.index else { return model.indexError == nil ? "reading the index…" : "index unavailable" }
         return "\(i.entries.count.formatted()) items"
     }
 

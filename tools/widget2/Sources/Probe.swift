@@ -170,6 +170,24 @@ enum Probe {
                     let opened = ms.globalSearch.detail == e || ms.home(e) != nil
                     log.append(hit && opened ? "PASS search \(what): \"\(words)\" finds and opens \(e.id)" : "FAIL search \(what): \"\(words)\" found=\(hit) opened=\(opened)")
                 }
+                // Items a pane already carries open in that pane, scoped to them.
+                let rec = ms.record!
+                let homes: [(String, Pane, (IndexEntry) -> Bool)] = [
+                    ("pattern", .patterns, { e in rec.patterns.contains { $0.id == e.id } }),
+                    ("finding", .reader, { e in rec.findings.contains { $0.cluster == e.id } }),
+                    ("slug", .landing, { e in rec.effects.contains { $0.slug == e.id } }),
+                    ("source", .ledger, { e in rec.sources.contains { $0.id == e.id } }),
+                ]
+                for (kind, pane, carried) in homes {
+                    guard let e = doc.entries.first(where: { $0.kind == kind && carried($0) }) else { log.append("FAIL search home \(kind): none carried by a pane"); continue }
+                    let h = model(status, reader); h.indexFixture = indexFile; h.loadIndex(sync: true)
+                    var opened = false
+                    h.openDashboard = { opened = true }
+                    h.globalSearch = GlobalSearch(open: true, query: e.id)
+                    h.openResult(e)
+                    let ok = opened && h.pane == pane && !h.globalSearch.open && h.home(e).map { scopeHolds(h, $0) } == true
+                    log.append(ok ? "PASS search home \(kind): return opens \(pane.title) at \(e.id)" : "FAIL search home \(kind): went to \(h.pane.title), search open=\(h.globalSearch.open)")
+                }
                 ms.pane = .reader
                 ms.globalSearch = GlobalSearch(open: true, query: "claim reading")
                 render(DashboardView(model: ms, fullHeight: false).frame(height: 760), appearance, out.appendingPathComponent("search-\(tag).png"), width: 1280)
