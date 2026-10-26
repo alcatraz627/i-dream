@@ -229,6 +229,19 @@ enum Probe {
                     log.append(bad.isEmpty ? "PASS chips on \(where_): all \(Set(ids).count) open a home or a card"
                                : "FAIL chips on \(where_): \(bad.count) of \(Set(ids).count) open only a search, e.g. \(bad.prefix(4).joined(separator: ", "))")
                 }
+                // Promote and demote call the CLI with the row's id, never live in a probe.
+                let flip = model(status, reader); flip.indexFixture = indexFile; flip.loadIndex(sync: true)
+                var calls: [[String]] = []
+                flip.runCLI = { calls.append($0); return (true, "✓ stubbed") }
+                if let h = doc.entries.first(where: { $0.kind == "hint" }) {
+                    flip.flipIntervention(h.id, promote: true)
+                    flip.flipIntervention(h.id, promote: false)
+                    Thread.sleep(forTimeInterval: 0.3)
+                    let want = [["promotions", "--promote", h.id], ["promotions", "--demote", h.id]]
+                    log.append(Set(calls.map { $0.joined(separator: " ") }) == Set(want.map { $0.joined(separator: " ") })
+                               ? "PASS flip: promote and demote run i-dream promotions with the row id"
+                               : "FAIL flip: ran \(calls)")
+                }
                 // Back returns to where the jump started.
                 let nav = model(status, reader); nav.indexFixture = indexFile; nav.loadIndex(sync: true)
                 nav.pane = .reader

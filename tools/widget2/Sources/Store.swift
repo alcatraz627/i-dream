@@ -67,10 +67,18 @@ final class AppModel: ObservableObject {
     private var indexAt: Date?
     /// The probe hands in a saved `index --json` instead of running the binary.
     var indexFixture: URL?
+    /// What the last promote or demote said, for the row it was on.
+    @Published var flipNote: (id: String, text: String, failed: Bool)?
+    /// Runs an `i-dream` subcommand; the probe swaps it so it never flips a live hint.
+    var runCLI: ([String]) -> (ok: Bool, out: String) = { args in
+        guard let bin = Runner.idreamBinary() else { return (false, "i-dream binary not found") }
+        let r = Runner.run(bin, args, timeout: 20)
+        return (r.ok, r.failure ?? String(decoding: r.out, as: UTF8.self))
+    }
 
     /// Reads `i-dream index --json`, at most once a minute.
-    func loadIndex(sync: Bool = false) {
-        if let at = indexAt, Date().timeIntervalSince(at) < 60, index != nil { return }
+    func loadIndex(sync: Bool = false, force: Bool = false) {
+        if !force, let at = indexAt, Date().timeIntervalSince(at) < 60, index != nil { return }
         let fixture = indexFixture
         let work = { () -> (doc: IndexDoc?, error: String?) in
             let data: Data

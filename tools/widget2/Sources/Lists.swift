@@ -13,16 +13,16 @@ struct ListSpec {
 
     static func of(_ p: Pane) -> ListSpec? {
         switch p {
-        case .proposals: ListSpec(kinds: ["proposal"], columns: ["status", "category"], chipColumn: "status",
-                                  sub: "Every proposal in the backlog. Those filed from a weekly finding link back to it from the finding.")
+        case .proposals: ListSpec(kinds: ["proposal"], columns: ["status", "category", "finding"], chipColumn: "status",
+                                  sub: "Every proposal in the backlog. Finding names the weekly finding you filed it from; the slug's movement after it shows on that finding's effect in Landing.")
         case .hints: ListSpec(kinds: ["hint", "nudge"], columns: ["state", "sessions", "cited", "promoted by"], chipColumn: "state",
-                              sub: "Every hint and nudge: its state, how many sessions were shown it, whether Claude cited it, and who made it live. Cited reads the firing scan; an item no scan has judged says not checked yet.")
+                              sub: "Every hint and nudge: its state, how many sessions were shown it, whether Claude cited it, and who made it live. Cited reads the firing scan; an item no scan has judged says not checked yet. Open a row to promote or demote it.")
         case .intentions: ListSpec(kinds: ["intention"], columns: ["fires", "cited", "keywords"], chipColumn: nil,
                                    sub: "Reminders a future session gets when its first prompt matches the keywords.")
         case .insights: ListSpec(kinds: ["insight"], columns: ["confidence", "cited", "intention"], chipColumn: nil,
                                  sub: "Associations the wake phase promoted to insights, with the intention each one produced.")
         case .sessions: ListSpec(kinds: ["session"], columns: ["shown", "cited"], chipColumn: nil,
-                                 sub: "Sessions i-dream showed something to: which items, and how many Claude cited. Open one for its transcript path.")
+                                 sub: "Sessions i-dream showed something to: which items, and how many Claude cited. Open one for its transcript path. Corrections and votes per session are not shown here yet.")
         case .evidence: ListSpec(kinds: ["evidence"], columns: ["domain", "by"], chipColumn: "domain",
                                  sub: "Every evidence row the latest daily recon read, not only the ones a finding cites.")
         case .gates: ListSpec(kinds: ["gate"], columns: ["week"], chipColumn: nil,
@@ -92,6 +92,19 @@ extension AppModel {
         let order = ["finding", "pattern", "slug", "source", "proposal", "hint", "nudge", "insight", "intention", "gate",
                      "session", "evidence", "association", "job"]
         return hits.min { (order.firstIndex(of: $0.kind) ?? 99) < (order.firstIndex(of: $1.kind) ?? 99) }
+    }
+
+    /// Flip a hint or nudge, then re-read the index so the row shows its new state.
+    func flipIntervention(_ id: String, promote: Bool) {
+        let args = ["promotions", promote ? "--promote" : "--demote", id]
+        let run = runCLI
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (ok, out) = run(args)
+            DispatchQueue.main.async {
+                self.flipNote = (id, ok ? out.trimmingCharacters(in: .whitespacesAndNewlines) : "could not flip: \(out)", !ok || out.contains("✗"))
+                self.loadIndex(force: true)
+            }
+        }
     }
 
     /// Back: the place before the last jump, ⌘[.
@@ -234,6 +247,7 @@ struct ListPane: View {
                 HStack(spacing: 6) { Text(t).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: t) }
             }
             HStack(spacing: 6) { Text("id").font(F.label).foregroundStyle(P.fg3); IdChip(model: model, id: e.id) }
+            if e.kind == "hint" || e.kind == "nudge" { flipControls(e) }
             if let rel = e.related, !rel.isEmpty {
                 SectionLabel(text: "points at")
                 WrapLayout(spacing: 4) {
@@ -252,6 +266,24 @@ struct ListPane: View {
             }
         }
         .padding(.leading, 4)
+    }
+
+    /// Promote to live or demote to shadow, through `i-dream promotions`.
+    private func flipControls(_ e: IndexEntry) -> some View {
+        let state = e.fields?["state"] ?? ""
+        return HStack(spacing: 10) {
+            if state != "live" {
+                Button { model.flipIntervention(e.id, promote: true) } label: { Label("Promote to live", systemImage: "arrow.up.circle").font(F.meta) }
+                    .buttonStyle(.plain).foregroundStyle(P.blue)
+            }
+            if state != "shadow" {
+                Button { model.flipIntervention(e.id, promote: false) } label: { Label("Demote to shadow", systemImage: "arrow.down.circle").font(F.meta) }
+                    .buttonStyle(.plain).foregroundStyle(P.blue)
+            }
+            if let n = model.flipNote, n.id == e.id {
+                Text(n.text).font(F.meta).foregroundStyle(n.failed ? P.red : P.fg2)
+            }
+        }
     }
 
     /// Items whose related ids name this one: the way back along a link.

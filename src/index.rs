@@ -47,7 +47,7 @@ pub fn gather(home: &Path) -> IndexDoc {
     patterns(home, &firings, &mut entries);
     reader(home, &mut entries);
     slugs(&mut entries);
-    proposals(home, &mut entries);
+    proposals(home, &filed_from(), &mut entries);
     sources(home, &mut entries);
     interventions(home, &firings, &mut entries);
     intentions(home, &firings, &mut entries);
@@ -292,7 +292,17 @@ fn slugs(out: &mut Vec<Entry>) {
     }
 }
 
-fn proposals(home: &Path, out: &mut Vec<Entry>) {
+/// Proposal id to the weekly finding it was filed from.
+fn filed_from() -> BTreeMap<String, String> {
+    crate::reader::all_runs()
+        .iter()
+        .flat_map(|r| r.landed.iter())
+        .filter(|l| l.outcome.contains("filed"))
+        .filter_map(|l| l.detail.clone().map(|p| (p, l.cluster.clone())))
+        .collect()
+}
+
+fn proposals(home: &Path, filed: &BTreeMap<String, String>, out: &mut Vec<Entry>) {
     for p in jsonl(&home.join(".claude/proposals.jsonl")) {
         let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         if s("id").is_empty() {
@@ -308,6 +318,10 @@ fn proposals(home: &Path, out: &mut Vec<Entry>) {
         e.at = parse_ts(&s("ts"));
         e.fields.insert("status", s("status"));
         e.fields.insert("category", s("category"));
+        if let Some(c) = filed.get(&s("id")) {
+            e.fields.insert("finding", c.clone());
+            e.related.push(c.clone());
+        }
         out.push(e);
     }
 }
@@ -456,7 +470,7 @@ mod tests {
         let mut out = vec![];
         let f = Firings::default();
         sessions(h, &f, &mut out);
-        proposals(h, &mut out);
+        proposals(h, &BTreeMap::new(), &mut out);
         intentions(h, &f, &mut out);
         let ids: Vec<(&str, &str)> = out.iter().map(|e| (e.kind, e.id.as_str())).collect();
         // Shadow rows are not "shown"; a proposal or intention without an id is skipped.
