@@ -275,6 +275,20 @@ enum Probe {
                     log.append(carded && !bk.globalSearch.open && bk.pane == .reader ? "PASS back: steps out of a search card first"
                                : "FAIL back: card=\(carded) search open=\(bk.globalSearch.open) pane=\(bk.pane.title)")
                 }
+                // Open in Claude: the copied line, parsed by a real shell, hands
+                // claude exactly the prompt, apostrophes and all.
+                let title = "it's the owner's \"quoted\" $HOME `x` case"
+                let cmd = OpenInClaude.command(kind: "proposal", id: "prop-x", title: title)
+                if let r = cmd.range(of: "claude ") {
+                    let sh = Process(); sh.executableURL = URL(fileURLWithPath: "/bin/sh")
+                    sh.arguments = ["-c", "printf '%s' " + String(cmd[r.upperBound...])]
+                    let pipe = Pipe(); sh.standardOutput = pipe
+                    try? sh.run(); sh.waitUntilExit()
+                    let got = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                    log.append(got.contains(title) && cmd.hasPrefix("cd ~/Code/Claude/i-dream && claude '")
+                               ? "PASS open in claude: the shell passes the prompt through unchanged"
+                               : "FAIL open in claude: shell read \(got.prefix(120))")
+                }
                 // Back returns to where the jump started.
                 let nav = model(status, reader); nav.indexFixture = indexFile; nav.loadIndex(sync: true)
                 nav.pane = .reader

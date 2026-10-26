@@ -461,6 +461,7 @@ struct ReaderPane: View {
                 SectionLabel(text: "proposed change")
                 Text("\(t): \(c)").font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
             }
+            OpenInClaudeRow(kind: "finding", id: f.cluster, title: f.title)
         }
         .padding(.top, 4)
         .overlay(alignment: .top) { Rectangle().fill(P.hair).frame(height: 0.5) }

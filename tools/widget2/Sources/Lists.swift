@@ -25,6 +25,8 @@ struct ListSpec {
                                  sub: "Sessions i-dream showed something to, and sessions evidence rows name: which items each was shown, and how many Claude cited once a scan judged it. Open one for its transcript path. Corrections and votes per session are not shown here yet.")
         case .evidence: ListSpec(kinds: ["evidence"], columns: ["domain", "by"], chipColumn: "domain",
                                  sub: "Every evidence row any kept daily recon read, newest copy of each, plus atone events older than those files. Open a row for the file it was read from.")
+        case .runs: ListSpec(kinds: ["run", "cycle"], columns: ["job", "outcome", "exit"], chipColumn: "outcome",
+                             sub: "Every scheduled run of an i-dream job, with its outcome and exit code, and every full daemon cycle with what it produced. A job's log file keeps only its latest run.")
         case .gates: ListSpec(kinds: ["gate"], columns: ["week"], chipColumn: nil,
                               sub: "Hooks your answers on a weekly page switched on, beside the hints and nudges that only advise.")
         default: nil
@@ -46,7 +48,7 @@ struct ListState: Equatable {
 }
 
 extension Pane {
-    static let lists: [Pane] = [.proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates]
+    static let lists: [Pane] = [.proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs]
 }
 
 extension AppModel {
@@ -132,6 +134,39 @@ extension AppModel {
         guard let id = lists[p]?.expanded, !head.contains(where: { $0.id == id }),
               let opened = rows.first(where: { $0.id == id }) else { return head }
         return [opened] + head
+    }
+}
+
+/// A shell line that starts a Claude session in the i-dream repo about one item.
+enum OpenInClaude {
+    static func command(kind: String, id: String, title: String) -> String {
+        let source: String = switch kind {
+        case "proposal": " It is in ~/.claude/proposals.jsonl; say whether it should be built and how."
+        case "hint", "nudge": " Its text and state are in ~/.claude/i-dream/interventions.json; say whether it should stay as it is."
+        case "finding": " It is a weekly reader finding; read its evidence and say what would fix it for good."
+        case "intention": " It is in ~/.claude/subconscious/intentions/registry.jsonl; say whether it still earns its place."
+        case "run", "cycle": " Read the job's log and say what happened and whether anything needs doing."
+        default: ""
+        }
+        let prompt = "Look into this i-dream \(kind) (\(id)): \(title.prefix(200)). Run i-dream index --json and read this id and the items it points at, then tell me what it means and what I should do about it.\(source)"
+        return "cd ~/Code/Claude/i-dream && claude '" + prompt.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+/// The copyable command, shown in full so the owner sees what will run.
+struct OpenInClaudeRow: View {
+    var kind: String
+    var id: String
+    var title: String
+    var body: some View {
+        let cmd = OpenInClaude.command(kind: kind, id: id, title: title)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                SectionLabel(text: "open in claude")
+                CopyButton(value: cmd)
+            }
+            Text(cmd).font(F.mono).foregroundStyle(P.fg3).lineLimit(3).textSelection(.enabled)
+        }
     }
 }
 
@@ -224,6 +259,7 @@ struct ListPane: View {
         case "cited": 190
         case "keywords": 180
         case "promoted by", "intention", "confidence": 110
+        case "job": 170
         case "category", "domain", "status", "state": 90
         default: 70
         }
@@ -269,6 +305,7 @@ struct ListPane: View {
             }
             HStack(spacing: 6) { Text("id").font(F.label).foregroundStyle(P.fg3); IdChip(model: model, id: e.id) }
             if e.kind == "hint" || e.kind == "nudge" { flipControls(e) }
+            OpenInClaudeRow(kind: e.kind, id: e.id, title: e.title)
             if let rel = e.related, !rel.isEmpty {
                 SectionLabel(text: "points at")
                 WrapLayout(spacing: 4) {

@@ -256,6 +256,7 @@ struct DetailCard: View {
                 }
                 if rel.count > 24 { Text("and \(rel.count - 24) more").font(F.meta).foregroundStyle(P.fg3) }
             }
+            OpenInClaudeRow(kind: e.kind, id: e.id, title: e.title)
             Text("esc goes back").font(F.mono).foregroundStyle(P.fg3)
         }
         .padding(14)

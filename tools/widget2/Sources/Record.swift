@@ -8,7 +8,7 @@ import Foundation
 // quietly disagreeing.
 
 enum Pane: String, CaseIterable, Identifiable {
-    case flow, ledger, patterns, reader, landing, changes, proposals, hints, intentions, insights, sessions, evidence, gates, settings
+    case flow, ledger, patterns, reader, landing, changes, proposals, hints, intentions, insights, sessions, evidence, gates, runs, settings
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -25,6 +25,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .sessions: "Sessions"
         case .evidence: "Evidence"
         case .gates: "Armed gates"
+        case .runs: "Cycles and runs"
         case .settings: "Settings"
         }
     }
@@ -43,6 +44,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .sessions: "bubble.left.and.bubble.right"
         case .evidence: "list.bullet.rectangle"
         case .gates: "lock.shield"
+        case .runs: "clock"
         case .settings: "slider.horizontal.3"
         }
     }

@@ -15,7 +15,7 @@ use std::path::Path;
 #[derive(Debug, Serialize)]
 pub struct Entry {
     /// pattern, association, insight, finding, evidence, slug, proposal,
-    /// source, hint, nudge, intention, gate, job or session.
+    /// source, hint, nudge, intention, gate, job, run, cycle or session.
     pub kind: &'static str,
     pub id: String,
     /// The line a person recognises it by.
@@ -52,7 +52,9 @@ pub fn gather(home: &Path) -> IndexDoc {
     sources(home, &mut entries);
     interventions(home, &firings, &mut entries);
     intentions(home, &firings, &mut entries);
-    jobs(&mut entries);
+    let jobs_now = crate::status::gather_jobs();
+    runs(home, &jobs_now, &mut entries);
+    jobs(&jobs_now, &mut entries);
     let transcripts = transcript_paths(home);
     sessions_at(home, &firings, &transcripts, &mut entries);
     fill_from_evidence(&firings, &transcripts, &mut entries);
@@ -434,8 +436,67 @@ fn intentions(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
     }
 }
 
-fn jobs(out: &mut Vec<Entry>) {
-    for j in crate::status::gather_jobs() {
+/// Every scheduled run of an i-dream job, and every full daemon cycle: the
+/// "Cycles and runs" list.
+fn runs(home: &Path, jobs: &[crate::status::JobStatus], out: &mut Vec<Entry>) {
+    let ours: BTreeMap<&str, &crate::status::JobStatus> = jobs.iter().map(|j| (j.name.as_str(), j)).collect();
+    for r in jsonl(&home.join(".claude/scheduled/history.jsonl")) {
+        let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let Some(job) = ours.get(s("name").as_str()) else { continue };
+        if s("ev") != "run" {
+            continue;
+        }
+        let at = parse_ts(&s("ts"));
+        let mut e = entry(
+            "run",
+            format!("run:{}@{}", s("name"), s("ts")),
+            match s("outcome").as_str() {
+                "ok" => format!("{} ran", job.name),
+                "failed" => format!("{} failed", job.name),
+                other => format!("{} ran, outcome not recorded ({})", job.name, if other.is_empty() { "none" } else { other }),
+            },
+            format!(
+                "{} · exit {} · runs {} · its log keeps only the latest run: {}",
+                s("outcome"),
+                s("exit"),
+                job.command,
+                job.log_path
+            ),
+        );
+        e.at = at;
+        e.related = vec![job.name.clone()];
+        e.fields.insert("job", job.name.clone());
+        e.fields.insert("outcome", s("outcome"));
+        e.fields.insert("exit", s("exit"));
+        out.push(e);
+    }
+    for c in jsonl(&home.join(".claude/subconscious/dreams/journal.jsonl")) {
+        let n = |k: &str| c.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(id) = c.get("cycle_id").and_then(|v| v.as_str()) else { continue };
+        let produced = n("patterns_extracted") + n("associations_found") + n("insights_promoted") > 0;
+        let mut e = entry(
+            "cycle",
+            id,
+            if produced { "daemon cycle, productive" } else { "daemon cycle, idle" },
+            format!(
+                "{} sessions read · {} patterns · {} associations · {} insights · {} tokens",
+                n("sessions_analyzed"),
+                n("patterns_extracted"),
+                n("associations_found"),
+                n("insights_promoted"),
+                n("tokens_used")
+            ),
+        );
+        e.at = c.get("timestamp").and_then(|v| v.as_str()).and_then(parse_ts);
+        e.fields.insert("job", "daemon".into());
+        e.fields.insert("outcome", if produced { "productive".into() } else { "idle".into() });
+        e.fields.insert("exit", "".into());
+        out.push(e);
+    }
+}
+
+fn jobs(jobs: &[crate::status::JobStatus], out: &mut Vec<Entry>) {
+    for j in jobs {
         out.push(entry("job", &j.name, &j.desc, format!("{} · runs {}", j.schedule, j.command)));
     }
 }

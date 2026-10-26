@@ -45,7 +45,7 @@ struct DashboardView: View {
                             case .reader: ReaderPane(model: model, r: r)
                             case .landing: LandingPane(model: model, r: r)
                             case .changes: ChangesPane(model: model, r: r)
-                            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates: ListPane(model: model, pane: model.pane, r: r)
+                            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs: ListPane(model: model, pane: model.pane, r: r)
                             case .settings: SettingsPane(model: model)
                             }
                         } else {
@@ -137,7 +137,7 @@ struct DashboardView: View {
         case .ledger, .patterns, .reader, .landing: "j k move · return opens · esc backs out · / search this pane · ⌘K search everything · f first filter"
         case .flow: "j k move between cycles · return loads one · esc clears the range · ⌘K search everything"
         case .changes: "click a change to open where it happened · ⌘K search everything"
-        case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates: "j k move · return opens · esc backs out · / search this list · f first chip · ⌘[ back · ⌘K search everything"
+        case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs: "j k move · return opens · esc backs out · / search this list · f first chip · ⌘[ back · ⌘K search everything"
         case .settings: ""
         }
     }

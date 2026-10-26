@@ -111,6 +111,10 @@ enum Glossary {
             ("domain", "The stream it came from, such as atone, proposals or sessions."),
             ("by", "Who made it: a person, an agent, a pin, telemetry, or an echo of an earlier note."),
         ]
+        case .runs: [
+            ("run", "One scheduled run of a job, from the scheduler's history: ok, or failed with its exit code."),
+            ("cycle", "One full pass of the daemon. Productive: it extracted a pattern, association or insight; idle: nothing."),
+        ]
         case .gates: [
             ("armed gate", "A hook your answer on a weekly page switched on. Unlike a hint, it acts."),
         ]

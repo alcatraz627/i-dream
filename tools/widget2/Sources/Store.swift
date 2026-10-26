@@ -398,7 +398,7 @@ final class AppModel: ObservableObject {
             case .landing: landingEffects().count
             case .flow: record?.cycles.count ?? 0
             case .settings, .changes: 0
-            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates: listRows(pane).prefix(ListPane.cap).count
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs: listRows(pane).prefix(ListPane.cap).count
             }
         }()
         func move(_ d: Int) {
@@ -409,7 +409,7 @@ final class AppModel: ObservableObject {
             case .landing: landing.selected = clamp(landing.selected + d, n)
             case .flow: flow.selected = clamp(flow.selected + d, n); flow.cycle = record?.cycles[safe: flow.selected]?.id
             case .settings, .changes: break
-            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs:
                 lists[pane, default: ListState()].selected = clamp((lists[pane]?.selected ?? 0) + d, n)
             }
         }
@@ -424,7 +424,7 @@ final class AppModel: ObservableObject {
             case .landing: landing.focus = landingEffects()[safe: landing.selected]?.slug
             case .flow: if let c = record?.cycles[safe: flow.selected] { flow.cycle = c.id; if let d = c.dive { open(d) } }
             case .settings, .changes: break
-            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs:
                 let id = listRows(pane)[safe: lists[pane]?.selected ?? 0]?.id
                 lists[pane, default: ListState()].expanded = lists[pane]?.expanded == id ? nil : id
             }
@@ -436,7 +436,7 @@ final class AppModel: ObservableObject {
             case .landing: if landing.focus != nil { landing.focus = nil } else { landing = LandingFilter() }
             case .flow: flow = FlowFilter()
             case .settings, .changes: break
-            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs:
                 if lists[pane]?.expanded != nil { lists[pane]?.expanded = nil } else { lists[pane] = ListState() }
             }
         case "/": if pane == .flow { return false }; searchFocusToken += 1
@@ -447,7 +447,7 @@ final class AppModel: ObservableObject {
             case .reader: toggle(&reader.kinds, "structural-need")
             case .landing: toggle(&landing.groups, "worsening")
             case .flow, .settings, .changes: return false
-            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates, .runs:
                 guard let col = ListSpec.of(pane)?.chipColumn,
                       let first = listRows(pane).first?.fields?[col] else { return false }
                 lists[pane, default: ListState()].chip = lists[pane]?.chip == nil ? first : nil
