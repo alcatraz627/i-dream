@@ -158,7 +158,7 @@ fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
 /// The hooks ledger every match, but show a live item only on its first match
 /// in a session, so raw rows overcount; shadow and candidate rows are never
 /// shown. Hooks write `ts` as epoch seconds; older rows carry RFC 3339 text.
-fn count_fired_since(ledger: &str, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
+pub(crate) fn count_fired_since(ledger: &str, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
     ledger
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())

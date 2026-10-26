@@ -1429,8 +1429,20 @@ Look for:
 Skip obvious connections between directly-related patterns. If no genuine connection exists, return [].
 Output ONLY a JSON array. No commentary."#;
 
-        let prompt =
-            format!("Find creative connections between these patterns:\n\n{pattern_digest}");
+        // Rules Claude already loads every session. A suggested rule that says
+        // the same thing adds nothing, so REM is told to leave it unactionable.
+        let standing = standing_rule_titles();
+        let standing_note = if standing.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nClaude already follows these standing rules every session. If a suggested_rule would restate one of them, even in other words, set actionable to false and omit suggested_rule:\n- {}",
+                standing.join("\n- ")
+            )
+        };
+        let prompt = format!(
+            "Find creative connections between these patterns:\n\n{pattern_digest}{standing_note}"
+        );
 
         let full_prompt_payload = format!("{system_prompt}\n\n---\n\n{prompt}");
 
@@ -1967,14 +1979,9 @@ Output ONLY a JSON array. No commentary."#;
                     Some(r) if !r.is_empty() && assoc.actionable => r,
                     _ => continue,
                 };
-                // Extract keywords from the rule text for matching
-                let keywords: Vec<String> = rule
-                    .split(|c: char| !c.is_alphanumeric())
-                    .filter(|w| w.len() > 3)
-                    .map(|w| w.to_ascii_lowercase())
-                    .take(5)
-                    .collect();
-                if keywords.is_empty() {
+                // The trigger needs two matches, so two topic words at least.
+                let keywords = wake_keywords(rule);
+                if keywords.len() < 2 {
                     continue;
                 }
 
@@ -2271,6 +2278,88 @@ pub fn promotable(a: &Association, threshold: f64, maintenance: bool) -> bool {
     }
     !maintenance
         || a.confidence >= crate::consolidation::yield_slo::MAINTENANCE_BYPASS_CONFIDENCE
+}
+
+/// Words a rule uses to give an order rather than to say what it is about.
+/// A trigger on them matches every prompt, so it is no trigger.
+const GENERIC_RULE_WORDS: &[&str] = &[
+    "always", "never", "before", "after", "every", "should", "must", "make", "sure", "ensure",
+    "check", "when", "with", "without", "instead", "rather", "that", "this", "from", "your",
+    "their", "then", "than", "into", "only", "each", "what", "which", "about", "first", "next",
+    "does", "done", "have", "being", "these", "those", "there", "here", "them", "they", "will",
+    "would", "could", "just", "also", "even", "more", "most", "less", "very", "over", "under",
+];
+
+/// The content words of a rule, lowercase, at least four letters, minus the
+/// generic ones, with a plural folded to its singular ("paths" is "path").
+fn rule_content_words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in text.split(|c: char| !c.is_alphanumeric()) {
+        let mut lw = w.to_ascii_lowercase();
+        if lw.len() > 4 && lw.ends_with('s') && !lw.ends_with("ss") {
+            lw.pop();
+        }
+        if lw.len() >= 4 && !GENERIC_RULE_WORDS.contains(&lw.as_str()) && !out.contains(&lw) {
+            out.push(lw);
+        }
+    }
+    out
+}
+
+
+/// Trigger keywords for a Wake rule: up to five words that say what the rule
+/// is about.
+fn wake_keywords(rule: &str) -> Vec<String> {
+    rule_content_words(rule).into_iter().take(5).collect()
+}
+
+/// The headings of a markdown file at levels 1 to 3, without their hashes.
+/// Word matching cannot tell a paraphrase from a new rule, so REM is handed
+/// these titles and judges the overlap itself.
+fn heading_titles(md: &str) -> Vec<String> {
+    md.lines()
+        .filter_map(|l| {
+            let t = l.trim_start();
+            let level = t.chars().take_while(|c| *c == '#').count();
+            (1..=3).contains(&level).then(|| t[level..].trim().to_string())
+        })
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Titles of the rules Claude already loads every session: the global
+/// CLAUDE.md headings and the first heading of each rules file.
+fn standing_rule_titles() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let mut titles = heading_titles(&std::fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap_or_default());
+    if let Ok(dir) = std::fs::read_dir(home.join(".claude/rules")) {
+        let mut files: Vec<_> = dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).collect();
+        files.sort();
+        for p in files {
+            if let Some(t) = heading_titles(&std::fs::read_to_string(&p).unwrap_or_default()).into_iter().next() {
+                titles.push(t);
+            }
+        }
+    }
+    titles
+}
+
+#[cfg(test)]
+mod wake_rule_tests {
+    use super::*;
+
+    #[test]
+    fn trigger_keywords_skip_the_rules_own_imperatives() {
+        let k = wake_keywords("Always execute the migration dry-run before claiming it works");
+        assert!(!k.iter().any(|w| w == "always" || w == "before"), "{k:?}");
+        assert!(k.contains(&"migration".to_string()), "{k:?}");
+    }
+
+    #[test]
+    fn standing_rule_titles_are_the_headings_without_hashes() {
+        let md = "# Global\n\n### File paths in output: never directly followed by a period\nbody\n#### deep\n";
+        assert_eq!(heading_titles(md), vec!["Global", "File paths in output: never directly followed by a period"]);
+    }
 }
 
 #[cfg(test)]

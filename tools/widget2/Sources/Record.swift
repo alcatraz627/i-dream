@@ -274,9 +274,6 @@ struct Record {
     var hoursSinceProductive: Double? { lastProductive.map { now.timeIntervalSince($0) / 3600 } }
     var filed: [ReaderDoc.Landed] { landed.filter { ["filed", "already-filed"].contains($0.outcome) } }
     var armed: [ReaderDoc.Landed] { landed.filter { $0.outcome == "armed" } }
-    var movers: [Effect] {
-        Array(effects.filter { $0.delta != 0 }.sorted { abs($0.delta) > abs($1.delta) || (abs($0.delta) == abs($1.delta) && $0.total > $1.total) }.prefix(2))
-    }
     var mood: (word: String, sentence: String, sev: Sev) {
         let n = (awaitingItems > 0 ? 2 : 0) + count(.stale) + dead.count * 3 + (daemonRunning ? 0 : 3)
         let w = n >= 6 ? "troubled" : n >= 3 ? "restless" : n >= 1 ? "settled" : "calm"
@@ -612,7 +609,10 @@ enum RecordBuilder {
                             age: r.lastCycle.map { r.now.timeIntervalSince($0) }, ageNote: "last cycle",
                             dive: Dive(pane: .flow)))
         }
-        for c in r.failingOutcomes {
+        // A failing outcome that names a dead source says the same thing twice;
+        // the source row carries the age and the fix, so it alone is shown.
+        let deadIds = Set(r.dead.map(\.id))
+        for c in r.failingOutcomes where !deadIds.contains(c.row) {
             rows.append(Row(id: "outcome-" + c.row, icon: "exclamationmark.triangle", title: "\(c.row) outcome is failing",
                             detail: c.detail, sev: .bad, dive: Dive(pane: .flow)))
         }
@@ -646,36 +646,17 @@ enum RecordBuilder {
                             title: missing ? "\(j.label) is not scheduled" : "\(j.label) last run failed (exit \(j.last_exit ?? 0))",
                             detail: humanSchedule(j.schedule), sev: .warn, dive: Dive(pane: .flow)))
         }
-        let worse = r.worsening.filter { !$0.gateCandidate }
-        if worse.count > 2 {
-            rows.append(Row(id: "worse-many", icon: "arrow.up.right", title: "\(plural(worse.count, "slug")) worsening this week",
-                            detail: worse.map { "\($0.slug) +\($0.delta)" }.joined(separator: " · ") + " · " + (worse.allSatisfy { $0.landing == nil } ? "none credited to a landing yet" : "some credited"),
-                            sev: .warn, age: worse.compactMap(\.last).max().map { r.now.timeIntervalSince($0) }, ageNote: "last event",
-                            dive: Dive(pane: .landing, scope: .landingGroup("worsening"))))
-        }
-        for e in worse where worse.count <= 2 {
-            rows.append(Row(id: "worse-" + e.slug, icon: "arrow.up.right", title: "\(e.slug) is worsening",
-                            detail: "\(e.last7) this week against \(e.prior7) the week before · \(e.landing.map { "credited to \($0)" } ?? e.recentLanding ?? "no landing")",
-                            sev: .warn, age: e.last.map { r.now.timeIntervalSince($0) }, ageNote: "last event",
-                            dive: Dive(pane: .landing, scope: .slug(e.slug))))
-        }
         return rows
     }
 
+    // Week-on-week mistake moves are not shown as trends: they count atone
+    // recordings, and recording itself fell about fivefold in week 38.
     static func quietRows(_ r: Record) -> [Row] {
         var rows: [Row] = []
-        if r.improving.count > 2 {
-            let unattributed = r.improving.allSatisfy { $0.landing == nil }
-            rows.append(Row(id: "better-many", icon: "arrow.down.right", title: "\(plural(r.improving.count, "slug")) easing this week",
-                            detail: r.improving.map { "\($0.slug) \($0.delta)" }.joined(separator: " · ") + (unattributed ? " · all unattributed" : ""),
-                            sev: unattributed ? .none : .ok, age: r.improving.compactMap(\.last).max().map { r.now.timeIntervalSince($0) }, ageNote: "last event",
-                            dive: Dive(pane: .landing, scope: .landingGroup("easing")), dim: unattributed))
-        }
-        for e in r.improving where r.improving.count <= 2 {
-            rows.append(Row(id: "better-" + e.slug, icon: "arrow.down.right", title: "\(e.slug) is easing",
-                            detail: "\(e.last7) this week against \(e.prior7) the week before · " + (e.landing.map { "credited to \($0)" } ?? e.recentLanding ?? "unattributed"),
-                            sev: e.landing == nil ? .none : .ok, age: e.last.map { r.now.timeIntervalSince($0) }, ageNote: "last event",
-                            dive: Dive(pane: .landing, scope: .slug(e.slug)), dim: e.landing == nil))
+        if !r.worsening.isEmpty || !r.improving.isEmpty {
+            rows.append(Row(id: "effect-unmeasured", icon: "ruler", title: "Effect not measured yet",
+                            detail: "weekly moves count how often atone is filed, which fell about fivefold in week 38, so they are not shown as trends",
+                            sev: .none, dive: Dive(pane: .landing), dim: true))
         }
         let fresh = r.count(.fresh)
         rows.append(Row(id: "fresh", icon: "checkmark.circle",

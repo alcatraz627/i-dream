@@ -1710,6 +1710,7 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
         positive,
         session_id,
         entrypoint,
+        prompt_words,
         ..
     } = &event
     {
@@ -1726,6 +1727,7 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
                 entrypoint.as_deref(),
                 rating,
                 source,
+                prompt_words,
             )
         {
             warn!("feedback vote failed: {e:#}");
@@ -1797,12 +1799,23 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
 /// repeats themselves. Only interactive sessions vote: a known headless
 /// entrypoint never does, and an absent one (an older hook) can only match
 /// fires from a session that passed SessionStart's own filter.
+/// Does a rule share a content word (four letters or more) with the prompt
+/// that corrected or praised the session? No words means no relevance.
+fn touches_prompt(message: &str, prompt_words: &[String]) -> bool {
+    let words: std::collections::HashSet<&str> = prompt_words.iter().map(String::as_str).collect();
+    message
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 4)
+        .any(|w| words.contains(w.to_lowercase().as_str()))
+}
+
 fn vote_on_surfaced_intentions(
     store: &Store,
     session_id: Option<&str>,
     entrypoint: Option<&str>,
     rating: &str,
     source: &str,
+    prompt_words: &[String],
 ) -> Result<usize> {
     use serde_json::json;
 
@@ -1857,6 +1870,10 @@ fn vote_on_surfaced_intentions(
         let Some(intent) = intention_by_id.get(intention_id) else {
             continue;
         };
+        // A correction about something else says nothing about this rule.
+        if !touches_prompt(&intent.action.message, prompt_words) {
+            continue;
+        }
         let Some(assoc_id) = intent.action.source.strip_prefix("dream-wake:") else {
             continue;
         };
@@ -2007,15 +2024,34 @@ fn persist_fires(
 /// Record that `ids` reached a session's context. Called only after the
 /// briefing was written, so a briefing the client gave up on spends no fire
 /// and attracts no vote.
+///
+/// Claude Code sends SessionStart twice for one session, so a rule this
+/// session already counted is skipped: one session spends one fire.
 fn record_surfacings(store: &Store, ids: &[String], session_id: Option<&str>) {
     if ids.is_empty() {
         return;
     }
     let _guard = REGISTRY_REWRITE.lock().unwrap_or_else(|p| p.into_inner());
+    let fresh: Vec<String> = match session_id.filter(|s| !s.is_empty()) {
+        Some(sid) => {
+            let seen: std::collections::HashSet<String> = store
+                .read_jsonl::<FiredRecord>("intentions/fired.jsonl")
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.session_id == sid)
+                .map(|r| r.intention_id)
+                .collect();
+            ids.iter().filter(|id| !seen.contains(*id)).cloned().collect()
+        }
+        None => ids.to_vec(),
+    };
+    if fresh.is_empty() {
+        return;
+    }
     let mut registry: Vec<Intention> = store
         .read_jsonl("intentions/registry.jsonl")
         .unwrap_or_default();
-    persist_fires(store, &mut registry, ids, session_id, Utc::now());
+    persist_fires(store, &mut registry, &fresh, session_id, Utc::now());
 }
 
 fn broadcast_intentions_section_for(
@@ -2831,6 +2867,41 @@ timeout = "10s"
     }
 
     #[test]
+    fn a_session_spends_one_fire_per_rule_however_many_starts_arrive() {
+        let (_dir, store) = mk_store();
+        let rule = broadcast_intention("dw-1", "Rule", Priority::High, chrono::Duration::hours(-1));
+        store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        let ids = vec!["dw-1".to_string()];
+        record_surfacings(&store, &ids, Some("sess-A"));
+        record_surfacings(&store, &ids, Some("sess-A"));
+        let reg: Vec<Intention> = store.read_jsonl("intentions/registry.jsonl").unwrap();
+        assert_eq!(reg[0].fire_count, 1, "Claude Code sends SessionStart twice per session");
+        record_surfacings(&store, &ids, Some("sess-B"));
+        let reg: Vec<Intention> = store.read_jsonl("intentions/registry.jsonl").unwrap();
+        assert_eq!(reg[0].fire_count, 2);
+    }
+
+    #[test]
+    fn a_correction_votes_only_on_rules_its_words_touch() {
+        let (_dir, store) = mk_store();
+        for (i, msg) in ["Read the file before claiming what it holds", "Put a word after a file path, never a period"]
+            .iter()
+            .enumerate()
+        {
+            let mut rule = broadcast_intention(&format!("dw-{i}"), msg, Priority::High, chrono::Duration::hours(-1));
+            rule.action.source = format!("dream-wake:assoc-{i}");
+            store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        }
+        build_session_start_response_for(&store, None, Some("sess-A"), true);
+        let words: Vec<String> = ["slack", "titles", "block", "claiming", "holds"].iter().map(|s| s.to_string()).collect();
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &words).unwrap();
+        assert_eq!(n, 1, "only the rule about claiming what a file holds");
+        assert_eq!(votes(&store)[0]["intention_id"], "dw-0");
+        let none = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "up", "auto-positive", &[]).unwrap();
+        assert_eq!(none, 0, "no words, no relevance, no vote");
+    }
+
+    #[test]
     fn votes_land_on_exactly_what_the_session_was_shown() {
         let (_dir, store) = mk_store();
         for i in 1..=3 {
@@ -2848,25 +2919,27 @@ timeout = "10s"
         build_session_start_response_for(&store, None, Some("sess-A"), true);
         build_session_start_response_for(&store, None, Some("sess-B"), true);
 
+        // The correcting prompt's words touch all three rules ("Rule").
+        let rule_words = vec!["rule".to_string()];
         // "no that's wrong" in A: exactly A's three, nothing for B.
-        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction").unwrap();
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &rule_words).unwrap();
         assert_eq!(n, 3);
         let v = votes(&store);
         assert_eq!(v.len(), 3);
         assert!(v.iter().all(|r| r["sid"] == "sess-A" && r["rating"] == "down"));
 
         // Saying it again is not a second vote.
-        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction").unwrap();
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &rule_words).unwrap();
         assert_eq!(n, 0);
 
         // "perfect, that works": up-votes the same three.
-        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "up", "auto-positive").unwrap();
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "up", "auto-positive", &rule_words).unwrap();
         assert_eq!(n, 3);
         assert_eq!(votes(&store).iter().filter(|r| r["rating"] == "up").count(), 3);
 
         // A headless session and a session with no id vote on nothing.
-        assert_eq!(vote_on_surfaced_intentions(&store, Some("sess-B"), Some("sdk-cli"), "down", "auto-correction").unwrap(), 0);
-        assert_eq!(vote_on_surfaced_intentions(&store, None, Some("cli"), "down", "auto-correction").unwrap(), 0);
+        assert_eq!(vote_on_surfaced_intentions(&store, Some("sess-B"), Some("sdk-cli"), "down", "auto-correction", &rule_words).unwrap(), 0);
+        assert_eq!(vote_on_surfaced_intentions(&store, None, Some("cli"), "down", "auto-correction", &rule_words).unwrap(), 0);
         assert_eq!(votes(&store).len(), 6);
     }
 

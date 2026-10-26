@@ -202,6 +202,47 @@ pub fn queue_check(depth: usize, oldest_hours: Option<f64>) -> Check {
     )
 }
 
+/// Do the status counter and the delivery rows tell the same story? A zero
+/// fired count beside delivered items means one of them reads its data wrong.
+pub fn delivery_agrees_check(fired_7d: usize, delivered: usize) -> Check {
+    let agree = (fired_7d == 0) == (delivered == 0);
+    Check::new(
+        "delivery-agrees",
+        if agree { Verdict::Pass } else { Verdict::Fail },
+        format!("status counts {fired_7d} fired; transcripts show {delivered} live item(s) delivered"),
+    )
+}
+
+/// Every metacog call in the last week sent at least one unit. `audits` is
+/// (timestamp, units analyzed) per audit file.
+pub fn metacog_calls_check(audits: &[(&str, u64)], as_of: DateTime<Utc>) -> Check {
+    let recent: Vec<u64> = audits
+        .iter()
+        .filter_map(|(ts, n)| Some((ts.parse::<DateTime<Utc>>().ok()?, *n)))
+        .filter(|(t, _)| as_of - *t <= Duration::days(DELIVERY_WINDOW_DAYS))
+        .map(|(_, n)| n)
+        .collect();
+    let empty = recent.iter().filter(|n| **n == 0).count();
+    Check::new(
+        "metacog-calls",
+        if empty == 0 { Verdict::Pass } else { Verdict::Fail },
+        format!("{empty} of {} metacog call(s) in the last {DELIVERY_WINDOW_DAYS} days sent no units", recent.len()),
+    )
+}
+
+/// When live items reached sessions, the firing scan must have judged some of
+/// them: zero ledger rows means the scan is not joining what was shown.
+pub fn firing_scan_check(shown_pairs: usize, ledger_rows: usize) -> Check {
+    if shown_pairs == 0 {
+        return Check::new("firing-scan", Verdict::Unknown, "no live item was shown in the window");
+    }
+    Check::new(
+        "firing-scan",
+        if ledger_rows > 0 { Verdict::Pass } else { Verdict::Fail },
+        format!("{shown_pairs} hint/nudge-session pair(s) shown; firing ledger judged {ledger_rows} of them"),
+    )
+}
+
 /// Delivery rows: did live nudges and hints actually reach a session?
 /// `delivered` holds the 8-hex id prefixes found in hook attachment records;
 /// `None` means the transcripts could not be read, which is UNKNOWN, not FAIL.
@@ -402,6 +443,32 @@ pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
         Ok(items) => {
             let delivered = scan_delivered(&home.join(".claude/projects"), now);
             checks.extend(delivery_checks(&items, delivered.as_ref()));
+            let would_fire = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap_or_default();
+            if let Some(d) = &delivered {
+                let reached = items
+                    .iter()
+                    .filter(|i| i.state == "live" && d.contains(&i.id.chars().take(8).collect::<String>()))
+                    .count();
+                let fired = crate::status::count_fired_since(&would_fire, now - Duration::days(DELIVERY_WINDOW_DAYS));
+                checks.push(delivery_agrees_check(fired, reached));
+            }
+            let window = now - Duration::days(14);
+            let shown = crate::status::count_fired_since(&would_fire, window);
+            let ledger_rows = std::fs::read_to_string(home.join(".claude/subconscious/dreams/firings.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                // Only rows for hooks' hints and nudges: lesson and intention
+                // rows say nothing about whether these are being judged.
+                .filter(|v| v.get("id").and_then(|i| i.as_str()).is_some_and(|i| i.starts_with("N:")))
+                .filter(|v| {
+                    v.get("ts")
+                        .and_then(|t| t.as_str())
+                        .and_then(|t| t.parse::<DateTime<Utc>>().ok())
+                        .is_some_and(|t| t > window)
+                })
+                .count();
+            checks.push(firing_scan_check(shown, ledger_rows));
         }
         Err(e) => checks.extend(["nudge-delivery", "hint-delivery"].into_iter().map(|r| {
             Check::new(r, Verdict::Unknown, format!("interventions.json unreadable: {e:#}"))
@@ -411,6 +478,17 @@ pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
     checks.push(reader_check(reader.as_ref(), now));
+    let audits: Vec<(String, u64)> = std::fs::read_dir(home.join(".claude/subconscious/metacog/audits"))
+        .map(|d| {
+            d.flatten()
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .filter_map(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .filter_map(|v| Some((v.get("timestamp")?.as_str()?.to_string(), v.get("units_analyzed")?.as_u64()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let audit_refs: Vec<(&str, u64)> = audits.iter().map(|(t, n)| (t.as_str(), *n)).collect();
+    checks.push(metacog_calls_check(&audit_refs, now));
     checks.push(effect_check());
     Ok(Report { as_of: now, checks })
 }
@@ -468,6 +546,31 @@ pub fn render_text(r: &Report) -> String {
 mod tests {
     use super::*;
     use crate::consolidation::assay::AssayPanel;
+
+    #[test]
+    fn delivery_counters_must_agree_across_surfaces() {
+        assert_eq!(delivery_agrees_check(0, 15).verdict, Verdict::Fail, "status says none fired, verify says delivered");
+        assert_eq!(delivery_agrees_check(12, 15).verdict, Verdict::Pass);
+        assert_eq!(delivery_agrees_check(0, 0).verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn a_metacog_call_that_sent_nothing_fails() {
+        let now: DateTime<Utc> = "2026-10-26T12:00:00Z".parse().unwrap();
+        let ok = [("2026-10-25T23:00:00Z", 12u64)];
+        assert_eq!(metacog_calls_check(&ok, now).verdict, Verdict::Pass);
+        let bad = [("2026-10-24T23:00:00Z", 0u64), ("2026-10-25T23:00:00Z", 12)];
+        assert_eq!(metacog_calls_check(&bad, now).verdict, Verdict::Fail);
+        let old_bad = [("2026-10-10T23:00:00Z", 0u64)];
+        assert_eq!(metacog_calls_check(&old_bad, now).verdict, Verdict::Pass, "outside the window");
+    }
+
+    #[test]
+    fn firing_scan_must_record_something_when_items_were_shown() {
+        assert_eq!(firing_scan_check(40, 0).verdict, Verdict::Fail);
+        assert_eq!(firing_scan_check(40, 31).verdict, Verdict::Pass);
+        assert_eq!(firing_scan_check(0, 0).verdict, Verdict::Unknown);
+    }
 
     #[test]
     fn a_quiet_day_whose_daily_run_happened_is_not_a_missed_cycle() {

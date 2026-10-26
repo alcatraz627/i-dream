@@ -70,9 +70,12 @@ struct DropdownView: View {
 
     private func groups(_ r: Record) -> some View {
         VStack(alignment: .leading, spacing: 0) {
+                // Whether anything needs the owner is the first answer, above
+                // the schedule's Run now buttons, which are optional.
+                group("You", r.you, empty: "Nothing waits on you. i-dream runs on its own schedule.", emptyProminent: true)
                 schedule(r)
-                group("You", r.you, empty: "nothing waits on you")
-                group("System", r.system, empty: "nothing wrong")
+                group("System", r.system, empty: "nothing wrong",
+                      note: "i-dream's own health. It catches up on its next run; nothing here needs you unless You above says so.")
                 group("Quiet", r.quiet, empty: nil)
                 if !r.checks.isEmpty {
                     VStack(alignment: .leading, spacing: 2) {
@@ -172,7 +175,7 @@ struct DropdownView: View {
 
     private func schedule(_ r: Record) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionLabel(text: "Schedule").padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
+            SectionLabel(text: "Schedule · runs on its own").padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
             if r.jobs.isEmpty {
                 Text("no i-dream jobs in the gcc schedule").font(F.meta).foregroundStyle(P.amber).padding(.horizontal, 14).padding(.bottom, 6)
             }
@@ -209,7 +212,8 @@ struct DropdownView: View {
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 3) {
                 Button { model.runJob(j.name) } label: {
-                    Text("Run now").font(F.meta.weight(.semibold)).foregroundStyle(started == nil ? P.blue : P.fg3)
+                    // Optional, so it reads as a link, not a call to action.
+                    Text("Run now").font(F.meta).foregroundStyle(P.fg2)
                 }
                 .buttonStyle(.plain).disabled(started != nil)
                 .onHover { help.text = $0 ? "starts \(j.title.lowercased()) now" : "" }
@@ -255,7 +259,7 @@ struct DropdownView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(P.hair).frame(height: 0.5) }
     }
 
-    // MARK: band: small constellation + the two biggest movers
+    // MARK: band: small constellation + the effect note
 
     private func band(_ r: Record) -> some View {
         HStack(spacing: 0) {
@@ -263,22 +267,12 @@ struct DropdownView: View {
                           onSelect: { model.open(Dive(pane: .patterns, scope: .pattern($0.id))) }, help: help)
                 .frame(minHeight: 84)
             VStack(alignment: .leading, spacing: 3) {
-                SectionLabel(text: "biggest movers · 7d")
-                if r.movers.isEmpty {
-                    Text("no slug moved this week").font(F.meta).foregroundStyle(P.fg3)
+                SectionLabel(text: "effect")
+                Button { model.open(Dive(pane: .landing)) } label: {
+                    Text("not measured yet: weekly moves count atone recordings, not mistakes")
+                        .font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
                 }
-                ForEach(r.movers) { e in
-                    Button { model.open(Dive(pane: .landing, scope: .slug(e.slug))) } label: {
-                        HStack(alignment: .firstTextBaseline, spacing: 5) {
-                            Image(systemName: e.delta > 0 ? "arrow.up.right" : "arrow.down.right").font(.system(size: 9))
-                                .foregroundStyle(e.delta > 0 ? P.amber : (e.landing == nil ? P.fg3 : P.green))
-                            Text(e.slug).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 2)
-                            Text("\(e.delta > 0 ? "+" : "")\(e.delta)").font(F.mono).foregroundStyle(P.fg)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
+                .buttonStyle(.plain)
                 Text("\(r.patterns.count) of \(r.patternTotal) patterns drawn, \(plural(r.associations.count, "link"))").font(F.mono).foregroundStyle(P.fg3)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -333,11 +327,17 @@ struct DropdownView: View {
 
     // MARK: rows
 
-    private func group(_ title: String, _ rows: [Row], empty: String?) -> some View {
+    private func group(_ title: String, _ rows: [Row], empty: String?, note: String? = nil,
+                       emptyProminent: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             SectionLabel(text: title).padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 4)
             if rows.isEmpty, let empty {
-                Text(empty).font(F.meta).foregroundStyle(P.fg3).padding(.horizontal, 14).padding(.bottom, 6)
+                Text(empty).font(emptyProminent ? F.body : F.meta).foregroundStyle(emptyProminent ? P.fg : P.fg3)
+                    .padding(.horizontal, 14).padding(.bottom, 6)
+            }
+            if !rows.isEmpty, let note {
+                Text(note).font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14).padding(.bottom, 4)
             }
             ForEach(rows) { row in rowView(row) }
         }

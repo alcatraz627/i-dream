@@ -313,8 +313,8 @@ struct FlowPane: View {
                   age: r.armed.compactMap { parseDate($0.ts) }.max().map { r.now.timeIntervalSince($0) },
                   ["gates armed from your answers", "\(r.interventions.live) live nudges overall"],
                   Dive(pane: .landing))
-            stage("arrow.down.right", "Effect", r.improving.count, "easing",
-                  age: 7 * 86400, ["\(r.worsening.count) worsening", "\(r.effects.filter { $0.delta != 0 && $0.landing == nil }.count) of the movers unattributed", "7-day window, not ranged"],
+            stage("ruler", "Effect", r.effects.filter { $0.delta != 0 }.count, "moved, not measured",
+                  age: 7 * 86400, ["weekly moves count atone recordings, not mistakes", "recording fell about fivefold in week 38", "a real measure waits on the before/after design"],
                   Dive(pane: .landing))
         }
     }

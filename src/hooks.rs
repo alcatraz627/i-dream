@@ -411,7 +411,14 @@ correction_re = re.compile(
     r"that.?s\s+wrong|no\s+no\b|stop\s+doing|i\s+didn.?t\s+ask)",
     re.IGNORECASE
 )
-correction = bool(correction_re.search(prompt))
+# A question asks; it does not correct or praise. Judge only the statements.
+statements = " ".join(
+    s for s in re.split(r"(?<=[.!?\n])\s+", prompt) if not s.rstrip().endswith("?")
+)
+correction = bool(correction_re.search(statements))
+
+# The prompt's distinct content words, so a vote lands only on rules it is about.
+prompt_words = sorted({{w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{{3,}}", prompt)}})[:120]
 
 # Positive feedback signals
 positive_re = re.compile(
@@ -422,7 +429,7 @@ positive_re = re.compile(
     r"awesome|fantastic|spot\s+on)",
     re.IGNORECASE
 )
-positive = bool(positive_re.search(prompt))
+positive = bool(positive_re.search(statements))
 
 # Composite frustration score [0.0, 1.0]
 score = 0.0
@@ -441,7 +448,8 @@ payload = json.dumps({{
     "positive": positive,
     "frustration_score": frustration_score,
     "session_id": data.get("session_id") or None,
-    "entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT") or None
+    "entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT") or None,
+    "prompt_words": prompt_words
 }}).encode()
 
 try:
@@ -1327,6 +1335,50 @@ mod tests {
             !script.contains("\necho \"$RESULT\""),
             "Must NOT echo result to stdout — that would corrupt user messages"
         );
+    }
+
+    /// Run the generated prompt hook on `prompt` against a throwaway socket and
+    /// return the event it sent.
+    fn signal_for(prompt: &str) -> serde_json::Value {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        write_user_prompt_submit_hook(dir.path(), &config).unwrap();
+        let live = config.data_dir().join("daemon.sock").to_string_lossy().to_string();
+        let sock = dir.path().join("t.sock");
+        let script = std::fs::read_to_string(dir.path().join("user-prompt-submit.sh"))
+            .unwrap()
+            .replace(&live, &sock.to_string_lossy());
+        let path = dir.path().join("hook.sh");
+        std::fs::write(&path, script).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let mut child = std::process::Command::new("bash")
+            .arg(&path)
+            .env_remove("I_DREAM_CHILD")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(serde_json::json!({"prompt": prompt, "session_id": "s"}).to_string().as_bytes())
+            .unwrap();
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut body = String::new();
+        conn.read_to_string(&mut body).unwrap();
+        child.wait().unwrap();
+        serde_json::from_str(body.trim()).unwrap()
+    }
+
+    #[test]
+    fn a_question_is_not_a_correction_and_the_prompt_words_ride_along() {
+        let q = signal_for("What are we fundamentally doing wrong with our block kit usage?");
+        assert_eq!(q["correction"], false, "a question asks; it does not correct");
+        let words: Vec<&str> = q["prompt_words"].as_array().unwrap().iter().filter_map(|w| w.as_str()).collect();
+        assert!(words.contains(&"block"), "{words:?}");
+        let c = signal_for("No, that's wrong. Undo this.");
+        assert_eq!(c["correction"], true);
     }
 
     #[test]

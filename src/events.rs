@@ -65,6 +65,10 @@ pub enum HookEvent {
         /// `CLAUDE_CODE_ENTRYPOINT`; only interactive sessions cast votes.
         #[serde(default)]
         entrypoint: Option<String>,
+        /// The prompt's distinct lowercase content words, so a vote lands only
+        /// on rules the prompt is about. Older hooks send none.
+        #[serde(default)]
+        prompt_words: Vec<String>,
     },
 }
 
@@ -152,6 +156,7 @@ mod tests {
                 frustration_score: 0.5,
                 session_id: None,
                 entrypoint: None,
+                prompt_words: vec![],
             }
         );
     }
@@ -177,6 +182,7 @@ mod tests {
             frustration_score: 0.0,
             session_id: None,
             entrypoint: None,
+            prompt_words: vec![],
         };
         let json = serde_json::to_string(&event).unwrap();
         let back: HookEvent = serde_json::from_str(&json).unwrap();
