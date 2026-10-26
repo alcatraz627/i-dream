@@ -200,6 +200,28 @@ fn patterns(home: &Path, firings: &Firings, wake: &BTreeMap<String, String>, out
         }
         out.push(e);
     }
+    // The map draws only live links between two known patterns, but an
+    // intention can come from any association, so every other one is listed
+    // too, saying why the map leaves it out.
+    let drawn: std::collections::HashSet<&str> = assocs.iter().map(|a| a.id.as_str()).collect();
+    for (id, a) in raw.iter().filter(|(id, _)| !drawn.contains(**id)) {
+        let why = if a.dismissed { "dismissed by your votes" } else { "not drawn: it links fewer than two known patterns" };
+        let mut e = entry(
+            if a.promoted { "insight" } else { "association" },
+            *id,
+            &a.hypothesis,
+            format!("{why} · confidence {:.2}", a.confidence),
+        );
+        let made = a.auto_intention_id.clone().or_else(|| wake.get(*id).cloned());
+        e.related = a.patterns_linked_stable.iter().filter(|p| text.contains_key(p.as_str())).cloned().collect();
+        e.related.extend(made.clone());
+        e.fields.insert("confidence", format!("{:.2}", a.confidence));
+        if a.promoted {
+            e.fields.insert("cited", firings.cited(id));
+            e.fields.insert("intention", made.unwrap_or_else(|| "none made".into()));
+        }
+        out.push(e);
+    }
 }
 
 fn reader(home: &Path, out: &mut Vec<Entry>) {
@@ -675,7 +697,7 @@ fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, S
     }
     // intention -> sessions it was shown to
     let mut shown_to: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
-    let mut reminded: std::collections::HashSet<String> = Default::default();
+    let mut reminded: std::collections::BTreeSet<String> = Default::default();
     for f in jsonl(&sub.join("intentions/fired.jsonl")) {
         if let (Some(i), Some(sid)) = (f.get("intention_id").and_then(|v| v.as_str()), f.get("session_id").and_then(|v| v.as_str())) {
             shown_to.entry(i.to_string()).or_default().insert(sid.to_string());
@@ -683,7 +705,9 @@ fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, S
         }
     }
     let have: std::collections::HashSet<String> = out.iter().filter(|e| e.kind == "session").map(|e| e.id.clone()).collect();
-    for sid in said.keys().chain(by_sid.keys()) {
+    // Every session that said something back, voted, or was shown a reminder
+    // gets an entry, so each id an intention points at opens.
+    for sid in said.keys().chain(by_sid.keys()).chain(reminded.iter()) {
         if have.contains(sid) || out.iter().any(|e| e.kind == "session" && &e.id == sid) {
             continue;
         }
@@ -692,7 +716,7 @@ fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, S
             sid,
             format!("session {}", sid.chars().take(8).collect::<String>()),
             if reminded.contains(sid) {
-                "shown only reminders that have since expired; listed for what it said back"
+                "i-dream showed it reminders, not hints or nudges"
             } else {
                 "i-dream showed it nothing live; it is listed for what it said back"
             },
@@ -745,7 +769,7 @@ mod tests {
         std::fs::write(sub.join("dreams/insight-feedback.jsonl"),
             "{\"sid\":\"s1\",\"intention_id\":\"i1\",\"rating\":\"down\"}\n{\"sid\":\"s2\",\"intention_id\":\"i1\",\"rating\":\"up\"}\n").unwrap();
         std::fs::write(sub.join("intentions/fired.jsonl"),
-            "{\"intention_id\":\"i1\",\"session_id\":\"s1\"}\n{\"intention_id\":\"i1\",\"session_id\":\"s1\"}\n").unwrap();
+            "{\"intention_id\":\"i1\",\"session_id\":\"s1\"}\n{\"intention_id\":\"i1\",\"session_id\":\"s1\"}\n{\"intention_id\":\"i1\",\"session_id\":\"s4\"}\n").unwrap();
         let mut out = vec![entry("intention", "i1", "t", "d")];
         add_feedback(home.path(), &Firings::default(), &BTreeMap::new(), &mut out);
         let s1 = out.iter().find(|e| e.id == "s1").unwrap();
@@ -755,9 +779,11 @@ mod tests {
         assert_eq!((s2.fields["corrections"].as_str(), s2.fields["votes"].as_str()), ("none", "1 up"));
         let i1 = out.iter().find(|e| e.id == "i1").unwrap();
         assert_eq!(i1.fields["votes"], "1 down, 1 up");
-        assert_eq!(i1.fields["shown to"], "1 session");
+        assert_eq!(i1.fields["shown to"], "2 sessions");
         assert!(out.iter().all(|e| e.id != "s3"), "a headless session is not listed");
-        assert!(s1.detail.contains("expired"), "{}", s1.detail);
+        assert!(s1.detail.contains("reminders"), "{}", s1.detail);
+        let s4 = out.iter().find(|e| e.id == "s4").expect("a session only shown a reminder is listed");
+        assert_eq!(s4.fields["corrections"], "none");
         assert!(s2.detail.contains("nothing live"), "{}", s2.detail);
     }
 
