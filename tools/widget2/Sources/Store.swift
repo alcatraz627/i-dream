@@ -29,6 +29,11 @@ final class AppModel: ObservableObject {
     @Published var patterns = PatternFilter()
     @Published var reader = ReaderFilter()
     @Published var landing = LandingFilter()
+    /// Each list home's search, chip, selection and open row.
+    @Published var lists: [Pane: ListState] = [:]
+    /// Where the owner was before each jump, for Back (⌘[).
+    var history: [(pane: Pane, item: String?)] = []
+    var restoring = false
     @Published var flow = FlowFilter()
     @Published var searchFocusToken = 0
     @Published var scaleToken = 0
@@ -282,6 +287,10 @@ final class AppModel: ObservableObject {
     // MARK: navigation
 
     func open(_ d: Dive) {
+        if !restoring, pane != d.pane || d.scope != .none {
+            history.append((pane, ListSpec.of(pane) != nil ? lists[pane]?.expanded : nil))
+            if history.count > 50 { history.removeFirst() }
+        }
         pane = d.pane
         switch d.scope {
         case .none: break
@@ -300,6 +309,9 @@ final class AppModel: ObservableObject {
         case .landingGroup(let g): landing = LandingFilter(groups: [g])
         case .slug(let s): landing = LandingFilter(focus: s)
             landing.selected = landingEffects().firstIndex(where: { $0.slug == s }) ?? 0
+        case .item(let id):
+            lists[d.pane] = ListState(expanded: id)
+            lists[d.pane]?.selected = listRows(d.pane).firstIndex { $0.id == id } ?? 0
         }
         openDashboard()
     }
@@ -368,7 +380,7 @@ final class AppModel: ObservableObject {
     /// toggles the pane's first filter. Returns false for a key it does not
     /// own so typing in a search field still works.
     func handleKey(_ key: String) -> Bool {
-        guard [.ledger, .patterns, .reader, .landing, .flow].contains(pane) else { return false }
+        guard [.ledger, .patterns, .reader, .landing, .flow].contains(pane) || ListSpec.of(pane) != nil else { return false }
         keyLog.append("\(pane.rawValue):\(key)")
         let n: Int = {
             switch pane {
@@ -378,6 +390,7 @@ final class AppModel: ObservableObject {
             case .landing: landingEffects().count
             case .flow: record?.cycles.count ?? 0
             case .settings, .changes: 0
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates: listRows(pane).prefix(ListPane.cap).count
             }
         }()
         func move(_ d: Int) {
@@ -388,6 +401,8 @@ final class AppModel: ObservableObject {
             case .landing: landing.selected = clamp(landing.selected + d, n)
             case .flow: flow.selected = clamp(flow.selected + d, n); flow.cycle = record?.cycles[safe: flow.selected]?.id
             case .settings, .changes: break
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+                lists[pane, default: ListState()].selected = clamp((lists[pane]?.selected ?? 0) + d, n)
             }
         }
         switch key {
@@ -401,6 +416,9 @@ final class AppModel: ObservableObject {
             case .landing: landing.focus = landingEffects()[safe: landing.selected]?.slug
             case .flow: if let c = record?.cycles[safe: flow.selected] { flow.cycle = c.id; if let d = c.dive { open(d) } }
             case .settings, .changes: break
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+                let id = listRows(pane)[safe: lists[pane]?.selected ?? 0]?.id
+                lists[pane, default: ListState()].expanded = lists[pane]?.expanded == id ? nil : id
             }
         case "esc":
             switch pane {
@@ -410,6 +428,8 @@ final class AppModel: ObservableObject {
             case .landing: if landing.focus != nil { landing.focus = nil } else { landing = LandingFilter() }
             case .flow: flow = FlowFilter()
             case .settings, .changes: break
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+                if lists[pane]?.expanded != nil { lists[pane]?.expanded = nil } else { lists[pane] = ListState() }
             }
         case "/": if pane == .flow { return false }; searchFocusToken += 1
         case "f":
@@ -419,6 +439,10 @@ final class AppModel: ObservableObject {
             case .reader: toggle(&reader.kinds, "structural-need")
             case .landing: toggle(&landing.groups, "worsening")
             case .flow, .settings, .changes: return false
+            case .proposals, .hints, .intentions, .insights, .sessions, .evidence, .gates:
+                guard let col = ListSpec.of(pane)?.chipColumn,
+                      let first = listRows(pane).first?.fields?[col] else { return false }
+                lists[pane, default: ListState()].chip = lists[pane]?.chip == nil ? first : nil
             }
         default: return false
         }

@@ -8,7 +8,7 @@ import Foundation
 // quietly disagreeing.
 
 enum Pane: String, CaseIterable, Identifiable {
-    case flow, ledger, patterns, reader, landing, changes, settings
+    case flow, ledger, patterns, reader, landing, changes, proposals, hints, intentions, insights, sessions, evidence, gates, settings
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -18,6 +18,13 @@ enum Pane: String, CaseIterable, Identifiable {
         case .reader: "Reader"
         case .landing: "Landing"
         case .changes: "Changes"
+        case .proposals: "Proposals"
+        case .hints: "Hints and nudges"
+        case .intentions: "Intentions"
+        case .insights: "Insights"
+        case .sessions: "Sessions"
+        case .evidence: "Evidence"
+        case .gates: "Armed gates"
         case .settings: "Settings"
         }
     }
@@ -29,6 +36,13 @@ enum Pane: String, CaseIterable, Identifiable {
         case .reader: "text.magnifyingglass"
         case .landing: "tray.and.arrow.down"
         case .changes: "clock.arrow.circlepath"
+        case .proposals: "doc.text"
+        case .hints: "lightbulb"
+        case .intentions: "bell"
+        case .insights: "sparkles"
+        case .sessions: "bubble.left.and.bubble.right"
+        case .evidence: "list.bullet.rectangle"
+        case .gates: "lock.shield"
         case .settings: "slider.horizontal.3"
         }
     }
@@ -44,6 +58,8 @@ enum Scope: Equatable {
     case cluster(String)
     case slug(String)
     case landingGroup(String)
+    /// One row of a list home, opened.
+    case item(String)
 }
 
 struct Dive: Equatable { var pane: Pane; var scope: Scope = .none }

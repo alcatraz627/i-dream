@@ -284,7 +284,7 @@ struct PatternsPane: View {
             }
             Text("\(plural(p.occurrences, "occurrence")) · \(p.last7) in the last 7 days, \(p.prior7) the 7 before · last seen \(ageText(p.lastSeen.map { r.now.timeIntervalSince($0) })) ago")
                 .font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 6) { Text(p.id).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: p.id) }
+            IdChip(model: model, id: p.id)
             if assoc.isEmpty {
                 Text("no association links this pattern").font(F.meta).foregroundStyle(P.fg3)
             } else {
@@ -416,7 +416,7 @@ struct ReaderPane: View {
                     }
                     Text(f.title).font(F.title).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
                     Text(f.why).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
-                    FlowChips(ids: f.evidenceIds)
+                    FlowChips(model: model, ids: f.evidenceIds)
                 }
                 .contentShape(Rectangle())
             }
@@ -432,8 +432,7 @@ struct ReaderPane: View {
                         .buttonStyle(.plain).foregroundStyle(P.blue)
                 }
                 Spacer()
-                Text(f.cluster).font(F.mono).foregroundStyle(P.fg3)
-                CopyButton(value: f.cluster)
+                IdChip(model: model, id: f.cluster)
             }
         }
         .card(current)
@@ -518,20 +517,13 @@ struct Stat: View {
 }
 
 /// Evidence ids as small chips that wrap onto as many lines as they need.
+/// A finding's evidence ids, each a link to its row in Evidence.
 struct FlowChips: View {
+    @ObservedObject var model: AppModel
     var ids: [String]
     var body: some View {
         WrapLayout(spacing: 4) {
-            ForEach(ids, id: \.self) { id in
-                let domain = String(id.split(separator: ":").first ?? "")
-                HStack(spacing: 3) {
-                    Image(systemName: domainIcon(domain)).font(.system(size: 8))
-                    Text(id).font(.system(size: 9.5 * F.k, design: .monospaced))
-                }
-                .foregroundStyle(P.fg2)
-                .padding(.horizontal, 5).padding(.vertical, 2)
-                .background(RoundedRectangle(cornerRadius: 4).fill(P.card2))
-            }
+            ForEach(ids, id: \.self) { id in IdChip(model: model, id: id) }
         }
     }
 }

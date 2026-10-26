@@ -84,6 +84,36 @@ enum Glossary {
             ("job failed", "A scheduled job's last run ended with an error; the cause is the last line of its log."),
             ("moved", "A mistake type's count over the last 7 days changed, with the fix it is credited to, if any."),
         ]
+        case .proposals: [
+            ("proposal", "A suggested improvement in the backlog, from a weekly finding you filed or from any other session."),
+            ("status", "open: not built yet; done: built; rejected or superseded: will not be built as written."),
+        ]
+        case .hints: [
+            ("hint / nudge", "A hint is added to your prompt; a nudge is shown before a tool runs. Both only advise."),
+            ("sessions", "How many sessions were shown it, counted once each."),
+            ("cited", "How many sessions Claude echoed its tag in, out of those the firing scan has checked. Not checked yet means no scan has judged it."),
+            ("promoted by", "you: you approved it; its evidence: its mistake kept coming back past the bar."),
+        ]
+        case .intentions: [
+            ("intention", "A reminder a future session gets when its first prompt matches the keywords."),
+            ("fires", "Times it was shown, out of the most it may be shown."),
+        ]
+        case .insights: [
+            ("insight", "An association the wake phase judged strong enough to promote, with the rule it suggests."),
+            ("intention", "The reminder this insight produced, if any."),
+        ]
+        case .sessions: [
+            ("shown", "Live hints and nudges the session was shown."),
+            ("cited", "Items the session echoed back, by the firing scan."),
+        ]
+        case .evidence: [
+            ("evidence row", "One record from a stream that the daily recon read."),
+            ("domain", "The stream it came from, such as atone, proposals or sessions."),
+            ("by", "Who made it: a person, an agent, a pin, telemetry, or an echo of an earlier note."),
+        ]
+        case .gates: [
+            ("armed gate", "A hook your answer on a weekly page switched on. Unlike a hint, it acts."),
+        ]
         case .settings: [
             ("idle time", "How long you must be away before the daemon runs a cycle."),
             ("usage guard", "Token limits used only when the account-wide usage gate is missing."),

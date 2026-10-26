@@ -195,6 +195,49 @@ enum Probe {
                     ms.globalSearch = GlobalSearch(open: true, query: "x", detail: e)
                     render(DashboardView(model: ms, fullHeight: false).frame(height: 760), appearance, out.appendingPathComponent("search-detail-\(tag).png"), width: 1280)
                 }
+                // Every list home renders its rows, first one open.
+                for p in Pane.lists {
+                    let d = model(status, reader)
+                    d.indexFixture = indexFile; d.loadIndex(sync: true)
+                    d.pane = p
+                    let rows = d.listRows(p)
+                    let inIndex = doc.entries.contains { ListSpec.of(p)!.kinds.contains($0.kind) }
+                    if let first = rows.first { d.lists[p] = ListState(expanded: first.id) }
+                    log.append(rows.isEmpty == !inIndex ? "PASS list \(p.title): \(rows.count) rows" : "FAIL list \(p.title): \(rows.count) rows, index has \(inIndex ? "some" : "none")")
+                    render(DashboardView(model: d, fullHeight: false).frame(height: 900), appearance, out.appendingPathComponent("dash-\(p.rawValue)-\(tag).png"), width: 1280)
+                }
+                // Every chip the panes show opens a home or a card, never only a search.
+                var chips: [(String, [String])] = [
+                    ("Reader", ms.record!.findings.flatMap { $0.evidenceIds + [$0.cluster] }),
+                    ("Patterns", ms.record!.patterns.prefix(30).map(\.id)),
+                ]
+                for p in Pane.lists {
+                    let d = model(status, reader); d.indexFixture = indexFile; d.loadIndex(sync: true)
+                    let rows = d.listRows(p).prefix(5)
+                    chips.append((p.title, rows.flatMap { [$0.id] + ($0.related ?? []) }))
+                }
+                let follower = model(status, reader); follower.indexFixture = indexFile; follower.loadIndex(sync: true)
+                for (where_, ids) in chips {
+                    var bad: [String] = []
+                    for id in Set(ids) {
+                        follower.globalSearch = GlobalSearch()
+                        follower.pane = .flow
+                        let ok = follower.openId(id)
+                        let landed = follower.globalSearch.detail != nil || (follower.pane != .flow && !follower.globalSearch.open)
+                        if !(ok && landed) { bad.append(id) }
+                    }
+                    log.append(bad.isEmpty ? "PASS chips on \(where_): all \(Set(ids).count) open a home or a card"
+                               : "FAIL chips on \(where_): \(bad.count) of \(Set(ids).count) open only a search, e.g. \(bad.prefix(4).joined(separator: ", "))")
+                }
+                // Back returns to where the jump started.
+                let nav = model(status, reader); nav.indexFixture = indexFile; nav.loadIndex(sync: true)
+                nav.pane = .reader
+                if let anyProposal = doc.entries.first(where: { $0.kind == "proposal" }) {
+                    nav.openId(anyProposal.id)
+                    let there = nav.pane
+                    nav.goBack()
+                    log.append(there == .proposals && nav.pane == .reader ? "PASS back: Reader to Proposals and back" : "FAIL back: went to \(there.title), came back to \(nav.pane.title)")
+                }
             } else {
                 log.append("FAIL search: \(ms.indexError ?? "index not read")")
             }
@@ -333,6 +376,7 @@ enum Probe {
         case .cluster(let c): "scoped to cluster \(c)"
         case .slug(let s): "scoped to slug \(s)"
         case .landingGroup(let g): "filtered to \(g)"
+        case .item(let id): "opened at \(id)"
         }
     }
 
@@ -346,6 +390,7 @@ enum Probe {
         case .cluster(let c): m.reader.expanded == c
         case .slug(let s): m.landing.focus == s
         case .landingGroup(let g): m.landing.groups == [g] && !m.landingEffects().isEmpty
+        case .item(let id): m.lists[d.pane]?.expanded == id && m.listRows(d.pane).contains { $0.id == id }
         }
     }
 

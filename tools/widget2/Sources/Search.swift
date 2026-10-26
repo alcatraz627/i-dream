@@ -29,13 +29,14 @@ struct IndexEntry: Decodable, Equatable {
     var detail: String
     var at: String?
     var related: [String]?
+    var fields: [String: String]?
     /// Unique across kinds: a slug and a hint can share an id.
     var uid: String { kind + ":" + id }
     /// Lowercased once at load, since every keystroke searches every row.
     private(set) var haystack = ""
     private(set) var titleLow = ""
 
-    private enum CodingKeys: String, CodingKey { case kind, id, title, detail, at, related }
+    private enum CodingKeys: String, CodingKey { case kind, id, title, detail, at, related, fields }
 
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -45,6 +46,7 @@ struct IndexEntry: Decodable, Equatable {
         detail = try c.decode(String.self, forKey: .detail)
         at = try c.decodeIfPresent(String.self, forKey: .at)
         related = try c.decodeIfPresent([String].self, forKey: .related)
+        fields = try c.decodeIfPresent([String: String].self, forKey: .fields)
         titleLow = title.lowercased()
         haystack = (id + " " + title + " " + detail).lowercased()
     }
@@ -91,8 +93,9 @@ enum SearchIndex {
 }
 
 extension AppModel {
-    /// Where an item lives in the dashboard today, or nil when no pane can
-    /// show it yet and it opens in the search's detail card instead.
+    /// Where an item lives in the dashboard, or nil when no pane can show it
+    /// (a pattern past the drawn ones, an association, a job) and it opens in
+    /// the search's detail card instead.
     func home(_ e: IndexEntry) -> Dive? {
         guard let r = record else { return nil }
         switch e.kind {
@@ -100,7 +103,7 @@ extension AppModel {
         case "finding" where r.findings.contains { $0.cluster == e.id }: return Dive(pane: .reader, scope: .cluster(e.id))
         case "slug" where r.effects.contains { $0.slug == e.id }: return Dive(pane: .landing, scope: .slug(e.id))
         case "source" where r.sources.contains { $0.id == e.id }: return Dive(pane: .ledger, scope: .source(e.id))
-        default: return nil
+        default: return ListSpec.pane(for: e.kind).map { Dive(pane: $0, scope: .item(e.id)) }
         }
     }
 
