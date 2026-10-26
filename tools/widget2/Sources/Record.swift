@@ -421,16 +421,22 @@ enum RecordBuilder {
         let awaitingItems = awaitingPages.map(\.items).reduce(0, +)
 
         // Effects: each slug's 7-day movement. It is credited to a landing only
-        // when a finding about that slug was filed or armed at least seven days
-        // ago, so the week being measured comes after the landing.
+        // when the fix is in place (a hook armed, or a filed proposal now done)
+        // and landed at least seven days ago, so the week measured comes after.
+        // A proposal that is only filed has changed nothing yet.
         let landedKinds: Set<String> = ["filed", "already-filed", "armed"]
         let landedAt = Dictionary(landed.map { ($0.cluster, parseDate($0.ts)) }, uniquingKeysWith: { a, _ in a })
+        let proposalStatus = Dictionary(landed.compactMap { l in l.proposal_status.map { (l.cluster, $0) } },
+                                        uniquingKeysWith: { a, _ in a })
         let effects: [Effect] = s.reflect.map { sl in
             let f = findings.first { $0.key == sl.slug }
             var landing: String?, recent: String?
             if let fd = f, let o = fd.outcome, landedKinds.contains(o) {
                 let at = landedAt[fd.cluster] ?? nil
-                if let at, now.timeIntervalSince(at) >= 7 * 86400 { landing = "\(o): \(fd.title)" }
+                let status = proposalStatus[fd.cluster]
+                let inPlace = o == "armed" || status == "done"
+                if !inPlace { recent = "proposal \(status ?? "status unknown"), nothing built yet, not credited" }
+                else if let at, now.timeIntervalSince(at) >= 7 * 86400 { landing = "\(o == "armed" ? "armed" : "built"): \(fd.title)" }
                 else { recent = "\(o) \(ageText(at.map { now.timeIntervalSince($0) })) ago, too soon to credit" }
             }
             return Effect(slug: sl.slug, total: sl.total, last7: sl.last7, prior7: sl.prior7, delta: sl.delta7,

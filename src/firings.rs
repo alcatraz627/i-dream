@@ -13,6 +13,11 @@
 //! the receipt, deliberately invisible to every voting reader (reinforce,
 //! confidence-apply, Brier all skip rating-less lines).
 //!
+//! Live hints and nudges, rendered `[i-dream:xxxxxxxx]` by the hooks, join
+//! the same way from the would-fire ledger; they record firings but cast no
+//! vote, since they are not insights. An echo shows Claude cited one, not
+//! that it acted on it.
+//!
 //! Matching is the tag literal only. Fuzzy text-echo detection is deferred
 //! on purpose: a zero-false-positive baseline that starts at zero when the
 //! tag render ships is honest; a similarity heuristic that manufactures
@@ -80,18 +85,49 @@ pub fn intention_tag(id: &str) -> String {
     format!("[I:{}]", &id[..id.len().min(8)])
 }
 
+/// The tag the hooks render on a live hint or nudge.
+fn intervention_tag(id: &str) -> String {
+    format!("[i-dream:{}]", &id[..id.len().min(8)])
+}
+
 /// One thing a session was shown: its state key, the tag an echo carries,
-/// and the insight a firing votes for.
+/// and the insight a firing votes for. Interventions vote for nothing.
 struct Shown {
     key: String,
     tag: String,
-    vote_id: String,
+    vote_id: Option<String>,
 }
 
 impl Shown {
     fn lesson(id: String) -> Self {
-        Shown { tag: tag_for(&id), vote_id: id.clone(), key: id }
+        Shown { tag: tag_for(&id), vote_id: Some(id.clone()), key: id }
     }
+}
+
+/// Every live hint or nudge the hooks showed a session, from the would-fire
+/// ledger. Shadow and candidate rows were never shown, so they are skipped.
+fn intervention_surfacings(would_fire: &Path, now: DateTime<Utc>) -> Vec<(String, DateTime<Utc>, Shown)> {
+    let body = std::fs::read_to_string(would_fire).unwrap_or_default();
+    body.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("state").and_then(|s| s.as_str()) == Some("live"))
+        .filter_map(|v| {
+            let at = DateTime::from_timestamp(v.get("ts")?.as_i64()?, 0)?;
+            if now - at >= Duration::days(SURFACING_LOOKBACK_DAYS) {
+                return None;
+            }
+            let id = v.get("id")?.as_str()?;
+            let sid = v.get("sid")?.as_str()?;
+            if id.is_empty() || sid.is_empty() {
+                return None;
+            }
+            Some((
+                sid.to_string(),
+                at,
+                Shown { key: format!("N:{id}"), tag: intervention_tag(id), vote_id: None },
+            ))
+        })
+        .collect()
 }
 
 /// Every dream-made intention the daemon surfaced, as (session, when, shown).
@@ -122,7 +158,7 @@ fn intention_surfacings(store: &Store, now: DateTime<Utc>) -> Vec<(String, DateT
                 Shown {
                     key: format!("I:{}", r.intention_id),
                     tag: intention_tag(&r.intention_id),
-                    vote_id: assoc.to_string(),
+                    vote_id: Some(assoc.to_string()),
                 },
             ))
         })
@@ -214,6 +250,10 @@ pub fn scan_at(
     for s in intention_surfacings(store, now) {
         add(s.0, Some(s.1), s.2);
     }
+    // The hooks' would-fire ledger sits beside the injector's receipts.
+    for s in intervention_surfacings(&injections_path.with_file_name("would-fire.jsonl"), now) {
+        add(s.0, Some(s.1), s.2);
+    }
 
     for (sid, (last_ts, shown)) in by_sid {
         // An undated row can't be aged; treat it as fresh forever rather
@@ -256,13 +296,15 @@ pub fn scan_at(
             if text.contains(&s.tag) {
                 // The vote goes to the feedback lane; the firing itself to its
                 // own ledger, which is never trimmed along with votes.
-                store.append_jsonl(
-                    "dreams/insight-feedback.jsonl",
-                    &serde_json::json!({
-                        "insight_id": s.vote_id, "rating": "up", "source": "fired",
-                        "sid": sid, "ts": now.to_rfc3339(),
-                    }),
-                )?;
+                if let Some(vote_id) = &s.vote_id {
+                    store.append_jsonl(
+                        "dreams/insight-feedback.jsonl",
+                        &serde_json::json!({
+                            "insight_id": vote_id, "rating": "up", "source": "fired",
+                            "sid": sid, "ts": now.to_rfc3339(),
+                        }),
+                    )?;
+                }
                 store.append_jsonl(
                     FIRINGS_LEDGER,
                     &serde_json::json!({
@@ -390,6 +432,33 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn intervention_tag_echo_is_a_firing_without_a_vote() {
+        let r = rig();
+        let shown_at = (now() - Duration::hours(12)).timestamp();
+        let wf = r.injections.with_file_name("would-fire.jsonl");
+        std::fs::write(
+            &wf,
+            [
+                serde_json::json!({"id": "8c24512f00aa", "sid": "sid-n", "state": "live", "ts": shown_at}),
+                serde_json::json!({"id": "65cfe4c200bb", "sid": "sid-n", "state": "live", "ts": shown_at}),
+                serde_json::json!({"id": "deadbeef00cc", "sid": "sid-n", "state": "shadow", "ts": shown_at}),
+            ]
+            .map(|v| v.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        write_transcript(&r, "sid-n", &["Acting on [i-dream:8c24512f], doing it now."], &[]);
+
+        let rep = scan_at(&r.injections, &r.projects, &r.state, &r.store, now()).unwrap();
+        assert_eq!(rep.fired, 1);
+        assert_eq!(rep.present_unused, 1, "shadow rows were never shown");
+        let rows = firings(&r);
+        let fired = rows.iter().find(|v| v["kind"] == "fired").unwrap();
+        assert_eq!(fired["id"], "N:8c24512f00aa");
+        assert!(ledger(&r).is_empty(), "an intervention is not an insight to vote on");
     }
 
     #[test]

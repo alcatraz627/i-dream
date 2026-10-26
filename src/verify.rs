@@ -157,6 +157,51 @@ pub fn journal_checks(entries: &[DreamEntry], as_of: DateTime<Utc>) -> Vec<Check
     out
 }
 
+/// The budget row, from the newest extractor run: dreaming, metacog and
+/// introspection together. `None` when no run has been logged, so the
+/// journal's dreaming-only row stands in.
+pub fn extractor_budget_check(ledger: &str) -> Option<Check> {
+    let newest = ledger
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .last()?;
+    let tokens = newest.get("tokens")?.as_u64()?;
+    let budget = newest.get("budget")?.as_u64()?.max(1);
+    let ratio = tokens as f64 / budget as f64;
+    Some(Check::new(
+        "cycle-budget",
+        if ratio <= 1.0 { Verdict::Pass } else { Verdict::Fail },
+        format!("newest extractor run spent {ratio:.2}x its budget ({tokens} of {budget} tokens, all modules)"),
+    ))
+}
+
+/// The cycle-ran row from the extractor ledger. The daily run logs a row even
+/// when dreaming skips a quiet day, so a run inside the limit is a cycle that
+/// ran. `None` when no run has been logged.
+pub fn extractor_ran_check(ledger: &str, as_of: DateTime<Utc>) -> Option<Check> {
+    let newest: DateTime<Utc> = ledger
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v.get("ts")?.as_str()?.parse().ok())
+        .max()?;
+    let age = as_of - newest;
+    Some(Check::new(
+        "cycle-ran",
+        if age <= Duration::hours(CYCLE_MAX_AGE_HOURS) { Verdict::Pass } else { Verdict::Fail },
+        format!("newest daily run {}h ago (limit {CYCLE_MAX_AGE_HOURS}h)", age.num_hours()),
+    ))
+}
+
+/// The ingest-queue row from the queue folder as it is now.
+pub fn queue_check(depth: usize, oldest_hours: Option<f64>) -> Check {
+    let oldest = oldest_hours.unwrap_or(0.0);
+    Check::new(
+        "ingest-queue",
+        if oldest < QUEUE_MAX_HOURS { Verdict::Pass } else { Verdict::Fail },
+        format!("{depth} item(s) queued, oldest {oldest:.0}h (limit {QUEUE_MAX_HOURS:.0}h)"),
+    )
+}
+
 /// Delivery rows: did live nudges and hints actually reach a session?
 /// `delivered` holds the 8-hex id prefixes found in hook attachment records;
 /// `None` means the transcripts could not be read, which is UNKNOWN, not FAIL.
@@ -324,6 +369,27 @@ fn load_journal(home: &Path) -> (Vec<DreamEntry>, usize) {
 pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
     let (journal, dropped) = load_journal(home);
     let mut checks = journal_checks(&journal, now);
+    let spend = std::fs::read_to_string(home.join(".claude/subconscious").join(crate::daemon::EXTRACTOR_SPEND_LOG))
+        .unwrap_or_default();
+    // The journal rows are replayable history; today's run, budget and queue
+    // are read from where they live now.
+    let queue_dir = home.join(".claude/subconscious/dreams/ingest-queue");
+    let depth = std::fs::read_dir(&queue_dir)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| !e.file_name().to_string_lossy().starts_with(['_', '.']))
+                .count()
+        })
+        .unwrap_or(0);
+    let oldest = crate::modules::registry::oldest_child_age(&queue_dir).map(|d| d.as_secs_f64() / 3600.0);
+    let live = [extractor_ran_check(&spend, now), extractor_budget_check(&spend), Some(queue_check(depth, oldest))];
+    for row in live.into_iter().flatten() {
+        let journal_row = checks.iter_mut().find(|c| c.row == row.row);
+        match journal_row {
+            Some(c) if row.row != "cycle-ran" || row.verdict == Verdict::Pass => *c = row,
+            _ => {}
+        }
+    }
     if dropped > 0 {
         checks.push(Check::new(
             "journal-readable",
@@ -402,6 +468,35 @@ pub fn render_text(r: &Report) -> String {
 mod tests {
     use super::*;
     use crate::consolidation::assay::AssayPanel;
+
+    #[test]
+    fn a_quiet_day_whose_daily_run_happened_is_not_a_missed_cycle() {
+        let now: DateTime<Utc> = "2026-10-26T12:00:00Z".parse().unwrap();
+        let ledger = "{\"ts\":\"2026-10-25T23:00:00Z\",\"tokens\":0,\"budget\":10000}\n";
+        let c = extractor_ran_check(ledger, now).unwrap();
+        assert_eq!((c.row, c.verdict), ("cycle-ran", Verdict::Pass));
+        let stale = "{\"ts\":\"2026-10-23T23:00:00Z\",\"tokens\":0,\"budget\":10000}\n";
+        assert_eq!(extractor_ran_check(stale, now).unwrap().verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn queue_row_reads_the_live_backlog() {
+        let c = queue_check(9, Some(67.0));
+        assert_eq!((c.row, c.verdict), ("ingest-queue", Verdict::Fail));
+        assert!(c.detail.contains("9 item(s)"));
+        assert_eq!(queue_check(0, None).verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn budget_row_judges_the_newest_extractor_run_across_all_modules() {
+        let ledger = "{\"ts\":\"2026-10-24T23:00:00Z\",\"tokens\":9000,\"budget\":10000}\n\
+                      {\"ts\":\"2026-10-25T23:00:00Z\",\"tokens\":12000,\"budget\":10000}\n";
+        let c = extractor_budget_check(ledger).unwrap();
+        assert_eq!(c.row, "cycle-budget");
+        assert_eq!(c.verdict, Verdict::Fail, "newest run spent 1.2x");
+        assert!(c.detail.contains("12000"));
+        assert!(extractor_budget_check("").is_none(), "no ledger falls back to the journal row");
+    }
 
     fn entry(day: u32, sessions: u64, patterns: u64, assoc: u64, insights: u64, ratio: f64, queue_h: f64) -> DreamEntry {
         DreamEntry {

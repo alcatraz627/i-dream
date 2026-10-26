@@ -371,8 +371,10 @@ impl Daemon {
                     return;
                 }
                 info!("Idle threshold reached, starting consolidation cycle");
-                // Abort if Claude Code session usage is over the warn threshold.
-                if self.check_usage_limit() {
+                // The transcript-count limits only gate when the account-wide
+                // gate is missing; the check still runs so status stays fresh.
+                let over_local = self.check_usage_limit();
+                if over_local && !shared_usage_gate_script().exists() {
                     warn!(
                         "Usage over warn threshold — skipping automatic consolidation cycle. Trigger manually to override."
                     );
@@ -515,11 +517,7 @@ impl Daemon {
                     if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
                         continue;
                     }
-                    let out_tokens = val
-                        .pointer("/usage/outputTokens")
-                        .or_else(|| val.pointer("/usage/output_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    let out_tokens = assistant_output_tokens(&val);
                     if out_tokens == 0 {
                         continue;
                     }
@@ -1294,6 +1292,25 @@ struct DomainCadenceState {
     last_run: std::collections::HashMap<String, DateTime<Utc>>,
 }
 
+/// Output tokens on one assistant transcript record. Claude Code nests usage
+/// under `message`; the top-level forms are kept for older transcripts.
+fn assistant_output_tokens(val: &serde_json::Value) -> u64 {
+    [
+        "/message/usage/output_tokens",
+        "/usage/output_tokens",
+        "/usage/outputTokens",
+    ]
+    .iter()
+    .find_map(|p| val.pointer(p).and_then(|v| v.as_u64()))
+    .unwrap_or(0)
+}
+
+/// Where the account-wide usage gate lives. When it exists, it decides; the
+/// transcript-count limits in `[limits]` only stand in when it is missing.
+fn shared_usage_gate_script() -> std::path::PathBuf {
+    crate::config::expand_tilde(Path::new("~/.claude/scripts/cron/usage-gate.sh"))
+}
+
 /// Ask the account-wide usage gate whether background work may spend tokens.
 ///
 /// The same gate the nightly residue review uses, so the daemon stands down
@@ -1301,7 +1318,7 @@ struct DomainCadenceState {
 /// detail line when it is closed, `None` when open or when the gate script is
 /// missing or unreadable (a broken gate must not silently stop dreaming).
 pub(crate) fn shared_usage_gate_closed() -> Option<String> {
-    let script = crate::config::expand_tilde(Path::new("~/.claude/scripts/cron/usage-gate.sh"));
+    let script = shared_usage_gate_script();
     if !script.exists() {
         return None;
     }
@@ -1582,7 +1599,37 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
         }
     }
 
-    Ok(config.budget.max_tokens_per_cycle.saturating_sub(budget))
+    let used = config.budget.max_tokens_per_cycle.saturating_sub(budget);
+    record_extractor_spend(store, used, config.budget.max_tokens_per_cycle, Utc::now())?;
+    info!("[extractors] complete: used {used} tokens of {}", config.budget.max_tokens_per_cycle);
+    Ok(used)
+}
+
+/// One row per extractor run: what it spent against its budget. `verify`
+/// judges the budget from the newest row.
+pub const EXTRACTOR_SPEND_LOG: &str = "logs/extractor-spend.jsonl";
+
+/// Record what the daily extractors spent, so the running token total and
+/// the budget check include it.
+///
+/// The extractors run in the reader's own process, not the daemon's, so this
+/// adds to `state.json` on disk; the daemon adopts the larger total the next
+/// time it writes (`merge_newer`).
+pub fn record_extractor_spend(store: &Store, tokens: u64, budget: u64, now: DateTime<Utc>) -> Result<()> {
+    store.append_jsonl(
+        EXTRACTOR_SPEND_LOG,
+        &serde_json::json!({"ts": now.to_rfc3339(), "tokens": tokens, "budget": budget}),
+    )?;
+    if tokens > 0 {
+        let mut state: DaemonState = if store.exists("state.json") {
+            store.read_json("state.json")?
+        } else {
+            DaemonState::default()
+        };
+        state.total_tokens_used += tokens;
+        store.write_json("state.json", &state)?;
+    }
+    Ok(())
 }
 
 /// Handle a single hook-script connection.
@@ -3199,6 +3246,32 @@ timeout = "10s"
         assert_eq!(reloaded.total_tokens_used, 12345);
         assert!(reloaded.last_consolidation.is_some());
         drop(dir);
+    }
+
+    #[test]
+    fn output_tokens_are_read_from_the_message_usage_block() {
+        let line = serde_json::json!({"type": "assistant", "message": {"usage": {"output_tokens": 122}}});
+        assert_eq!(assistant_output_tokens(&line), 122);
+        let legacy = serde_json::json!({"type": "assistant", "usage": {"outputTokens": 7}});
+        assert_eq!(assistant_output_tokens(&legacy), 7);
+        assert_eq!(assistant_output_tokens(&serde_json::json!({"type": "assistant"})), 0);
+    }
+
+    #[test]
+    fn extractor_spend_adds_to_the_total_and_logs_a_row() {
+        let (_dir, store) = mk_store();
+        store
+            .write_json("state.json", &DaemonState { total_cycles: 3, total_tokens_used: 1000, ..Default::default() })
+            .unwrap();
+        record_extractor_spend(&store, 250, 400, Utc::now()).unwrap();
+        record_extractor_spend(&store, 0, 400, Utc::now()).unwrap();
+        let s: DaemonState = store.read_json("state.json").unwrap();
+        assert_eq!(s.total_tokens_used, 1250);
+        assert_eq!(s.total_cycles, 3, "an extractor run is not a cycle");
+        let rows: Vec<serde_json::Value> = store.read_jsonl(EXTRACTOR_SPEND_LOG).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["tokens"], 250);
+        assert_eq!(rows[0]["budget"], 400);
     }
 
     #[test]

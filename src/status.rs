@@ -100,7 +100,7 @@ pub struct InterventionSummary {
     pub live: usize,
     pub candidate: usize,
     pub shadow: usize,
-    /// Would-fire matches recorded in the last seven days.
+    /// Live interventions shown in the last seven days, once per session.
     pub fired_7d: usize,
 }
 
@@ -142,23 +142,45 @@ fn gather_interventions(home: &std::path::Path) -> InterventionSummary {
         .unwrap_or_default();
     let count = |s: &str| items.iter().filter(|i| i.state == s).count();
     let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
-    let fired_7d = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter(|v| {
-            v.get("ts")
-                .and_then(|t| t.as_str())
-                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                .is_some_and(|t| t.with_timezone(&chrono::Utc) > cutoff)
-        })
-        .count();
+    let ledger = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap_or_default();
+    let fired_7d = count_fired_since(&ledger, cutoff);
     InterventionSummary {
         live: count("live"),
         candidate: count("candidate"),
         shadow: count("shadow"),
         fired_7d,
     }
+}
+
+/// How many live interventions reached a session since `cutoff`, counting
+/// each one once per session.
+///
+/// The hooks ledger every match, but show a live item only on its first match
+/// in a session, so raw rows overcount; shadow and candidate rows are never
+/// shown. Hooks write `ts` as epoch seconds; older rows carry RFC 3339 text.
+fn count_fired_since(ledger: &str, cutoff: chrono::DateTime<chrono::Utc>) -> usize {
+    ledger
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("state").and_then(|s| s.as_str()) == Some("live"))
+        .filter(|v| {
+            let ts = v.get("ts");
+            let at = match ts.and_then(|t| t.as_i64()) {
+                Some(secs) => chrono::DateTime::from_timestamp(secs, 0),
+                None => ts
+                    .and_then(|t| t.as_str())
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc)),
+            };
+            at.is_some_and(|t| t > cutoff)
+        })
+        .filter_map(|v| {
+            let id = v.get("id")?.as_str()?.to_string();
+            let sid = v.get("sid").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            Some((id, sid))
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .len()
 }
 
 /// How many days of cycles the report carries.
@@ -1120,6 +1142,25 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fired_counts_live_rows_once_per_session_with_epoch_or_text_stamps() {
+        let now = chrono::Utc::now();
+        let recent = now.timestamp() - 3600;
+        let old = now.timestamp() - 8 * 86400;
+        let text_ts = (now - chrono::Duration::hours(2)).to_rfc3339();
+        let ledger = [
+            format!(r#"{{"id":"a","sid":"s1","state":"live","ts":{recent}}}"#),
+            format!(r#"{{"id":"a","sid":"s1","state":"live","ts":{recent}}}"#),
+            format!(r#"{{"id":"a","sid":"s2","state":"live","ts":{recent}}}"#),
+            format!(r#"{{"id":"b","sid":"s1","state":"live","ts":"{text_ts}"}}"#),
+            format!(r#"{{"id":"c","sid":"s1","state":"candidate","ts":{recent}}}"#),
+            format!(r#"{{"id":"d","sid":"s1","state":"live","ts":{old}}}"#),
+        ]
+        .join("\n");
+        let cutoff = now - chrono::Duration::days(7);
+        assert_eq!(count_fired_since(&ledger, cutoff), 3);
+    }
 
     fn lane(name: &'static str, status: LaneStatus, reason: &str) -> LaneHealth {
         LaneHealth {

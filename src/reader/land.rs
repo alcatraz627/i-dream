@@ -540,6 +540,10 @@ pub struct Landed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub ts: DateTime<Utc>,
+    /// The filed proposal's status as of reading (open, done, rejected, …).
+    /// Filled when the view is served, never stored in the landed log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_status: Option<String>,
 }
 
 /// Apply the owner's verdicts. `file` files one proposal and returns its id;
@@ -561,6 +565,7 @@ pub fn apply(
             outcome: outcome.into(),
             detail,
             ts: now,
+            proposal_status: None,
         };
         if !verdicts.get(&n.cluster).copied().unwrap_or(true) {
             out.push(landed("declined", None));

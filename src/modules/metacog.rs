@@ -512,18 +512,18 @@ Output as JSON matching this shape:
             params.sample_budget_chars,
         );
         let total_units = batch.units.len();
-        let mut budget_units: Vec<&ExecutionUnit> = Vec::new();
-        let mut running_len = 2usize; // account for "[]" wrapper
-        for unit in &batch.units {
-            let unit_json = serde_json::to_string(unit)?;
-            let sep = if budget_units.is_empty() { 0 } else { 1 }; // comma separator
-            if running_len + sep + unit_json.len() > sample_budget {
-                break;
-            }
-            running_len += sep + unit_json.len();
-            budget_units.push(unit);
-        }
+        let budget_units = units_within_budget(&batch.units, sample_budget);
         let analyzed_count = budget_units.len();
+        if analyzed_count == 0 {
+            // Every unit is bigger than the budget, so they can never be sent.
+            // Mark the sessions done and spend nothing.
+            warn!(
+                "Metacog: none of {total_units} units fits the {}k-char budget, skipping the call",
+                sample_budget / 1000
+            );
+            self.persist_processed(&batch.sessions_seen)?;
+            return Ok(0);
+        }
         let serialized = serde_json::to_string(&budget_units)?;
 
         if analyzed_count < total_units {
@@ -579,8 +579,6 @@ Output as JSON matching this shape:
             warn!("failed to persist metacog audit: {e:#}");
         }
 
-        self.persist_processed(&batch.sessions_seen)?;
-
         // Parse the LLM response and append to calibration.jsonl.
         #[derive(Deserialize)]
         struct LlmCalibration {
@@ -613,9 +611,12 @@ Output as JSON matching this shape:
                 if let Err(e) = self.store.append_jsonl("metacog/calibration.jsonl", &entry) {
                     warn!("failed to persist calibration entry: {e:#}");
                 }
+                // Only a usable answer retires these sessions; a refusal or
+                // garbled reply leaves them for the next run.
+                self.persist_processed(&batch.sessions_seen)?;
             }
             Err(e) => {
-                warn!("metacog: failed to parse LLM calibration response: {e:#}");
+                warn!("metacog: failed to parse LLM calibration response, sessions stay queued: {e:#}");
             }
         }
 
@@ -632,6 +633,24 @@ Output as JSON matching this shape:
         );
         Ok(response.tokens_used)
     }
+}
+
+/// The units that fit in `budget_chars` once serialized as a JSON array,
+/// newest first. A unit too big on its own is skipped, not a stopping point,
+/// so one huge session cannot starve the rest.
+fn units_within_budget(units: &[ExecutionUnit], budget_chars: usize) -> Vec<&ExecutionUnit> {
+    let mut picked = Vec::new();
+    let mut running_len = 2usize; // the "[]" wrapper
+    for unit in units {
+        let Ok(json) = serde_json::to_string(unit) else { continue };
+        let sep = usize::from(!picked.is_empty());
+        if running_len + sep + json.len() > budget_chars {
+            continue;
+        }
+        running_len += sep + json.len();
+        picked.push(unit);
+    }
+    picked
 }
 
 impl<'a> MetacogModule<'a> {
@@ -1221,6 +1240,21 @@ mod tests {
             (score - 1.0).abs() < f64::EPSILON,
             "No calibration history → full novelty (1.0)"
         );
+    }
+
+    #[test]
+    fn an_oversize_unit_is_skipped_not_a_wall_for_the_rest() {
+        let big = make_unit("u-big", false, (0..40).map(|_| tool("Read", true)).collect());
+        let small = make_unit("u-small", false, vec![tool("Read", true)]);
+        let small_len = serde_json::to_string(&small).unwrap().len();
+        assert!(serde_json::to_string(&big).unwrap().len() > small_len + 2);
+        let units = vec![big, small];
+        // The newest unit alone exceeds the budget; the next one fits.
+        let picked = units_within_budget(&units, small_len + 2);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].unit_id, "u-small");
+        let none = units_within_budget(&units, 1);
+        assert!(none.is_empty(), "nothing fits, nothing is sent");
     }
 
     #[test]

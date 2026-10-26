@@ -173,7 +173,7 @@ struct ReaderDoc: Decodable {
         var proposal: Proposal?
     }
     struct Validated: Decodable { var items: [Named]; var process_note: String? }
-    struct Landed: Decodable { var cluster: String; var title: String; var outcome: String; var detail: String?; var ts: String }
+    struct Landed: Decodable { var cluster: String; var title: String; var outcome: String; var detail: String?; var ts: String; var proposal_status: String? }
     struct Run: Decodable {
         var week: String
         var at: String?

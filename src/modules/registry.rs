@@ -234,8 +234,8 @@ pub enum LaneCheck {
     /// A queue is healthy only while its oldest item is younger than the
     /// cadence (the drain SLA). Empty is green.
     BacklogAge,
-    /// The store must exist and be non-empty — a store never created is a lane
-    /// that never lived.
+    /// The store must exist: a store never created is a lane that never lived.
+    /// Its age is not judged, for stores written whenever a person chooses.
     Existence,
     /// The store is bounded by its rule in [`RETENTION`], the one table of caps.
     /// Yellow means the reaper is behind (more than a tenth over the cap), red
@@ -317,9 +317,9 @@ pub const LANES: &[Lane] = &[
         consumer: "i-dream reader",
         store: ".claude/affirm/events.jsonl",
         cadence_hours: 168,
-        check: LaneCheck::Freshness {
-            signal: ".claude/affirm/events.jsonl",
-        },
+        // The owner runs /affirm when something earns it; a quiet month is
+        // not a fault.
+        check: LaneCheck::Existence,
         consumed: Consumed::By(".claude/i-dream/reader/state.json"),
     },
     Lane {
@@ -525,13 +525,14 @@ pub(crate) fn oldest_child_age(dir: &Path) -> Option<Duration> {
     )
 }
 
-/// Is there anything here? A non-empty file, or a directory with entries.
-fn path_nonempty(path: &Path) -> bool {
+/// Has the producer ever made this store? A file counts even when empty,
+/// since a rolling window can hold no events; a directory needs an entry.
+fn path_present(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(m) if m.is_dir() => std::fs::read_dir(path)
             .map(|mut d| d.next().is_some())
             .unwrap_or(false),
-        Ok(m) => m.len() > 0,
+        Ok(_) => true,
         Err(_) => false,
     }
 }
@@ -643,7 +644,7 @@ impl Lane {
                 ),
             },
             LaneCheck::Existence => {
-                if path_nonempty(&store_abs) {
+                if path_present(&store_abs) {
                     (LaneStatus::Green, "present".to_string())
                 } else {
                     (LaneStatus::Red, format!("store absent ({})", self.store))
@@ -1705,6 +1706,21 @@ mod consumer_tests {
             check: LaneCheck::Existence,
             consumed,
         }
+    }
+
+    #[test]
+    fn an_empty_store_is_present_and_only_a_missing_one_is_red() {
+        let home = tempfile::tempdir().unwrap();
+        let l = lane(Consumed::OnDemand);
+        assert_eq!(l.evaluate(home.path()).status, LaneStatus::Red);
+        std::fs::write(home.path().join("s.jsonl"), "").unwrap();
+        assert_eq!(l.evaluate(home.path()).status, LaneStatus::Green);
+    }
+
+    #[test]
+    fn affirm_is_human_paced_so_its_age_is_never_a_fault() {
+        let affirm = LANES.iter().find(|l| l.name == "affirm").unwrap();
+        assert!(matches!(affirm.check, LaneCheck::Existence));
     }
 
     #[test]

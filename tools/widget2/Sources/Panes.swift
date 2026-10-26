@@ -550,7 +550,7 @@ struct LandingPane: View {
     var body: some View {
         let effects = model.landingEffects()
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .landing, sub: "Where findings went and whether anything moved. An effect is credited only to a finding about the same slug that you filed or armed; every other movement reads unattributed.")
+            PaneHeader(pane: .landing, sub: "Where findings went and whether anything moved. An effect is credited only to a fix that is in place: a hook you armed, or a filed proposal that is now done. A proposal still open has changed nothing yet; every other movement reads unattributed.")
             Text("\(r.interventions.live) live nudges · \(r.interventions.candidate) candidates · \(r.interventions.shadow) in shadow · \(r.interventions.fired_7d) fired in the last 7 days · heed is not measured yet")
                 .font(F.meta).foregroundStyle(P.fg2)
             highlights

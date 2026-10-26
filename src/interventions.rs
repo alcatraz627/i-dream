@@ -40,10 +40,9 @@ const QUALIFY_RECURRENCES: usize = 2;
 /// A shadow hint may auto-promote once it would have fired this many times
 /// across distinct sessions (the evidence bar; owner ladder 2026-07-22).
 pub const EVIDENCE_BAR_FIRES: usize = 5;
-/// Whether any hook surface delivers hint-form items. False since the
-/// 2026-09-05 ruling: the prompt hook runs async and prints nothing, and
-/// PreToolUse handles nudges only. Flip it when a delivering surface returns.
-pub const HINTS_DELIVERED: bool = false;
+/// Whether any hook surface delivers hint-form items. The synchronous hint
+/// hook does, so live hints reach sessions and may auto-promote on evidence.
+pub const HINTS_DELIVERED: bool = true;
 /// Body length cap — an intervention is a nudge, not an essay.
 const BODY_MAX: usize = 220;
 /// Pattern length cap (consumer-side `re.compile` is the real validator;
@@ -921,8 +920,9 @@ mod tests {
         let changed = promote_on_evidence(&mut items, &fires, now(), true, false);
         assert_eq!(changed, 2);
         assert_eq!(
-            items[0].state, "candidate",
-            "hot hint stops at candidate while no surface delivers hints"
+            items[0].state,
+            if HINTS_DELIVERED { "live" } else { "candidate" },
+            "hot hint goes live only while a surface delivers hints"
         );
         assert_eq!(items[1].state, "candidate", "hot nudge waits for the flip");
         assert_eq!(items[2].state, "shadow", "cold stays shadow");

@@ -336,6 +336,23 @@ pub fn count_open_proposals(body: &str) -> usize {
         .count()
 }
 
+/// Give each filed or already-filed landing the current status of the
+/// proposal it names, so a surface can tell a built fix from a filed one.
+pub fn attach_proposal_status(landed: &mut [land::Landed], proposals_body: &str) {
+    let status: std::collections::HashMap<String, String> = proposals_body
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| {
+            let id = v.get("id")?.as_str()?.to_string();
+            let s = v.get("status").and_then(|s| s.as_str()).unwrap_or("open").to_string();
+            Some((id, s))
+        })
+        .collect();
+    for l in landed.iter_mut().filter(|l| l.outcome == "filed" || l.outcome == "already-filed") {
+        l.proposal_status = l.detail.as_ref().and_then(|d| status.get(d)).cloned();
+    }
+}
+
 fn backlog_open() -> Option<usize> {
     let body = std::fs::read_to_string(dirs::home_dir()?.join(".claude/proposals.jsonl")).ok()?;
     Some(count_open_proposals(&body))
@@ -639,10 +656,16 @@ pub fn view() -> ReaderView {
                 .collect();
         }
     }
+    let mut runs = all_runs();
+    if let Some(body) = dirs::home_dir().and_then(|h| std::fs::read_to_string(h.join(".claude/proposals.jsonl")).ok()) {
+        for run in &mut runs {
+            attach_proposal_status(&mut run.landed, &body);
+        }
+    }
     ReaderView {
         state: ReaderState::load(),
         recon,
-        runs: all_runs(),
+        runs,
         evidence,
     }
 }
@@ -727,6 +750,24 @@ mod tests {
         assert!(run.since.is_none() && run.backlog_open.is_none());
         assert_eq!(run.atone_total, 0);
         assert!(run.named.summary.is_empty());
+    }
+
+    #[test]
+    fn a_filed_landing_carries_its_proposal_status_now() {
+        let mk = |outcome: &str, detail: Option<&str>| land::Landed {
+            cluster: "c".into(),
+            title: "t".into(),
+            outcome: outcome.into(),
+            detail: detail.map(str::to_string),
+            ts: Utc::now(),
+            proposal_status: None,
+        };
+        let mut rows = vec![mk("filed", Some("prop-1")), mk("filed", Some("prop-2")), mk("armed", Some("hook-x"))];
+        let body = "{\"id\":\"prop-1\",\"status\":\"done\"}\n{\"id\":\"prop-2\"}\n";
+        attach_proposal_status(&mut rows, body);
+        assert_eq!(rows[0].proposal_status.as_deref(), Some("done"));
+        assert_eq!(rows[1].proposal_status.as_deref(), Some("open"));
+        assert_eq!(rows[2].proposal_status, None, "an armed hook is not a proposal");
     }
 
     #[test]
