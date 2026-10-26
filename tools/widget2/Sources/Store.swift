@@ -32,7 +32,7 @@ final class AppModel: ObservableObject {
     /// Each list home's search, chip, selection and open row.
     @Published var lists: [Pane: ListState] = [:]
     /// Where the owner was before each jump, for Back (⌘[).
-    var history: [(pane: Pane, item: String?)] = []
+    var history: [(pane: Pane, list: ListState?)] = []
     var restoring = false
     @Published var flow = FlowFilter()
     @Published var searchFocusToken = 0
@@ -296,7 +296,7 @@ final class AppModel: ObservableObject {
 
     func open(_ d: Dive) {
         if !restoring, pane != d.pane || d.scope != .none {
-            history.append((pane, ListSpec.of(pane) != nil ? lists[pane]?.expanded : nil))
+            history.append((pane, ListSpec.of(pane) != nil ? (lists[pane] ?? ListState()) : nil))
             if history.count > 50 { history.removeFirst() }
         }
         pane = d.pane

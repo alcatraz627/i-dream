@@ -448,8 +448,11 @@ struct ReaderPane: View {
                     Image(systemName: domainIcon(domain)).font(.system(size: 10)).foregroundStyle(P.fg2).frame(width: 14).padding(.top, 2)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(ev?.text ?? "(not in the evidence rows this read carries)").font(F.meta).foregroundStyle(ev == nil ? P.fg3 : P.fg).fixedSize(horizontal: false, vertical: true)
-                        Text("\(id) · \(ev?.provenance ?? "?") · \(ageText(parseDate(ev?.ts).map { r.now.timeIntervalSince($0) })) ago\(ev?.project.map { " · \($0)" } ?? "")")
-                            .font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 6) {
+                            IdChip(model: model, id: id)
+                            Text("\(ev?.provenance ?? "?") · \(ageText(parseDate(ev?.ts).map { r.now.timeIntervalSince($0) })) ago\(ev?.project.map { " · \($0)" } ?? "")")
+                                .font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }

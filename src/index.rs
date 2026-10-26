@@ -44,7 +44,8 @@ pub struct IndexDoc {
 pub fn gather(home: &Path) -> IndexDoc {
     let mut entries = vec![];
     let firings = Firings::load(home);
-    patterns(home, &firings, &mut entries);
+    let wake = wake_intentions(home);
+    patterns(home, &firings, &wake, &mut entries);
     reader(home, &mut entries);
     slugs(&mut entries);
     proposals(home, &filed_from(), &mut entries);
@@ -52,7 +53,9 @@ pub fn gather(home: &Path) -> IndexDoc {
     interventions(home, &firings, &mut entries);
     intentions(home, &firings, &mut entries);
     jobs(&mut entries);
-    sessions(home, &firings, &mut entries);
+    let transcripts = transcript_paths(home);
+    sessions_at(home, &firings, &transcripts, &mut entries);
+    fill_from_evidence(&firings, &transcripts, &mut entries);
     let mut counts = BTreeMap::new();
     for e in &entries {
         *counts.entry(e.kind).or_insert(0) += 1;
@@ -82,8 +85,8 @@ fn jsonl(path: &Path) -> Vec<serde_json::Value> {
 struct Firings {
     /// item key ("N:<hint id>", "I:<intention id>", or an insight id) to (cited, unused).
     by_item: BTreeMap<String, (usize, usize)>,
-    /// session id to the item keys it cited.
-    cited_in: BTreeMap<String, Vec<String>>,
+    /// session id to (items it cited, items it was shown unused), for sessions a scan judged.
+    by_session: BTreeMap<String, (usize, usize)>,
 }
 
 impl Firings {
@@ -101,13 +104,20 @@ impl Firings {
                 let e = f.by_item.entry(k.clone()).or_default();
                 if cited { e.0 += 1 } else { e.1 += 1 }
             }
-            if cited {
-                if let (Some(sid), Some(id)) = (r.get("sid").and_then(|v| v.as_str()), keys.first()) {
-                    f.cited_in.entry(sid.to_string()).or_default().push(id.clone());
-                }
+            if let Some(sid) = r.get("sid").and_then(|v| v.as_str()) {
+                let e = f.by_session.entry(sid.to_string()).or_default();
+                if cited { e.0 += 1 } else { e.1 += 1 }
             }
         }
         f
+    }
+
+    /// For a session: "cited 1 of 4 items shown", or "not checked yet".
+    fn session_cited(&self, sid: &str) -> String {
+        match self.by_session.get(sid) {
+            Some(&(c, u)) => format!("cited {c} of {} items shown", c + u),
+            None => "not checked yet".to_string(),
+        }
     }
 
     /// "cited in 2 of 5 sessions checked", or "not checked yet" before any scan judged it.
@@ -119,7 +129,20 @@ impl Firings {
     }
 }
 
-fn patterns(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
+/// Association id to the intention the wake phase made from it, read from
+/// each intention's `dream-wake:<association>` source.
+fn wake_intentions(home: &Path) -> BTreeMap<String, String> {
+    jsonl(&home.join(".claude/subconscious/intentions/registry.jsonl"))
+        .iter()
+        .filter_map(|i| {
+            let id = i.get("id")?.as_str()?;
+            let src = i.pointer("/action/source")?.as_str()?;
+            Some((src.strip_prefix("dream-wake:")?.to_string(), id.to_string()))
+        })
+        .collect()
+}
+
+fn patterns(home: &Path, firings: &Firings, wake: &BTreeMap<String, String>, out: &mut Vec<Entry>) {
     let (rows, assocs) = crate::status::pattern_rows(home);
     for (rank, p) in rows.iter().enumerate() {
         let mut e = entry(
@@ -164,15 +187,13 @@ fn patterns(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
                 full.and_then(|f| f.suggested_rule.as_deref()).map(|r| format!(" · rule: {r}")).unwrap_or_default()
             ),
         );
+        let made = full.and_then(|f| f.auto_intention_id.clone()).or_else(|| wake.get(&a.id).cloned());
         e.related = vec![a.a.clone(), a.b.clone()];
-        e.related.extend(full.and_then(|f| f.auto_intention_id.clone()));
+        e.related.extend(made.clone());
         e.fields.insert("confidence", format!("{:.2}", a.confidence));
         if insight {
             e.fields.insert("cited", firings.cited(&a.id));
-            e.fields.insert(
-                "intention",
-                full.and_then(|f| f.auto_intention_id.clone()).unwrap_or_else(|| "none".into()),
-            );
+            e.fields.insert("intention", made.unwrap_or_else(|| "none made".into()));
         }
         out.push(e);
     }
@@ -226,14 +247,16 @@ fn reader(home: &Path, out: &mut Vec<Entry>) {
     // Every evidence row any kept daily recon read, newest copy of each, so
     // an older finding's citations resolve too.
     let mut rows: BTreeMap<String, crate::reader::evidence::Evidence> = BTreeMap::new();
+    let mut source_of: BTreeMap<String, String> = BTreeMap::new();
     let dir = home.join(".claude/i-dream/reader/daily");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .map(|d| d.flatten().map(|f| f.path()).filter(|p| p.to_string_lossy().ends_with(".evidence.jsonl")).collect())
         .unwrap_or_default();
     files.sort();
     for f in files {
-        for line in std::fs::read_to_string(f).unwrap_or_default().lines() {
+        for line in std::fs::read_to_string(&f).unwrap_or_default().lines() {
             if let Ok(ev) = serde_json::from_str::<crate::reader::evidence::Evidence>(line) {
+                source_of.insert(ev.id.clone(), f.display().to_string());
                 rows.insert(ev.id.clone(), ev);
             }
         }
@@ -255,6 +278,10 @@ fn reader(home: &Path, out: &mut Vec<Entry>) {
         e.related = ev.slug.iter().chain(ev.session.iter()).cloned().collect();
         e.fields.insert("domain", ev.domain.clone());
         e.fields.insert("by", ev.provenance.clone());
+        e.fields.insert("source", source_of.get(&ev.id).cloned().unwrap_or_default());
+        if let Some(s) = &ev.slug { e.fields.insert("slug", s.clone()); }
+        if let Some(s) = &ev.session { e.fields.insert("session", s.clone()); }
+        if let Some(p) = &ev.project { e.fields.insert("project", p.clone()); }
         out.push(e);
     }
     // Atone events older than every kept daily file are still cited by older
@@ -270,6 +297,9 @@ fn reader(home: &Path, out: &mut Vec<Entry>) {
         e.related = [s("slug"), s("session_id")].into_iter().filter(|x| !x.is_empty()).collect();
         e.fields.insert("domain", "atone".into());
         e.fields.insert("by", "atone log".into());
+        e.fields.insert("source", home.join(".claude/atone/events.jsonl").display().to_string());
+        if !s("slug").is_empty() { e.fields.insert("slug", s("slug")); }
+        if !s("session_id").is_empty() { e.fields.insert("session", s("session_id")); }
         out.push(e);
     }
 }
@@ -399,6 +429,7 @@ fn intentions(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
         e.fields.insert("fires", format!("{fired} of {max}"));
         e.fields.insert("cited", cited);
         e.fields.insert("keywords", keywords.join(", "));
+        e.related.extend(source.strip_prefix("dream-wake:").map(String::from));
         out.push(e);
     }
 }
@@ -411,8 +442,7 @@ fn jobs(out: &mut Vec<Entry>) {
 
 /// Sessions that i-dream showed something to, from the firing ledger: which
 /// items each one was shown, and when.
-fn sessions(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
-    let transcripts = transcript_paths(home);
+fn sessions_at(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, String>, out: &mut Vec<Entry>) {
     let mut by: BTreeMap<String, (std::collections::BTreeSet<String>, i64, i64)> = BTreeMap::new();
     for r in jsonl(&home.join(".claude/i-dream/would-fire.jsonl")) {
         let (Some(sid), Some(id), Some(ts)) =
@@ -437,13 +467,55 @@ fn sessions(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
             format!("shown {} live item(s) between {} and {} UTC", items.len(), when(first), when(last)),
         );
         e.at = DateTime::from_timestamp(last, 0);
-        let cited = firings.cited_in.get(&sid).map_or(0, |c| c.len());
         e.fields.insert("shown", items.len().to_string());
-        e.fields.insert("cited", cited.to_string());
-        if let Some(t) = transcripts.get(&sid) {
-            e.fields.insert("transcript", t.clone());
-        }
+        e.fields.insert("cited", firings.session_cited(&sid));
+        e.fields.insert("transcript", transcripts.get(&sid).cloned().unwrap_or_else(|| "transcript not found".into()));
         e.related = items.into_iter().collect();
+        out.push(e);
+    }
+}
+
+/// Every slug and session an evidence row names gets an entry, so no link
+/// in the index points at nothing. Slugs and sessions already listed are
+/// left as they are.
+fn fill_from_evidence(firings: &Firings, transcripts: &BTreeMap<String, String>, out: &mut Vec<Entry>) {
+    let have: std::collections::HashSet<(&str, String)> = out.iter().map(|e| (e.kind, e.id.clone())).collect();
+    // id to (evidence ids, newest time, projects)
+    type Seen = BTreeMap<String, (Vec<String>, Option<DateTime<Utc>>, std::collections::BTreeSet<String>)>;
+    let (mut slugs, mut sessions): (Seen, Seen) = Default::default();
+    for e in out.iter().filter(|e| e.kind == "evidence") {
+        let project = e.fields.get("project").cloned().unwrap_or_default();
+        for (key, map, kind) in [("slug", &mut slugs, "slug"), ("session", &mut sessions, "session")] {
+            let Some(v) = e.fields.get(key) else { continue };
+            if have.contains(&(kind, v.clone())) {
+                continue;
+            }
+            let s = map.entry(v.clone()).or_default();
+            s.0.push(e.id.clone());
+            s.1 = s.1.max(e.at);
+            if !project.is_empty() { s.2.insert(project.clone()); }
+        }
+    }
+    for (slug, (ev, at, _)) in slugs {
+        let mut e = entry("slug", &slug, &slug, format!("named by {} evidence row(s); recorded fewer than twice, so it has no weekly trend", ev.len()));
+        e.at = at;
+        e.fields.insert("total", ev.len().to_string());
+        e.related = ev;
+        out.push(e);
+    }
+    for (sid, (ev, at, projects)) in sessions {
+        let mut e = entry(
+            "session",
+            &sid,
+            format!("session {}", sid.chars().take(8).collect::<String>()),
+            format!("named by {} evidence row(s){}; i-dream showed it nothing live", ev.len(),
+                if projects.is_empty() { String::new() } else { format!(" in {}", projects.into_iter().collect::<Vec<_>>().join(", ")) }),
+        );
+        e.at = at;
+        e.fields.insert("shown", "0".into());
+        e.fields.insert("cited", firings.session_cited(&sid));
+        e.fields.insert("transcript", transcripts.get(&sid).cloned().unwrap_or_else(|| "transcript not found".into()));
+        e.related = ev;
         out.push(e);
     }
 }
@@ -451,6 +523,28 @@ fn sessions(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_slug_and_session_evidence_names_gets_an_entry() {
+        let mut ev = entry("evidence", "atone:x", "t", "d");
+        ev.fields.insert("slug", "rare-slug".into());
+        ev.fields.insert("session", "s-1".into());
+        let mut known = entry("slug", "known", "known", "d");
+        known.fields.insert("total", "9".into());
+        let mut ev2 = entry("evidence", "atone:y", "t", "d");
+        ev2.fields.insert("slug", "known".into());
+        let mut out = vec![ev, known, ev2];
+        let mut f = Firings::default();
+        f.by_session.insert("s-1".into(), (1, 3));
+        fill_from_evidence(&f, &BTreeMap::new(), &mut out);
+        let slugs: Vec<&str> = out.iter().filter(|e| e.kind == "slug").map(|e| e.id.as_str()).collect();
+        // The listed slug is not duplicated; the unlisted one is added.
+        assert_eq!(slugs, vec!["known", "rare-slug"]);
+        let s = out.iter().find(|e| e.kind == "session").unwrap();
+        assert_eq!(s.fields["cited"], "cited 1 of 4 items shown");
+        assert_eq!(s.fields["transcript"], "transcript not found");
+        assert_eq!(Firings::default().session_cited("s-2"), "not checked yet");
+    }
 
     #[test]
     fn odd_rows_are_skipped_and_never_panic() {
@@ -469,7 +563,7 @@ mod tests {
         std::fs::write(h.join(".claude/subconscious/intentions/registry.jsonl"), "{\"id\":\"i1\"}\n{}\n").unwrap();
         let mut out = vec![];
         let f = Firings::default();
-        sessions(h, &f, &mut out);
+        sessions_at(h, &f, &BTreeMap::new(), &mut out);
         proposals(h, &BTreeMap::new(), &mut out);
         intentions(h, &f, &mut out);
         let ids: Vec<(&str, &str)> = out.iter().map(|e| (e.kind, e.id.as_str())).collect();

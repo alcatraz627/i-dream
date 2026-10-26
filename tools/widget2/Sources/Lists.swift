@@ -20,11 +20,11 @@ struct ListSpec {
         case .intentions: ListSpec(kinds: ["intention"], columns: ["fires", "cited", "keywords"], chipColumn: nil,
                                    sub: "Reminders a future session gets when its first prompt matches the keywords.")
         case .insights: ListSpec(kinds: ["insight"], columns: ["confidence", "cited", "intention"], chipColumn: nil,
-                                 sub: "Associations the wake phase promoted to insights, with the intention each one produced.")
+                                 sub: "Associations the wake phase promoted to insights, with the intention each one produced, read from each intention's source. None made means no intention came from it.")
         case .sessions: ListSpec(kinds: ["session"], columns: ["shown", "cited"], chipColumn: nil,
-                                 sub: "Sessions i-dream showed something to: which items, and how many Claude cited. Open one for its transcript path. Corrections and votes per session are not shown here yet.")
+                                 sub: "Sessions i-dream showed something to, and sessions evidence rows name: which items each was shown, and how many Claude cited once a scan judged it. Open one for its transcript path. Corrections and votes per session are not shown here yet.")
         case .evidence: ListSpec(kinds: ["evidence"], columns: ["domain", "by"], chipColumn: "domain",
-                                 sub: "Every evidence row the latest daily recon read, not only the ones a finding cites.")
+                                 sub: "Every evidence row any kept daily recon read, newest copy of each, plus atone events older than those files. Open a row for the file it was read from.")
         case .gates: ListSpec(kinds: ["gate"], columns: ["week"], chipColumn: nil,
                               sub: "Hooks your answers on a weekly page switched on, beside the hints and nudges that only advise.")
         default: nil
@@ -57,7 +57,7 @@ extension AppModel {
         let words = st.search.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
         return doc.entries
             .filter { spec.kinds.contains($0.kind) }
-            .filter { e in st.chip.map { c in spec.chipColumn.flatMap { e.fields?[$0] } == c } ?? true }
+            .filter { e in st.chip.map { c in spec.chipColumn.map { e.fields?[$0] ?? "?" } == c } ?? true }
             .filter { e in let h = e.haystack; return words.allSatisfy { h.contains($0) } }
             .sorted { ($0.at ?? "") > ($1.at ?? "") }
     }
@@ -90,7 +90,7 @@ extension AppModel {
     static func resolve(_ id: String, in doc: IndexDoc) -> IndexEntry? {
         let hits = doc.entries.filter { $0.id == id }
         let order = ["finding", "pattern", "slug", "source", "proposal", "hint", "nudge", "insight", "intention", "gate",
-                     "session", "evidence", "association", "job"]
+                     "session", "evidence", "association", "run", "cycle", "job"]
         return hits.min { (order.firstIndex(of: $0.kind) ?? 99) < (order.firstIndex(of: $1.kind) ?? 99) }
     }
 
@@ -109,11 +109,29 @@ extension AppModel {
 
     /// Back: the place before the last jump, ⌘[.
     func goBack() {
+        // An open search or card is the most recent place: step out of it first.
+        if globalSearch.open {
+            if globalSearch.detail != nil, let prev = globalSearch.trail.popLast() { globalSearch.detail = prev }
+            // A card opened from a chip has no search behind it: close the panel.
+            else if globalSearch.detail != nil, !globalSearch.query.isEmpty { globalSearch.detail = nil }
+            else { globalSearch = GlobalSearch() }
+            return
+        }
         guard let prev = history.popLast() else { return }
         restoring = true
         pane = prev.pane
-        if let id = prev.item, ListSpec.of(prev.pane) != nil { lists[prev.pane, default: ListState()].expanded = id }
+        if let st = prev.list { lists[prev.pane] = st }
         restoring = false
+    }
+
+    /// The rows a list draws: the opened row first when the cap would hide it,
+    /// then the first rows up to the cap.
+    func visibleRows(_ p: Pane) -> [IndexEntry] {
+        let rows = listRows(p)
+        let head = Array(rows.prefix(ListPane.cap))
+        guard let id = lists[p]?.expanded, !head.contains(where: { $0.id == id }),
+              let opened = rows.first(where: { $0.id == id }) else { return head }
+        return [opened] + head
     }
 }
 
@@ -161,8 +179,8 @@ struct ListPane: View {
             if let col = spec.chipColumn { chips(col, spec) }
             VStack(alignment: .leading, spacing: 0) {
                 header(spec)
-                ForEach(Array(rows.prefix(Self.cap).enumerated()), id: \.element.uid) { i, e in
-                    row(e, spec, current: i == st.wrappedValue.selected)
+                ForEach(Array(model.visibleRows(pane).enumerated()), id: \.element.uid) { _, e in
+                    row(e, spec, current: e.id == rows[safe: st.wrappedValue.selected]?.id)
                 }
                 if rows.count > Self.cap {
                     Text("\(rows.count - Self.cap) more; narrow the search to see them").font(F.meta).foregroundStyle(P.fg3).padding(8)
@@ -205,7 +223,7 @@ struct ListPane: View {
         switch c {
         case "cited": 190
         case "keywords": 180
-        case "promoted by", "intention": 110
+        case "promoted by", "intention", "confidence": 110
         case "category", "domain", "status", "state": 90
         default: 70
         }
@@ -243,6 +261,9 @@ struct ListPane: View {
     private func detail(_ e: IndexEntry) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(e.detail).font(F.meta).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            if let src = e.fields?["source"], !src.isEmpty {
+                HStack(spacing: 6) { Text("read from \(src)").font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: src) }
+            }
             if let t = e.fields?["transcript"] {
                 HStack(spacing: 6) { Text(t).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: t) }
             }

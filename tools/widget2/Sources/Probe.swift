@@ -223,7 +223,13 @@ enum Probe {
                         follower.globalSearch = GlobalSearch()
                         follower.pane = .flow
                         let ok = follower.openId(id)
-                        let landed = follower.globalSearch.detail != nil || (follower.pane != .flow && !follower.globalSearch.open)
+                        // Landed means the target itself is on screen: the open row of
+                        // a list, the scoped item of a pane, or the search card for it.
+                        let p = follower.pane
+                        let landed: Bool
+                        if let card = follower.globalSearch.detail { landed = card.id == id }
+                        else if ListSpec.of(p) != nil { landed = follower.lists[p]?.expanded == id && follower.visibleRows(p).contains { $0.id == id } }
+                        else { landed = p != .flow && !follower.globalSearch.open }
                         if !(ok && landed) { bad.append(id) }
                     }
                     log.append(bad.isEmpty ? "PASS chips on \(where_): all \(Set(ids).count) open a home or a card"
@@ -232,15 +238,42 @@ enum Probe {
                 // Promote and demote call the CLI with the row's id, never live in a probe.
                 let flip = model(status, reader); flip.indexFixture = indexFile; flip.loadIndex(sync: true)
                 var calls: [[String]] = []
-                flip.runCLI = { calls.append($0); return (true, "✓ stubbed") }
+                let callsLock = NSLock()
+                // Each flip runs off the main thread, so the stub records under a lock.
+                flip.runCLI = { a in callsLock.lock(); calls.append(a); callsLock.unlock(); return (true, "✓ stubbed") }
                 if let h = doc.entries.first(where: { $0.kind == "hint" }) {
                     flip.flipIntervention(h.id, promote: true)
                     flip.flipIntervention(h.id, promote: false)
-                    Thread.sleep(forTimeInterval: 0.3)
+                    for _ in 0..<20 where calls.count < 2 { Thread.sleep(forTimeInterval: 0.05) }
                     let want = [["promotions", "--promote", h.id], ["promotions", "--demote", h.id]]
                     log.append(Set(calls.map { $0.joined(separator: " ") }) == Set(want.map { $0.joined(separator: " ") })
                                ? "PASS flip: promote and demote run i-dream promotions with the row id"
                                : "FAIL flip: ran \(calls)")
+                }
+                // No link anywhere in the index points at nothing.
+                let dangling = Set(doc.entries.flatMap { $0.related ?? [] }).filter { AppModel.resolve($0, in: doc) == nil }
+                log.append(dangling.isEmpty ? "PASS links: every related id in the index resolves to an item"
+                           : "FAIL links: \(dangling.count) related ids resolve to nothing, e.g. \(dangling.prefix(4).joined(separator: ", "))")
+                // Back restores a list as it was, and steps out of a search card first.
+                let bk = model(status, reader); bk.indexFixture = indexFile; bk.loadIndex(sync: true)
+                if let ev = doc.entries.first(where: { $0.kind == "evidence" }) {
+                    bk.pane = .proposals
+                    bk.lists[.proposals] = ListState(search: "hook", chip: "open", selected: 2, expanded: nil)
+                    bk.openId(ev.id)
+                    let jumped = bk.pane
+                    bk.goBack()
+                    let st = bk.lists[.proposals]
+                    log.append(jumped == .evidence && bk.pane == .proposals && st?.search == "hook" && st?.chip == "open" && st?.selected == 2
+                               ? "PASS back: a list comes back with its search, chip and selection"
+                               : "FAIL back: went to \(jumped.title), came back to \(bk.pane.title) with \(String(describing: st))")
+                }
+                if let assoc = doc.entries.first(where: { $0.kind == "association" }) {
+                    bk.pane = .reader
+                    bk.openId(assoc.id)
+                    let carded = bk.globalSearch.detail?.id == assoc.id
+                    bk.goBack()
+                    log.append(carded && !bk.globalSearch.open && bk.pane == .reader ? "PASS back: steps out of a search card first"
+                               : "FAIL back: card=\(carded) search open=\(bk.globalSearch.open) pane=\(bk.pane.title)")
                 }
                 // Back returns to where the jump started.
                 let nav = model(status, reader); nav.indexFixture = indexFile; nav.loadIndex(sync: true)

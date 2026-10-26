@@ -125,7 +125,7 @@ extension AppModel {
 
     /// Follow a related id to the item it names, in any kind.
     func follow(_ id: String) {
-        guard let e = index?.entries.first(where: { $0.id == id }) else {
+        guard let doc = index, let e = AppModel.resolve(id, in: doc) else {
             globalSearch.query = id; globalSearch.detail = nil; globalSearch.selected = 0
             return
         }
@@ -242,11 +242,7 @@ struct DetailCard: View {
             Text(e.title).font(F.body).foregroundStyle(P.fg).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             Text(e.detail).font(F.meta).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
-                Text(e.id).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled)
-                Button("copy id") {
-                    NSPasteboard.general.clearContents(); NSPasteboard.general.setString(e.id, forType: .string)
-                }
-                .buttonStyle(.link).font(F.meta)
+                IdChip(model: model, id: e.id)
                 if let at = e.at.flatMap(parseDate) { Text("· \(ageText(Date().timeIntervalSince(at))) ago").font(F.mono).foregroundStyle(P.fg3) }
             }
             if let rel = e.related, !rel.isEmpty {
