@@ -257,7 +257,13 @@ enum Probe {
         // Dashboard panes at full height.
         render(PaneHeader(pane: .settings, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
                appearance, out.appendingPathComponent("terms-settings-\(tag).png"), width: 1000)
-        for p in [Pane.flow, .ledger, .patterns, .reader, .landing, .changes] {
+        for p in [Pane.flow, .ledger, .patterns, .reader, .landing, .changes] + Pane.lists {
+            if Pane.lists.contains(p) {
+                // The lists render with the index above; here only their term lists.
+                render(PaneHeader(pane: p, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
+                       appearance, out.appendingPathComponent("terms-\(p.rawValue)-\(tag).png"), width: 1000)
+                continue
+            }
             let d = model(status, reader)
             d.pane = p
             render(DashboardView(model: d, fullHeight: true), appearance, out.appendingPathComponent("dash-\(p.rawValue)-\(tag).png"), width: 1280)

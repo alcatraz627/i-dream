@@ -84,6 +84,8 @@ landing|gate candidate|needs a hook, not more text
 landing|shadow|only being counted
 settings|usage guard|account-wide usage gate is missing
 changes|went live|either because you approved it
+hints|cited|no scan has judged it
+gates|armed gate|Unlike a hint, it acts
 TERMS
 fi
 echo "probe: $fails FAIL lines; see $OUT/drive-dark.txt, $OUT/drive-light.txt and $OUT/first-look.txt"
