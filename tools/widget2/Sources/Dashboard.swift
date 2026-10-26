@@ -199,7 +199,7 @@ struct PaneHeader: View {
                     Label(showing ? "hide terms" : "what the words mean", systemImage: "questionmark.circle")
                         .font(F.meta).foregroundStyle(P.blue)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.plain).focusEffectDisabled()
             }
             Text(sub).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
             if showing {

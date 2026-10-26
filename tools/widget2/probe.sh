@@ -71,8 +71,9 @@ if command -v lm >/dev/null; then
   done <<'TERMS'
 flow|productive|extracted at least one pattern
 flow|recon|join of every signal stream
-ledger|stale|longer than its cadence
+ledger|stale|its consumer is behind
 ledger|EVENTS|28-day window
+ledger|dead|a queue older than its limit
 patterns|valence|good (positive) or a problem
 patterns|drawn|strongest patterns and the ones they link to
 reader|join key|What the rows in a cluster share
@@ -80,6 +81,7 @@ reader|noise|not worth your time
 landing|slug|A mistake type from the atone log
 landing|gate candidate|needs a hook, not more text
 landing|shadow|only being counted
+settings|usage guard|account-wide usage gate is missing
 TERMS
 fi
 echo "probe: $fails FAIL lines; see $OUT/drive-dark.txt, $OUT/drive-light.txt and $OUT/first-look.txt"

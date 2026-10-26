@@ -16,8 +16,10 @@ enum Glossary {
         ]
         case .ledger: [
             ("fresh", "Written within its cadence and read by its consumer."),
-            ("stale", "Not written for longer than its cadence; dimmed past twice the cadence."),
-            ("dead", "Missing, or its consumer has stopped reading it."),
+            ("stale", "Past its cadence, or its consumer is behind or has never read it. Dimmed past twice the cadence."),
+            ("dead", "Past twice its cadence, a queue older than its limit, or a store that does not exist."),
+            ("SOURCE", "The stream: a lane or a domain."),
+            ("CONSUMER", "Who reads the stream. on-demand: read only when you open it; never: no read recorded; live: read recently."),
             ("idle", "Ran and produced nothing."),
             ("retired", "A ruling took its consumer away, so it counts toward nothing."),
             ("lane", "A stream the daemon itself measures."),
@@ -36,9 +38,11 @@ enum Glossary {
             ("reinforced", "A positive pattern seen more this week than last. Green halo on the map."),
             ("easing", "Seen less this week than last."),
             ("steady", "Seen as often this week as last."),
-            ("quiet", "Not seen this week."),
+            ("quiet", "Not seen this week or last."),
             ("association", "A link dreaming drew between two patterns, with a hypothesis; the lines on the map."),
-            ("drawn", "The map shows only the strongest patterns and the ones they link to, not all of them."),
+            ("drawn", "The map shows only the strongest patterns and the ones they link to, not all of them. \"Drawn with no link\" counts the shown ones that no line touches."),
+            ("category", "The kind of behaviour a pattern is about; each has its own region of the map."),
+            ("occurrences", "How many times the pattern has been seen in all."),
         ]
         case .reader: [
             ("recon", "The daily join of every signal stream, with no model call."),
@@ -50,7 +54,9 @@ enum Glossary {
             ("structural-need", "A finding that says something needs a mechanism, not another reminder."),
             ("repeat", "A finding about the same mistake coming back."),
             ("drift", "A finding about something slowly getting worse."),
-            ("provenance", "Who wrote the evidence: you, an agent, or an echo of an earlier note."),
+            ("provenance", "Where the evidence came from, such as a person, an agent, a pin, a proposal, or an echo of an earlier note."),
+            ("evidence row", "One record from a stream that a finding rests on."),
+            ("score", "How strongly the recon ranked a cluster before naming."),
             ("awaiting you", "Findings on a decision page you have not answered yet."),
         ]
         case .landing: [
@@ -66,6 +72,9 @@ enum Glossary {
             ("heed", "Whether Claude acted on a hint. Not measured yet."),
             ("TOTAL", "Every recorded mistake of that type, all time."),
             ("MOVE", "This week's count minus last week's."),
+            ("worsening / easing / flat", "Here they mean MOVE above, below or at zero, not the pattern trends."),
+            ("LAST", "How long ago a mistake of that type was last recorded."),
+            ("CREDITED TO", "The fix that explains the move, \"too soon to credit\", or \"unattributed\"."),
         ]
         case .settings: [
             ("idle time", "How long you must be away before the daemon runs a cycle."),

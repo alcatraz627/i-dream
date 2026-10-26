@@ -155,12 +155,13 @@ struct PatternsPane: View {
     private var mapLegend: some View {
         HStack(spacing: 10) {
             legendItem(Circle().fill(P.fg2).frame(width: 9, height: 9), "bigger, brighter: stronger")
-            legendItem(Circle().stroke(P.red, lineWidth: 2).frame(width: 9, height: 9), "worsening")
-            legendItem(Circle().stroke(P.green, lineWidth: 2).frame(width: 9, height: 9), "reinforced")
-            legendItem(Rectangle().fill(P.teal).frame(width: 12, height: 1.5), "association")
+            // Drawn as the map draws them: a soft disc behind the star, and a
+            // grey line that turns teal when both ends are lit.
+            legendItem(ZStack { Circle().fill(P.red.opacity(0.18)).frame(width: 13, height: 13); Circle().fill(P.fg2).frame(width: 6, height: 6) }, "worsening")
+            legendItem(ZStack { Circle().fill(P.green.opacity(0.18)).frame(width: 13, height: 13); Circle().fill(P.fg2).frame(width: 6, height: 6) }, "reinforced")
+            legendItem(Rectangle().fill(P.fg3.opacity(0.6)).frame(width: 12, height: 1), "association")
+            legendItem(Rectangle().fill(P.teal).frame(width: 12, height: 1.5), "association of the star you point at")
         }
-        .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(RoundedRectangle(cornerRadius: 6).fill(P.bg.opacity(0.85)))
     }
 
     private func legendItem(_ mark: some View, _ text: String) -> some View {
@@ -175,6 +176,7 @@ struct PatternsPane: View {
             highlights
             SearchField(text: $model.patterns.search, prompt: "search pattern text or id", token: model.searchFocusToken)
             filters
+            mapLegend
             HStack(alignment: .top, spacing: 12) {
                 Constellation(patterns: r.patterns, associations: r.associations, focus: model.patterns.focus, big: true,
                               dimmed: Set(r.patterns.map(\.id)).subtracting(shown),
@@ -185,7 +187,6 @@ struct PatternsPane: View {
                     .frame(height: 460)
                     .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(P.hair, lineWidth: 0.5))
-                    .overlay(alignment: .bottomLeading) { mapLegend.padding(8) }
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {

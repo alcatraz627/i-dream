@@ -69,7 +69,7 @@ pub struct AtoneWeek {
 
 #[derive(Serialize)]
 pub struct ReaderSummary {
-    /// Mistakes recorded with atone in each of the last ten ISO weeks, oldest
+    /// Mistakes recorded with atone in each of the last ten complete ISO weeks, oldest
     /// first. Effect panels quote it: they count recordings, not mistakes.
     pub atone_weeks: Vec<AtoneWeek>,
     pub last_recon: Option<chrono::DateTime<chrono::Utc>>,
@@ -695,8 +695,9 @@ fn atone_weeks(log: &str, now: chrono::DateTime<chrono::Utc>, n: usize) -> Vec<(
         let w = d.iso_week();
         format!("{}-W{:02}", w.year(), w.week())
     };
+    // Complete weeks only: the week in progress would read as a drop.
     let mut weeks: Vec<(String, u32)> =
-        (0..n).rev().map(|i| (label(now - chrono::Duration::weeks(i as i64)), 0)).collect();
+        (1..=n).rev().map(|i| (label(now - chrono::Duration::weeks(i as i64)), 0)).collect();
     for ts in log
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
@@ -1254,9 +1255,10 @@ mod tests {
         let log = "{\"ts\":\"2026-10-25T10:00:00Z\"}\n{\"ts\":\"2026-10-24T10:00:00Z\"}\n\
                    {\"ts\":\"2026-10-15T10:00:00Z\"}\nnot json\n{\"ts\":\"2026-01-01T00:00:00Z\"}\n";
         let w = atone_weeks(log, now, 3);
-        // 26 Oct 2026 is a Monday, so it opens W44; the 24th and 25th are W43.
-        assert_eq!(w.iter().map(|x| x.1).collect::<Vec<_>>(), vec![1, 2, 0]);
-        assert_eq!(w[2].0, "2026-W44");
+        // 26 Oct 2026 is a Monday opening W44, which is in progress and left
+        // out; the 24th and 25th are W43, the 15th W42.
+        assert_eq!(w.iter().map(|x| x.1).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(w[2].0, "2026-W43");
     }
 
     #[test]

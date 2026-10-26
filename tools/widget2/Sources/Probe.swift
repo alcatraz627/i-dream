@@ -85,6 +85,8 @@ enum Probe {
         }
 
         // Dashboard panes at full height.
+        render(PaneHeader(pane: .settings, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
+               appearance, out.appendingPathComponent("terms-settings-\(tag).png"), width: 1000)
         for p in [Pane.flow, .ledger, .patterns, .reader, .landing] {
             let d = model(status, reader)
             d.pane = p
