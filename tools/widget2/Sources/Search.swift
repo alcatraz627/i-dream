@@ -6,6 +6,8 @@ struct IndexDoc: Decodable {
     var generated: String
     var counts: [String: Int]
     var entries: [IndexEntry]
+    /// Row numbers by id, built once, so following a link is a lookup.
+    private(set) var byId: [String: [Int]] = [:]
 
     private enum CodingKeys: String, CodingKey { case generated, counts, entries }
 
@@ -19,6 +21,7 @@ struct IndexDoc: Decodable {
         var newest: [String: Int] = [:]
         for (i, e) in all.enumerated() where (newest[e.uid].map { (all[$0].at ?? "") < (e.at ?? "") } ?? true) { newest[e.uid] = i }
         entries = all.enumerated().filter { newest[$0.element.uid] == $0.offset }.map(\.element)
+        for (i, e) in entries.enumerated() { byId[e.id, default: []].append(i) }
     }
 }
 

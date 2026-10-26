@@ -136,6 +136,7 @@ struct LedgerPane: View {
             if let p = s.path, !p.isEmpty {
                 HStack(spacing: 8) { Text("stream     \(p)").fixedSize(horizontal: false, vertical: true); CopyButton(value: p) }
             }
+            OpenInClaudeRow(kind: "source", id: s.id, title: s.reason)
         }
         .font(F.mono).foregroundStyle(P.fg2)
         .padding(.leading, 12).padding(.vertical, 8)
@@ -285,6 +286,7 @@ struct PatternsPane: View {
             Text("\(plural(p.occurrences, "occurrence")) · \(p.last7) in the last 7 days, \(p.prior7) the 7 before · last seen \(ageText(p.lastSeen.map { r.now.timeIntervalSince($0) })) ago")
                 .font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
             IdChip(model: model, id: p.id)
+            OpenInClaudeRow(kind: "pattern", id: p.id, title: p.text)
             if assoc.isEmpty {
                 Text("no association links this pattern").font(F.meta).foregroundStyle(P.fg3)
             } else {
@@ -668,6 +670,7 @@ struct LandingPane: View {
             } else {
                 Text("No named finding is about this slug yet, so nothing can be credited for its movement.").font(F.meta).foregroundStyle(P.fg3)
             }
+            OpenInClaudeRow(kind: "slug", id: e.slug, title: "\(e.total) atone events, \(e.last7) in the last 7 days")
         }
         .padding(.leading, 12).padding(.vertical, 8)
         .overlay(alignment: .leading) { Rectangle().fill(P.blue).frame(width: 2) }

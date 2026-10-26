@@ -209,11 +209,12 @@ enum Probe {
                 // Every chip the panes show opens a home or a card, never only a search.
                 var chips: [(String, [String])] = [
                     ("Reader", ms.record!.findings.flatMap { $0.evidenceIds + [$0.cluster] }),
-                    ("Patterns", ms.record!.patterns.prefix(30).map(\.id)),
+                    ("Patterns", ms.record!.patterns.map(\.id)),
                 ]
                 for p in Pane.lists {
                     let d = model(status, reader); d.indexFixture = indexFile; d.loadIndex(sync: true)
-                    let rows = d.listRows(p).prefix(5)
+                    let rows = d.listRows(p)
+                    // The first rows are checked down to the pixel; the rest by where they land.
                     chips.append((p.title, rows.flatMap { [$0.id] + ($0.related ?? []) }))
                 }
                 let follower = model(status, reader); follower.indexFixture = indexFile; follower.loadIndex(sync: true)
@@ -228,7 +229,11 @@ enum Probe {
                         let p = follower.pane
                         let landed: Bool
                         if let card = follower.globalSearch.detail { landed = card.id == id }
-                        else if ListSpec.of(p) != nil { landed = follower.lists[p]?.expanded == id && follower.visibleRows(p).contains { $0.id == id } }
+                        else if let spec = ListSpec.of(p) {
+                            // visibleRows pins the opened row (its own check below went red when broken),
+                            // so landing is: this list holds the row and it is the opened one.
+                            landed = follower.lists[p]?.expanded == id && (AppModel.resolve(id, in: doc).map { spec.kinds.contains($0.kind) } ?? false)
+                        }
                         else { landed = p != .flow && !follower.globalSearch.open }
                         if !(ok && landed) { bad.append(id) }
                     }
@@ -249,6 +254,13 @@ enum Probe {
                     log.append(Set(calls.map { $0.joined(separator: " ") }) == Set(want.map { $0.joined(separator: " ") })
                                ? "PASS flip: promote and demote run i-dream promotions with the row id"
                                : "FAIL flip: ran \(calls)")
+                }
+                // An opened row past the first 200 is drawn: pinned at the top.
+                let pin = model(status, reader); pin.indexFixture = indexFile; pin.loadIndex(sync: true)
+                if let deep = pin.listRows(.evidence).dropFirst(ListPane.cap).first {
+                    pin.openId(deep.id)
+                    log.append(pin.visibleRows(.evidence).first?.id == deep.id ? "PASS pin: a row past the first 200 opens at the top of its list"
+                               : "FAIL pin: \(deep.id) opened but is not drawn")
                 }
                 // No link anywhere in the index points at nothing.
                 let dangling = Set(doc.entries.flatMap { $0.related ?? [] }).filter { AppModel.resolve($0, in: doc) == nil }
@@ -334,6 +346,14 @@ enum Probe {
             // this one header.
             render(PaneHeader(pane: p, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
                    appearance, out.appendingPathComponent("terms-\(p.rawValue)-\(tag).png"), width: 1000)
+        }
+
+        // One item opened on each work pane, so its detail and Claude line are drawn.
+        let dl = model(status, reader); dl.pane = .ledger; dl.ledger.expanded = dl.record!.sources.first?.id
+        let dp = model(status, reader); dp.pane = .patterns; dp.patterns.focus = dp.record!.patterns.first?.id
+        let dg = model(status, reader); dg.pane = .landing; dg.landing.focus = dg.record!.effects.first?.slug
+        for (d, name) in [(dl, "ledger"), (dp, "patterns"), (dg, "landing")] {
+            render(DashboardView(model: d, fullHeight: false).frame(height: 900), appearance, out.appendingPathComponent("detail-\(name)-\(tag).png"), width: 1280)
         }
 
         // Settings, both tabs, from the live `config --json`. The tab choice is

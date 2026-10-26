@@ -90,7 +90,7 @@ extension AppModel {
     /// The entry an id names. Ids are unique within a kind, not across kinds,
     /// so the kinds with a home win over those without.
     static func resolve(_ id: String, in doc: IndexDoc) -> IndexEntry? {
-        let hits = doc.entries.filter { $0.id == id }
+        let hits = (doc.byId[id] ?? []).map { doc.entries[$0] }
         let order = ["finding", "pattern", "slug", "source", "proposal", "hint", "nudge", "insight", "intention", "gate",
                      "session", "evidence", "association", "run", "cycle", "job"]
         return hits.min { (order.firstIndex(of: $0.kind) ?? 99) < (order.firstIndex(of: $1.kind) ?? 99) }
@@ -148,9 +148,10 @@ enum OpenInClaude {
         case "run", "cycle": " Read the log of that job and say what happened and whether anything needs doing."
         default: ""
         }
-        let find = "Find it with: i-dream index --json | jq '.entries[] | select(.id == \"\(id)\")'."
+        let find = "It is in the output of i-dream index --json under that id."
         // One line, so a paste is one command.
-        let flat = title.prefix(200).split(whereSeparator: \.isNewline).joined(separator: " ")
+        var flat = title.prefix(200).split(whereSeparator: \.isNewline).joined(separator: " ")
+        while flat.hasSuffix(".") { flat.removeLast() }
         let prompt = "Look into this i-dream \(kind) (\(id)): \(flat). \(find) Read it and the items it points at, then tell me what it means and what I should do about it.\(source)"
         return "cd ~/Code/Claude/i-dream && claude '" + prompt.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
