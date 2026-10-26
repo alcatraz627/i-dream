@@ -681,6 +681,11 @@ pub struct ScheduledJob {
     pub description: String,
     pub plist: String,
     pub installed: bool,
+    /// The shell command the scheduler runs.
+    pub command: String,
+    /// Where the scheduler writes the job's output and errors.
+    pub out_log: String,
+    pub err_log: String,
 }
 
 /// i-dream's scheduled jobs: every registry entry whose name starts with
@@ -709,6 +714,9 @@ pub fn scheduled_jobs() -> Vec<ScheduledJob> {
                 label: s("label"),
                 fire_at: s("fire_at"),
                 description: s("description"),
+                command: s("command"),
+                out_log: s("out_log"),
+                err_log: s("err_log"),
                 plist,
                 name,
             })

@@ -200,14 +200,27 @@ struct DropdownView: View {
             if let n = j.next { return "next \(whenText(n, r.now))" }
             return "no next run"
         }()
+        let open = model.openJobs.contains(j.name)
+        let running = started != nil || j.running
         return HStack(alignment: .top, spacing: 8) {
             // A run in progress outranks the last outcome: it is neither failed nor fine yet.
-            Dot(color: started != nil || j.held != nil ? P.amber : j.lastFailed ? P.red : P.green).padding(.top, 5)
+            Dot(color: running || j.held != nil ? P.amber : j.lastFailed ? P.red : P.green).padding(.top, 5)
             VStack(alignment: .leading, spacing: 1) {
-                Text(j.title).font(F.body).foregroundStyle(P.fg)
-                Text("\(when) · \(last)").font(F.meta).foregroundStyle(j.lastFailed && started == nil ? P.red : P.fg2)
+                Button {
+                    if open { model.openJobs.remove(j.name) } else { model.openJobs.insert(j.name) }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: open ? "chevron.down" : "chevron.right").font(.system(size: 9)).foregroundStyle(P.fg3)
+                        Text(j.title).font(F.body).foregroundStyle(P.fg)
+                        if j.running { Text("running now").font(F.meta).foregroundStyle(P.amber) }
+                    }
+                }
+                .buttonStyle(.plain)
+                .onHover { help.text = $0 ? (open ? "hide what it runs" : "show what it runs, its log, and how to run it yourself") : "" }
+                Text("\(when) · \(last)").font(F.meta).foregroundStyle(j.lastFailed && !running ? P.red : P.fg2)
                     .fixedSize(horizontal: false, vertical: true)
                 Text(j.what).font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                if open { jobDetail(j) }
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 3) {
@@ -235,6 +248,39 @@ struct DropdownView: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 6)
         .overlay(alignment: .top) { Rectangle().fill(P.hair).frame(height: 0.5) }
+    }
+
+    /// What a job really does: the headless command the scheduler runs, the
+    /// same work as a command to paste into a terminal and watch, and the
+    /// last lines of its log.
+    private func jobDetail(_ j: JobRow) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if let manual = j.manual {
+                HStack(spacing: 6) {
+                    Text("Run it yourself").font(F.label).tracking(0.4).foregroundStyle(P.fg3)
+                    CopyButton(value: manual)
+                }
+                if let note = j.manualNote {
+                    Text(note).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
+                }
+                Text(manual).font(F.mono).foregroundStyle(P.fg).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("The scheduler runs").font(F.label).tracking(0.4).foregroundStyle(P.fg3)
+            Text(j.command.isEmpty ? "no command recorded" : j.command).font(F.mono).foregroundStyle(P.fg2)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                Text("Last log lines").font(F.label).tracking(0.4).foregroundStyle(P.fg3)
+                if !j.logPath.isEmpty { CopyButton(value: j.logPath) }
+            }
+            if j.logTail.isEmpty {
+                Text("the log is empty").font(F.meta).foregroundStyle(P.fg3)
+            }
+            ForEach(Array(j.logTail.enumerated()), id: \.offset) { _, line in
+                Text(line).font(F.mono).foregroundStyle(P.fg3).lineLimit(2).textSelection(.enabled)
+            }
+        }
+        .padding(.top, 6)
     }
 
     // MARK: since you last looked

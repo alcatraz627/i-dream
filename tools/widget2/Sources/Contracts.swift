@@ -46,6 +46,12 @@ struct StatusDoc: Decodable {
         var runner: String?
         var last_run: String?
         var last_outcome: String?
+        var command: String?
+        var manual: String?
+        var manual_note: String?
+        var running: Bool?
+        var log_tail: [String]?
+        var log_path: String?
     }
     struct WeeklyFailure: Decodable { var at: String; var error: String }
     struct Log: Decodable { var file: String; var warn_count: Int; var error_count: Int; var last_error: String? }

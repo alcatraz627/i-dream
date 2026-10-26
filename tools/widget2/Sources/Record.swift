@@ -116,6 +116,14 @@ struct JobRow: Identifiable {
     var lastRun: Date?
     var lastFailed: Bool
     var delayable: Bool
+    /// What the scheduler runs, headless.
+    var command: String
+    /// The same work as a command to paste into a terminal and watch.
+    var manual: String?
+    var manualNote: String?
+    var running: Bool
+    var logTail: [String]
+    var logPath: String
 }
 
 struct Finding: Identifiable {
@@ -562,7 +570,9 @@ enum RecordBuilder {
             return JobRow(name: name, title: title, what: what,
                           next: parseDate(j.next_fire), held: parseDate(j.held_until),
                           lastRun: parseDate(j.last_run), lastFailed: j.last_outcome == "failed",
-                          delayable: j.delayable ?? false)
+                          delayable: j.delayable ?? false,
+                          command: j.command ?? "", manual: j.manual, manualNote: j.manual_note,
+                          running: j.running ?? false, logTail: j.log_tail ?? [], logPath: j.log_path ?? "")
         }
         .sorted { ($0.held ?? $0.next ?? .distantFuture) < ($1.held ?? $1.next ?? .distantFuture) }
     }
@@ -612,9 +622,13 @@ enum RecordBuilder {
         // A failing outcome that names a dead source says the same thing twice;
         // the source row carries the age and the fix, so it alone is shown.
         let deadIds = Set(r.dead.map(\.id))
+        // Outcomes are re-judged on the next daily run; saying when keeps a red
+        // row from reading as a chore for the owner.
+        let nextDaily = r.jobs.first { $0.name.hasSuffix("reader-daily") }.flatMap { $0.held ?? $0.next }
+        let retry = nextDaily.map { " · re-checked on its own \(whenText($0, r.now))" } ?? ""
         for c in r.failingOutcomes where !deadIds.contains(c.row) {
             rows.append(Row(id: "outcome-" + c.row, icon: "exclamationmark.triangle", title: "\(c.row) outcome is failing",
-                            detail: c.detail, sev: .bad, dive: Dive(pane: .flow)))
+                            detail: c.detail + retry, sev: .bad, dive: Dive(pane: .flow)))
         }
         for src in r.dead {
             rows.append(Row(id: "src-" + src.id, icon: src.icon, title: "\(src.id) is dead", detail: src.fix ?? src.reason,

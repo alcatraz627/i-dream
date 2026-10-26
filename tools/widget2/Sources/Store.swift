@@ -35,6 +35,8 @@ final class AppModel: ObservableObject {
     @Published var keyLog: [String] = []
     /// Jobs started from the widget, until the scheduler's history shows the run.
     @Published var jobStarted: [String: Date] = [:]
+    /// Job rows opened to show their command, by-hand command and log.
+    @Published var openJobs: Set<String> = []
     /// What the last job action said, success or failure.
     @Published var jobNote: (text: String, failed: Bool)?
     let help = HoverHelp()

@@ -55,6 +55,18 @@ enum Probe {
         renderStatusItem(m.record, m.reading, appearance, out.appendingPathComponent("status-item-\(tag).png"))
         render(DropdownView(model: m, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-\(tag).png"))
 
+        // Every job row opened: what it runs, how to run it by hand, its log.
+        let mj = model(status, reader)
+        mj.openJobs = Set(mj.record!.jobs.map(\.name))
+        render(DropdownView(model: mj, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-jobs-\(tag).png"))
+        // The menu height is capped, so the later jobs get a picture of their own.
+        let ml = model(status, reader)
+        ml.openJobs = Set(ml.record!.jobs.map(\.name).filter { !$0.hasSuffix("reader-daily") })
+        render(DropdownView(model: ml, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-jobs-later-\(tag).png"))
+        log.append(mj.record!.jobs.allSatisfy { $0.manual != nil }
+                   ? "PASS jobs: every job has a by-hand command"
+                   : "FAIL jobs: a job has no by-hand command")
+
         // The owner closes it; the next open compares against that look.
         m.markLooked()
         let m2 = model(status, reader)

@@ -446,6 +446,19 @@ pub struct JobStatus {
     /// visible instead of silent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
+    /// The shell command the scheduler runs, headless.
+    pub command: String,
+    /// The same work as a command the owner can paste into a terminal and
+    /// watch, with a sentence on what it does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual_note: Option<String>,
+    /// Whether a process for this job is running right now.
+    pub running: bool,
+    /// The last lines of the job's output and error logs, and where they are.
+    pub log_tail: Vec<String>,
+    pub log_path: String,
 }
 
 #[derive(Serialize)]
@@ -657,6 +670,38 @@ fn lane_word(s: LaneStatus) -> &'static str {
 /// keeps a fresh sandbox from querying it at all, but a sandbox that plants
 /// a plist whose label is live in the real session will read the REAL job's
 /// state; the `program` field is carried so that collision is visible.
+/// How to run a job by hand in a terminal you can watch, and what that does.
+///
+/// The scheduler runs these headless. The audit and the weekly review are
+/// meant for the owner's eyes, so their by-hand form is a Claude session in
+/// the i-dream repo; the daily recon is a plain command.
+fn manual_run(name: &str) -> Option<(String, String)> {
+    match name {
+        "i-dream-reader-daily" => Some((
+            "i-dream reader recon".into(),
+            "Joins every signal stream and runs the extractors; their Claude calls are headless and logged here.".into(),
+        )),
+        "i-dream-reader-weekly" => Some((
+            "cd ~/Code/Claude/i-dream && claude \"Run the weekly i-dream reader with: i-dream reader run --force. \
+             Then open the decision page it prints and walk me through each finding, one at a time, before I answer it.\""
+                .into(),
+            "A Claude session runs the weekly review, then walks you through its findings.".into(),
+        )),
+        "idream-audit-monthly" => Some((
+            "cd ~/Code/Claude/i-dream && claude --model opus \"$(cat ~/.claude/scheduled/idream-audit-monthly-prompt.md)\""
+                .into(),
+            "An Opus session runs the monthly audit, including the adversarial pass, in the i-dream repo.".into(),
+        )),
+        _ => None,
+    }
+}
+
+/// The last `n` non-blank lines of a log.
+fn log_tail(text: &str, n: usize) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].iter().map(|l| l.to_string()).collect()
+}
+
 fn gather_jobs() -> Vec<JobStatus> {
     let sched = dirs::home_dir().map(|h| h.join(".claude/scheduled")).unwrap_or_default();
     let gateway = sched.join(".gateway").exists();
@@ -688,7 +733,27 @@ fn gather_jobs() -> Vec<JobStatus> {
             };
             let runner = (gateway && !loaded).then_some("gcc-cron");
             let held_until = holds.get(&job.name).map(|h| h.until).filter(|u| *u > now.with_timezone(&chrono::Utc));
+            let (manual, manual_note) = manual_run(&job.name).unzip();
+            // The scheduler runs i-dream by its full path; matching on the
+            // subcommand finds the run however it was started.
+            let running = pid.is_some()
+                || job.command.split("/i-dream ").nth(1).is_some_and(|args| {
+                    std::process::Command::new("pgrep")
+                        .args(["-f", &format!("i-dream {args}")])
+                        .output()
+                        .is_ok_and(|o| o.status.success())
+                });
+            let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+            let mut tail = log_tail(&read(&job.out_log), 6);
+            // i-dream's own log lines (info included) go to stderr.
+            tail.extend(log_tail(&read(&job.err_log), 4));
             JobStatus {
+                command: job.command.clone(),
+                manual,
+                manual_note,
+                running,
+                log_tail: tail,
+                log_path: job.out_log.clone(),
                 delayable: crate::jobs::DELAYABLE.contains(&job.name.as_str()),
                 held_until,
                 next_fire: crate::jobs::next_fire(&job.fire_at, now).map(|t| t.to_rfc3339()),
@@ -1142,6 +1207,23 @@ fn render_verbose(r: &StatusReport, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_i_dream_job_has_a_command_to_run_it_by_hand() {
+        let (shell, _) = manual_run("idream-audit-monthly").unwrap();
+        assert!(shell.starts_with("cd ~/Code/Claude/i-dream && claude --model opus"), "{shell}");
+        assert!(shell.contains("idream-audit-monthly-prompt.md"));
+        let (weekly, _) = manual_run("i-dream-reader-weekly").unwrap();
+        assert!(weekly.contains("claude") && weekly.contains("i-dream reader run --force"), "{weekly}");
+        assert_eq!(manual_run("i-dream-reader-daily").unwrap().0, "i-dream reader recon");
+        assert!(manual_run("something-else").is_none());
+    }
+
+    #[test]
+    fn a_log_tail_is_its_last_non_blank_lines() {
+        assert_eq!(log_tail("a\n\nb\nc\n\n", 2), vec!["b", "c"]);
+        assert!(log_tail("", 3).is_empty());
+    }
 
     #[test]
     fn fired_counts_live_rows_once_per_session_with_epoch_or_text_stamps() {
