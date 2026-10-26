@@ -148,7 +148,9 @@ enum OpenInClaude {
         case "run", "cycle": " Read the job's log and say what happened and whether anything needs doing."
         default: ""
         }
-        let prompt = "Look into this i-dream \(kind) (\(id)): \(title.prefix(200)). Run i-dream index --json and read this id and the items it points at, then tell me what it means and what I should do about it.\(source)"
+        // One line, so a paste is one command.
+        let flat = title.prefix(200).split(whereSeparator: \.isNewline).joined(separator: " ")
+        let prompt = "Look into this i-dream \(kind) (\(id)): \(flat). Run i-dream index --json and read this id and the items it points at, then tell me what it means and what I should do about it.\(source)"
         return "cd ~/Code/Claude/i-dream && claude '" + prompt.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

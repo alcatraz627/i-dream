@@ -277,7 +277,7 @@ enum Probe {
                 }
                 // Open in Claude: the copied line, parsed by a real shell, hands
                 // claude exactly the prompt, apostrophes and all.
-                let title = "it's the owner's \"quoted\" $HOME `x` case"
+                let title = "it's the owner's \"quoted\" $HOME `x` $(echo hi) !! case"
                 let cmd = OpenInClaude.command(kind: "proposal", id: "prop-x", title: title)
                 if let r = cmd.range(of: "claude ") {
                     let sh = Process(); sh.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -285,7 +285,8 @@ enum Probe {
                     let pipe = Pipe(); sh.standardOutput = pipe
                     try? sh.run(); sh.waitUntilExit()
                     let got = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                    log.append(got.contains(title) && cmd.hasPrefix("cd ~/Code/Claude/i-dream && claude '")
+                    let multi = OpenInClaude.command(kind: "finding", id: "c-x", title: "line one\nline two")
+                    log.append(got.contains(title) && cmd.hasPrefix("cd ~/Code/Claude/i-dream && claude '") && !multi.contains("\n")
                                ? "PASS open in claude: the shell passes the prompt through unchanged"
                                : "FAIL open in claude: shell read \(got.prefix(120))")
                 }
