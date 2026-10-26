@@ -19,7 +19,8 @@ The plan these slices built is `.claude/output/20261026-dashboard-inventory/plan
 - Hints and nudges shows state, how many sessions saw each one, whether Claude cited it, and who made it live. Cited reads the firing scan, and says "not checked yet" until a scan has judged that item. An opened row has Promote and Demote buttons, which run `i-dream promotions`.
 - Proposals filed from a weekly finding show and link that finding.
 - Insights link the intention each one produced.
-- Sessions say "not checked yet" for cited until a firing scan has judged that session.
+- Sessions say "not checked yet" for cited until a firing scan has judged that session, and show how often you corrected or praised Claude in each and the votes that cast.
+- Intentions show how many sessions saw each one and the votes it drew.
 - Evidence rows show the file they were read from.
 - Cycles and runs lists every scheduled run of an i-dream job, retired jobs included, with its outcome, exit code, failure reason and its own lines from the job's log. Below them are the consolidation passes the daemon journaled.
 
@@ -30,8 +31,6 @@ The plan these slices built is `.claude/output/20261026-dashboard-inventory/plan
 ## What is not done
 
 - The daemon journals only consolidation passes that read something, so Cycles and runs holds fewer cycles than the daemon's own count.
-- Sessions does not show the corrections and votes that came from each session yet.
-- Intentions show fires and cited, not the votes on them.
 - Evidence rows and atone events open as rows in the Evidence list, not in a separate sheet.
 - The Patterns, Ledger and Landing rows and the dropdown's job rows have no Open in Claude line; the dropdown keeps its by-hand commands.
 - Armed gates is empty because no weekly answer has armed a hook yet.

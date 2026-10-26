@@ -17,12 +17,12 @@ struct ListSpec {
                                   sub: "Every proposal in the backlog. Finding names the weekly finding you filed it from; the slug's movement after it shows on that finding's effect in Landing.")
         case .hints: ListSpec(kinds: ["hint", "nudge"], columns: ["state", "sessions", "cited", "promoted by"], chipColumn: "state",
                               sub: "Every hint and nudge: its state, how many sessions were shown it, whether Claude cited it, and who made it live. Cited reads the firing scan; an item no scan has judged says not checked yet. Open a row to promote or demote it.")
-        case .intentions: ListSpec(kinds: ["intention"], columns: ["fires", "cited", "keywords"], chipColumn: nil,
-                                   sub: "Reminders a future session gets when its first prompt matches the keywords.")
+        case .intentions: ListSpec(kinds: ["intention"], columns: ["shown to", "votes", "cited", "fires"], chipColumn: nil,
+                                   sub: "Reminders a future session gets when its first prompt matches the keywords: how many sessions saw each, and the votes your replies cast on it. Open one for its keywords and the sessions.")
         case .insights: ListSpec(kinds: ["insight"], columns: ["confidence", "cited", "intention"], chipColumn: nil,
                                  sub: "Associations the wake phase promoted to insights, with the intention each one produced, read from each intention's source. None made means no intention came from it.")
-        case .sessions: ListSpec(kinds: ["session"], columns: ["shown", "cited"], chipColumn: nil,
-                                 sub: "Sessions i-dream showed something to, and sessions evidence rows name: which items each was shown, and how many Claude cited once a scan judged it. Open one for its transcript path. Corrections and votes per session are not shown here yet.")
+        case .sessions: ListSpec(kinds: ["session"], columns: ["shown", "cited", "corrections", "votes"], chipColumn: nil,
+                                 sub: "Sessions i-dream showed something to, and sessions evidence rows name: which items each was shown, how many Claude cited once a scan judged it, how often you corrected or praised it, and the votes that cast on what it was shown. Open one for its transcript path.")
         case .evidence: ListSpec(kinds: ["evidence"], columns: ["domain", "by"], chipColumn: "domain",
                                  sub: "Every evidence row any kept daily recon read, newest copy of each, plus atone events older than those files. Open a row for the file it was read from.")
         case .runs: ListSpec(kinds: ["run", "cycle"], columns: ["job", "outcome", "exit"], chipColumn: "outcome",
@@ -264,6 +264,8 @@ struct ListPane: View {
         case "keywords": 180
         case "promoted by", "intention", "confidence": 110
         case "job": 170
+        case "corrections": 160
+        case "votes", "shown to": 100
         case "category", "domain", "status", "state": 90
         default: 70
         }

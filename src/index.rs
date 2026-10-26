@@ -58,6 +58,7 @@ pub fn gather(home: &Path) -> IndexDoc {
     let transcripts = transcript_paths(home);
     sessions_at(home, &firings, &transcripts, &mut entries);
     fill_from_evidence(&firings, &transcripts, &mut entries);
+    add_feedback(home, &firings, &transcripts, &mut entries);
     let mut counts = BTreeMap::new();
     for e in &entries {
         *counts.entry(e.kind).or_insert(0) += 1;
@@ -624,9 +625,123 @@ fn fill_from_evidence(firings: &Firings, transcripts: &BTreeMap<String, String>,
     }
 }
 
+/// "2 down, 1 up", or "none".
+fn tally(up: usize, down: usize) -> String {
+    match (up, down) {
+        (0, 0) => "none".into(),
+        (u, 0) => format!("{u} up"),
+        (0, d) => format!("{d} down"),
+        (u, d) => format!("{d} down, {u} up"),
+    }
+}
+
+/// What each session said back and what each intention drew: corrections
+/// and praise from every prompt's signal, and the votes those cast on the
+/// intentions the session had been shown. A session that corrected or voted
+/// but was never shown anything live still gets an entry.
+fn add_feedback(home: &Path, firings: &Firings, transcripts: &BTreeMap<String, String>, out: &mut Vec<Entry>) {
+    let sub = home.join(".claude/subconscious");
+    // session -> (corrections, praise)
+    let mut said: BTreeMap<String, (usize, usize, Option<DateTime<Utc>>)> = BTreeMap::new();
+    for r in jsonl(&sub.join("logs/signals.jsonl")) {
+        let ev = r.get("event").unwrap_or(&r);
+        let Some(sid) = ev.get("session_id").and_then(|v| v.as_str()) else { continue };
+        let corr = ev.get("correction").and_then(|v| v.as_bool()) == Some(true);
+        let praise = ev.get("positive").and_then(|v| v.as_bool()) == Some(true);
+        if !corr && !praise {
+            continue;
+        }
+        let at = r.get("received_at").and_then(|v| v.as_str()).and_then(parse_ts);
+        let e = said.entry(sid.to_string()).or_default();
+        if corr { e.0 += 1 }
+        if praise { e.1 += 1 }
+        e.2 = e.2.max(at);
+    }
+    // votes by session and by intention: (up, down)
+    let (mut by_sid, mut by_intention): (BTreeMap<String, (usize, usize)>, BTreeMap<String, (usize, usize)>) = Default::default();
+    for v in jsonl(&sub.join("dreams/insight-feedback.jsonl")) {
+        let up = v.get("rating").and_then(|x| x.as_str()) == Some("up");
+        for (key, map) in [("sid", &mut by_sid), ("intention_id", &mut by_intention)] {
+            if let Some(k) = v.get(key).and_then(|x| x.as_str()) {
+                let e = map.entry(k.to_string()).or_default();
+                if up { e.0 += 1 } else { e.1 += 1 }
+            }
+        }
+    }
+    // intention -> sessions it was shown to
+    let mut shown_to: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for f in jsonl(&sub.join("intentions/fired.jsonl")) {
+        if let (Some(i), Some(sid)) = (f.get("intention_id").and_then(|v| v.as_str()), f.get("session_id").and_then(|v| v.as_str())) {
+            shown_to.entry(i.to_string()).or_default().insert(sid.to_string());
+        }
+    }
+    let have: std::collections::HashSet<String> = out.iter().filter(|e| e.kind == "session").map(|e| e.id.clone()).collect();
+    for sid in said.keys().chain(by_sid.keys()) {
+        if have.contains(sid) || out.iter().any(|e| e.kind == "session" && &e.id == sid) {
+            continue;
+        }
+        let mut e = entry(
+            "session",
+            sid,
+            format!("session {}", sid.chars().take(8).collect::<String>()),
+            "i-dream showed it nothing live; it is listed for what it said back",
+        );
+        e.at = said.get(sid).and_then(|s| s.2);
+        e.fields.insert("shown", "0".into());
+        e.fields.insert("cited", firings.session_cited(sid));
+        e.fields.insert("transcript", transcripts.get(sid).cloned().unwrap_or_else(|| "transcript not found".into()));
+        out.push(e);
+    }
+    for e in out.iter_mut() {
+        match e.kind {
+            "session" => {
+                let (c, p, _) = said.get(&e.id).cloned().unwrap_or_default();
+                e.fields.insert("corrections", if c + p == 0 { "none".into() } else { format!("{c} corrected, {p} praised") });
+                let (u, d) = by_sid.get(&e.id).cloned().unwrap_or_default();
+                e.fields.insert("votes", tally(u, d));
+            }
+            "intention" => {
+                let (u, d) = by_intention.get(&e.id).cloned().unwrap_or_default();
+                e.fields.insert("votes", tally(u, d));
+                let seen = shown_to.get(&e.id);
+                e.fields.insert("shown to", format!("{} session(s)", seen.map_or(0, |s| s.len())));
+                e.related.extend(seen.into_iter().flatten().cloned());
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sessions_and_intentions_carry_what_was_said_back() {
+        let home = tempfile::tempdir().unwrap();
+        let sub = home.path().join(".claude/subconscious");
+        std::fs::create_dir_all(sub.join("logs")).unwrap();
+        std::fs::create_dir_all(sub.join("dreams")).unwrap();
+        std::fs::create_dir_all(sub.join("intentions")).unwrap();
+        std::fs::write(sub.join("logs/signals.jsonl"),
+            "{\"received_at\":\"2026-10-26T10:00:00Z\",\"event\":{\"session_id\":\"s1\",\"correction\":true,\"positive\":false}}\n\
+             {\"event\":{\"session_id\":\"s1\",\"correction\":false,\"positive\":true}}\n\
+             {\"event\":{\"session_id\":\"s1\",\"correction\":false,\"positive\":false}}\n").unwrap();
+        std::fs::write(sub.join("dreams/insight-feedback.jsonl"),
+            "{\"sid\":\"s1\",\"intention_id\":\"i1\",\"rating\":\"down\"}\n{\"sid\":\"s2\",\"intention_id\":\"i1\",\"rating\":\"up\"}\n").unwrap();
+        std::fs::write(sub.join("intentions/fired.jsonl"),
+            "{\"intention_id\":\"i1\",\"session_id\":\"s1\"}\n{\"intention_id\":\"i1\",\"session_id\":\"s1\"}\n").unwrap();
+        let mut out = vec![entry("intention", "i1", "t", "d")];
+        add_feedback(home.path(), &Firings::default(), &BTreeMap::new(), &mut out);
+        let s1 = out.iter().find(|e| e.id == "s1").unwrap();
+        assert_eq!(s1.fields["corrections"], "1 corrected, 1 praised");
+        assert_eq!(s1.fields["votes"], "1 down");
+        let s2 = out.iter().find(|e| e.id == "s2").unwrap();
+        assert_eq!((s2.fields["corrections"].as_str(), s2.fields["votes"].as_str()), ("none", "1 up"));
+        let i1 = out.iter().find(|e| e.id == "i1").unwrap();
+        assert_eq!(i1.fields["votes"], "1 down, 1 up");
+        assert_eq!(i1.fields["shown to"], "1 session(s)");
+    }
 
     #[test]
     fn a_job_log_splits_into_one_segment_per_run() {

@@ -97,6 +97,8 @@ enum Glossary {
         case .intentions: [
             ("intention", "A reminder a future session gets when its first prompt matches the keywords."),
             ("fires", "Times it was shown, out of the most it may be shown."),
+            ("shown to", "How many sessions saw it at their start."),
+            ("votes", "Down when your next prompt in that session corrected something it was about; up when you praised it."),
         ]
         case .insights: [
             ("insight", "An association the wake phase judged strong enough to promote, with the rule it suggests."),
@@ -105,6 +107,8 @@ enum Glossary {
         case .sessions: [
             ("shown", "Live hints and nudges the session was shown."),
             ("cited", "Items the session echoed back, by the firing scan."),
+            ("corrections", "Prompts in that session that corrected Claude, and ones that praised it."),
+            ("votes", "The votes those prompts cast on the intentions the session was shown."),
         ]
         case .evidence: [
             ("evidence row", "One record from a stream that the daily recon read."),
