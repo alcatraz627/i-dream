@@ -26,7 +26,7 @@ struct ListSpec {
         case .evidence: ListSpec(kinds: ["evidence"], columns: ["domain", "by"], chipColumn: "domain",
                                  sub: "Every evidence row any kept daily recon read, newest copy of each, plus atone events older than those files. Open a row for the file it was read from.")
         case .runs: ListSpec(kinds: ["run", "cycle"], columns: ["job", "outcome", "exit"], chipColumn: "outcome",
-                             sub: "Every scheduled run of an i-dream job, with its outcome and exit code, and every full daemon cycle with what it produced. A job's log file keeps only its latest run.")
+                             sub: "Every scheduled run of an i-dream job, retired jobs included, with its outcome, exit code and its own lines from the job's log. Below them, every consolidation pass the daemon journaled; passes that read nothing are not journaled, so there are fewer than the daemon's cycle count.")
         case .gates: ListSpec(kinds: ["gate"], columns: ["week"], chipColumn: nil,
                               sub: "Hooks your answers on a weekly page switched on, beside the hints and nudges that only advise.")
         default: nil
@@ -145,12 +145,13 @@ enum OpenInClaude {
         case "hint", "nudge": " Its text and state are in ~/.claude/i-dream/interventions.json; say whether it should stay as it is."
         case "finding": " It is a weekly reader finding; read its evidence and say what would fix it for good."
         case "intention": " It is in ~/.claude/subconscious/intentions/registry.jsonl; say whether it still earns its place."
-        case "run", "cycle": " Read the job's log and say what happened and whether anything needs doing."
+        case "run", "cycle": " Read the log of that job and say what happened and whether anything needs doing."
         default: ""
         }
+        let find = "Find it with: i-dream index --json | jq '.entries[] | select(.id == \"\(id)\")'."
         // One line, so a paste is one command.
         let flat = title.prefix(200).split(whereSeparator: \.isNewline).joined(separator: " ")
-        let prompt = "Look into this i-dream \(kind) (\(id)): \(flat). Run i-dream index --json and read this id and the items it points at, then tell me what it means and what I should do about it.\(source)"
+        let prompt = "Look into this i-dream \(kind) (\(id)): \(flat). \(find) Read it and the items it points at, then tell me what it means and what I should do about it.\(source)"
         return "cd ~/Code/Claude/i-dream && claude '" + prompt.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
@@ -167,7 +168,7 @@ struct OpenInClaudeRow: View {
                 SectionLabel(text: "open in claude")
                 CopyButton(value: cmd)
             }
-            Text(cmd).font(F.mono).foregroundStyle(P.fg3).lineLimit(3).textSelection(.enabled)
+            Text(cmd).font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
         }
     }
 }
@@ -301,6 +302,11 @@ struct ListPane: View {
             Text(e.detail).font(F.meta).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             if let src = e.fields?["source"], !src.isEmpty {
                 HStack(spacing: 6) { Text("read from \(src)").font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: src) }
+            }
+            if let log = e.fields?["log"], !log.isEmpty {
+                SectionLabel(text: "this run's log lines")
+                Text(log).font(F.mono).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    .padding(6).background(RoundedRectangle(cornerRadius: 4).fill(P.card2))
             }
             if let t = e.fields?["transcript"] {
                 HStack(spacing: 6) { Text(t).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: t) }

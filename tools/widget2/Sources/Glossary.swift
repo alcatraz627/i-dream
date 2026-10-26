@@ -112,8 +112,8 @@ enum Glossary {
             ("by", "Who made it: a person, an agent, a pin, telemetry, or an echo of an earlier note."),
         ]
         case .runs: [
-            ("run", "One scheduled run of a job, from the scheduler's history: ok, or failed with its exit code."),
-            ("cycle", "One full pass of the daemon. Productive: it extracted a pattern, association or insight; idle: nothing."),
+            ("run", "One scheduled run of a job, from the scheduler's history: ok, failed with its exit code and reason, or unknown when the scheduler did not record how it ended."),
+            ("cycle", "One consolidation pass the daemon journaled, with what it extracted. Passes that read nothing are not journaled."),
         ]
         case .gates: [
             ("armed gate", "A hook your answer on a weekly page switched on. Unlike a hint, it acts."),

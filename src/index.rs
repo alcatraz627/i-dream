@@ -439,45 +439,62 @@ fn intentions(home: &Path, firings: &Firings, out: &mut Vec<Entry>) {
 /// Every scheduled run of an i-dream job, and every full daemon cycle: the
 /// "Cycles and runs" list.
 fn runs(home: &Path, jobs: &[crate::status::JobStatus], out: &mut Vec<Entry>) {
-    let ours: BTreeMap<&str, &crate::status::JobStatus> = jobs.iter().map(|j| (j.name.as_str(), j)).collect();
+    let current: BTreeMap<&str, &crate::status::JobStatus> = jobs.iter().map(|j| (j.name.as_str(), j)).collect();
+    let logs = home.join(".claude/logs/launchd");
+    let mut segments: BTreeMap<String, Vec<(DateTime<Utc>, Vec<String>)>> = BTreeMap::new();
     for r in jsonl(&home.join(".claude/scheduled/history.jsonl")) {
         let s = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let Some(job) = ours.get(s("name").as_str()) else { continue };
-        if s("ev") != "run" {
+        let name = s("name");
+        // i-dream's jobs, the current ones and any it has retired.
+        if s("ev") != "run" || !(name.contains("i-dream") || name.contains("idream")) {
             continue;
         }
+        let job = current.get(name.as_str());
+        let log_path = job.map(|j| j.log_path.clone()).unwrap_or_else(|| logs.join(format!("{name}.out.log")).display().to_string());
+        let segs = segments.entry(name.clone()).or_insert_with(|| log_segments(Path::new(&log_path)));
         let at = parse_ts(&s("ts"));
+        let lines = at.and_then(|t| segs.iter().rev().find(|(start, _)| *start <= t)).map(|(_, l)| l.clone());
+        let failed_because = [s("reason"), s("stage")].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" at ");
         let mut e = entry(
             "run",
-            format!("run:{}@{}", s("name"), s("ts")),
+            format!("run:{name}@{}", s("ts")),
             match s("outcome").as_str() {
-                "ok" => format!("{} ran", job.name),
-                "failed" => format!("{} failed", job.name),
-                other => format!("{} ran, outcome not recorded ({})", job.name, if other.is_empty() { "none" } else { other }),
+                "ok" => format!("{name} ran"),
+                "failed" => format!("{name} failed"),
+                other => format!("{name} ran, outcome not recorded ({})", if other.is_empty() { "none" } else { other }),
             },
             format!(
-                "{} · exit {} · runs {} · its log keeps only the latest run: {}",
+                "{} · exit {}{}{} · log {}",
                 s("outcome"),
                 s("exit"),
-                job.command,
-                job.log_path
+                if failed_because.is_empty() { String::new() } else { format!(" · {failed_because}") },
+                job.map(|j| format!(" · runs {}", j.command)).unwrap_or_else(|| " · a retired job".into()),
+                log_path
             ),
         );
         e.at = at;
-        e.related = vec![job.name.clone()];
-        e.fields.insert("job", job.name.clone());
+        e.related = job.map(|j| vec![j.name.clone()]).unwrap_or_default();
+        e.fields.insert("job", name.clone());
         e.fields.insert("outcome", s("outcome"));
         e.fields.insert("exit", s("exit"));
+        if !failed_because.is_empty() {
+            e.fields.insert("reason", failed_because);
+        }
+        if let Some(l) = lines {
+            e.fields.insert("log", l.join("\n"));
+        }
         out.push(e);
     }
+    // The journal records each consolidation pass; a pass that read nothing
+    // is not journaled, so this is fewer than the daemon's cycle count.
     for c in jsonl(&home.join(".claude/subconscious/dreams/journal.jsonl")) {
         let n = |k: &str| c.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-        let Some(id) = c.get("cycle_id").and_then(|v| v.as_str()) else { continue };
+        let Some(id) = c.get("cycle_id").or_else(|| c.get("id")).and_then(|v| v.as_str()) else { continue };
         let produced = n("patterns_extracted") + n("associations_found") + n("insights_promoted") > 0;
         let mut e = entry(
             "cycle",
             id,
-            if produced { "daemon cycle, productive" } else { "daemon cycle, idle" },
+            if produced { "consolidation, produced something" } else { "consolidation, produced nothing" },
             format!(
                 "{} sessions read · {} patterns · {} associations · {} insights · {} tokens",
                 n("sessions_analyzed"),
@@ -489,10 +506,36 @@ fn runs(home: &Path, jobs: &[crate::status::JobStatus], out: &mut Vec<Entry>) {
         );
         e.at = c.get("timestamp").and_then(|v| v.as_str()).and_then(parse_ts);
         e.fields.insert("job", "daemon".into());
-        e.fields.insert("outcome", if produced { "productive".into() } else { "idle".into() });
+        e.fields.insert("outcome", if produced { "produced".into() } else { "nothing".into() });
         e.fields.insert("exit", "".into());
         out.push(e);
     }
+}
+
+/// A job's log split into its runs. Each run opens with a
+/// `[YYYY-MM-DD HH:MM:SS] running scheduled command` line in local time;
+/// only the last 80 lines of a run are kept.
+fn log_segments(path: &Path) -> Vec<(DateTime<Utc>, Vec<String>)> {
+    let mut out: Vec<(DateTime<Utc>, Vec<String>)> = vec![];
+    for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+        let start = line
+            .strip_prefix('[')
+            .and_then(|r| r.split_once("] running scheduled command"))
+            .and_then(|(t, _)| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S").ok())
+            .and_then(|t| t.and_local_timezone(chrono::Local).single())
+            .map(|t| t.with_timezone(&Utc));
+        match (start, out.last_mut()) {
+            (Some(t), _) => out.push((t, vec![line.to_string()])),
+            (None, Some((_, lines))) => lines.push(line.to_string()),
+            (None, None) => {}
+        }
+    }
+    for (_, lines) in &mut out {
+        if lines.len() > 80 {
+            lines.drain(..lines.len() - 80);
+        }
+    }
+    out
 }
 
 fn jobs(jobs: &[crate::status::JobStatus], out: &mut Vec<Entry>) {
@@ -584,6 +627,24 @@ fn fill_from_evidence(firings: &Firings, transcripts: &BTreeMap<String, String>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_log_splits_into_one_segment_per_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("job.out.log");
+        std::fs::write(
+            &log,
+            "stray line before any run\n[2026-10-07 04:30:05] running scheduled command (daily)\nfirst a\nfirst b\n\
+             [2026-10-08 04:30:05] running scheduled command (daily)\nsecond a\n",
+        )
+        .unwrap();
+        let segs = log_segments(&log);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].1, vec!["[2026-10-07 04:30:05] running scheduled command (daily)", "first a", "first b"]);
+        assert!(segs[0].0 < segs[1].0);
+        assert_eq!(segs[1].1.len(), 2);
+        assert!(log_segments(&dir.path().join("missing.log")).is_empty());
+    }
 
     #[test]
     fn every_slug_and_session_evidence_names_gets_an_entry() {
