@@ -9,26 +9,17 @@ struct ListSpec {
     var kinds: [String]
     var columns: [String]
     var chipColumn: String?
-    var sub: String
 
     static func of(_ p: Pane) -> ListSpec? {
         switch p {
-        case .proposals: ListSpec(kinds: ["proposal"], columns: ["status", "category", "finding"], chipColumn: "status",
-                                  sub: "Every proposal in the backlog. Finding names the weekly finding you filed it from; the slug's movement after it shows on that finding's effect in Landing.")
-        case .hints: ListSpec(kinds: ["hint", "nudge"], columns: ["state", "sessions", "cited", "promoted by"], chipColumn: "state",
-                              sub: "Every hint and nudge: its state, how many sessions were shown it, whether Claude cited it, and who made it live. Cited reads the firing scan; an item no scan has judged says not checked yet. Open a row to promote or demote it.")
-        case .intentions: ListSpec(kinds: ["intention"], columns: ["shown to", "votes", "cited", "fires"], chipColumn: nil,
-                                   sub: "Reminders a future session gets when its first prompt matches the keywords: how many sessions saw each, and the votes your replies cast on it. Open one for its keywords and the sessions.")
-        case .insights: ListSpec(kinds: ["insight"], columns: ["confidence", "cited", "intention"], chipColumn: nil,
-                                 sub: "Associations the wake phase promoted to insights, with the intention each one produced, read from each intention's source. None made means no intention came from it.")
-        case .sessions: ListSpec(kinds: ["session"], columns: ["shown", "cited", "corrections", "votes"], chipColumn: nil,
-                                 sub: "Sessions i-dream showed something to, and sessions evidence rows name: which items each was shown, how many Claude cited once a scan judged it, how often you corrected or praised it, and the votes that cast on what it was shown. Open one for its transcript path.")
-        case .evidence: ListSpec(kinds: ["evidence"], columns: ["domain", "by"], chipColumn: "domain",
-                                 sub: "Every evidence row any kept daily recon read, newest copy of each, plus atone events older than those files. Open a row for the file it was read from.")
-        case .runs: ListSpec(kinds: ["run", "cycle"], columns: ["job", "outcome", "exit"], chipColumn: "outcome",
-                             sub: "Every scheduled run of an i-dream job, retired jobs included, with its outcome, exit code and its own lines from the job's log. Below them, every consolidation pass the daemon journaled; passes that read nothing are not journaled, so there are fewer than the daemon's cycle count.")
-        case .gates: ListSpec(kinds: ["gate"], columns: ["week"], chipColumn: nil,
-                              sub: "Hooks your answers on a weekly page switched on, beside the hints and nudges that only advise.")
+        case .proposals: ListSpec(kinds: ["proposal"], columns: ["status", "category", "finding"], chipColumn: "status")
+        case .hints: ListSpec(kinds: ["hint", "nudge"], columns: ["state", "sessions", "cited", "promoted by"], chipColumn: "state")
+        case .intentions: ListSpec(kinds: ["intention"], columns: ["shown to", "votes", "cited", "fires"], chipColumn: nil)
+        case .insights: ListSpec(kinds: ["insight"], columns: ["confidence", "cited", "intention"], chipColumn: nil)
+        case .sessions: ListSpec(kinds: ["session"], columns: ["shown", "cited", "corrections", "votes"], chipColumn: nil)
+        case .evidence: ListSpec(kinds: ["evidence"], columns: ["domain", "by"], chipColumn: "domain")
+        case .runs: ListSpec(kinds: ["run", "cycle"], columns: ["job", "outcome", "exit"], chipColumn: "outcome")
+        case .gates: ListSpec(kinds: ["gate"], columns: ["week"], chipColumn: nil)
         default: nil
         }
     }
@@ -162,14 +153,84 @@ struct OpenInClaudeRow: View {
     var kind: String
     var id: String
     var title: String
+    @State private var showing = false
     var body: some View {
         let cmd = OpenInClaude.command(kind: kind, id: id, title: title)
         VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 SectionLabel(text: "open in claude")
                 CopyButton(value: cmd)
+                Button(showing ? "hide command" : "show command") { showing.toggle() }
+                    .buttonStyle(.plain).font(F.meta).foregroundStyle(P.blue).focusEffectDisabled()
             }
-            Text(cmd).font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            if showing {
+                Text(cmd).font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+            }
+        }
+    }
+}
+
+/// An opened item's facts, one per line: the detail sentence split at its
+/// " · " joins, then every field as a label beside its value.
+struct FieldLines: View {
+    var detail: String
+    var fields: [String: String]
+    /// Fields the row already shows as columns: not repeated in the grid.
+    var hide: [String] = []
+    /// Fields drawn elsewhere in the opened item, or too long for one line.
+    static let elsewhere: Set<String> = ["source", "log", "transcript"]
+
+    /// A piece of the detail sentence that only restates a field, such as
+    /// "exit 0" beside an exit field of 0, or "by human" beside by = human.
+    static func restates(_ part: String, _ fields: [String: String]) -> Bool {
+        fields.contains { k, v in
+            !v.isEmpty && (part == v || part == "\(k) \(v)" || (v.count >= 3 && part.hasSuffix(" " + v)))
+        }
+    }
+
+    var body: some View {
+        let parts = detail.components(separatedBy: " · ").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !Self.restates($0, fields) }
+        let rows = fields.filter { !Self.elsewhere.contains($0.key) && !hide.contains($0.key) && !$0.value.isEmpty }.sorted { $0.key < $1.key }
+        VStack(alignment: .leading, spacing: 3) {
+            ForEach(Array(parts.enumerated()), id: \.offset) { _, p in
+                Text(p).font(F.meta).foregroundStyle(P.fg).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+            if !rows.isEmpty {
+                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 2) {
+                    ForEach(rows, id: \.key) { k, v in
+                        GridRow {
+                            Text(k).font(F.meta).foregroundStyle(P.fg3)
+                            Text(v).font(F.meta).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(.top, parts.isEmpty ? 0 : 4)
+            }
+        }
+    }
+}
+
+/// A run's own log lines: the first few, with the rest one click away.
+struct LogBlock: View {
+    var log: String
+    static let shown = 8
+    @State private var all = false
+
+    var body: some View {
+        let lines = log.components(separatedBy: "\n")
+        let more = lines.count - Self.shown
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                SectionLabel(text: "this run's log lines")
+                CopyButton(value: log)
+                if more > 0 {
+                    Button(all ? "show fewer" : "show all \(lines.count)") { all.toggle() }
+                        .buttonStyle(.plain).font(F.meta).foregroundStyle(P.blue).focusEffectDisabled()
+                }
+            }
+            Text(all || more <= 0 ? log : lines.prefix(Self.shown).joined(separator: "\n")).font(F.mono).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                .padding(6).background(RoundedRectangle(cornerRadius: 4).fill(P.card2))
         }
     }
 }
@@ -210,7 +271,7 @@ struct ListPane: View {
         let rows = model.listRows(pane)
         let st = model.list(pane)
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: pane, sub: spec.sub)
+            PaneHeader(pane: pane)
             if model.index == nil {
                 Text(model.indexError ?? "reading the index…").font(F.meta).foregroundStyle(P.fg3)
             }
@@ -282,8 +343,8 @@ struct ListPane: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(e.title.isEmpty ? e.id : e.title).font(F.meta).foregroundStyle(P.fg).lineLimit(open ? nil : 1)
-                        Text(e.id).font(F.mono).foregroundStyle(P.fg3).lineLimit(1)
                     }
+                    .help(e.id)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     ForEach(spec.columns, id: \.self) { c in
                         Text(e.fields?[c] ?? "").font(F.meta).foregroundStyle(P.fg2).lineLimit(1).frame(width: width(c), alignment: .leading)
@@ -302,14 +363,12 @@ struct ListPane: View {
 
     private func detail(_ e: IndexEntry) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(e.detail).font(F.meta).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            FieldLines(detail: e.detail, fields: e.fields ?? [:], hide: ListSpec.of(pane)!.columns)
             if let src = e.fields?["source"], !src.isEmpty {
-                HStack(spacing: 6) { Text("read from \(src)").font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: src) }
+                HStack(spacing: 6) { Text("read from").font(F.meta).foregroundStyle(P.fg3); Text(src).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: src) }
             }
             if let log = e.fields?["log"], !log.isEmpty {
-                SectionLabel(text: "this run's log lines")
-                Text(log).font(F.mono).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    .padding(6).background(RoundedRectangle(cornerRadius: 4).fill(P.card2))
+                LogBlock(log: log)
             }
             if let t = e.fields?["transcript"] {
                 HStack(spacing: 6) { Text(t).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: t) }

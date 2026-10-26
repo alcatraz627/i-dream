@@ -82,6 +82,14 @@ enum Probe {
         let m2 = model(status, reader)
         render(DropdownView(model: m2), appearance, out.appendingPathComponent("dropdown-relook-\(tag).png"))
         let noise = m2.record!.since.changes
+        // Every pane's fixed line is one sentence a glance can take in.
+        let wordy = Pane.allCases.compactMap { p -> String? in
+            let line = Copy.about(p).line
+            let sentences = line.split(separator: ".").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+            return line.count > Copy.maxLine || sentences > 1 ? "\(p.rawValue) (\(line.count) chars)" : nil
+        }
+        log.append(wordy.isEmpty ? "PASS copy: every pane line is one sentence of at most \(Copy.maxLine) characters"
+                                 : "FAIL copy: too long for a glance: " + wordy.joined(separator: ", "))
         log.append(noise.isEmpty ? "PASS relook: nothing changed, no change reported" : "FAIL relook: nothing changed but it reports " + noise.map(\.text).joined(separator: "; "))
         log.append(m2.record!.since.first ? "FAIL since-last-look: second open still says first look" : "PASS since-last-look: second open compares (\(m2.record!.since.anything ? "something moved" : "nothing moved"))")
 
@@ -335,12 +343,12 @@ enum Probe {
         }
 
         // Dashboard panes at full height.
-        render(PaneHeader(pane: .settings, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
+        render(PaneHeader(pane: .settings).environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
                appearance, out.appendingPathComponent("terms-settings-\(tag).png"), width: 1000)
         for p in [Pane.flow, .ledger, .patterns, .reader, .landing, .changes] + Pane.lists {
             if Pane.lists.contains(p) {
                 // The lists render with the index above; here only their term lists.
-                render(PaneHeader(pane: p, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
+                render(PaneHeader(pane: p).environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
                        appearance, out.appendingPathComponent("terms-\(p.rawValue)-\(tag).png"), width: 1000)
                 continue
             }
@@ -351,7 +359,7 @@ enum Probe {
             // The pane's header with its term list open, alone: some panes grow
             // past the height the text reader can read, and every pane uses
             // this one header.
-            render(PaneHeader(pane: p, sub: "").environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
+            render(PaneHeader(pane: p).environment(\.termsOpen, true).padding(16).frame(width: 1000).background(P.bg),
                    appearance, out.appendingPathComponent("terms-\(p.rawValue)-\(tag).png"), width: 1000)
         }
 

@@ -123,8 +123,8 @@ struct DashboardView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer()
             switch model.reading {
-            case .fresh(let at): Text("read \(ageText(Date().timeIntervalSince(at))) ago").font(F.mono).foregroundStyle(P.fg3)
-            case .stale(let at, let why): Text("as of \(ageText(Date().timeIntervalSince(at))): \(why)").font(F.mono).foregroundStyle(P.amber)
+            case .fresh(let at): Text("read \(ageText(Date().timeIntervalSince(at))) ago").font(F.meta).foregroundStyle(P.fg3)
+            case .stale(let at, let why): Text("as of \(ageText(Date().timeIntervalSince(at))): \(why)").font(F.meta).foregroundStyle(P.amber)
             default: EmptyView()
             }
         }
@@ -202,24 +202,36 @@ struct SidebarPrefs: View {
 
 struct PaneHeader: View {
     var pane: Pane
-    var sub: String
+    /// A live line (counts, what changed) shown in place of the pane's fixed one.
+    var status: String? = nil
+    /// Live detail added after the pane's longer explanation.
+    var note: String? = nil
     @State private var open = false
     @Environment(\.termsOpen) private var forced
     var body: some View {
         let showing = open || forced
+        let about = Copy.about(pane)
+        let more = [about.more, note].compactMap { $0 }.joined(separator: " ")
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
                 Image(systemName: pane.icon).font(.system(size: 14)).foregroundStyle(P.fg2)
                 Text(pane.title).font(F.head).foregroundStyle(P.fg)
                 Button { open.toggle() } label: {
-                    Label(showing ? "hide terms" : "what the words mean", systemImage: "questionmark.circle")
+                    Label(showing ? "hide" : "about this view", systemImage: "questionmark.circle")
                         .font(F.meta).foregroundStyle(P.blue)
                 }
                 .buttonStyle(.plain).focusEffectDisabled()
             }
-            Text(sub).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
+            let line = status ?? about.line
+            if !line.isEmpty {
+                Text(line).font(F.meta).foregroundStyle(P.fg2).lineLimit(status == nil ? 1 : 2).truncationMode(.tail)
+            }
             if showing {
                 VStack(alignment: .leading, spacing: 3) {
+                    if !more.isEmpty {
+                        Text(more).font(F.meta).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: 640, alignment: .leading).padding(.bottom, 6)
+                    }
                     ForEach(Glossary.terms(pane), id: \.0) { term, meaning in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(term).font(F.meta.weight(.semibold)).foregroundStyle(P.fg).frame(width: 150, alignment: .leading)
@@ -271,9 +283,7 @@ struct FlowPane: View {
         let cycles = r.cycles.filter { $0.kind == "cycle" && inRange($0.at) }
         let journal = r.cycles.filter { $0.kind == "cycle" }
         VStack(alignment: .leading, spacing: 12) {
-            PaneHeader(pane: .flow, sub: sinceSentence + " " + (model.flow.range == nil
-                ? "Hover a cycle to probe it, click it to load its lines, drag across the week to re-aggregate the stages."
-                : "Showing \(rangeText). Esc clears the range."))
+            PaneHeader(pane: .flow, status: sinceSentence + (model.flow.range == nil ? "" : " Showing \(rangeText). Esc clears the range."))
             VStack(alignment: .leading, spacing: 4) {
                 Hypnogram(marks: r.cycles, now: r.now, selected: model.flow.cycle, range: model.flow.range,
                           onSelect: { m in model.flow.cycle = m.id; model.flow.selected = r.cycles.firstIndex { $0.id == m.id } ?? 0 },
@@ -281,7 +291,7 @@ struct FlowPane: View {
                     .frame(height: 150)
                     .background(RoundedRectangle(cornerRadius: 10).fill(P.card))
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(P.hair, lineWidth: 0.5))
-                Text(lensCaption(journal)).font(F.mono).foregroundStyle(P.fg3)
+                Text(lensCaption(journal)).font(F.meta).foregroundStyle(P.fg3)
             }
             stages(cycles)
             HStack(alignment: .top, spacing: 12) {
@@ -450,7 +460,7 @@ struct ChainRow: View {
             } else {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("no slug to measure").font(F.meta).foregroundStyle(P.fg3)
-                    Text(f.key.map { "joined on \($0)" } ?? "").font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                    Text(f.key.map { "joined on \($0)" } ?? "").font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 2)
             }
         }
@@ -474,7 +484,7 @@ struct ChainRow: View {
                 Image(systemName: icon).font(.system(size: 10)).foregroundStyle(color).padding(.top, 2)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(F.meta).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
-                    Text(sub).font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                    Text(sub).font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
             }

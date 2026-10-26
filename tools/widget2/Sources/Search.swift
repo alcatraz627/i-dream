@@ -223,7 +223,7 @@ struct SearchPanel: View {
         Button { model.openResult(e) } label: {
             VStack(alignment: .leading, spacing: 1) {
                 Text(e.title).font(F.meta).foregroundStyle(P.fg).lineLimit(1)
-                Text(e.id + " · " + e.detail).font(F.mono).foregroundStyle(P.fg3).lineLimit(1)
+                Text(e.detail).font(F.meta).foregroundStyle(P.fg3).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12).padding(.vertical, 4)
@@ -243,10 +243,10 @@ struct DetailCard: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(e.kind.uppercased()).font(F.label).tracking(0.6).foregroundStyle(P.fg3)
             Text(e.title).font(F.body).foregroundStyle(P.fg).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            Text(e.detail).font(F.meta).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            FieldLines(detail: e.detail, fields: e.fields ?? [:])
             HStack(spacing: 6) {
                 IdChip(model: model, id: e.id)
-                if let at = e.at.flatMap(parseDate) { Text("· \(ageText(Date().timeIntervalSince(at))) ago").font(F.mono).foregroundStyle(P.fg3) }
+                if let at = e.at.flatMap(parseDate) { Text("· \(ageText(Date().timeIntervalSince(at))) ago").font(F.meta).foregroundStyle(P.fg3) }
             }
             if let rel = e.related, !rel.isEmpty {
                 SectionLabel(text: "points at")
@@ -260,7 +260,7 @@ struct DetailCard: View {
                 if rel.count > 24 { Text("and \(rel.count - 24) more").font(F.meta).foregroundStyle(P.fg3) }
             }
             OpenInClaudeRow(kind: e.kind, id: e.id, title: e.title)
-            Text("esc goes back").font(F.mono).foregroundStyle(P.fg3)
+            Text("esc goes back").font(F.meta).foregroundStyle(P.fg3)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)

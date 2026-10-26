@@ -165,7 +165,7 @@ struct SettingsPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                PaneHeader(pane: .settings, sub: "Controls change what i-dream does. All settings shows the rest, read-only.")
+                PaneHeader(pane: .settings)
                 Spacer()
                 Picker("", selection: $tab) {
                     Label("Controls", systemImage: "slider.horizontal.3").tag("controls")

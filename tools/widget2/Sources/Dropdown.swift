@@ -146,9 +146,9 @@ struct DropdownView: View {
     @ViewBuilder private var readingAge: some View {
         switch model.reading {
         case .fresh(let at):
-            Text("read \(ageText(Date().timeIntervalSince(at))) ago").font(F.mono).foregroundStyle(P.fg3).fixedSize()
+            Text("read \(ageText(Date().timeIntervalSince(at))) ago").font(F.meta).foregroundStyle(P.fg3).fixedSize()
         case .stale(let at, let why):
-            Text("as of \(ageText(Date().timeIntervalSince(at))): \(why)").font(F.mono).foregroundStyle(P.amber).fixedSize(horizontal: false, vertical: true)
+            Text("as of \(ageText(Date().timeIntervalSince(at))): \(why)").font(F.meta).foregroundStyle(P.amber).fixedSize(horizontal: false, vertical: true)
         default: EmptyView()
         }
     }
@@ -216,17 +216,20 @@ struct DropdownView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .onHover { help.text = $0 ? (open ? "hide what it runs" : "show what it runs, its log, and how to run it yourself") : "" }
+                .onHover { help.text = $0 ? (open ? "hide what it does" : j.what) : "" }
                 Text("\(when) · \(last)").font(F.meta).foregroundStyle(j.lastFailed && !running ? P.red : P.fg2)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(j.what).font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                // What the job does is what tells a newcomer it runs by itself;
+                // without it, the probe's first-look check reads Run now as a chore.
+                Text(j.what).font(F.meta).foregroundStyle(P.fg3).lineLimit(open ? nil : 1).truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: open)
                 if open { jobDetail(j) }
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 3) {
                 Button { model.runJob(j.name) } label: {
                     // Optional, so it reads as a link, not a call to action.
-                    Text("Run now").font(F.meta).foregroundStyle(P.fg2)
+                    Text("Run early").font(F.meta).foregroundStyle(P.fg2)
                 }
                 .buttonStyle(.plain).disabled(started != nil)
                 .onHover { help.text = $0 ? "starts \(j.title.lowercased()) now" : "" }
@@ -333,7 +336,7 @@ struct DropdownView: View {
                         .font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
                 }
                 .buttonStyle(.plain)
-                Text("\(r.patterns.count) of \(r.patternTotal) patterns drawn, \(plural(r.associations.count, "link"))").font(F.mono).foregroundStyle(P.fg3)
+                Text("\(r.patterns.count) of \(r.patternTotal) patterns drawn, \(plural(r.associations.count, "link"))").font(F.meta).foregroundStyle(P.fg3)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)

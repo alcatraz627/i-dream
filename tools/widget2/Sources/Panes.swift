@@ -14,7 +14,7 @@ struct LedgerPane: View {
     var body: some View {
         let rows = model.ledgerRows()
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .ledger, sub: "Every input stream: the lanes the daemon measures and the domains the reader reads, with when each was last written and last read. A row older than twice its cadence is dimmed.")
+            PaneHeader(pane: .ledger)
             highlights
             SearchField(text: $model.ledger.search, prompt: "search name, reason, consumer, path", token: model.searchFocusToken)
             filters
@@ -126,19 +126,31 @@ struct LedgerPane: View {
         .contentShape(Rectangle())
     }
 
+    private func fact(_ label: String, _ value: String, _ tint: Color = P.fg2) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(P.fg3)
+            Text(value).foregroundStyle(tint).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private func detail(_ s: Source) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("reason     \(s.reason)").fixedSize(horizontal: false, vertical: true)
-            Text("consumer   \(s.consumer)").fixedSize(horizontal: false, vertical: true)
-            Text("cadence    \(s.cadence.map { "\(Int($0 / 3600))h, stale past \(Int($0 / 1800))h" } ?? "none recorded (a reader domain)")")
-            Text("written    \(ageText(s.writtenAge)) ago · read \(ageText(s.readAge)) ago")
-            if let fix = s.fix { Text("fix        \(fix)").foregroundStyle(P.amber).fixedSize(horizontal: false, vertical: true) }
-            if let p = s.path, !p.isEmpty {
-                HStack(spacing: 8) { Text("stream     \(p)").fixedSize(horizontal: false, vertical: true); CopyButton(value: p) }
+        VStack(alignment: .leading, spacing: 6) {
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 3) {
+                fact("reason", s.reason)
+                fact("consumer", s.consumer)
+                fact("cadence", s.cadence.map { "\(Int($0 / 3600))h, stale past \(Int($0 / 1800))h" } ?? "none recorded (a reader domain)")
+                fact("written", "\(ageText(s.writtenAge)) ago, read \(ageText(s.readAge)) ago")
+                if let fix = s.fix { fact("fix", fix, P.amber) }
+                if let p = s.path, !p.isEmpty {
+                    GridRow {
+                        Text("stream").foregroundStyle(P.fg3)
+                        HStack(spacing: 8) { Text(p).font(F.mono).textSelection(.enabled).fixedSize(horizontal: false, vertical: true); CopyButton(value: p) }
+                    }
+                }
             }
             OpenInClaudeRow(kind: "source", id: s.id, title: s.reason)
         }
-        .font(F.mono).foregroundStyle(P.fg2)
+        .font(F.meta).foregroundStyle(P.fg2)
         .padding(.leading, 12).padding(.vertical, 8)
         .overlay(alignment: .leading) { Rectangle().fill(P.blue).frame(width: 2) }
         .padding(.leading, 26).padding(.vertical, 4)
@@ -173,7 +185,7 @@ struct PatternsPane: View {
         let rows = model.patternRows()
         let shown = Set(rows.map(\.id))
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .patterns, sub: "The \(r.patterns.count) strongest of \(r.patternTotal) extracted patterns, placed by category, sized and lit by strength, linked by the \(r.associations.count) associations. Hover a star to probe it, click to open it, drag to pan, pinch to zoom.")
+            PaneHeader(pane: .patterns, status: "The \(r.patterns.count) strongest of \(r.patternTotal) patterns, linked by \(r.associations.count) associations.")
             highlights
             SearchField(text: $model.patterns.search, prompt: "search pattern text or id", token: model.searchFocusToken)
             filters
@@ -256,7 +268,7 @@ struct PatternsPane: View {
             Dot(color: P.category(p.category)).padding(.top, 4)
             VStack(alignment: .leading, spacing: 2) {
                 Text(p.text).font(F.meta).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
-                Text("rank \(p.rank) · strength \(String(format: "%.2f", p.strength)) · \(p.trend) · \(p.category)").font(F.mono).foregroundStyle(P.fg3)
+                Text("rank \(p.rank) · strength \(String(format: "%.2f", p.strength)) · \(p.trend) · \(p.category)").font(F.meta).foregroundStyle(P.fg3)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 7)
@@ -281,7 +293,7 @@ struct PatternsPane: View {
                     RoundedRectangle(cornerRadius: 3).fill(P.card2).frame(width: 100, height: 6)
                     RoundedRectangle(cornerRadius: 3).fill(P.violet).frame(width: 100 * CGFloat(p.strength), height: 6)
                 }
-                Text("\(String(format: "%.2f", p.strength)) on 0 to 1 · rank \(p.rank) of \(r.patterns.count)").font(F.mono).foregroundStyle(P.fg2)
+                Text("\(String(format: "%.2f", p.strength)) on 0 to 1 · rank \(p.rank) of \(r.patterns.count)").font(F.meta).foregroundStyle(P.fg2)
             }
             Text("\(plural(p.occurrences, "occurrence")) · \(p.last7) in the last 7 days, \(p.prior7) the 7 before · last seen \(ageText(p.lastSeen.map { r.now.timeIntervalSince($0) })) ago")
                 .font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
@@ -321,7 +333,7 @@ struct ReaderPane: View {
     var body: some View {
         let cards = model.readerCards()
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .reader, sub: "What the reader found. The daily recon joins every stream without a model; the weekly run names the strongest clusters and puts them on a page for you. Click a run to load it; click a card to open its evidence.")
+            PaneHeader(pane: .reader)
             runsTimeline
             highlights
             SearchField(text: $model.reader.search, prompt: "search title, reason, join key", token: model.searchFocusToken)
@@ -453,12 +465,12 @@ struct ReaderPane: View {
                         HStack(spacing: 6) {
                             IdChip(model: model, id: id)
                             Text("\(ev?.provenance ?? "?") · \(ageText(parseDate(ev?.ts).map { r.now.timeIntervalSince($0) })) ago\(ev?.project.map { " · \($0)" } ?? "")")
-                                .font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
+                                .font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
             }
-            if let k = f.key { Text("joined on: \(k) across \(f.joinedDomains.joined(separator: ", "))").font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true) }
+            if let k = f.key { Text("joined on: \(k) across \(f.joinedDomains.joined(separator: ", "))").font(F.meta).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true) }
             if let t = f.target, let c = f.change {
                 SectionLabel(text: "proposed change")
                 Text("\(t): \(c)").font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
@@ -496,7 +508,7 @@ struct ReaderPane: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(c.summary).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
                             Text("\(c.kind) · \(plural(c.evidence.count, "evidence row")) · \(c.domains.joined(separator: ", ")) · score \(String(format: "%.1f", c.score))")
-                                .font(F.mono).foregroundStyle(P.fg3)
+                                .font(F.meta).foregroundStyle(P.fg3)
                         }
                     }.padding(.vertical, 3)
                 }
@@ -567,7 +579,7 @@ struct LandingPane: View {
     var body: some View {
         let effects = model.landingEffects()
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .landing, sub: "Where findings went and whether anything moved. An effect is credited only to a fix that is in place: a hook you armed, or a filed proposal that is now done. A proposal still open has changed nothing yet; every other movement reads unattributed. The " + r.recordingNote + ".")
+            PaneHeader(pane: .landing, note: "The " + r.recordingNote + ".")
             Text("\(r.interventions.live) live nudges · \(r.interventions.candidate) candidates · \(r.interventions.shadow) in shadow · \(r.interventions.fired_7d) fired in the last 7 days · heed is not measured yet")
                 .font(F.meta).foregroundStyle(P.fg2)
             highlights
@@ -716,7 +728,7 @@ struct ChangesPane: View {
         let unseen = Set(r.since.unseen.map(\.id))
         let history = model.changeHistory
         VStack(alignment: .leading, spacing: 10) {
-            PaneHeader(pane: .changes, sub: "Everything i-dream did or noticed, each with its cause, newest first. Amber rows arrived since you last looked; the menu bar number counts them. Click a row to open where it happened.")
+            PaneHeader(pane: .changes)
             Text("\(plural(unseen.count, "unseen change")) · \(plural(history.count, "change")) kept")
                 .font(F.meta).foregroundStyle(P.fg2)
             LazyVStack(alignment: .leading, spacing: 6) {

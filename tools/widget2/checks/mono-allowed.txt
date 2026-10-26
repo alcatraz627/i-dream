@@ -1,0 +1,20 @@
+Search.swift: Text(indexNote).font(F.mono).foregroundStyle(model.indexError != nil && model.index == nil ? P.amber : P.fg3).lineLimit(1).fixedSize()
+Lists.swift: Text(cmd).font(F.mono).foregroundStyle(P.fg3).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+Lists.swift: Text(all || more <= 0 ? log : lines.prefix(Self.shown).joined(separator: "\n")).font(F.mono).foregroundStyle(P.fg2).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+Lists.swift: HStack(spacing: 6) { Text("read from").font(F.meta).foregroundStyle(P.fg3); Text(src).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: src) }
+Lists.swift: HStack(spacing: 6) { Text(t).font(F.mono).foregroundStyle(P.fg3).textSelection(.enabled); CopyButton(value: t) }
+Settings.swift: Text("CLI: \(Runner.idreamBinary() ?? "not found")").font(F.mono).foregroundStyle(P.fg3)
+Settings.swift: Text("Open log: ~/Library/Application Support/i-dream-bar/open-log.jsonl").font(F.mono).foregroundStyle(P.fg3)
+Settings.swift: Text(value).font(F.mono).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
+Panes.swift: Text(s.events.map { $0.formatted() } ?? "—").font(F.mono).foregroundStyle(P.fg2).frame(width: 60, alignment: .trailing)
+Panes.swift: HStack(spacing: 8) { Text(p).font(F.mono).textSelection(.enabled).fixedSize(horizontal: false, vertical: true); CopyButton(value: p) }
+Panes.swift: bar(e.prior7, maxN, P.fg3); Text("\(e.prior7)").font(F.mono).foregroundStyle(P.fg3).frame(width: 18)
+Panes.swift: bar(e.last7, maxN, e.delta > 0 ? P.amber : e.delta < 0 ? P.green : P.fg2); Text("\(e.last7)").font(F.mono).foregroundStyle(P.fg).frame(width: 18)
+Panes.swift: Text("\(e.delta > 0 ? "+" : "")\(e.delta)").font(F.mono).foregroundStyle(e.delta > 0 ? P.amber : e.delta < 0 ? (e.landing == nil ? P.fg2 : P.green) : P.fg3).frame(width: 44, alignment: .trailing)
+Panes.swift: Text("\(e.total)").font(F.mono).foregroundStyle(P.fg2).frame(width: 44, alignment: .trailing)
+Dashboard.swift: Text("/").font(F.mono).foregroundStyle(P.fg3)
+Dashboard.swift: ForEach(c.lines, id: \.self) { Text($0).font(F.mono).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true) }
+Kit.swift: .font(F.mono).foregroundStyle(stale && warn ? P.amber : P.fg3).fixedSize()
+Dropdown.swift: Text(manual).font(F.mono).foregroundStyle(P.fg).textSelection(.enabled)
+Dropdown.swift: Text(j.command.isEmpty ? "no command recorded" : j.command).font(F.mono).foregroundStyle(P.fg2)
+Dropdown.swift: Text(line).font(F.mono).foregroundStyle(P.fg3).lineLimit(2).textSelection(.enabled)
