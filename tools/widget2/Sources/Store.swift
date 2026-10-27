@@ -159,7 +159,8 @@ final class AppModel: ObservableObject {
 
     /// Start a job now; it runs detached, so this returns at once.
     func runJob(_ name: String) {
-        jobAction(["jobs", "run", name]) { ok in if ok { self.jobStarted[name] = Date() } }
+        let clicked = Date()
+        jobAction(["jobs", "run", name]) { ok in if ok { self.jobStarted[name] = clicked } }
     }
 
     /// Hold a job and run it `hours` from now instead.

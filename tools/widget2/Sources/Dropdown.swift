@@ -189,10 +189,13 @@ struct DropdownView: View {
     }
 
     private func jobView(_ j: JobRow, _ r: Record) -> some View {
-        let started = model.jobStarted[j.name].flatMap { s in (j.lastRun ?? .distantPast) < s ? s : nil }
+        // History stamps whole seconds, so a run that finished within the
+        // click's second can carry an earlier stamp than the click itself.
+        let started = model.jobStarted[j.name].flatMap { s in (j.lastRun ?? .distantPast) < s.addingTimeInterval(-2) ? s : nil }
         let last: String = {
             guard let at = j.lastRun else { return "never run" }
-            return "last ran \(ageText(r.now.timeIntervalSince(at))) ago, \(j.lastFailed ? "failed" : "ok")"
+            let outcome = j.lastSkip ?? (j.lastFailed ? "failed" : "ok")
+            return "last ran \(ageText(r.now.timeIntervalSince(at))) ago, \(outcome)"
         }()
         let when: String = {
             if let s = started { return "started \(ageText(r.now.timeIntervalSince(s))) ago, running" }
@@ -233,6 +236,11 @@ struct DropdownView: View {
                 }
                 .buttonStyle(.plain).disabled(started != nil)
                 .onHover { help.text = $0 ? "starts \(j.title.lowercased()) now" : "" }
+                // The command to run it yourself, without opening the row.
+                if let manual = j.manual {
+                    CopyButton(value: manual)
+                        .onHover { help.text = $0 ? "copies the command to run it in a terminal" : "" }
+                }
                 if j.held != nil {
                     Button { model.cancelHold(j.name) } label: {
                         Text("Cancel delay").font(F.meta).foregroundStyle(P.blue)
@@ -459,9 +467,11 @@ struct DropdownView: View {
                 .buttonStyle(.plain).foregroundStyle(P.fg2)
             if help.text.isEmpty { readingAge }
             Spacer(minLength: 6)
-            // One short line at a small size, so a hover never changes the footer's height.
+            // One line at a small size, cut to fit, so a hover never changes the
+            // footer's height or pushes the panel wider than the window.
             Text(help.text.isEmpty ? "click a row to open it" : help.text)
-                .font(.system(size: 10)).italic().foregroundStyle(P.fg3).fixedSize()
+                .font(.system(size: 10)).italic().foregroundStyle(P.fg3)
+                .lineLimit(1).truncationMode(.tail).frame(minWidth: 0, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .frame(height: 32)

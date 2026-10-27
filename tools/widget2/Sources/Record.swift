@@ -135,6 +135,8 @@ struct JobRow: Identifiable {
     var held: Date?
     var lastRun: Date?
     var lastFailed: Bool
+    /// Why the last run stood down without doing the work, in plain words.
+    var lastSkip: String? = nil
     var delayable: Bool
     /// What the scheduler runs, headless.
     var command: String
@@ -736,6 +738,7 @@ enum RecordBuilder {
             return JobRow(name: name, title: title, what: what,
                           next: parseDate(j.next_fire), held: parseDate(j.held_until),
                           lastRun: parseDate(j.last_run), lastFailed: j.last_outcome == "failed",
+                          lastSkip: skipText(j.last_reason, j.last_detail),
                           delayable: j.delayable ?? false,
                           command: j.command ?? "", manual: j.manual, manualNote: j.manual_note,
                           running: j.running ?? false, logTail: j.log_tail ?? [], logPath: j.log_path ?? "")

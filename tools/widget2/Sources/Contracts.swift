@@ -46,6 +46,8 @@ struct StatusDoc: Decodable {
         var runner: String?
         var last_run: String?
         var last_outcome: String?
+        var last_reason: String?
+        var last_detail: String?
         var command: String?
         var manual: String?
         var manual_note: String?
@@ -210,6 +212,16 @@ struct ReaderDoc: Decodable {
     var recon: Recon?
     var runs: [Run]
     var evidence: [Evidence]
+}
+
+/// A run that stood down by design, in plain words, or nil for a run that did
+/// its work. The scheduler logs such a run as "ok", which alone reads as done.
+func skipText(_ reason: String?, _ detail: String?) -> String? {
+    guard reason == "cadence_skip" else { return nil }
+    switch detail {
+    case "not_first_tuesday": return "skipped, not the first week of the month"
+    default: return "skipped, not its day"
+    }
 }
 
 /// Turn a contract timestamp into a date. The CLI writes RFC 3339 with

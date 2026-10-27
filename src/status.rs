@@ -492,6 +492,13 @@ pub struct JobStatus {
     pub last_run: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<String>,
+    /// Why the last run did what it did, when the scheduler says: a date-gated
+    /// job that stood down logs "ok" with reason "cadence_skip", which must
+    /// not read as work done.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_detail: Option<String>,
     /// Set while the job is held to run later; its regular fire stands down.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_until: Option<chrono::DateTime<chrono::Utc>>,
@@ -821,11 +828,13 @@ pub(crate) fn gather_jobs() -> Vec<JobStatus> {
             let held_until = holds.get(&job.name).map(|h| h.until).filter(|u| *u > now.with_timezone(&chrono::Utc));
             let (manual, manual_note) = manual_run(&job.name).unzip();
             // The scheduler runs i-dream by its full path; matching on the
-            // subcommand finds the run however it was started.
+            // subcommand finds the run however it was started. The match is
+            // anchored to the start of the command line, so a shell or a Claude
+            // session that only mentions the command never reads as a run.
             let running = pid.is_some()
                 || job.command.split("/i-dream ").nth(1).is_some_and(|args| {
                     std::process::Command::new("pgrep")
-                        .args(["-f", &format!("i-dream {args}")])
+                        .args(["-f", &running_pattern(args)])
                         .output()
                         .is_ok_and(|o| o.status.success())
                 });
@@ -853,6 +862,8 @@ pub(crate) fn gather_jobs() -> Vec<JobStatus> {
                 last_exit: if runner.is_some() { last.as_ref().and_then(|r| r.exit) } else { last_exit },
                 runner,
                 last_run: last.as_ref().map(|r| r.ts.clone()),
+                last_reason: last.as_ref().and_then(|r| r.reason.clone()),
+                last_detail: last.as_ref().and_then(|r| r.detail.clone()),
                 last_outcome: last.map(|r| r.outcome),
                 program,
             }
@@ -860,11 +871,19 @@ pub(crate) fn gather_jobs() -> Vec<JobStatus> {
         .collect()
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 struct LastRun {
     ts: String,
     outcome: String,
     exit: Option<i64>,
+    reason: Option<String>,
+    detail: Option<String>,
+}
+
+/// The pgrep pattern for a running i-dream subcommand: the i-dream binary
+/// itself, by any path, at the start of the command line.
+fn running_pattern(args: &str) -> String {
+    format!("^([^ ]*/)?i-dream {args}( |$)")
 }
 
 /// The weekly reader's last run, counting runs started by hand. The widget's
@@ -880,7 +899,12 @@ fn with_manual_weekly(
     let mut best = scheduled;
     let mut consider = |ts: chrono::DateTime<chrono::Utc>, outcome: &str, exit: i64| {
         if best.as_ref().and_then(at).is_none_or(|b| ts > b) {
-            best = Some(LastRun { ts: ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), outcome: outcome.into(), exit: Some(exit) });
+            best = Some(LastRun {
+                ts: ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                outcome: outcome.into(),
+                exit: Some(exit),
+                ..Default::default()
+            });
         }
     };
     if let Some(t) = last_weekly {
@@ -903,7 +927,7 @@ fn last_runs(history: &str) -> std::collections::HashMap<String, LastRun> {
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
         let (Some(name), Some(ts)) = (s("name"), s("ts")) else { continue };
         let exit = s("exit").and_then(|e| e.parse().ok());
-        out.insert(name, LastRun { ts, outcome: s("outcome").unwrap_or_default(), exit });
+        out.insert(name, LastRun { ts, outcome: s("outcome").unwrap_or_default(), exit, reason: s("reason"), detail: s("detail") });
     }
     out
 }
@@ -1508,7 +1532,10 @@ not json
 {"ts":"2026-10-06T23:01:51Z","ev":"run","name":"d","outcome":"ok","exit":"0"}
 {"ts":"2026-10-07T23:00:40Z","ev":"run","name":"d","outcome":"ok","exit":"0"}"#;
         let runs = last_runs(history);
-        assert_eq!(runs["w"], LastRun { ts: "2026-10-06T21:36:42Z".into(), outcome: "failed".into(), exit: Some(1) });
+        assert_eq!(
+            runs["w"],
+            LastRun { ts: "2026-10-06T21:36:42Z".into(), outcome: "failed".into(), exit: Some(1), ..Default::default() }
+        );
         assert_eq!(runs["d"].ts, "2026-10-07T23:00:40Z");
         assert_eq!(runs.len(), 2);
     }
@@ -1517,7 +1544,7 @@ not json
     /// hides a newer scheduled run, and a newer failure shows as failed.
     #[test]
     fn a_manual_weekly_run_counts_as_the_last_run() {
-        let sched = || Some(LastRun { ts: "2026-10-21T12:15:04Z".into(), outcome: "ok".into(), exit: Some(0) });
+        let sched = || Some(LastRun { ts: "2026-10-21T12:15:04Z".into(), outcome: "ok".into(), exit: Some(0), ..Default::default() });
         let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
         let manual = with_manual_weekly(sched(), Some(t("2026-10-27T08:33:32Z")), None).unwrap();
         assert_eq!((manual.ts.as_str(), manual.outcome.as_str()), ("2026-10-27T08:33:32Z", "ok"));
@@ -1527,6 +1554,22 @@ not json
         let f = with_manual_weekly(sched(), Some(t("2026-10-27T08:33:32Z")), Some(&failed)).unwrap();
         assert_eq!(f.outcome, "failed");
         assert!(with_manual_weekly(None, None, None).is_none());
+    }
+
+    /// A skipped run keeps the scheduler's reason, so it never reads as work done.
+    #[test]
+    fn a_skipped_run_keeps_its_reason() {
+        let h = r#"{"ts":"2026-10-27T11:06:00Z","ev":"run","name":"m","outcome":"ok","exit":"0","reason":"cadence_skip","detail":"not_first_tuesday"}"#;
+        let runs = last_runs(h);
+        assert_eq!(runs["m"].reason.as_deref(), Some("cadence_skip"));
+        assert_eq!(runs["m"].detail.as_deref(), Some("not_first_tuesday"));
+    }
+
+    /// Only the i-dream binary itself counts as a running job. The pattern is
+    /// checked against live processes in pgrep by hand; this pins its shape.
+    #[test]
+    fn the_running_pattern_is_anchored_to_the_binary() {
+        assert_eq!(running_pattern("reader run"), "^([^ ]*/)?i-dream reader run( |$)");
     }
 
     // ── freshness_verdicts — pins each verdict's SOURCE ──────────────
