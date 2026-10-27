@@ -142,6 +142,72 @@ Run `/adversarial-review` with a Claude prosecutor (opus, worktree-isolated, as 
 
 Inputs to hand it: this doc, the argon indictment with its check table, `docs/36-reading-the-widget.md`, the five 2026-10-19 audits, and the owner's quotes in `.claude/output/20261021-1948-adversarial-review/claims-ledger.md`.
 
+## E. Monthly audit findings, 2026-10-27
+
+The monthly audit (`.claude/output/20261027-audit/summary.md`) re-checked everything above and found the items below. The parent session checked each one against the code. Session i-dream-1d06fbbc is planning the fixes. B1 still decides whether any of this changes behaviour.
+
+### E1. Votes come from things that are not corrections
+Both vote bursts after the fix (35 down-votes on 10-27) came from a sub-agent's task notification and a quoted "try again". The word filter has no stop words. This is the same issue as B3.
+
+Fix: treat any prompt that starts with a task notification as machine input, add stop words, require two shared content words, and cap the votes per correction.
+
+### E2. Every rule reaches every session, and the generic-word filter is broken
+At session start every Context trigger passes, so all 21 rules go to each session and are used up in about three hours. The plural fold turns "always" into "alway" before the stop-word check, and the test passes on the bug.
+
+Fix: run the check before the fold, and change the test to use a word that ends in "s". Then either make the keywords gate delivery or remove them.
+
+### E3. Delivered rules repeat standing rules
+At least 9 of the 21 rules and most brief bullets restate rules Claude already loads. Briefs have no age limit, and the oldest one delivered was 125 days old.
+
+Fix: compare each candidate with the full text of the standing rules, not only their headings, and do not inject a brief older than about 14 days.
+
+### E4. The glance shows alarms that are not real
+The red dot and "1 broken" show for a metacog bug that was fixed on 10-26, and they will stay until about 10-30. Settings shows the daily and weekly jobs as "paused" while both run. The first-look gate compares the screen with its own text, so it cannot catch a misleading glance.
+
+Fix: judge metacog-calls on its last few calls, drive the Settings switch from the job's real state, and give the gate a health question that does not come from the screen.
+
+### E5. Built proposals show as "filed"
+All seven w44 proposals are done, but Landing and Flow show them as "filed", and the dropdown calls 28 filed proposals "landed".
+
+Fix: show each proposal's status on its row, and use one word for one count.
+
+### E6. Spend is under-reported
+The daily recon is documented as using no model, but it ran the paid extractors ($12.77 in 21 days). Recorded spend can never go above the budget. The weekly run's brief refresh (76k tokens) and its retried calls are in no ledger.
+
+Fix: record the real sum of tokens, add a ledger row for the brief refresh and for every call in a run, and correct the docs.
+
+### E7. Metacog drops sessions without reading them
+Sessions that did not fit the budget are marked processed anyway. Two of D2's three fixes have no test behind them.
+
+Fix: persist only the sessions that were analysed, and add tests for the empty-call guard and the refusal path.
+
+### E8. Hook and telemetry gaps
+- PostToolUse writes an empty tool name on every event.
+- Heed rows cannot be joined to their warnings.
+- The scheduler history cannot tell a produced page from a held or skipped one.
+- dense-briefing-shapes fails its own readout (1 real of 10).
+- hook-health.sh hides one overdue review.
+- Four hints misfire.
+
+Fix: the batch reports give one fix line per item.
+
+### E9. Retention, and docs that break the widget
+About 255 MB of logs and chains have no retention. README, USAGE, CONTRIBUTING and docs/05 say to build `tools/menubar`, and that build kills the live widget.
+
+Fix: add retention rules, and point the build docs at `i-dream widget`.
+
+### Sources for E
+
+- E1: `src/daemon.rs:1804-1810`; `~/.claude/subconscious/hooks/user-prompt-submit.sh:44-58`; indictment rank 2.
+- E2: `src/daemon.rs:2079`; `src/modules/dreaming.rs:2297-2302`, test `:2352-2356`.
+- E3: `src/modules/project_briefs.rs:352-368`; `src/daemon.rs:1938-1945`; agent-workflow W-27-01, W-27-03.
+- E4: `src/verify.rs:218-231`; `tools/widget2/Sources/Record.swift:381-388`; `Settings.swift:317,335`; `tools/widget2/probe.sh` first-look loop.
+- E5: `tools/widget2/Sources/Record.swift:530-541`; `Dropdown.swift:369-371`.
+- E6: `src/reader/mod.rs:577,734-745`; `src/daemon.rs:1466-1527,1549,1602`.
+- E7: `src/modules/metacog.rs:517,616-620`.
+- E8: `src/hooks.rs:338`; `~/.claude/hooks/warn-events.jsonl`; `hook-health.sh:209-212`; reports L-27-03, L-27-04, W-27-04 to W-27-07.
+- E9: `src/modules/registry.rs:875-957`; `tools/menubar/build.sh:44-45`.
+
 ## Sources for the 2026-10-26 notes
 
 Full report: `.claude/output/20261026-1703-adversarial-review/indictment.md`.
