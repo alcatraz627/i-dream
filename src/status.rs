@@ -796,7 +796,11 @@ pub(crate) fn gather_jobs() -> Vec<JobStatus> {
         // A delay's one-shot belongs to the job it delays, shown as its hold.
         .filter(|job| !job.name.contains("-later-"))
         .map(|job| {
-            let last = runs.get(&job.name).cloned();
+            let mut last = runs.get(&job.name).cloned();
+            if job.name == "i-dream-reader-weekly" {
+                let state = crate::reader::ReaderState::load();
+                last = with_manual_weekly(last, state.last_weekly, state.weekly_failure.as_ref());
+            }
             let installed = job.installed;
             let (loaded, pid, last_exit, program) = if installed {
                 match std::process::Command::new("launchctl")
@@ -861,6 +865,31 @@ struct LastRun {
     ts: String,
     outcome: String,
     exit: Option<i64>,
+}
+
+/// The weekly reader's last run, counting runs started by hand. The widget's
+/// own "run now" opens a Claude session that runs the reader directly, which
+/// the scheduler never logs; the reader's state records every real run, so
+/// whichever is newer is the last run.
+fn with_manual_weekly(
+    scheduled: Option<LastRun>,
+    last_weekly: Option<chrono::DateTime<chrono::Utc>>,
+    failure: Option<&crate::reader::WeeklyFailure>,
+) -> Option<LastRun> {
+    let at = |r: &LastRun| r.ts.parse::<chrono::DateTime<chrono::Utc>>().ok();
+    let mut best = scheduled;
+    let mut consider = |ts: chrono::DateTime<chrono::Utc>, outcome: &str, exit: i64| {
+        if best.as_ref().and_then(at).is_none_or(|b| ts > b) {
+            best = Some(LastRun { ts: ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), outcome: outcome.into(), exit: Some(exit) });
+        }
+    };
+    if let Some(t) = last_weekly {
+        consider(t, "ok", 0);
+    }
+    if let Some(f) = failure {
+        consider(f.at, "failed", 1);
+    }
+    best
 }
 
 /// The newest "run" event per job name in the gcc scheduler's history.
@@ -1482,6 +1511,22 @@ not json
         assert_eq!(runs["w"], LastRun { ts: "2026-10-06T21:36:42Z".into(), outcome: "failed".into(), exit: Some(1) });
         assert_eq!(runs["d"].ts, "2026-10-07T23:00:40Z");
         assert_eq!(runs.len(), 2);
+    }
+
+    /// A weekly run started by hand shows as the last run; an older one never
+    /// hides a newer scheduled run, and a newer failure shows as failed.
+    #[test]
+    fn a_manual_weekly_run_counts_as_the_last_run() {
+        let sched = || Some(LastRun { ts: "2026-10-21T12:15:04Z".into(), outcome: "ok".into(), exit: Some(0) });
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let manual = with_manual_weekly(sched(), Some(t("2026-10-27T08:33:32Z")), None).unwrap();
+        assert_eq!((manual.ts.as_str(), manual.outcome.as_str()), ("2026-10-27T08:33:32Z", "ok"));
+        let older = with_manual_weekly(sched(), Some(t("2026-10-14T05:30:54Z")), None).unwrap();
+        assert_eq!(older.ts, "2026-10-21T12:15:04Z");
+        let failed = crate::reader::WeeklyFailure { at: t("2026-10-27T09:00:00Z"), error: "x".into() };
+        let f = with_manual_weekly(sched(), Some(t("2026-10-27T08:33:32Z")), Some(&failed)).unwrap();
+        assert_eq!(f.outcome, "failed");
+        assert!(with_manual_weekly(None, None, None).is_none());
     }
 
     // ── freshness_verdicts — pins each verdict's SOURCE ──────────────
