@@ -10,6 +10,8 @@ struct DropdownView: View {
     /// The popover's starting height; the row list scrolls inside it. Nil in
     /// the probe, which renders the whole thing.
     var height: CGFloat?
+    /// The probe draws the default height whatever the owner last dragged to.
+    var heightOverride: CGFloat?
 
     static let width: CGFloat = 424
     static let height: CGFloat = 540
@@ -19,12 +21,16 @@ struct DropdownView: View {
     @State private var dragStart: Double?
 
     private var maxHeight: Double { Double((NSScreen.main?.visibleFrame.height ?? 900) - 60) }
-    private var liveHeight: CGFloat? { height == nil ? nil : CGFloat(min(max(savedHeight, 320), maxHeight)) }
+    private var liveHeight: CGFloat? {
+        if let heightOverride { return heightOverride }
+        return height == nil ? nil : CGFloat(min(max(savedHeight, 320), maxHeight))
+    }
 
-    init(model: AppModel, height: CGFloat? = nil, openLogs: @escaping () -> Void = {}) {
+    init(model: AppModel, height: CGFloat? = nil, heightOverride: CGFloat? = nil, openLogs: @escaping () -> Void = {}) {
         self.model = model
         self.help = model.help
         self.height = height
+        self.heightOverride = heightOverride
         self.openLogs = openLogs
     }
 
@@ -34,9 +40,6 @@ struct DropdownView: View {
                 strip(r)
                 nextLine(r)
                 sinceLine(r)
-                // Pinned to their natural height so a resize only grows the row list.
-                band(r).fixedSize(horizontal: false, vertical: true)
-                ribbon(r).fixedSize(horizontal: false, vertical: true)
                 if height != nil {
                     ScrollView { groups(r) }.frame(maxHeight: .infinity)
                 } else {
@@ -73,6 +76,11 @@ struct DropdownView: View {
                 // Whether anything needs the owner is the first answer, above
                 // the schedule's Run early buttons, which are optional.
                 group("You", r.you, empty: "Nothing waits on you. i-dream runs on its own schedule.", emptyProminent: true)
+                // Under You, not above it: with the changes list open the pinned
+                // bands already fill the default height, and You must not be
+                // pushed off the screen by the picture and the stage boxes.
+                band(r)
+                ribbon(r)
                 schedule(r)
                 group("System", r.system, empty: "nothing wrong",
                       note: "i-dream's own health. Failing outcomes are re-checked on their own \(r.nextRecheck.map { whenText($0, r.now) } ?? "at the next run"); nothing here needs you unless You above says so.")
@@ -226,15 +234,16 @@ struct DropdownView: View {
                 // without it, the probe's first-look check reads the run button as a chore.
                 Text(j.what).font(F.meta).foregroundStyle(P.fg3).lineLimit(open ? nil : 1).truncationMode(.tail)
                     .fixedSize(horizontal: false, vertical: open)
+                if model.confirmRun == j.name { runConfirm(j) }
                 if open { jobDetail(j) }
             }
             Spacer(minLength: 6)
             VStack(alignment: .trailing, spacing: 3) {
-                Button { model.runJob(j.name) } label: {
+                Button { model.requestRun(j) } label: {
                     // Optional, so it reads as a link, not a call to action.
                     Text("Run early").font(F.meta).foregroundStyle(P.fg2)
                 }
-                .buttonStyle(.plain).disabled(started != nil)
+                .buttonStyle(.plain).disabled(started != nil || model.confirmRun == j.name)
                 .onHover { help.text = $0 ? "starts \(j.title.lowercased()) now" : "" }
                 // The command to run it yourself, without opening the row.
                 if let manual = j.manual {
@@ -259,6 +268,27 @@ struct DropdownView: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 6)
         .overlay(alignment: .top) { Rectangle().fill(P.hair).frame(height: 0.5) }
+    }
+
+    /// The question a review asks before it starts early: what it will do and
+    /// what it costs. Nothing runs until the owner says so.
+    private func runConfirm(_ j: JobRow) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(j.runEarlyWarning).font(F.meta).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 12) {
+                Button { model.confirmRun = nil; model.runJob(j.name) } label: {
+                    Text("Run it now").font(F.meta.weight(.semibold)).foregroundStyle(P.blue)
+                }.buttonStyle(.plain)
+                Button { model.confirmRun = nil } label: {
+                    Text("Not now").font(F.meta).foregroundStyle(P.fg2)
+                }.buttonStyle(.plain)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 6).fill(P.card))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(P.amber.opacity(0.6), lineWidth: 0.5))
+        .padding(.top, 3)
     }
 
     /// What a job really does: the headless command the scheduler runs, the
@@ -366,8 +396,8 @@ struct DropdownView: View {
                 "\(r.runs.first?.week ?? "no run") · \(ageText(parseDate(r.runs.first?.at).map { r.now.timeIntervalSince($0) })) ago · \(r.awaitingItems) for you",
                 sev: r.weeklyBroken != nil ? .bad : r.awaitingItems > 0 ? .wait : .ok, Dive(pane: .reader))
             Connector(moving: r.since.newLanded > 0)
-            box("tray.and.arrow.down", "Landing", r.landed.count, "landed",
-                "\(r.filed.count) filed · \(r.armed.count) armed · \(r.interventions.fired_7d) nudges fired 7d",
+            box("tray.and.arrow.down", "Landing", r.filed.count, "filed",
+                [r.filedStatusLine, r.armed.isEmpty ? "" : "\(r.armed.count) armed"].filter { !$0.isEmpty }.joined(separator: " · "),
                 sev: r.landed.isEmpty ? .none : .ok, Dive(pane: .landing))
         }
         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)

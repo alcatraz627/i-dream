@@ -14,14 +14,14 @@ and promote insights about your work style.
 bash scripts/install.sh
 
 # 1. Build and install the menu bar widget (run once)
-bash tools/menubar/build.sh --install
+i-dream widget install
 
 # 2. Register the daemon as a LaunchAgent (run once)
 i-dream service install
 
 # 3. Start the daemon
 i-dream service start
-# OR: click "Start Daemon" in the menu bar widget
+# OR: use "Restart daemon" in the widget's Settings pane
 ```
 
 After a few sessions with Claude Code, the daemon will automatically process them overnight.
@@ -30,40 +30,29 @@ After a few sessions with Claude Code, the daemon will automatically process the
 
 ## Menu Bar Widget
 
-The widget lives in your macOS menu bar. Click the icon to open the menu.
+The widget lives in your macOS menu bar. Click the icon to open the dropdown.
 
-### Reading the status bar icon
+The dropdown tells you, top to bottom:
 
-| Display | Meaning |
-|---------|---------|
-| `◉ 14` | Daemon running, 14 cycles completed |
-| `◉ 2m 15s` | Dream cycle in progress (elapsed time updates live) |
-| *(blank icon)* | Daemon stopped |
+- whether i-dream is alive
+- what moved since you last looked
+- what the loop holds
+- what waits on whom
 
-### Menu sections
+Every row opens the dashboard at the thing it describes.
 
-**Daemon Controls**
-- **Start Daemon** — launches the background process (writes `daemon.pid`)
-- **Stop Daemon** — gracefully shuts it down
-- **Trigger Dream Cycle** — run one cycle immediately (requires daemon running)
+The widget's source is `tools/widget2/`. The older widget in `tools/menubar/` is replaced and no longer built.
 
-**Knowledge Base** (tap any row to open a scrollable detail view)
-- **Patterns** — behavioral patterns the daemon has noticed about your sessions
-- **Associations** — cross-pattern hypotheses ("if A then B")
-- **Sessions** — the dream journal, one entry per cycle
-- **Metacog Audits** — calibration scores and detected reasoning biases
+Everything about the widget goes through the CLI:
 
-**Dashboard**
-- **Open Dashboard** — opens the native AppKit dashboard panel (see Dashboard section below)
+```bash
+i-dream widget install     # build, copy to ~/Applications, start at login
+i-dream widget status      # build freshness, install, running, at-login
+i-dream widget logs        # tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
+```
 
-**Logs**
-- **Logs → Open in Terminal** — live `tail -f` of the daemon log
-- **Logs → Open in VS Code** — open current log file in editor
-- **Logs → Open Debug Log** — the widget's own debug output (`/tmp/i-dream-bar.log`)
-
-**Tools**
-- **Change Icon** — pick from 36 SF Symbol icons for the status bar button
-- **Show How-To…** — opens this reference guide as an in-app scrollable dialog
+The daemon can be restarted from the widget's Settings pane (**Restart daemon**),
+or with `i-dream service start` and `i-dream stop` from a terminal.
 
 ---
 
@@ -76,13 +65,12 @@ i-dream start --daemonize        # run with pid file (what the widget uses)
 i-dream stop                     # stop the daemon gracefully
 i-dream dream                    # manually trigger a full dream cycle (sws+rem+wake)
 i-dream dream sws                # run only the SWS phase (cheap, frequent)
-i-dream dashboard                # SIGUSR1 the menubar widget to open the native panel
 i-dream dashboard --no-open      # regenerate ~/.claude/subconscious/dashboard.html only
 i-dream brief-projects           # generate per-project SessionStart briefs (D6)
 i-dream briefing --force         # synthesize the Sunday morning briefing now (D4)
 i-dream graph-metrics --snapshot # write dreams/graph-metrics.json + snapshot
-i-dream widget start             # build + launch the menubar widget
-i-dream widget logs              # tail -f /tmp/i-dream-bar.log
+i-dream widget start             # launch the installed menu bar widget
+i-dream widget logs              # tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
 i-dream inspect dreaming         # dump dreaming module data (patterns/associations/insights)
 i-dream inspect metacog          # dump metacog data
 i-dream config                   # print current effective config.toml
@@ -117,7 +105,11 @@ All data lives under `~/.claude/subconscious/`:
 
 ## Dashboard
 
-The dashboard is a native AppKit panel (1240×840, resizable, min 960×640) that opens from the menu bar widget via **Open Dashboard**. It uses a sidebar with 9 tabs — no browser needed.
+> **Out of date.** The tab list and shortcuts below describe the older widget in `tools/menubar/`.
+> The live dashboard (`tools/widget2/Sources/Dashboard.swift`) has a sidebar of five places plus Settings:
+> Flow, Ledger, Patterns, Reader and Landing. Click any dropdown row to open it.
+
+The dashboard is a native panel that opens from the menu bar widget. It uses a sidebar with 9 tabs — no browser needed.
 
 ### Navigating
 
@@ -166,12 +158,14 @@ Each insight block has 👍 👎 📋 buttons:
 ### Widget
 
 ```bash
-bash tools/menubar/build.sh              # rebuild + replace running instance
-bash tools/menubar/build.sh --install    # rebuild + register LaunchAgent (auto-start on login)
-bash tools/menubar/build.sh --uninstall  # remove LaunchAgent + kill widget
-bash tools/menubar/build.sh --logs       # tail widget debug log
-bash tools/menubar/build.sh --status     # show running instances + plist state
+i-dream widget build       # compile into tools/widget2/build/ (does not touch the running widget)
+i-dream widget install     # rebuild, replace the running widget, register the LaunchAgent
+i-dream widget uninstall   # remove the LaunchAgent and the app
+i-dream widget logs        # tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
+i-dream widget status      # build freshness, install, running, at-login
 ```
+
+These run `tools/widget2/build.sh` and `tools/widget2/install.sh`. Do not run `tools/menubar/build.sh`; it refuses to run so it cannot kill the live widget.
 
 ### Daemon LaunchAgent
 
@@ -182,7 +176,7 @@ i-dream service stop       # stop via launchctl
 i-dream service uninstall  # remove LaunchAgent
 ```
 
-> **Note:** There are two separate LaunchAgents — one for the widget (`dev.i-dream.menubar`)
+> **Note:** There are two separate LaunchAgents — one for the widget (`dev.i-dream.bar`)
 > and one for the daemon (`dev.i-dream.daemon`). They are independent. You can run one
 > without the other.
 
@@ -192,12 +186,12 @@ i-dream service uninstall  # remove LaunchAgent
 
 **Daemon shows "Stopped" even after clicking Start**
 
-The "Start Daemon" button uses `i-dream start --daemonize`, which writes
+Starting from the widget runs `i-dream start --daemonize`, which writes
 `~/.claude/subconscious/daemon.pid`. If the pid file is missing after starting,
 the daemon failed to launch — check the logs:
 
 ```bash
-bash tools/menubar/build.sh --logs
+i-dream widget logs
 # or
 tail -100 ~/.claude/subconscious/logs/i-dream.log.$(date +%Y-%m-%d)
 ```
@@ -214,14 +208,14 @@ Two possible causes:
 The widget falls back to the most recent log file if today's doesn't exist yet (the daemon hasn't
 run today). If no log files exist at all, the daemon has never successfully started.
 
-**Two widget instances after `build.sh`**
+**Two widget instances**
 
-If the LaunchAgent is installed, running `build.sh` unregisters it before killing the old binary
-and re-registers after compile. If you still see two instances, run:
+`i-dream widget install` stops every running instance and retires the older widget's LaunchAgent
+before it starts the new one. If you still see two instances, run:
 
 ```bash
-bash tools/menubar/build.sh --uninstall
-bash tools/menubar/build.sh --install
+i-dream widget uninstall
+i-dream widget install
 ```
 
 ---

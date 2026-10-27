@@ -352,7 +352,8 @@ pub fn page_config(week: &str, items: &[Named], at: DateTime<Utc>, report_url: &
             "session": "i-dream-reader",
             "project": "~/Code/Claude/i-dream",
             "topic": "weekly reader findings",
-            "created": Utc::now().format("%Y-%m-%d").to_string(),
+            // A full timestamp, so the page's age counts from when it was made.
+            "created": at.with_timezone(&chrono::Local).to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
         },
         "groups": {},
         "decisions": [],
@@ -753,6 +754,18 @@ mod tests {
         assert!(intro.contains("http://localhost:5106/dp/idream-reader-2026w42/page.html ."), "{intro}");
         let text = cfg.to_string();
         assert!(!text.contains("c-0d4db80b") && !text.contains("CHANGE") && !text.contains("EVIDENCE"));
+    }
+
+    #[test]
+    fn the_page_is_stamped_with_the_moment_it_was_made() {
+        // The w44 page was written at 14:09 IST; a date-only stamp made its age
+        // count from midnight UTC, so it read as asked 11 hours earlier than it was.
+        let (run, _) = mock_week();
+        let made: DateTime<Utc> = "2026-10-27T08:39:00Z".parse().unwrap(); // 14:09 IST
+        let cfg = page_config("2026w44", &run.items, made, "http://localhost:5106/dp/x/page.html");
+        let stamp = cfg["origin"]["created"].as_str().unwrap();
+        let parsed = DateTime::parse_from_rfc3339(stamp).unwrap_or_else(|e| panic!("created is {stamp:?}: {e}"));
+        assert_eq!(parsed.with_timezone(&Utc), made, "{stamp}");
     }
 
     /// Builds the 2026w42 report from the real saved run and that day's

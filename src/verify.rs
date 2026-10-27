@@ -27,6 +27,7 @@ const PHASE_WINDOW_CYCLES: usize = 3;
 const QUEUE_MAX_HOURS: f64 = 48.0;
 const DELIVERY_WINDOW_DAYS: i64 = 7;
 const READER_MAX_WAIT_DAYS: i64 = 7;
+const METACOG_RECENT_CALLS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -213,20 +214,26 @@ pub fn delivery_agrees_check(fired_7d: usize, delivered: usize) -> Check {
     )
 }
 
-/// Every metacog call in the last week sent at least one unit. `audits` is
-/// (timestamp, units analyzed) per audit file.
+/// The metacog calls are healthy now: none of the latest few sent an empty
+/// request. `audits` is (timestamp, units analyzed) per audit file, in any
+/// order.
+///
+/// Only the latest [`METACOG_RECENT_CALLS`] calls inside the last week count,
+/// so a bug that is fixed stops alarming after a few good calls and not a
+/// week later. The call runs about daily, so three covers the last few days.
 pub fn metacog_calls_check(audits: &[(&str, u64)], as_of: DateTime<Utc>) -> Check {
-    let recent: Vec<u64> = audits
+    let mut week: Vec<(DateTime<Utc>, u64)> = audits
         .iter()
         .filter_map(|(ts, n)| Some((ts.parse::<DateTime<Utc>>().ok()?, *n)))
         .filter(|(t, _)| as_of - *t <= Duration::days(DELIVERY_WINDOW_DAYS))
-        .map(|(_, n)| n)
         .collect();
-    let empty = recent.iter().filter(|n| **n == 0).count();
+    week.sort_by_key(|(t, _)| *t);
+    let latest = &week[week.len().saturating_sub(METACOG_RECENT_CALLS)..];
+    let empty = latest.iter().filter(|(_, n)| *n == 0).count();
     Check::new(
         "metacog-calls",
         if empty == 0 { Verdict::Pass } else { Verdict::Fail },
-        format!("{empty} of {} metacog call(s) in the last {DELIVERY_WINDOW_DAYS} days sent no units", recent.len()),
+        format!("{empty} of the latest {} metacog call(s) sent no units", latest.len()),
     )
 }
 
@@ -563,6 +570,29 @@ mod tests {
         assert_eq!(metacog_calls_check(&bad, now).verdict, Verdict::Fail);
         let old_bad = [("2026-10-10T23:00:00Z", 0u64)];
         assert_eq!(metacog_calls_check(&old_bad, now).verdict, Verdict::Pass, "outside the window");
+    }
+
+    #[test]
+    fn a_fixed_metacog_bug_stops_alarming_once_good_calls_follow() {
+        // The daily metacog call sent nothing on 10-23 and 10-24; the fix landed
+        // and the three calls since sent units. Inside the 7-day window still.
+        let now: DateTime<Utc> = "2026-10-27T08:00:00Z".parse().unwrap();
+        let healed = [
+            ("2026-10-23T23:02:00Z", 0u64),
+            ("2026-10-24T23:01:00Z", 0),
+            ("2026-10-25T23:00:00Z", 3),
+            ("2026-10-26T20:28:00Z", 9),
+            ("2026-10-27T06:39:00Z", 6),
+        ];
+        assert_eq!(metacog_calls_check(&healed, now).verdict, Verdict::Pass);
+        // Order of the audit files on disk must not matter.
+        let shuffled = [healed[3], healed[0], healed[4], healed[2], healed[1]];
+        assert_eq!(metacog_calls_check(&shuffled, now).verdict, Verdict::Pass);
+        // One empty call among the latest three still fails.
+        let relapse = [("2026-10-25T23:00:00Z", 3u64), ("2026-10-26T20:28:00Z", 0), ("2026-10-27T06:39:00Z", 6)];
+        assert_eq!(metacog_calls_check(&relapse, now).verdict, Verdict::Fail);
+        let just_now = [("2026-10-26T20:28:00Z", 9u64), ("2026-10-27T06:39:00Z", 0)];
+        assert_eq!(metacog_calls_check(&just_now, now).verdict, Verdict::Fail);
     }
 
     #[test]

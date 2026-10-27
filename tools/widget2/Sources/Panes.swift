@@ -426,7 +426,10 @@ struct ReaderPane: View {
                         SectionLabel(text: f.kind)
                         Spacer()
                         if f.awaiting { Dot(color: P.amber); Text("awaiting you").font(F.meta).foregroundStyle(P.amber) }
-                        else if let o = f.outcome { Dot(color: P.green); Text(o).font(F.meta).foregroundStyle(P.fg2) }
+                        else if let o = f.outcome {
+                            Dot(color: P.sev(landingSev(o, status: f.proposalStatus)))
+                            Text(landingWord(o, status: f.proposalStatus)).font(F.meta).foregroundStyle(P.fg2)
+                        }
                     }
                     Text(f.title).font(F.title).foregroundStyle(P.fg).fixedSize(horizontal: false, vertical: true)
                     Text(f.why).font(F.meta).foregroundStyle(P.fg2).fixedSize(horizontal: false, vertical: true)
@@ -595,6 +598,15 @@ struct LandingPane: View {
     }
 
     private var highlights: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            highlightStats
+            if !r.filed.isEmpty {
+                Text("Filed proposals now: \(r.filedStatusLine)").font(F.meta).foregroundStyle(P.fg2)
+            }
+        }
+    }
+
+    private var highlightStats: some View {
         HStack(spacing: 8) {
             Stat(icon: "lock.shield", n: r.armed.count, noun: "gates armed from your answers")
             Stat(icon: "tray.and.arrow.down", n: r.filed.count, noun: "proposals filed from your answers")

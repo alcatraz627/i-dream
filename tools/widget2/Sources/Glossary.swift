@@ -61,7 +61,7 @@ enum Glossary {
         ]
         case .landing: [
             ("slug", "A mistake type from the atone log, such as structural-claim-without-reading-code."),
-            ("filed", "Your answer turned the finding into a proposal. Nothing is built yet."),
+            ("filed", "Your answer turned the finding into a proposal. A row says where it stands: open (nothing built yet), done, rejected or superseded."),
             ("armed", "Your answer switched on a hook that now acts."),
             ("credited", "The slug moved after a fix that is in place: an armed hook or a finished proposal."),
             ("unattributed", "The slug moved but no fix in place explains it."),

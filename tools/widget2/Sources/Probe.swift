@@ -54,9 +54,25 @@ enum Probe {
         let m = model(status, reader)
         log.append("record checks: " + (m.record!.checks.isEmpty ? "PASS none failed" : "FAIL " + m.record!.checks.joined(separator: "; ")))
 
+        // The default popover height: You must be on screen without scrolling,
+        // first look and the state after changes alike. A local vision reader
+        // (OCR) finds it on the picture; skipped where lm is absent.
+        func youOnScreen(_ name: String, _ mdl: AppModel) {
+            let file = out.appendingPathComponent("dropdown-\(name)-540-\(tag).png")
+            render(DropdownView(model: mdl, height: DropdownView.height, heightOverride: DropdownView.height), appearance, file)
+            let lm = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/lm").path
+            guard FileManager.default.isExecutableFile(atPath: lm) else { log.append("NOTE dropdown 540 \(name): lm not installed, You not read"); return }
+            let res = Runner.run(lm, ["see", file.path, "--ocr"], timeout: 90)
+            let text = String(decoding: res.out, as: UTF8.self).lowercased()
+            let seen = text.contains("waits on you") || text.contains("nothing waits")
+            log.append(seen ? "PASS dropdown 540 \(name): the You section is on screen without scrolling"
+                            : "FAIL dropdown 540 \(name): no You section in the first 540 pt (read: \(text.replacingOccurrences(of: "\n", with: " ").prefix(160)))")
+        }
+
         // Status item and dropdown, first look.
         renderStatusItem(m.record, m.reading, appearance, out.appendingPathComponent("status-item-\(tag).png"))
         render(DropdownView(model: m, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-\(tag).png"))
+        youOnScreen("first", m)
 
         // The same dropdown while someone is changing i-dream (source newer than
         // the installed build): the first-look check reads this one too.
@@ -150,6 +166,7 @@ enum Probe {
         }
         renderStatusItem(rc, mc.reading, appearance, out.appendingPathComponent("status-item-changes-\(tag).png"))
         render(DropdownView(model: mc, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-changes-\(tag).png"))
+        youOnScreen("changes", mc)
         mc.pane = .changes
         render(DashboardView(model: mc, fullHeight: true), appearance, out.appendingPathComponent("dash-changes-fixture-\(tag).png"), width: 1280)
         mc.markLooked()
@@ -306,17 +323,34 @@ enum Probe {
                 // claude exactly the prompt, apostrophes and all.
                 let title = "it's the owner's \"quoted\" $HOME `x` $(echo hi) !! case"
                 let cmd = OpenInClaude.command(kind: "proposal", id: "prop-x", title: title)
-                if let r = cmd.range(of: "claude ") {
+                // The prompt starts at the first quote after the session name.
+                if let r = cmd.range(of: " '") {
                     let sh = Process(); sh.executableURL = URL(fileURLWithPath: "/bin/sh")
-                    sh.arguments = ["-c", "printf '%s' " + String(cmd[r.upperBound...])]
+                    sh.arguments = ["-c", "printf '%s' " + String(cmd[cmd.index(after: r.lowerBound)...])]
                     let pipe = Pipe(); sh.standardOutput = pipe
                     try? sh.run(); sh.waitUntilExit()
                     let got = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                     let multi = OpenInClaude.command(kind: "finding", id: "c-x", title: "line one\nline two")
-                    log.append(got.contains(title) && cmd.hasPrefix("cd ~/Code/Claude/i-dream && claude '") && !multi.contains("\n")
+                    log.append(got.contains(title) && !multi.contains("\n")
                                ? "PASS open in claude: the shell passes the prompt through unchanged"
                                : "FAIL open in claude: shell read \(got.prefix(120))")
                 }
+                // The line starts the owner's alias with a short, lowercase, hyphenated name.
+                let longTitle = "A very long finding title that runs well past thirty characters"
+                let named = [
+                    OpenInClaude.command(kind: "proposal", id: "prop-x", title: title),
+                    OpenInClaude.command(kind: "finding", id: "c-x", title: longTitle),
+                    OpenInClaude.command(kind: "slug", id: "structural-claim", title: "!!! ???"),
+                ]
+                let nameOK = named.allSatisfy { c in
+                    c.range(of: #"^cd ~/Code/Claude/i-dream && clo -n i-dream-[a-z0-9]+(-[a-z0-9]+)* '"#, options: .regularExpression) != nil
+                        && !c.contains("&& claude ")
+                }
+                let slugs = [(longTitle, "c-x"), ("!!! ???", "structural-claim"), ("", "")]
+                    .map { OpenInClaude.sessionSlug(title: $0.0, id: $0.1) }
+                log.append(nameOK && slugs.allSatisfy { $0.count <= 30 && !$0.hasSuffix("-") } && slugs[1] == "structural-claim"
+                           ? "PASS open in claude: starts clo -n i-dream-<slug>, slugs \(slugs.map { "\"\($0)\"" }.joined(separator: ", "))"
+                           : "FAIL open in claude: lines \(named.map { String($0.prefix(70)) }), slugs \(slugs)")
                 // Back returns to where the jump started.
                 let nav = model(status, reader); nav.indexFixture = indexFile; nav.loadIndex(sync: true)
                 nav.pane = .reader
@@ -340,6 +374,59 @@ enum Probe {
             d.open(row.dive)
             let scoped = scopeHolds(d, row.dive)
             log.append("\(opened && d.pane == row.dive.pane && scoped ? "PASS" : "FAIL") row \"\(row.title)\" -> \(row.dive.pane.title) \(describe(row.dive.scope))\(row.url != nil ? " (+ action opens \(row.url!.absoluteString))" : "")")
+        }
+
+        // Run early: a review asks first, the daily recon starts at once. A stub
+        // stands in for the CLI so a drive never starts a real job.
+        let mr = model(status, reader)
+        var started: [String] = []
+        mr.onRunJob = { started.append($0) }
+        for j in mr.record!.jobs {
+            mr.confirmRun = nil
+            started = []
+            mr.requestRun(j)
+            let asks = mr.confirmRun == j.name && started.isEmpty
+            let direct = mr.confirmRun == nil && started == [j.name]
+            let right = j.isReview ? asks : direct
+            log.append("\(right ? "PASS" : "FAIL") run early \(j.name): \(j.isReview ? "asks first" : "starts at once") (started \(started), asking \(mr.confirmRun ?? "-"))")
+        }
+        if let review = mr.record!.jobs.first(where: { $0.isReview }) {
+            log.append(review.runEarlyWarning.contains("Claude usage")
+                       ? "PASS run early: the question says what it costs"
+                       : "FAIL run early: the question does not mention cost")
+            let mq = model(status, reader)
+            mq.confirmRun = review.name
+            render(DropdownView(model: mq, height: DropdownView.height), appearance, out.appendingPathComponent("dropdown-confirm-\(tag).png"))
+        }
+
+        // Built proposals read as built: the reader's own status is on the row.
+        let rs = m.record!
+        let doneFiled = rs.landed.filter { ["filed", "already-filed"].contains($0.outcome) && $0.proposal_status == "done" }.count
+        let doneRows = rs.findings.filter { f in f.outcome.map { landingWord($0, status: f.proposalStatus) == "proposal done" } ?? false }.count
+        log.append(doneRows == doneFiled && rs.filedByStatus.map(\.count).reduce(0, +) == rs.filed.count
+                   ? "PASS proposal status: \(doneRows) filed rows read \"proposal done\"; filed by status: \(rs.filedStatusLine)"
+                   : "FAIL proposal status: \(doneRows) rows read done against \(doneFiled) done in the reader; \(rs.filedStatusLine)")
+        log.append(landingWord("filed", status: "open") == "proposal open" && landingWord("armed", status: nil) == "armed" && landingWord("filed", status: nil) == "filed"
+                   ? "PASS proposal status: open stays open, an armed gate and an unreadable status keep their words"
+                   : "FAIL proposal status: wrong word for an open, armed or unknown row")
+
+        // Settings: a job the shared scheduler runs is on, though launchd has
+        // it unloaded; a job nobody schedules is off.
+        let sm = model(status, reader)
+        sm.settings.load(sync: true)
+        if let cfg = sm.settings.doc {
+            let jobs = sm.record!.jobs
+            let cron = cfg.schedules.filter { sc in jobs.first { $0.name == sc.name }?.runner == "gcc-cron" }
+            let unloaded = cron.filter { !$0.loaded }
+            let wrong = unloaded.filter { !sm.settings.isOn($0, jobs: jobs) }.map(\.name)
+            log.append(!unloaded.isEmpty && wrong.isEmpty
+                       ? "PASS settings: \(unloaded.map(\.name).joined(separator: ", ")) run under gcc-cron, launchd has them unloaded, the switch reads on"
+                       : "FAIL settings: gcc-cron jobs read off: \(wrong) (\(unloaded.count) unloaded under gcc-cron)")
+            if var j = jobs.first(where: { $0.runner == "gcc-cron" }), let sc = cfg.schedules.first(where: { $0.name == j.name }) {
+                j.runner = nil
+                log.append(!sm.settings.isOn(sc, jobs: [j]) ? "PASS settings: a job with no scheduler and no launchd agent reads off"
+                                                              : "FAIL settings: an unscheduled job reads on")
+            }
         }
 
         // Dashboard panes at full height.

@@ -42,6 +42,8 @@ final class AppModel: ObservableObject {
     @Published var jobStarted: [String: Date] = [:]
     /// Job rows opened to show their command, by-hand command and log.
     @Published var openJobs: Set<String> = []
+    /// The review whose Run early is waiting for the owner's yes.
+    @Published var confirmRun: String?
     /// What the last job action said, success or failure.
     @Published var jobNote: (text: String, failed: Bool)?
     let help = HoverHelp()
@@ -157,8 +159,18 @@ final class AppModel: ObservableObject {
 
     // MARK: jobs
 
+    /// The Run early click. A review (it makes a model call and fills a page
+    /// for the owner) asks first; anything else starts at once.
+    func requestRun(_ j: JobRow) {
+        if j.isReview { confirmRun = j.name } else { runJob(j.name) }
+    }
+
+    /// The probe swaps this so a drive never starts a real job.
+    var onRunJob: ((String) -> Void)?
+
     /// Start a job now; it runs detached, so this returns at once.
     func runJob(_ name: String) {
+        if let onRunJob { onRunJob(name); return }
         let clicked = Date()
         jobAction(["jobs", "run", name]) { ok in if ok { self.jobStarted[name] = clicked } }
     }

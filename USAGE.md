@@ -235,10 +235,10 @@ i-dream dashboard
 i-dream dashboard --no-open       # Generate HTML only, don't open browser
 
 # Manage the menubar widget
-i-dream widget start             # Build + launch the menubar widget
-i-dream widget stop              # Kill any running instance
-i-dream widget logs              # tail -f /tmp/i-dream-bar.log
-i-dream widget install           # Set up auto-start at login (LaunchAgents)
+i-dream widget start             # Launch the installed widget (or the in-tree build)
+i-dream widget stop              # Quit the widget cleanly
+i-dream widget logs              # tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
+i-dream widget install           # Build, copy to ~/Applications, start at login
 
 # D6 — per-project SessionStart briefs (D2-tagged patterns required)
 i-dream brief-projects                    # Backfill + generate for all projects
@@ -363,21 +363,20 @@ Then register it in `~/.claude/settings.json` under hooks:
 
 ## Step 9 — macOS menu-bar widget (optional)
 
-A native AppKit status-bar app with a full dashboard:
+A native SwiftUI status-bar app. Click its icon to see whether i-dream is alive,
+what moved since you last looked, and what waits on you, then open the dashboard
+from any row. Its source is `tools/widget2/`:
 
 ```bash
-cd tools/menubar
-bash build.sh              # Compile + launch
-bash build.sh --install    # Add to Login Items (auto-start)
-bash build.sh --status     # Check build staleness
-bash build.sh --logs       # Tail live widget logs
+i-dream widget install     # Compile, copy to ~/Applications, start at login
+i-dream widget status      # Build freshness, install, running, at-login
+i-dream widget logs        # Tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
+i-dream widget restart     # Stop, then start
 ```
 
-The widget shows:
-- Live daemon status (green dot = running, animated = active cycle)
-- Token usage sparkline
-- Pattern/association counts
-- Full 9-tab dashboard (Overview, Patterns, Associations, Journal, Insights, Metacog, Search, Help, About)
+`i-dream widget build` compiles without installing. The same steps exist as
+scripts: `tools/widget2/build.sh` and `tools/widget2/install.sh`. Do not use the
+old `tools/menubar/build.sh`; it refuses to run so it cannot kill the live widget.
 
 ## Step 10 — Verify everything works
 
@@ -411,7 +410,7 @@ i-dream stop
 i-dream hooks uninstall
 
 # Remove menu-bar widget
-cd tools/menubar && bash build.sh --uninstall
+i-dream widget uninstall
 
 # Remove data (irreversible)
 rm -rf ~/.claude/subconscious
@@ -450,9 +449,9 @@ i-dream start -d
 
 ### Widget not showing data
 
-- Build may be stale: `cd tools/menubar && bash build.sh --status`
-- Rebuild: `bash build.sh`
-- Check widget logs: `bash build.sh --logs`
+- Build may be stale: `i-dream widget status`
+- Rebuild and reinstall: `i-dream widget install`
+- Check widget logs: `i-dream widget logs`
 
 ---
 

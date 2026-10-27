@@ -53,6 +53,14 @@ if command -v lm >/dev/null; then
 else
   echo "SKIP first-look: lm not installed" | tee -a "$OUT/first-look.txt"
 fi
+# Verdict: the check above only asks whether the screen agrees with its own You
+# text. This one asks the model something the screen does not answer for it,
+# "healthy or broken?", and holds the answer against verify.json, the
+# system's real state. A glance that misleads while the You text is
+# self-consistent passes the first check and fails this one.
+vfail=0
+bash "$HERE/checks/verdict.sh" "$OUT/verify.json" "$OUT/dropdown-dark.png" "$OUT/dropdown-light.png" "$OUT/dropdown-inprogress-dark.png" "$OUT/dropdown-inprogress-light.png" | tee -a "$OUT/first-look.txt" || vfail=$?
+fails=$((fails + vfail))
 # Meaning: on each pane with its term list open, the screen's exact text (read
 # without a model) must carry each named term's definition. A small vision
 # model was tried first and answered "not shown" while the definition sat on

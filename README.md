@@ -365,37 +365,18 @@ calling the others.
 
 ## macOS menu-bar widget
 
-`tools/menubar/i-dream-bar` is a native macOS status-bar app (~8,000 lines of Swift/AppKit) that provides both a quick-access menu and a comprehensive multi-tab dashboard.
-
-```
-build.sh  →  compiles + signs + launches i-dream-bar
-
-  ┌───────────────────────────────┐
-  │  ◉ i-dream  129 cycles        │  ← status dot (green=running, animated=cycling)
-  │  ●●●○○  ▁▂▃▄▅▆▇█▁▂▃▄         │  ← load gauge + token sparkline
-  │  tokens  467k                 │
-  │  patterns  47  (12 high-conf) │
-  │  last cycle  2h ago           │
-  └───────────────────────────────┘
-       bar chart (token history)
-```
-
-### Features
-
-**Ambient HUD** — a floating overlay (`⌘H` or menu toggle) shows live stats and auto-updates every 1s during active cycles. Supports pin-to-top and time-range toggling (7d/30d/all).
-
-**Dream Replay** — step through the event trace from the last cycle, including the full LLM prompt and response text for each API call, color-coded by sleep phase (SWS=blue, REM=purple, Wake=green).
-
-**Crash Reporter** — two-layer crash handling (NSSetUncaughtExceptionHandler + signal handlers). Writes a sentinel file on crash; shows a "previous crash" alert on next launch with copy-to-clipboard support.
+`i-dream-bar` is a native macOS status-bar app written in SwiftUI. Click its icon for a glance at whether i-dream is alive, what moved since you last looked, and what waits on you. Every row opens the dashboard at the thing it describes. Its source is `tools/widget2/`, and you manage it with `i-dream widget`:
 
 ```bash
-cd tools/menubar
-bash build.sh              # compile + launch
-bash build.sh --logs       # tail live logs
-bash build.sh --install    # add to Login Items
-bash build.sh --status     # check running instances + build staleness
-bash build.sh --uninstall  # remove LaunchAgent + kill widget
+i-dream widget build       # compile tools/widget2 into tools/widget2/build/
+i-dream widget install     # copy to ~/Applications and start at login
+i-dream widget status      # build freshness, install, running, at-login
+i-dream widget logs        # tail ~/Library/Logs/i-dream-bar/i-dream-bar.log
+i-dream widget restart     # stop then start
+i-dream widget uninstall   # stop it and remove the LaunchAgent and the app
 ```
+
+`install` also retires the older widget in `tools/menubar/` if it is still registered. Do not run that widget's `build.sh`; it now refuses to run (see `tools/menubar/README.md`).
 
 ## Comprehensive dashboard
 
@@ -614,9 +595,12 @@ i-dream/
 │       ├── insight_digest.rs  Promoted insight summarization
 │       └── user_settings.rs   User preference persistence
 ├── tools/
-│   └── menubar/
-│       ├── i-dream-bar.swift   macOS menu-bar widget + HUD + dashboard (~8,500 lines)
-│       └── build.sh            Compile + sign + launch script
+│   ├── widget2/
+│   │   ├── Sources/            The live macOS menu-bar widget (SwiftUI)
+│   │   ├── build.sh            Compile + sign into build/i-dream-bar.app
+│   │   ├── install.sh          Copy to ~/Applications + register the LaunchAgent
+│   │   └── probe.sh            Render every surface, dark and light, and check them
+│   └── menubar/                The old widget, replaced by widget2 (build.sh refuses to run)
 ├── docs/
 │   ├── 01-research-human-subconsciousness.md
 │   ├── 02-research-ai-metacognition.md
@@ -674,7 +658,7 @@ Full research notes: [docs/01-research-human-subconsciousness.md](docs/01-resear
 | [03 — Implementation details](docs/03-implementation-details.md) | Internal Rust architecture |
 | [04 — Architecture diagram](docs/04-architecture-diagram.md) | Visual overview |
 | [05 — How to](docs/05-how-to.md) | Common workflows |
-| [06 — Menubar widget](docs/06-menubar-widget.md) | Every menu entry of `i-dream-bar` |
+| [06 — Menubar widget](docs/06-menubar-widget.md) | Menu entries of the old `tools/menubar` widget (replaced by `tools/widget2`) |
 | [07 — Floating HUD](docs/07-floating-hud.md) | Ambient widget reference |
 | [08 — Native dashboard](docs/08-native-dashboard.md) | Full dashboard tab map |
 | [09 — Local CLI vs API](docs/09-cli-vs-api.md) | Why CLI is the default + when to switch |
@@ -701,7 +685,7 @@ CI runs `cargo fmt`, `clippy`, `cargo test --release`, and a Swift compile check
 cargo fmt --all
 cargo clippy --all-targets --release -- -D warnings
 cargo test --release --bins
-bash tools/menubar/build.sh
+bash tools/widget2/build.sh
 ```
 
 See [CHANGELOG.md](CHANGELOG.md) for the recent change log; bump `Cargo.toml` `version` for any user-visible feature/fix and add an entry to the `[Unreleased]` section.

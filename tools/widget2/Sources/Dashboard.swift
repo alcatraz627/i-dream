@@ -355,7 +355,7 @@ struct FlowPane: View {
                   Dive(pane: .reader))
             stage("tray.and.arrow.down", "Filed", filedIn, "on a page",
                   age: parseDate(r.runs.first?.at).map { r.now.timeIntervalSince($0) },
-                  ["items the weekly run put on a page for you", "\(r.filed.count) filed as proposals from your answers", "\(r.awaitingItems) still waiting on you"],
+                  ["items the weekly run put on a page for you", "\(r.filed.count) filed as proposals from your answers" + (r.filed.isEmpty ? "" : ": " + r.filedStatusLine), "\(r.awaitingItems) still waiting on you"],
                   Dive(pane: .reader))
             stage("lock.shield", "Landed", landedIn.count, "armed",
                   age: r.armed.compactMap { parseDate($0.ts) }.max().map { r.now.timeIntervalSince($0) },
@@ -480,7 +480,8 @@ struct ChainRow: View {
 
     @ViewBuilder private var landingNode: some View {
         if let o = f.outcome {
-            node(landingIcon(o), o, "answered on \(f.pageSlug ?? "the page")", color: P.green) { model.open(Dive(pane: .landing)) }
+            node(landingIcon(o), landingWord(o, status: f.proposalStatus), "answered on \(f.pageSlug ?? "the page")",
+                 color: P.sev(landingSev(o, status: f.proposalStatus))) { model.open(Dive(pane: .landing)) }
         } else if f.awaiting, let url = f.pageURL {
             node("person.crop.circle.badge.exclamationmark", "awaiting you", "on \(f.pageSlug ?? "the page"), opens it", color: P.amber) { model.openURL(url) }
         } else {

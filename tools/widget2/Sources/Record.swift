@@ -146,6 +146,26 @@ struct JobRow: Identifiable {
     var running: Bool
     var logTail: [String]
     var logPath: String
+    /// "gcc-cron" when the shared scheduler runs the job. launchd then reports
+    /// it not loaded, which is expected and does not mean it is off.
+    var runner: String? = nil
+    var launchdLoaded = false
+
+    /// Whether the job is scheduled to run: under the shared scheduler, or
+    /// loaded in launchd.
+    var on: Bool { runner != nil || launchdLoaded }
+
+    /// A review makes a model call and puts work in front of the owner, so
+    /// running it early asks first. The daily recon is cheap and keeps one click.
+    var isReview: Bool { name.hasSuffix("reader-weekly") || name.hasSuffix("audit-monthly") }
+
+    /// What running a review early does and what it costs, in the owner's terms.
+    var runEarlyWarning: String {
+        if name.hasSuffix("audit-monthly") {
+            return "Raises the monthly audit card now, even outside the first week. Nothing spends until you start it from the card; the audit itself is an Opus session that costs about $10 to $20 of your Claude usage."
+        }
+        return "Starts the weekly review now: a few Sonnet calls, about $1 of your Claude usage, then up to seven findings on a page that waits on you."
+    }
 }
 
 struct Finding: Identifiable {
@@ -161,9 +181,32 @@ struct Finding: Identifiable {
     var key: String?
     var joinedDomains: [String]
     var outcome: String?
+    /// Where the proposal stands in the backlog (open, done, rejected,
+    /// superseded) when the answer filed one; nil when none was filed or the
+    /// backlog could not be read.
+    var proposalStatus: String? = nil
     var pageURL: URL?
     var pageSlug: String?
     var awaiting: Bool
+}
+
+/// What a landed answer is called on a row. A filed proposal says where it
+/// stands, because "filed" alone reads as unbuilt long after it is done.
+func landingWord(_ outcome: String, status: String?) -> String {
+    guard let status, ["filed", "already-filed"].contains(outcome) else { return outcome }
+    return "proposal \(status)"
+}
+
+/// Green once the fix is built, amber while the proposal is still open, grey
+/// when it was turned down or replaced.
+func landingSev(_ outcome: String, status: String?) -> Sev {
+    guard ["filed", "already-filed"].contains(outcome) else { return .ok }
+    switch status {
+    case "done": return .ok
+    case "open": return .wait
+    case nil: return .ok
+    default: return .none
+    }
 }
 
 struct Effect: Identifiable {
@@ -378,6 +421,17 @@ struct Record {
     var hoursSinceProductive: Double? { lastProductive.map { now.timeIntervalSince($0) / 3600 } }
     var filed: [ReaderDoc.Landed] { landed.filter { ["filed", "already-filed"].contains($0.outcome) } }
     var armed: [ReaderDoc.Landed] { landed.filter { $0.outcome == "armed" } }
+    /// The filed proposals by where each stands, in the order a reader cares:
+    /// done first, then open, then the two ways a proposal ends unbuilt.
+    var filedByStatus: [(status: String, count: Int)] {
+        let counts = Dictionary(grouping: filed, by: { $0.proposal_status ?? "status unknown" }).mapValues(\.count)
+        let order = ["done", "open", "rejected", "superseded", "status unknown"]
+        let known = order.compactMap { s in counts[s].map { (status: s, count: $0) } }
+        let extra = counts.keys.filter { !order.contains($0) }.sorted().map { (status: $0, count: counts[$0]!) }
+        return known + extra
+    }
+    /// "16 done · 7 open · 4 rejected", or empty when nothing was filed.
+    var filedStatusLine: String { filedByStatus.map { "\($0.count) \($0.status)" }.joined(separator: " · ") }
     var mood: (word: String, sentence: String, sev: Sev) {
         let n = (awaitingItems > 0 ? 2 : 0) + count(.stale) + dead.count * 3 + (daemonRunning ? 0 : 3)
         let w = n >= 6 ? "troubled" : n >= 3 ? "restless" : n >= 1 ? "settled" : "calm"
@@ -499,6 +553,7 @@ enum RecordBuilder {
         var noiseNamed = 0
         for run in r.runs {
             let landedBy = Dictionary(run.landed.map { ($0.cluster, $0.outcome) }, uniquingKeysWith: { a, _ in a })
+            let statusBy = Dictionary(run.landed.compactMap { l in l.proposal_status.map { (l.cluster, $0) } }, uniquingKeysWith: { a, _ in a })
             for n in run.named.items {
                 if n.kind == "noise" { if run.week == r.runs.first?.week { noiseNamed += 1 }; continue }
                 let c = clusters[n.cluster]
@@ -508,6 +563,7 @@ enum RecordBuilder {
                     week: run.week, cluster: n.cluster, kind: n.kind, title: n.title, why: n.why,
                     evidenceIds: n.evidence_ids, target: n.proposal?.target, change: n.proposal?.change,
                     key: c?.key, joinedDomains: c?.domains ?? [], outcome: landedBy[n.cluster],
+                    proposalStatus: statusBy[n.cluster],
                     pageURL: run.page_url.flatMap(URL.init(string:)), pageSlug: run.page_slug, awaiting: awaiting))
             }
         }
@@ -741,7 +797,8 @@ enum RecordBuilder {
                           lastSkip: skipText(j.last_reason, j.last_detail),
                           delayable: j.delayable ?? false,
                           command: j.command ?? "", manual: j.manual, manualNote: j.manual_note,
-                          running: j.running ?? false, logTail: j.log_tail ?? [], logPath: j.log_path ?? "")
+                          running: j.running ?? false, logTail: j.log_tail ?? [], logPath: j.log_path ?? "",
+                          runner: j.runner, launchdLoaded: j.loaded)
         }
         .sorted { ($0.held ?? $0.next ?? .distantFuture) < ($1.held ?? $1.next ?? .distantFuture) }
     }

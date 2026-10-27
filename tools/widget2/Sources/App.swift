@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
     private var window: NSWindow?
     private var bag = Set<AnyCancellable>()
     private var keyMonitor: Any?
+    private var dashboardSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         if let mine = Bundle.main.bundleIdentifier,
@@ -39,6 +40,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         NSApp.mainMenu = mainMenu()
 
         model.openDashboard = { [weak self] in self?.showDashboard() }
+
+        // `i-dream dashboard` asks for the dashboard with SIGUSR1. Left to its
+        // default, that signal ends the process, so the bar would vanish.
+        signal(SIGUSR1, SIG_IGN)
+        let usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        usr1.setEventHandler { [weak self] in self?.menuDashboard() }
+        usr1.resume()
+        dashboardSignal = usr1
         model.$record.combineLatest(model.$reading)
             .receive(on: RunLoop.main)
             .sink { [weak self] r, reading in

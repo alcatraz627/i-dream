@@ -80,6 +80,10 @@ final class SettingsModel: ObservableObject {
     private var queued = 0
     /// The value each restart-needing key had before this pane changed it.
     private var original: [String: String] = [:]
+    /// A schedule the owner switched here, until the app restarts. The shared
+    /// scheduler's pause is a registry flag the reports do not carry, so
+    /// without this the switch would snap back to its old position.
+    @Published private(set) var switched: [String: Bool] = [:]
 
     /// The value a settable key holds in the last report, as `config set` would write it.
     func current(_ key: String) -> String? {
@@ -144,7 +148,18 @@ final class SettingsModel: ObservableObject {
     /// Pause or resume one of the reader's scheduled runs through gcc-schedule,
     /// which keeps launchd, its registry and the Calendar companion in step.
     func setSchedule(_ name: String, on: Bool) {
-        perform(on ? "schedule resumed" : "schedule paused", Self.scheduleTool(), [on ? "enable" : "disable", name])
+        perform(on ? "schedule resumed" : "schedule paused", Self.scheduleTool(), [on ? "enable" : "disable", name]) { ok in
+            if ok { self.switched[name] = on }
+        }
+    }
+
+    /// Whether a scheduled run is on. The jobs report knows (the shared
+    /// scheduler runs it, so launchd's "not loaded" says nothing); the config
+    /// report's `loaded` is launchd's answer and is only the fallback.
+    func isOn(_ sc: ConfigDoc.Schedule, jobs: [JobRow]) -> Bool {
+        guard let job = jobs.first(where: { $0.name == sc.name }) else { return sc.loaded }
+        if job.runner != nil, let flipped = switched[sc.name] { return flipped }
+        return job.on
     }
 
     static func scheduleTool() -> String? {
@@ -174,7 +189,7 @@ struct SettingsPane: View {
                 .pickerStyle(.segmented).frame(width: 260).labelsHidden()
             }
             status
-            if tab == "controls" { ControlsTab(model: model, s: s) } else { AllSettingsTab(s: s) }
+            if tab == "controls" { ControlsTab(model: model, s: s) } else { AllSettingsTab(s: s, jobs: model.record?.jobs ?? []) }
         }
         .onAppear { if s.doc == nil { s.load() } }
     }
@@ -262,6 +277,7 @@ private struct ControlRow<Control: View>: View {
 struct ControlsTab: View {
     @ObservedObject var model: AppModel
     @ObservedObject var s: SettingsModel
+    private var jobs: [JobRow] { model.record?.jobs ?? [] }
     @AppStorage("ui.scale") private var scale = "S"
     @AppStorage("ui.appearance") private var appearance = "system"
 
@@ -314,7 +330,7 @@ struct ControlsTab: View {
             Divider()
             ForEach(d.schedules, id: \.name) { sc in
                 ControlRow(title: scheduleTitle(sc), detail: scheduleDetail(sc)) {
-                    Toggle("", isOn: Binding(get: { sc.loaded }, set: { s.setSchedule(sc.name, on: $0) }))
+                    Toggle("", isOn: Binding(get: { s.isOn(sc, jobs: jobs) }, set: { s.setSchedule(sc.name, on: $0) }))
                         .toggleStyle(.switch).labelsHidden()
                         .disabled(!sc.registered || SettingsModel.scheduleTool() == nil)
                 }
@@ -332,7 +348,7 @@ struct ControlsTab: View {
             ? "joins every signal stream without a model and runs the extractors"
             : "names this week's strongest findings and puts them on a page for you"
         if !sc.registered { return "Not found in gcc-schedule." }
-        return "\(when) · \(what)\(sc.loaded ? "" : " · paused")"
+        return "\(when) · \(what)\(s.isOn(sc, jobs: jobs) ? "" : " · paused")"
     }
 
     // Usage guard
@@ -458,6 +474,7 @@ func humanSchedule(_ s: String?) -> String {
 
 struct AllSettingsTab: View {
     @ObservedObject var s: SettingsModel
+    var jobs: [JobRow] = []
 
     /// Plain names for config keys; anything missing falls back to the key with spaces.
     private static let names: [String: String] = [
@@ -518,7 +535,7 @@ struct AllSettingsTab: View {
                     rows(d.config["idle"], skip: [])
                     ForEach(d.schedules, id: \.name) { sc in
                         row(sc.name.hasSuffix("daily") ? "Daily recon" : "Weekly reader run",
-                            humanSchedule(sc.fire_at) + (sc.loaded ? "" : " (paused)"))
+                            humanSchedule(sc.fire_at) + (s.isOn(sc, jobs: jobs) ? "" : " (paused)"))
                     }
                 }
                 section("gauge.with.dots.needle.67percent", "Usage guard") { rows(d.config["limits"], skip: []) }

@@ -130,7 +130,8 @@ extension AppModel {
     }
 }
 
-/// A shell line that starts a Claude session in the i-dream repo about one item.
+/// A shell line that starts a named Claude session (`clo`, the owner's alias
+/// for claude with their defaults) in the i-dream repo about one item.
 enum OpenInClaude {
     static func command(kind: String, id: String, title: String) -> String {
         let source: String = switch kind {
@@ -146,7 +147,25 @@ enum OpenInClaude {
         var flat = title.prefix(200).split(whereSeparator: \.isNewline).joined(separator: " ")
         while flat.hasSuffix(".") { flat.removeLast() }
         let prompt = "Look into this i-dream \(kind) (\(id)): \(flat). \(find) Read it and the items it points at, then tell me what it means and what I should do about it.\(source)"
-        return "cd ~/Code/Claude/i-dream && claude '" + prompt.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "cd ~/Code/Claude/i-dream && clo -n i-dream-\(sessionSlug(title: title, id: id)) '" + prompt.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// A short name for the session, from the item's title: lowercase words
+    /// joined by hyphens, at most 30 characters. An item with no usable
+    /// letters in its title is named by its id instead.
+    static func sessionSlug(title: String, id: String) -> String {
+        func slug(_ text: String) -> String {
+            var out = ""
+            for ch in text.lowercased() {
+                if ch.isASCII, ch.isLetter || ch.isNumber { out.append(ch) }
+                else if !out.isEmpty, out.last != "-" { out.append("-") }
+            }
+            var cut = String(out.prefix(30))
+            while cut.hasSuffix("-") { cut.removeLast() }
+            return cut
+        }
+        let fromTitle = slug(title)
+        return fromTitle.isEmpty ? (slug(id).isEmpty ? "item" : slug(id)) : fromTitle
     }
 }
 

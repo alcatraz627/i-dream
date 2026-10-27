@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# This widget has been replaced by tools/widget2. Running this script used to
+# stop the live widget (same process name) and install the old one over it, so
+# it now refuses to do anything. The code below is kept for reference only.
+echo "tools/menubar is the old widget and is replaced by tools/widget2; use 'i-dream widget install' (see tools/menubar/README.md)." >&2
+exit 1
+
 # build.sh — Compile and manage the i-dream menu bar widget.
 #
 # Usage:

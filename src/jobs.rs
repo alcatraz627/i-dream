@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeZone, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The jobs a hold can delay: their regular command checks it.
 pub const DELAYABLE: [&str; 2] = ["i-dream-reader-daily", "i-dream-reader-weekly"];
@@ -132,19 +132,51 @@ pub fn cancel(name: &str) -> Result<Option<Hold>> {
 pub fn run_now(name: &str) -> Result<u32> {
     known(name)?;
     cancel(name)?;
-    let logs = dirs::home_dir().context("home")?.join(".claude/logs/launchd");
+    let home = dirs::home_dir().context("home")?;
+    let argv = run_argv(name, &home)?;
+    let logs = home.join(".claude/logs/launchd");
     std::fs::create_dir_all(&logs)?;
     let open = |ext: &str| {
         std::fs::OpenOptions::new().create(true).append(true).open(logs.join(format!("{name}.{ext}.log")))
     };
-    let child = std::process::Command::new("bash")
-        .arg(job_script(name)?)
+    let child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
         .stdin(std::process::Stdio::null())
         .stdout(open("out")?)
         .stderr(open("err")?)
         .spawn()
         .context("start gcc-schedule run")?;
     Ok(child.id())
+}
+
+/// The job that raises the monthly audit card.
+const MONTHLY_AUDIT: &str = "idream-audit-monthly";
+
+/// The command "Run early" starts for a job. Most jobs run their scheduler
+/// wrapper, which is what a scheduled fire does. The monthly audit raises its
+/// card directly, because its wrapper would skip outside the first week and
+/// the owner asked for it now.
+fn run_argv(name: &str, home: &Path) -> Result<Vec<String>> {
+    if name != MONTHLY_AUDIT {
+        return Ok(vec!["bash".to_string(), job_script(name, home)?.display().to_string()]);
+    }
+    let handoff = home.join(".claude/scripts/schedule/handoff.sh");
+    let prompt = home.join(".claude/scheduled/idream-audit-monthly-prompt.md");
+    for p in [&handoff, &prompt] {
+        if !p.exists() {
+            bail!("cannot raise the monthly audit: {} is missing", p.display());
+        }
+    }
+    Ok(vec![
+        "bash".to_string(),
+        handoff.display().to_string(),
+        "raise".to_string(),
+        name.to_string(),
+        "Monthly i-dream audit".to_string(),
+        home.join("Code/Claude/i-dream").display().to_string(),
+        "opus".to_string(),
+        prompt.display().to_string(),
+    ])
 }
 
 /// Hold a job until `until` and arrange for it to run then.
@@ -186,15 +218,16 @@ pub fn fire(name: &str) -> Result<i32> {
     let mut holds = load_holds();
     holds.remove(name);
     save_holds(&holds)?;
-    let status = std::process::Command::new("bash").arg(job_script(name)?).status().context("run the job script")?;
+    let home = dirs::home_dir().context("home")?;
+    let status = std::process::Command::new("bash").arg(job_script(name, &home)?).status().context("run the job script")?;
     Ok(status.code().unwrap_or(1))
 }
 
 /// The wrapper gcc-schedule generated for a job. Running it is what a
 /// scheduled fire does, including the run record in the scheduler's history;
 /// `gcc-schedule run` skips that record.
-fn job_script(name: &str) -> Result<PathBuf> {
-    let p = dirs::home_dir().context("home")?.join(".claude/scheduled").join(name).join("script.sh");
+fn job_script(name: &str, home: &Path) -> Result<PathBuf> {
+    let p = home.join(".claude/scheduled").join(name).join("script.sh");
     if !p.exists() {
         bail!("no script for {name} at {}", p.display());
     }
@@ -220,5 +253,50 @@ mod tests {
         assert_eq!(next_fire("weekly@tue@17:00", now), Some(local("2026-10-13 17:00")));
         assert_eq!(next_fire("monthly@day1@04:10", now), Some(local("2026-11-01 04:10")));
         assert_eq!(next_fire("custom-schedule", now), None);
+    }
+
+    fn home_with(files: &[&str]) -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        for f in files {
+            let p = home.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "").unwrap();
+        }
+        home
+    }
+
+    #[test]
+    fn run_early_on_the_monthly_audit_raises_the_card_whatever_the_date() {
+        let home = home_with(&[
+            ".claude/scheduled/idream-audit-monthly/script.sh",
+            ".claude/scheduled/idream-audit-monthly-prompt.md",
+            ".claude/scripts/schedule/handoff.sh",
+        ]);
+        let h = home.path().display();
+        let argv = run_argv("idream-audit-monthly", home.path()).unwrap();
+        assert_eq!(
+            argv,
+            vec![
+                "bash".to_string(),
+                format!("{h}/.claude/scripts/schedule/handoff.sh"),
+                "raise".into(),
+                "idream-audit-monthly".into(),
+                "Monthly i-dream audit".into(),
+                format!("{h}/Code/Claude/i-dream"),
+                "opus".into(),
+                format!("{h}/.claude/scheduled/idream-audit-monthly-prompt.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_early_on_any_other_job_still_runs_its_scheduler_script() {
+        let home = home_with(&[".claude/scheduled/i-dream-reader-weekly/script.sh"]);
+        let argv = run_argv("i-dream-reader-weekly", home.path()).unwrap();
+        assert_eq!(
+            argv,
+            vec!["bash".to_string(), format!("{}/.claude/scheduled/i-dream-reader-weekly/script.sh", home.path().display())]
+        );
+        assert!(run_argv("i-dream-reader-daily", home.path()).is_err(), "a job with no script is refused");
     }
 }
