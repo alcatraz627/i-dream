@@ -771,13 +771,13 @@ fn manual_run(name: &str) -> Option<(String, String)> {
             "Joins every signal stream and runs the extractors; their Claude calls are headless and logged here.".into(),
         )),
         "i-dream-reader-weekly" => Some((
-            "cd ~/Code/Claude/i-dream && claude \"Run the weekly i-dream reader with: i-dream reader run --force. \
+            "cd ~/Code/Claude/i-dream && clo -n i-dream-weekly-review \"Run the weekly i-dream reader with: i-dream reader run --force. \
              Then open the decision page it prints and walk me through each finding, one at a time, before I answer it.\""
                 .into(),
             "A Claude session runs the weekly review, then walks you through its findings.".into(),
         )),
         "idream-audit-monthly" => Some((
-            "cd ~/Code/Claude/i-dream && claude --model opus \"$(cat ~/.claude/scheduled/idream-audit-monthly-prompt.md)\""
+            "cd ~/Code/Claude/i-dream && clo -n i-dream-monthly-audit \"$(cat ~/.claude/scheduled/idream-audit-monthly-prompt.md)\""
                 .into(),
             "An Opus session runs the monthly audit, including the adversarial pass, in the i-dream repo.".into(),
         )),
@@ -1372,10 +1372,10 @@ mod tests {
     #[test]
     fn every_i_dream_job_has_a_command_to_run_it_by_hand() {
         let (shell, _) = manual_run("idream-audit-monthly").unwrap();
-        assert!(shell.starts_with("cd ~/Code/Claude/i-dream && claude --model opus"), "{shell}");
+        assert!(shell.starts_with("cd ~/Code/Claude/i-dream && clo -n i-dream-monthly-audit "), "{shell}");
         assert!(shell.contains("idream-audit-monthly-prompt.md"));
         let (weekly, _) = manual_run("i-dream-reader-weekly").unwrap();
-        assert!(weekly.contains("claude") && weekly.contains("i-dream reader run --force"), "{weekly}");
+        assert!(weekly.contains("clo -n i-dream-weekly-review ") && weekly.contains("i-dream reader run --force"), "{weekly}");
         assert_eq!(manual_run("i-dream-reader-daily").unwrap().0, "i-dream reader recon");
         assert!(manual_run("something-else").is_none());
     }
