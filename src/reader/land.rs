@@ -30,7 +30,7 @@ fn pages_dir() -> Result<PathBuf> {
         .join(".claude/assets/decision-pages"))
 }
 
-fn page_script() -> PathBuf {
+pub fn page_script() -> PathBuf {
     crate::config::expand_tilde(Path::new("~/.claude/scripts/decision-page/decision-page.sh"))
 }
 

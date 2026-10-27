@@ -23,20 +23,21 @@ pub struct Named {
     /// The problem as the owner would say it happened to them.
     pub title: String,
     /// The machine-facing reason, kept for the backlog proposal body.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub why: String,
+    #[serde(default, deserialize_with = "null_default")]
     pub evidence_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<Proposal>,
     /// Dated instances. The model writes `what`; the page takes the date and
     /// project from the evidence row, never from the model.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "null_default", skip_serializing_if = "Vec::is_empty")]
     pub happened: Vec<Instance>,
     /// Why it keeps happening, in owner voice, no hook ids or script names.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub why_repeats: String,
     /// The proposed fix in plain words, no paths.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub fix: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard: Option<Guard>,
@@ -56,12 +57,24 @@ pub struct Guard {
     #[serde(default)]
     pub hook_id: Option<String>,
     /// The check named in owner words: "A check on done and works claims".
+    #[serde(default, deserialize_with = "null_default")]
     pub plain: String,
     /// yes, partly or no.
+    #[serde(default, deserialize_with = "null_default")]
     pub verdict: String,
     /// What it misses, one clause, no numbers (the page adds the counts).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     pub gap: String,
+}
+
+/// The model writes `null` for a field that has nothing to say (a noise item
+/// has no fix), and that means the same as leaving the field out.
+fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +96,45 @@ pub struct RawNaming {
     /// The weekly run may amend its own process (ruling D7).
     #[serde(default)]
     pub process_note: Option<String>,
+    /// Items that were not the documented shape, each with the reason, so
+    /// one malformed item costs that item and not the week's run.
+    #[serde(skip)]
+    pub unparsed: Vec<String>,
+}
+
+/// The answer's envelope, with each item kept raw so items parse one by one.
+#[derive(Deserialize)]
+struct Envelope {
+    #[serde(default, deserialize_with = "null_default")]
+    items: Vec<serde_json::Value>,
+    #[serde(default, deserialize_with = "null_default")]
+    summary: String,
+    #[serde(default)]
+    process_note: Option<String>,
+}
+
+/// Read the model's answer: a ```json block or bare JSON, either the
+/// documented object or a bare list of items. Fails only when the answer as
+/// a whole is unreadable, with serde's reason; a bad item is kept in
+/// `unparsed` instead.
+pub fn parse_answer(content: &str) -> Result<RawNaming, String> {
+    let json = crate::modules::parse_json_codeblock(content).unwrap_or_else(|| content.trim().to_string());
+    let env = match serde_json::from_str::<Envelope>(&json) {
+        Ok(env) => env,
+        Err(obj_err) => match serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+            Ok(items) => Envelope { items, summary: String::new(), process_note: None },
+            Err(_) => return Err(obj_err.to_string()),
+        },
+    };
+    let mut raw = RawNaming { summary: env.summary, process_note: env.process_note, ..Default::default() };
+    for (i, v) in env.items.into_iter().enumerate() {
+        let label = v.get("cluster").and_then(|c| c.as_str()).map(str::to_string).unwrap_or_else(|| format!("item {i}"));
+        match serde_json::from_value::<Named>(v) {
+            Ok(item) => raw.items.push(item),
+            Err(e) => raw.unparsed.push(format!("{label}: not the documented shape ({e})")),
+        }
+    }
+    Ok(raw)
 }
 
 /// What validation kept and why it dropped the rest.
@@ -181,6 +233,7 @@ pub fn validate(raw: RawNaming, clusters: &[Cluster]) -> Validated {
     let mut v = Validated {
         process_note: raw.process_note.filter(|n| !n.trim().is_empty()),
         summary: raw.summary.trim().to_string(),
+        rejected: raw.unparsed,
         ..Default::default()
     };
     let mut seen: HashSet<String> = HashSet::new();
@@ -350,6 +403,34 @@ mod tests {
             fix: "a plain fix".into(),
             ..Default::default()
         }
+    }
+
+    /// The 2026w44 answer wrote null for a noise item's empty fields, and the
+    /// whole week failed on it. Null reads as empty, and an item that is
+    /// still the wrong shape costs only itself.
+    #[test]
+    fn null_fields_and_one_bad_item_do_not_sink_the_answer() {
+        let answer = r#"```json
+{"summary": "s", "items": [
+  {"cluster": "c-1", "kind": "noise", "title": "t", "happened": [], "why_repeats": null,
+   "fix": null, "guard": {"hook_id": null, "plain": null, "verdict": "no", "gap": null},
+   "why": "w", "evidence_ids": ["atone:a"], "proposal": null},
+  {"cluster": "c-2", "kind": "repeat", "title": 7, "evidence_ids": []}
+], "process_note": null}
+```"#;
+        let raw = parse_answer(answer).unwrap();
+        assert_eq!(raw.items.len(), 1);
+        assert_eq!(raw.items[0].fix, "");
+        assert_eq!(raw.items[0].guard.as_ref().unwrap().plain, "");
+        assert_eq!(raw.unparsed.len(), 1);
+        assert!(raw.unparsed[0].starts_with("c-2: "), "{:?}", raw.unparsed);
+
+        let cs = vec![cluster("c-1", &["atone:a"]), cluster("c-2", &["atone:b"])];
+        let v = validate(raw, &cs);
+        assert!(v.rejected.iter().any(|r| r.starts_with("c-2: ")), "{:?}", v.rejected);
+
+        let err = parse_answer("not json at all").unwrap_err();
+        assert!(err.contains("line 1"), "{err}");
     }
 
     #[test]

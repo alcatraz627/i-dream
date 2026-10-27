@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use evidence::{Evidence, StreamRead};
 use join::Cluster;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The reader's home: `~/.claude/i-dream/reader/`.
 pub fn reader_dir() -> Result<PathBuf> {
@@ -262,14 +262,36 @@ fn registered_hooks() -> std::collections::HashSet<String> {
 }
 
 /// Parse the model's answer: the documented object, or a bare array of items.
-fn parse_naming(content: &str) -> Option<name::RawNaming> {
-    let json = crate::modules::parse_json_codeblock(content).unwrap_or_else(|| content.trim().to_string());
-    if let Ok(raw) = serde_json::from_str::<name::RawNaming>(&json) {
-        return Some(raw);
+/// The saved answer for these clusters, if an earlier run of the week got
+/// one. A run that fails after the model call can then be rerun for free.
+/// Keyed on the batch rather than the whole prompt, because the prompt's
+/// hook counts move every time a hook fires.
+fn saved_answer(dir: &Path, batch: &str) -> Option<String> {
+    let same_batch = std::fs::read_to_string(dir.join("answered-batch.md")).ok()? == batch;
+    let answer = std::fs::read_to_string(dir.join("response.txt")).ok()?;
+    (same_batch && name::parse_answer(&answer).is_ok()).then_some(answer)
+}
+
+/// Checks that cost nothing, run before the briefs and the model call so a
+/// broken setup fails in seconds rather than after the paid steps.
+fn preflight(dry_run: bool) -> Result<()> {
+    load_process().context("read the reader's PROCESS.md")?;
+    if dry_run {
+        return Ok(());
     }
-    serde_json::from_str::<Vec<name::Named>>(&json)
-        .ok()
-        .map(|items| name::RawNaming { items, ..Default::default() })
+    let script = land::page_script();
+    anyhow::ensure!(script.exists(), "the decision-page script is missing at {}", script.display());
+    // The page server restarts often, so give it a few seconds to come back.
+    let addr: std::net::SocketAddr = "127.0.0.1:5106".parse()?;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        }
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).is_ok() {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("the decision-page server on :5106 is not answering, so the page could not be published; start it and rerun")
 }
 
 /// The answer's shape and the voice rules for the owner-facing fields. Code
@@ -417,6 +439,8 @@ async fn run_weekly_inner(
         return Ok(run);
     }
 
+    preflight(dry_run)?;
+
     let (recon, rows) = recon_at(store, now, since);
     persist_recon(&recon, &rows)?;
     run.forwarded = join::forward(&recon.clusters, now, 20);
@@ -458,13 +482,35 @@ async fn run_weekly_inner(
              whether a hook blocks on these counts, not on its name.\n{actions}\n\n{ANSWER_SCHEMA}",
             hooks.join(", ")
         );
-        let resp = client
-            .analyze(&process, &prompt, &config.budget.model, 8192, 0.2)
-            .await
-            .context("reader naming call")?;
-        run.tokens = resp.tokens_used;
-        std::fs::write(run_dir(&week)?.join("response.txt"), &resp.content)?;
-        let raw = parse_naming(&resp.content).context("the naming answer was not the documented JSON")?;
+        let dir = run_dir(&week)?;
+        let answer = match saved_answer(&dir, &batch) {
+            Some(answer) => {
+                tracing::info!("reader: reusing the saved naming answer in {}", dir.display());
+                answer
+            }
+            None => {
+                let resp = client
+                    .analyze(&process, &prompt, &config.budget.model, 8192, 0.2)
+                    .await
+                    .context("reader naming call")?;
+                run.tokens = resp.tokens_used;
+                std::fs::write(dir.join("prompt.txt"), &prompt)?;
+                std::fs::write(dir.join("response.txt"), &resp.content)?;
+                // Written last, so a call that failed never pairs a new batch
+                // with an older answer.
+                std::fs::write(dir.join("answered-batch.md"), &batch)?;
+                resp.content
+            }
+        };
+        let raw = name::parse_answer(&answer).map_err(|e| {
+            anyhow::anyhow!(
+                "the naming answer was not the documented JSON ({e}); the answer is saved at {}",
+                dir.join("response.txt").display()
+            )
+        })?;
+        for r in &raw.unparsed {
+            tracing::warn!("reader: dropped {r}");
+        }
         run.named = name::validate(raw, &run.forwarded);
         drop_unknown_hooks(&mut run.named, &run.hook_actions);
         name::ground(&mut run.named, &registered, |p| {
