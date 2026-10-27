@@ -90,9 +90,13 @@ pub fn activity(guard: &Guard, actions: &[(String, BTreeMap<String, usize>)]) ->
     })
 }
 
-fn replies(n: usize) -> String {
-    if n == 1 { "1 reply".into() } else { format!("{n} replies") }
+/// A check's counts cover everything it looks at, not just this problem, and
+/// a check on tool calls stops actions rather than replies; the wording says so.
+fn times(n: usize) -> String {
+    if n == 1 { "once".into() } else { format!("{n} times") }
 }
+
+const ALL_IT_CHECKS: &str = "across everything it checks";
 
 /// The table's "Is that working?" cell: the model's verdict, then what the
 /// hook really did (from counts, never from model text), then what it misses.
@@ -103,8 +107,8 @@ pub fn working_cell(guard: Option<&Guard>, actions: &[(String, BTreeMap<String, 
         f.make_ascii_uppercase();
     }
     let counts = activity(g, actions).map(|a| match a {
-        Activity::Stopped(n) => format!("It stopped {}", replies(n)),
-        Activity::Warned(n) => format!("It warned {n} times and never stopped a reply"),
+        Activity::Stopped(n) => format!("It stopped Claude {} {ALL_IT_CHECKS}", times(n)),
+        Activity::Warned(n) => format!("It warned {} {ALL_IT_CHECKS} and never stopped anything", times(n)),
         Activity::Once => "It fired once in two weeks".into(),
         Activity::Never => "It never fired in two weeks".into(),
         Activity::Fired(n) => format!("It fired {n} times in two weeks"),
@@ -141,8 +145,10 @@ fn lower_first(s: &str) -> String {
 /// The sentence the "why it keeps happening" paragraph ends with.
 fn activity_sentence(a: Activity) -> String {
     match a {
-        Activity::Stopped(n) => format!("In the last two weeks the check stopped {}.", replies(n)),
-        Activity::Warned(n) => format!("In the last two weeks the check warned {n} times and never stopped a reply."),
+        Activity::Stopped(n) => format!("In the last two weeks the check stopped Claude {} {ALL_IT_CHECKS}.", times(n)),
+        Activity::Warned(n) => {
+            format!("In the last two weeks the check warned {} {ALL_IT_CHECKS} and never stopped anything.", times(n))
+        }
         Activity::Once => "In the last two weeks the check fired once.".into(),
         Activity::Never => "In the last two weeks the check never fired.".into(),
         Activity::Fired(n) => format!("In the last two weeks the check fired {n} times."),
@@ -248,6 +254,11 @@ pub fn report_markdown(run: &WeeklyRun, rows: &[Evidence]) -> String {
         md.push_str(run.named.summary.trim());
     }
     md.push_str("\n\n");
+    if let Some(why) = &run.sources_unchecked {
+        md.push_str(&format!(
+            "What this page says about each check was not compared with the check itself this week, because {why}. Treat those parts as unconfirmed.\n\n"
+        ));
+    }
 
     md.push_str(&format!(
         "| Problem | Times you caught it ({weeks} weeks) | What tries to stop it today | Is that working? (last 2 weeks) |\n|---|---|---|---|\n"
@@ -986,7 +997,7 @@ mod tests {
         );
         let header = "| Problem | Times you caught it (4 weeks) | What tries to stop it today | Is that working? (last 2 weeks) |";
         let h = lines.iter().position(|l| *l == header).expect("table header");
-        assert_eq!(lines[h + 2], "| 1. Said it works without checking where you would see it | 3 | A check on \"done\" and \"works\" claims | Partly. It stopped 25 replies, but \"proven on the Pi\" gets through |");
+        assert_eq!(lines[h + 2], "| 1. Said it works without checking where you would see it | 3 | A check on \"done\" and \"works\" claims | Partly. It stopped Claude 25 times across everything it checks, but \"proven on the Pi\" gets through |");
         assert_eq!(lines[h + 3], "| 2. Handed you a page to review without looking at it first | 2 | Nothing | No |");
         let h1 = lines.iter().position(|l| l.starts_with("## 1. Said it works")).expect("## 1.");
         let h2 = lines.iter().position(|l| l.starts_with("## 2. Handed you")).expect("## 2.");
@@ -1005,7 +1016,7 @@ mod tests {
             assert!(dates.windows(2).all(|w| w[0] <= w[1]), "bullets out of date order: {bullets:?}");
         }
         assert!(md.contains("- 10 Oct, ~/.claude: turned on a terminal wrapper"));
-        assert!(md.contains("**Why it keeps happening.** Claude checks on the surface it can reach. In the last two weeks the check stopped 25 replies."));
+        assert!(md.contains("**Why it keeps happening.** Claude checks on the surface it can reach. In the last two weeks the check stopped Claude 25 times across everything it checks."));
         assert!(md.contains("**Proposed fix.** Extend the check"));
         assert!(md.ends_with("which holds 86 open items and is not worked through automatically. Nothing on this page gets built just by agreeing.\n"));
     }
@@ -1061,10 +1072,10 @@ mod tests {
             ("warns", &[("soft", 65), ("block", 0)]),
             ("once", &[("nudge", 1)]),
         ]);
-        assert_eq!(working_cell(Some(&g(Some("stops"), "partly", "")), &a), "Partly. It stopped 25 replies");
+        assert_eq!(working_cell(Some(&g(Some("stops"), "partly", "")), &a), "Partly. It stopped Claude 25 times across everything it checks");
         assert_eq!(
             working_cell(Some(&g(Some("warns"), "no", "")), &a),
-            "No. It warned 65 times and never stopped a reply"
+            "No. It warned 65 times across everything it checks and never stopped anything"
         );
         assert_eq!(working_cell(Some(&g(Some("once"), "no", "")), &a), "No. It fired once in two weeks");
         assert_eq!(working_cell(Some(&g(Some("silent"), "no", "")), &a), "No. It never fired in two weeks");
@@ -1073,7 +1084,7 @@ mod tests {
         // A number the model wrote into the gap is not a count source.
         assert_eq!(
             working_cell(Some(&g(Some("stops"), "partly", "\"green on\" gets through")), &a),
-            "Partly. It stopped 25 replies, but \"green on\" gets through"
+            "Partly. It stopped Claude 25 times across everything it checks, but \"green on\" gets through"
         );
     }
 

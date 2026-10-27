@@ -5,6 +5,7 @@
 //! one bounded model call and landed on a decision page the owner answers;
 //! accepted items go to the backlog. Design: docs/32.
 
+pub mod check;
 pub mod evidence;
 pub mod join;
 pub mod land;
@@ -175,6 +176,10 @@ pub struct WeeklyRun {
     /// Open items on the gcc backlog when the page was built.
     #[serde(default)]
     pub backlog_open: Option<usize>,
+    /// Why the page's account of each check was not compared with the
+    /// check's source, when it was not. The page says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sources_unchecked: Option<String>,
 }
 
 fn run_dir(week: &str) -> Result<PathBuf> {
@@ -261,7 +266,17 @@ fn registered_hooks() -> std::collections::HashSet<String> {
         .unwrap_or_default()
 }
 
-/// Parse the model's answer: the documented object, or a bare array of items.
+/// Write a run file, saying which one when it fails.
+fn write(path: &Path, body: impl AsRef<[u8]>) -> Result<()> {
+    std::fs::write(path, body).with_context(|| format!("write {}", path.display()))
+}
+
+/// The clusters this week's last paid naming call answered, if any.
+fn answered_clusters(week: &str) -> Option<Vec<Cluster>> {
+    let body = std::fs::read_to_string(reader_dir().ok()?.join("runs").join(week).join("answered-clusters.json")).ok()?;
+    serde_json::from_str(&body).ok()
+}
+
 /// The saved answer for these clusters, if an earlier run of the week got
 /// one. A run that fails after the model call can then be rerun for free.
 /// Keyed on the batch rather than the whole prompt, because the prompt's
@@ -272,6 +287,55 @@ fn saved_answer(dir: &Path, batch: &str) -> Option<String> {
     (same_batch && name::parse_answer(&answer).is_ok()).then_some(answer)
 }
 
+/// Compare what the page says about each check with the check's source and
+/// fold in the corrections. A failure here never sinks the run: the page goes
+/// out as named, and says it was not checked and why.
+async fn check_against_sources(
+    run: &mut WeeklyRun,
+    client: &crate::api::ClaudeClient,
+    config: &crate::config::Config,
+    process: &str,
+    dir: &Path,
+) {
+    let hooks_dir = crate::config::expand_tilde(Path::new("~/.claude/scripts/hooks"));
+    let Some(prompt) = check::prompt(&run.items, &hooks_dir) else {
+        return;
+    };
+    let saved = std::fs::read_to_string(dir.join("check-prompt.txt"))
+        .ok()
+        .filter(|p| p == &prompt)
+        .and_then(|_| std::fs::read_to_string(dir.join("check-response.txt")).ok());
+    let answer = match saved {
+        Some(a) => {
+            tracing::info!("reader: reusing the saved source check in {}", dir.display());
+            a
+        }
+        None => match client.analyze(process, &prompt, &config.budget.model, 8192, 0.2).await {
+            Ok(resp) => {
+                run.tokens += resp.tokens_used;
+                let _ = std::fs::write(dir.join("check-response.txt"), &resp.content);
+                let _ = std::fs::write(dir.join("check-prompt.txt"), &prompt);
+                resp.content
+            }
+            Err(e) => {
+                tracing::warn!("reader: source check call failed: {e:#}");
+                run.sources_unchecked = Some(format!("the check call failed ({e})"));
+                return;
+            }
+        },
+    };
+    match check::apply(&mut run.items, &answer) {
+        Ok(notes) => {
+            drop_unknown_hooks_in(&mut run.items, &run.hook_actions);
+            run.named.rejected.extend(notes);
+        }
+        Err(e) => {
+            tracing::warn!("reader: source check answer unreadable: {e}; saved at {}", dir.join("check-response.txt").display());
+            run.sources_unchecked = Some("the check's answer could not be read".into());
+        }
+    }
+}
+
 /// Checks that cost nothing, run before the briefs and the model call so a
 /// broken setup fails in seconds rather than after the paid steps.
 fn preflight(dry_run: bool) -> Result<()> {
@@ -279,13 +343,16 @@ fn preflight(dry_run: bool) -> Result<()> {
     if dry_run {
         return Ok(());
     }
-    let script = land::page_script();
+    page_ready(&land::page_script(), "127.0.0.1:5106".parse()?, std::time::Duration::from_secs(5))
+}
+
+/// Whether a page can be published: the script exists and the server answers.
+fn page_ready(script: &Path, addr: std::net::SocketAddr, retry_wait: std::time::Duration) -> Result<()> {
     anyhow::ensure!(script.exists(), "the decision-page script is missing at {}", script.display());
     // The page server restarts often, so give it a few seconds to come back.
-    let addr: std::net::SocketAddr = "127.0.0.1:5106".parse()?;
     for attempt in 0..3 {
         if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::thread::sleep(retry_wait);
         }
         if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)).is_ok() {
             return Ok(());
@@ -329,7 +396,11 @@ cluster ids in "merged". A cluster is named or merged, never both.
 /// the page never quotes counts for a hook the model made up. The guard's
 /// plain name and verdict stay.
 pub fn drop_unknown_hooks(v: &mut name::Validated, actions: &[(String, std::collections::BTreeMap<String, usize>)]) {
-    for item in &mut v.items {
+    drop_unknown_hooks_in(&mut v.items, actions);
+}
+
+fn drop_unknown_hooks_in(items: &mut [name::Named], actions: &[(String, std::collections::BTreeMap<String, usize>)]) {
+    for item in items {
         if let Some(g) = &mut item.guard
             && let Some(h) = &g.hook_id
             && !actions.iter().any(|(id, _)| id == h)
@@ -444,6 +515,14 @@ async fn run_weekly_inner(
     let (recon, rows) = recon_at(store, now, since);
     persist_recon(&recon, &rows)?;
     run.forwarded = join::forward(&recon.clusters, now, 20);
+    // New evidence lands every hour, so a fresh read rarely reproduces the
+    // clusters a failed run already paid to have named. A rerun after a
+    // failure this week takes that run's clusters, and its saved answer applies.
+    let resuming = state.weekly_failure.as_ref().is_some_and(|f| join::iso_week(f.at) == week);
+    if resuming && let Some(prior) = answered_clusters(&week) {
+        tracing::info!("reader: resuming this week's failed run with its {} named clusters", prior.len());
+        run.forwarded = prior;
+    }
     run.atone_total = count_atone(&rows, since, now);
     run.hook_actions = hook_actions(now - chrono::Duration::days(14));
     run.backlog_open = backlog_open();
@@ -458,7 +537,7 @@ async fn run_weekly_inner(
     if !run.forwarded.is_empty() {
         let process = load_process()?;
         let batch = name::render_batch(&run.forwarded, &rows, 8);
-        std::fs::write(run_dir(&week)?.join("batch.md"), &batch)?;
+        write(&run_dir(&week)?.join("batch.md"), &batch)?;
         let client = crate::api::ClaudeClient::for_config(config)?;
         let registered = registered_hooks();
         let mut hooks: Vec<&String> = registered.iter().collect();
@@ -486,6 +565,8 @@ async fn run_weekly_inner(
         let answer = match saved_answer(&dir, &batch) {
             Some(answer) => {
                 tracing::info!("reader: reusing the saved naming answer in {}", dir.display());
+                // The batch matched, so these are the clusters it answered.
+                write(&dir.join("answered-clusters.json"), serde_json::to_string(&run.forwarded)?)?;
                 answer
             }
             None => {
@@ -494,11 +575,12 @@ async fn run_weekly_inner(
                     .await
                     .context("reader naming call")?;
                 run.tokens = resp.tokens_used;
-                std::fs::write(dir.join("prompt.txt"), &prompt)?;
-                std::fs::write(dir.join("response.txt"), &resp.content)?;
+                write(&dir.join("prompt.txt"), &prompt)?;
+                write(&dir.join("response.txt"), &resp.content)?;
                 // Written last, so a call that failed never pairs a new batch
                 // with an older answer.
-                std::fs::write(dir.join("answered-batch.md"), &batch)?;
+                write(&dir.join("answered-clusters.json"), serde_json::to_string(&run.forwarded)?)?;
+                write(&dir.join("answered-batch.md"), &batch)?;
                 resp.content
             }
         };
@@ -517,6 +599,7 @@ async fn run_weekly_inner(
             crate::config::expand_tilde(std::path::Path::new(p)).exists()
         });
         run.items = land::select(&run.named, &run.forwarded);
+        check_against_sources(&mut run, &client, config, &process, &dir).await;
         if !dry_run && let Some(note) = run.named.process_note.clone() {
             amend_process(&week, &note)?;
         }
@@ -525,7 +608,8 @@ async fn run_weekly_inner(
     if !dry_run && !run.items.is_empty() {
         let slug = land::page_slug(&week);
         let cfg = land::page_config(&week, &run.items, now, &land::report_url(&slug));
-        let url = land::publish(&slug, &cfg, &land::report_markdown(&run, &rows))?;
+        let url = land::publish(&slug, &cfg, &land::report_markdown(&run, &rows))
+            .context("publish the decision page (the named answer is saved; a rerun this week reuses it)")?;
         run.page_slug = Some(slug.clone());
         run.page_url = Some(url);
         state = ReaderState::load();
@@ -537,19 +621,20 @@ async fn run_weekly_inner(
             state.pending_pages.push(slug);
         }
     }
-    // A dry run produces no page, so it must not count as the week's review.
+    if dry_run {
+        // Kept for inspection, but never read as the week's run.
+        write(&run_dir(&week)?.join("dry-run.json"), serde_json::to_string_pretty(&run)?)?;
+    } else {
+        save_run(&run).context("save the run record")?;
+    }
+    // A dry run produces no page, so it must not count as the week's review,
+    // but either kind of success ends a failure streak.
     if !dry_run {
         state.last_weekly = Some(now);
         state.weekly_pending_since = None;
-        state.weekly_failure = None;
     }
+    state.weekly_failure = None;
     state.save()?;
-    if dry_run {
-        // Kept for inspection, but never read as the week's run.
-        std::fs::write(run_dir(&week)?.join("dry-run.json"), serde_json::to_string_pretty(&run)?)?;
-    } else {
-        save_run(&run)?;
-    }
     Ok(run)
 }
 
@@ -788,6 +873,25 @@ pub fn republish(week: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A broken publish setup is found in seconds, before any paid step, and
+    /// the error says which part is broken.
+    #[test]
+    fn a_broken_page_setup_fails_fast_and_says_why() {
+        let wait = std::time::Duration::from_millis(10);
+        let started = std::time::Instant::now();
+        let missing = page_ready(Path::new("/no/such/decision-page.sh"), "127.0.0.1:9".parse().unwrap(), wait);
+        assert!(format!("{:#}", missing.unwrap_err()).contains("decision-page script is missing"));
+
+        let script = tempfile::NamedTempFile::new().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let up = listener.local_addr().unwrap();
+        assert!(page_ready(script.path(), up, wait).is_ok());
+        drop(listener);
+        let down = page_ready(script.path(), up, wait).unwrap_err();
+        assert!(format!("{down:#}").contains("is not answering"), "{down:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
 
     /// A run.json written before the page fields existed still loads.
     #[test]

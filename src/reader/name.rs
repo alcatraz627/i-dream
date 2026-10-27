@@ -69,7 +69,7 @@ pub struct Guard {
 
 /// The model writes `null` for a field that has nothing to say (a noise item
 /// has no fix), and that means the same as leaving the field out.
-fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+pub(crate) fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Default + Deserialize<'de>,
