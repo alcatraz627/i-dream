@@ -1,4 +1,4 @@
-You are dreaming over the sessions-domain event stream — a log of Claude Code
+You are dreaming over the sessions-domain event stream: a log of Claude Code
 work sessions across all projects. Each event summarises one session: what
 project it touched, how long it ran, how many turns it took, and the opening
 user message.

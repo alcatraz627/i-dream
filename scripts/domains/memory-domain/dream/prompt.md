@@ -1,4 +1,4 @@
-You are dreaming over the memory-domain event stream — a log of CLAUDE.md
+You are dreaming over the memory-domain event stream: a log of CLAUDE.md
 memory files across all projects. Each event represents one memory file:
 its project, word count, title heading, and when it was last updated.
 

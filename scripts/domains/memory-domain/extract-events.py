@@ -105,7 +105,7 @@ with EVENTS_FILE.open("a") as out:
         seen[key] = mtime_unix
         new_count += 1
 
-# Always rewrite _seen.json — touching it is the lane-health liveness signal.
+# Always rewrite _seen.json: touching it is the lane-health liveness signal.
 SEEN_FILE.write_text(json.dumps(seen))
 
 print(f"memory-domain: {new_count} new/updated memory file(s) ({len(memory_files)} total found)")

@@ -2,7 +2,7 @@
 """Extract one DomainEvent per Claude Code session into sessions-domain/events.jsonl.
 
 Run by `i-dream dream-pass` (or `i-dream consolidate`) via the manifest's
-[consolidation].script field.  Safe to run repeatedly — sessions already in
+[consolidation].script field.  Safe to run repeatedly: sessions already in
 _seen.json are skipped.  On first run the extraction is capped at the 30
 most-recent sessions to avoid delivering a giant initial delta to the LLM.
 
@@ -171,7 +171,7 @@ with EVENTS_FILE.open("a") as out:
         seen[session_id] = True
         new_count += 1
 
-# Always rewrite _seen.json — touching it is the lane-health liveness signal.
+# Always rewrite _seen.json: touching it is the lane-health liveness signal.
 SEEN_FILE.write_text(json.dumps(seen))
 
 print(f"sessions-domain: {new_count} new session(s) extracted ({len(seen)} total seen)")
