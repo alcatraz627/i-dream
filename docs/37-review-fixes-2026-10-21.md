@@ -213,14 +213,14 @@ Fix: add retention rules, and point the build docs at `i-dream widget`.
 Slices 2 and 3 shipped on 2026-11-02, but the audit (`.claude/output/20261102-audit/summary.md`) found that the rules still do not reach Claude. The fixes below are open.
 
 ### F1. The session-start cap drops the rules
-The cap keeps only the about, do and avoid sections, while the daemon still counts every rule as fired. In the 28 capped sessions, 341 fires produced 9 rule tags.
+Fixed the same night. The cap kept only the about, do and avoid sections, while the daemon still counted every rule as fired. In the 28 capped sessions, 341 fires produced 9 rule tags.
 
-Fix: the owner decides whether the cap keeps rules, rules arrive at prompt time, or the channel stops. Count a fire only for text that enters context, and vote only on rules Claude saw.
+Rules now arrive with the prompt they are about, at most two per prompt and once per session. A fire is spent only when the text is handed to the hook, so votes land only on rules Claude was given.
 
-### F2. The keyword gate matches the wrong thing
-Rule keywords describe behaviour and the gate compares them with the project path, so almost no rule ever matches. The word "user" matches every path through `/Users/`.
+### F2. The keyword gate matched the wrong thing
+Fixed with F1. Rule keywords describe behaviour and the gate compared them with the project path, so almost no rule ever matched. They are now compared with the owner's prompt, and two topic words must match.
 
-Fix: match against the prompt, or remove the keywords. This depends on F1.
+Whether a delivered rule changes behaviour is still unmeasured.
 
 ### F3. Two controls state things that are not so
 A paused job reads "on" after a widget restart, because status carries no `enabled` field. The usage guard shows on but only applies when the account gate script is missing.

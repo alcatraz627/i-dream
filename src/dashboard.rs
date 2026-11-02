@@ -922,6 +922,7 @@ fn collect_recent_events(store: &Store) -> (Vec<EventSummary>, usize) {
                 crate::events::HookEvent::SessionStart { .. } => "session_start".into(),
                 crate::events::HookEvent::ToolUse { tool, .. } => format!("tool_use({tool})"),
                 crate::events::HookEvent::SessionEnd { .. } => "session_end".into(),
+                crate::events::HookEvent::PromptRules { .. } => "prompt_rules".into(),
                 crate::events::HookEvent::UserSignal {
                     frustration_score,
                     correction,

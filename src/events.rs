@@ -70,6 +70,18 @@ pub enum HookEvent {
         #[serde(default)]
         prompt_words: Vec<String>,
     },
+    /// A prompt asking which dream-made rules apply to it. The daemon answers
+    /// with the matching rules, which the hook puts into Claude's context.
+    PromptRules {
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        entrypoint: Option<String>,
+        #[serde(default)]
+        prompt_words: Vec<String>,
+    },
 }
 
 /// True when an entrypoint names a person at a terminal or editor. An absent

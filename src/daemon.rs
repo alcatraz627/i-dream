@@ -1784,6 +1784,16 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
             );
             (text, ids, session_id.clone())
         }
+        HookEvent::PromptRules { cwd, entrypoint, .. }
+            if crate::transcript::classify_fields(entrypoint.as_deref(), cwd.as_deref())
+                != crate::transcript::TranscriptKind::Interactive =>
+        {
+            (String::new(), vec![], None)
+        }
+        HookEvent::PromptRules { session_id, prompt_words, .. } => {
+            let (text, ids) = rules_for_prompt(store, session_id.as_deref(), prompt_words);
+            (text, ids, session_id.clone())
+        }
         _ => (String::new(), vec![], None),
     };
     if !response.is_empty() {
@@ -1816,10 +1826,10 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
 }
 
 /// When the owner corrects or praises Claude, vote on the dream-made rules that
-/// session was shown at its start.
+/// session was shown.
 ///
-/// SessionStart is the only place intentions surface, so the session's own
-/// fired records are exactly what it saw; there is no time window. Each
+/// A fire is recorded only once a rule's text was handed over, so the session's
+/// own fired records are exactly what it saw; there is no time window. Each
 /// (session, intention, rating) is voted once, however many times the owner
 /// repeats themselves. Only interactive sessions vote: a known headless
 /// entrypoint never does, and an absent one (an older hook) can only match
@@ -2008,7 +2018,7 @@ fn build_session_start_response_for(
     }
 
     // ── 1. Broadcast intentions ─────────────────────────────
-    if let Some((section, ids)) = broadcast_intentions_section_for(store, session_id, cwd, record) {
+    if let Some((section, ids)) = broadcast_intentions_section_for(store, session_id, record) {
         sections.push(section);
         surfaced_ids = ids;
     }
@@ -2116,10 +2126,94 @@ fn record_surfacings(store: &Store, ids: &[String], session_id: Option<&str>) {
     persist_fires(store, &mut registry, &fresh, session_id, Utc::now());
 }
 
+/// The most rules one prompt may bring into context.
+const MAX_RULES_PER_PROMPT: usize = 2;
+
+/// A prompt word in the form rule keywords are stored in: a plural folded to
+/// its singular, and nothing at all for a word that carries no topic.
+fn topic_word(word: &str) -> Option<String> {
+    let mut w = word.to_lowercase();
+    if !is_topic_word(&w) {
+        return None;
+    }
+    if w.len() > 4 && w.ends_with('s') && !w.ends_with("ss") {
+        w.pop();
+    }
+    is_topic_word(&w).then_some(w)
+}
+
+/// The behavioural rules this prompt is about, for the hook to put into context.
+///
+/// A rule's keywords describe behaviour, so the owner's words are what can match
+/// them. Two shared topic words are needed, because one is chance. A session sees
+/// a rule once, and the strongest matches win the two places. Spending a fire is
+/// left to the caller, once the text has been handed over.
+fn rules_for_prompt(
+    store: &Store,
+    session_id: Option<&str>,
+    prompt_words: &[String],
+) -> (String, Vec<String>) {
+    let said: std::collections::HashSet<String> =
+        prompt_words.iter().filter_map(|w| topic_word(w)).collect();
+    if said.len() < 2 {
+        return (String::new(), vec![]);
+    }
+    let _guard = REGISTRY_REWRITE.lock().unwrap_or_else(|p| p.into_inner());
+    let registry: Vec<Intention> = store
+        .read_jsonl("intentions/registry.jsonl")
+        .unwrap_or_default();
+    let seen: std::collections::HashSet<String> = match session_id.filter(|s| !s.is_empty()) {
+        Some(sid) => store
+            .read_jsonl::<FiredRecord>("intentions/fired.jsonl")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.session_id == sid)
+            .map(|r| r.intention_id)
+            .collect(),
+        None => Default::default(),
+    };
+    let now = Utc::now();
+    let standing = crate::modules::dreaming::standing_rule_lines();
+    let mut matched: Vec<(usize, &Intention)> = registry
+        .iter()
+        .filter(|i| i.expires > now && i.fire_count < i.max_fires && !seen.contains(&i.id))
+        .filter_map(|i| {
+            let Trigger::Context { keywords, min_keyword_matches } = &i.trigger else {
+                return None;
+            };
+            let shared = keywords
+                .iter()
+                .filter_map(|k| topic_word(k))
+                .collect::<std::collections::HashSet<_>>()
+                .intersection(&said)
+                .count();
+            (shared >= (*min_keyword_matches).max(2)).then_some((shared, i))
+        })
+        .filter(|(_, i)| {
+            !(i.action.source.starts_with("dream-wake:")
+                && crate::modules::dreaming::restates_standing_rule(&i.action.message, &standing))
+        })
+        .collect();
+    matched.sort_by_key(|(shared, i)| {
+        let rank = match i.action.priority {
+            Priority::High => 0,
+            Priority::Medium => 1,
+            Priority::Low => 2,
+        };
+        (std::cmp::Reverse(*shared), rank)
+    });
+    matched.truncate(MAX_RULES_PER_PROMPT);
+    let lines: Vec<String> = matched
+        .iter()
+        .map(|(_, i)| format!("[i-dream rule] {} {}", i.action.message, crate::firings::intention_tag(&i.id)))
+        .collect();
+    let ids = matched.iter().map(|(_, i)| i.id.clone()).collect();
+    (lines.join("\n"), ids)
+}
+
 fn broadcast_intentions_section_for(
     store: &Store,
     session_id: Option<&str>,
-    cwd: Option<&str>,
     record: bool,
 ) -> Option<(String, Vec<String>)> {
     let _guard = REGISTRY_REWRITE.lock().unwrap_or_else(|p| p.into_inner());
@@ -2144,16 +2238,9 @@ fn broadcast_intentions_section_for(
         .filter(|intent| match &intent.trigger {
             // Broadcast Time triggers (original behavior)
             Trigger::Time { after, keywords } => *after <= now && keywords.is_empty(),
-            // Context triggers — behavioral rules from dream insights
-            // A rule with topic keywords reaches only a session whose project
-            // path carries enough of them; a rule with none is for everyone.
-            Trigger::Context { keywords, min_keyword_matches } => {
-                keywords.is_empty() || {
-                    let here = cwd.unwrap_or_default().to_lowercase();
-                    let need = (*min_keyword_matches).max(1).min(keywords.len());
-                    keywords.iter().filter(|k| here.contains(&k.to_lowercase())).count() >= need
-                }
-            }
+            // Behavioural rules arrive with the prompt they are about, where
+            // the briefing's size cap cannot drop them.
+            Trigger::Context { .. } => false,
             // Event triggers need keyword matching — skip at session start
             Trigger::Event { .. } => false,
         })
@@ -2992,24 +3079,83 @@ timeout = "10s"
         w.iter().map(|s| s.to_string()).collect()
     }
 
+    fn add_context_rule(store: &Store, id: &str, msg: &str, keywords: &[&str]) {
+        let mut rule = broadcast_intention(id, msg, Priority::High, chrono::Duration::hours(-1));
+        rule.trigger = Trigger::Context {
+            keywords: keywords.iter().map(|s| s.to_string()).collect(),
+            min_keyword_matches: 2,
+        };
+        store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+    }
+
     #[test]
-    fn a_session_gets_only_the_context_rules_its_project_matches() {
+    fn behavioural_rules_are_not_spent_on_the_session_briefing() {
         let (_dir, store) = mk_store();
-        for (id, msg, kw) in [
-            ("dw-hit", "Run the migration dry-run first", vec!["migration", "dry-run"]),
-            ("dw-miss", "Name the slack channel in full", vec!["slack", "channel"]),
-        ] {
-            let mut rule = broadcast_intention(id, msg, Priority::High, chrono::Duration::hours(-1));
-            rule.trigger = Trigger::Context {
-                keywords: kw.iter().map(|s| s.to_string()).collect(),
-                min_keyword_matches: 2,
-            };
-            store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        add_context_rule(&store, "dw-1", "Run the migration dry-run first", &["migration", "dry-run"]);
+        let (out, shown, _) = build_session_start_response_for(&store, Some("/Users/me/Code/migration-dry-run"), Some("sess-A"), true);
+        assert!(shown.is_empty(), "the briefing's cap drops rules, so none may fire: {out}");
+    }
+
+    #[test]
+    fn a_prompt_gets_only_the_rules_it_is_about() {
+        let (_dir, store) = mk_store();
+        add_context_rule(&store, "dw-hit", "Run the migration dry-run first", &["migration", "dry-run"]);
+        add_context_rule(&store, "dw-miss", "Name the slack channel in full", &["slack", "channel"]);
+        // The live case: "alway" and "user" were stored as keywords, and neither
+        // may match the owner saying "always" or "users".
+        add_context_rule(&store, "dw-generic", "Distinguish user deferred work", &["alway", "user"]);
+
+        let (text, ids) = rules_for_prompt(&store, Some("sess-A"), &words(&["migrations", "dry-run", "please"]));
+        assert_eq!(ids, vec!["dw-hit".to_string()], "{text}");
+        assert!(text.contains("Run the migration dry-run first"), "{text}");
+
+        let (_, ids) = rules_for_prompt(&store, Some("sess-A"), &words(&["migration", "please"]));
+        assert!(ids.is_empty(), "one topic word is chance: {ids:?}");
+        let (_, ids) = rules_for_prompt(&store, Some("sess-A"), &words(&["always", "users"]));
+        assert!(ids.is_empty(), "a generic word is no match: {ids:?}");
+    }
+
+    #[test]
+    fn a_session_sees_a_rule_once_and_at_most_two_per_prompt() {
+        let (_dir, store) = mk_store();
+        for id in ["dw-1", "dw-2", "dw-3"] {
+            add_context_rule(&store, id, "Reconcile ledger exports", &["ledger", "export"]);
         }
-        let (out, shown, _) = build_session_start_response_for(&store, Some("/Users/me/Code/migration-dry-run"), Some("sess-A"), false);
-        assert_eq!(shown, vec!["dw-hit".to_string()], "{out}");
-        let (_, shown, _) = build_session_start_response_for(&store, Some("/Users/me/Code/other"), Some("sess-B"), false);
-        assert!(shown.is_empty(), "a project that matches no rule gets none: {shown:?}");
+        let said = words(&["ledger", "exports"]);
+        let (_, first) = rules_for_prompt(&store, Some("sess-A"), &said);
+        assert_eq!(first.len(), 2, "two places per prompt");
+        record_surfacings(&store, &first, Some("sess-A"));
+        let (_, second) = rules_for_prompt(&store, Some("sess-A"), &said);
+        assert_eq!(second, vec!["dw-3".to_string()], "the ones already shown do not repeat");
+        let (_, other) = rules_for_prompt(&store, Some("sess-B"), &said);
+        assert_eq!(other.len(), 2, "another session still gets them");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_rule_spends_a_fire_only_when_it_is_handed_over() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        add_context_rule(&store, "dw-1", "Reconcile ledger exports", &["ledger", "export"]);
+        let socket_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let client_path = socket_path.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(&client_path).await.unwrap();
+            let payload = r#"{"event":"prompt_rules","session_id":"sess-A","cwd":"/Users/me/Code/x","entrypoint":"cli","prompt_words":["ledger","exports"]}"#;
+            stream.write_all(payload.as_bytes()).await.unwrap();
+            stream.write_all(b"\n").await.unwrap();
+            let mut buf = String::new();
+            stream.read_to_string(&mut buf).await.unwrap();
+            buf
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        handle_hook_connection(stream, &store).await.unwrap();
+        let reply = client.await.unwrap();
+        assert!(reply.contains("Reconcile ledger exports"), "{reply}");
+        let fired: Vec<FiredRecord> = store.read_jsonl("intentions/fired.jsonl").unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].session_id, "sess-A");
     }
 
     #[test]

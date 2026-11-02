@@ -33,7 +33,7 @@ fn install(config: &Config) -> Result<()> {
     write_post_tool_use_hook(&hooks_dir, config)?;
     write_stop_hook(&hooks_dir, config)?;
     write_user_prompt_submit_hook(&hooks_dir, config)?;
-    write_user_prompt_hint_hook(&hooks_dir)?;
+    write_user_prompt_hint_hook(&hooks_dir, &config.data_dir().join("daemon.sock"))?;
     write_pre_tool_use_hook(&hooks_dir)?;
 
     // Update Claude Code settings.json
@@ -505,9 +505,12 @@ touch "{activity}" 2>/dev/null || true
 /// Runs SYNCHRONOUSLY (Claude Code drops the output of async hooks) and
 /// prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit",
 /// "additionalContext":...}}`, the only shape the harness reads. File-only,
-/// no daemon dependency. Gates: child guard, mute file, project, regex,
+/// no daemon dependency for hints. Gates: child guard, mute file, project, regex,
 /// once per hint per session, one per "continue" family, cap of 2.
-fn write_user_prompt_hint_hook(dir: &std::path::Path) -> Result<()> {
+///
+/// It also asks the daemon which behavioural rules this prompt is about. A down
+/// or slow daemon costs the prompt nothing: the rules are simply left out.
+fn write_user_prompt_hint_hook(dir: &std::path::Path, socket: &Path) -> Result<()> {
     let script = r#"#!/bin/bash
 # i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
 # not feed the surface (it was downvoting its own intentions, 2026-10-06).
@@ -533,21 +536,54 @@ try:
 except Exception:
     sys.exit(0)
 prompt = data.get("prompt", "") or ""
-ipath = _p.expanduser("~/.claude/i-dream/interventions.json")
-if not isinstance(prompt, str) or not prompt or not _p.exists(ipath):
+if not isinstance(prompt, str) or not prompt:
     sys.exit(0)
 # Machine-written prompts (task notifications, seat briefs) are not the owner
 # talking, whatever the entrypoint says.
 if prompt.lstrip().startswith(("<task-notification>", "You are", "You enforce")):
     sys.exit(0)
-try:
-    items = json.load(open(ipath))
-except Exception:
-    sys.exit(0)
 
 cwd = data.get("cwd", "") or ""
 proj = _p.basename(cwd.rstrip("/")) if cwd else ""
 sid = data.get("session_id", "") or ""
+
+def _rules():
+    # The daemon answers with the rules this prompt is about, and spends their
+    # fires only after writing them. Give up quickly: a prompt must never wait.
+    import socket
+    words = sorted({w.lower() for w in re.findall(r"[A-Za-z][A-Za-z-]{3,}", prompt[:4000])})[:400]
+    try:
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(1.0)
+        s.connect("__IDREAM_SOCKET__")
+        s.sendall((json.dumps({"event": "prompt_rules", "session_id": sid, "cwd": cwd,
+            "entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT") or None,
+            "prompt_words": words}) + "\n").encode())
+        reply = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            reply += chunk
+        s.close()
+        return [l for l in reply.decode("utf-8", "replace").splitlines() if l.strip()]
+    except Exception:
+        return []
+
+def _finish(hints):
+    # Hints and rules travel in one block: the harness reads one JSON object.
+    lines = hints + _rules()
+    if lines:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "\n".join(lines)}}))
+    sys.exit(0)
+
+ipath = _p.expanduser("~/.claude/i-dream/interventions.json")
+try:
+    items = json.load(open(ipath))
+except Exception:
+    _finish([])
 
 # ReDoS guard: compiler-authored patterns get a hard 2s budget for the whole
 # match loop and a capped subject. A catastrophic pattern aborts to a silent
@@ -580,11 +616,11 @@ try:
             continue
         (live if it.get("state") == "live" else shadow).append(it)
 except TimeoutError:
-    sys.exit(0)
+    _finish([])
 _sig.alarm(0)
 
 if not live and not shadow:
-    sys.exit(0)
+    _finish([])
 # Every match is ledgered (display caps never gate telemetry).
 try:
     with open(_p.expanduser("~/.claude/i-dream/would-fire.jsonl"), "a") as f:
@@ -632,17 +668,13 @@ for it in live:
     shown.append(it)
     if len(shown) == 2:
         break
-if shown:
-    lines = ["[i-dream:%s] %s" % (str(it.get("id", ""))[:8], it.get("body", ""))
-             for it in shown]
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "UserPromptSubmit",
-        "additionalContext": "\n".join(lines)}}))
+_finish(["[i-dream:%s] %s" % (str(it.get("id", ""))[:8], it.get("body", ""))
+         for it in shown])
 PYEOF
 exit 0
 "#;
     let path = dir.join("user-prompt-hint.sh");
-    std::fs::write(&path, script)?;
+    std::fs::write(&path, script.replace("__IDREAM_SOCKET__", &socket.display().to_string()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1000,7 +1032,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
-        write_user_prompt_hint_hook(&hooks).unwrap();
+        write_user_prompt_hint_hook(&hooks, Path::new("/nonexistent.sock")).unwrap();
         let home = dir.path().join("home");
         intervention_fixture(&home);
         let script = hooks.join("user-prompt-hint.sh");
@@ -1032,7 +1064,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
-        write_user_prompt_hint_hook(&hooks).unwrap();
+        write_user_prompt_hint_hook(&hooks, Path::new("/nonexistent.sock")).unwrap();
         let home = dir.path().join("home");
         intervention_fixture(&home);
         let script = hooks.join("user-prompt-hint.sh");
@@ -1083,7 +1115,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hooks = dir.path().join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
-        write_user_prompt_hint_hook(&hooks).unwrap();
+        write_user_prompt_hint_hook(&hooks, Path::new("/nonexistent.sock")).unwrap();
         let home = dir.path().join("home");
         let idir = home.join(".claude/i-dream");
         std::fs::create_dir_all(&idir).unwrap();
@@ -1119,9 +1151,54 @@ mod tests {
         assert_eq!(entry["command"], "bash /h/user-prompt-hint.sh");
         assert!(entry.get("async").is_none(), "must not be async: {entry}");
         let script_dir = tempfile::tempdir().unwrap();
-        write_user_prompt_hint_hook(script_dir.path()).unwrap();
+        write_user_prompt_hint_hook(script_dir.path(), Path::new("/nonexistent.sock")).unwrap();
         let script = std::fs::read_to_string(script_dir.path().join("user-prompt-hint.sh")).unwrap();
         assert!(script.contains("hookEventName\": \"UserPromptSubmit"));
+    }
+
+    #[test]
+    fn the_prompt_hook_puts_the_daemons_rules_into_context() {
+        use std::io::{BufRead, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        write_user_prompt_hint_hook(dir.path(), &sock).unwrap();
+        let daemon = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(conn.try_clone().unwrap()).read_line(&mut line).unwrap();
+            conn.write_all(b"[i-dream rule] Reconcile ledger exports").unwrap();
+            line
+        });
+        // No interventions file in this home: hints are absent, rules still arrive.
+        let home = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new("bash")
+            .arg(dir.path().join("user-prompt-hint.sh"))
+            .env("HOME", home.path())
+            .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+            .env_remove("I_DREAM_CHILD")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"prompt":"reconcile the ledger exports","session_id":"s","cwd":"/x"}"#)
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let asked: serde_json::Value = serde_json::from_str(daemon.join().unwrap().trim()).unwrap();
+        assert_eq!(asked["event"], "prompt_rules");
+        assert!(asked["prompt_words"].as_array().unwrap().iter().any(|w| w == "ledger"), "{asked}");
+        let shown: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert!(
+            shown["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("Reconcile ledger exports"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -1289,7 +1366,7 @@ mod tests {
         write_session_start_hook(dir.path(), &config).unwrap();
         write_post_tool_use_hook(dir.path(), &config).unwrap();
         write_user_prompt_submit_hook(dir.path(), &config).unwrap();
-        write_user_prompt_hint_hook(dir.path()).unwrap();
+        write_user_prompt_hint_hook(dir.path(), Path::new("/nonexistent.sock")).unwrap();
         write_pre_tool_use_hook(dir.path()).unwrap();
         write_stop_hook(dir.path(), &config).unwrap();
         for name in ["session-start.sh", "post-tool-use.sh", "user-prompt-submit.sh", "user-prompt-hint.sh", "pre-tool-use.sh", "stop.sh"] {
