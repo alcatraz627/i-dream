@@ -345,7 +345,7 @@ struct ControlsTab: View {
     private func scheduleDetail(_ sc: ConfigDoc.Schedule) -> String {
         let when = humanSchedule(sc.fire_at)
         let what = sc.name.hasSuffix("daily")
-            ? "joins every signal stream without a model and runs the extractors"
+            ? "joins every signal stream and runs the paid pattern extractors"
             : "names this week's strongest findings and puts them on a page for you"
         if !sc.registered { return "Not found in gcc-schedule." }
         return "\(when) · \(what)\(s.isOn(sc, jobs: jobs) ? "" : " · paused")"
@@ -359,7 +359,13 @@ struct ControlsTab: View {
         let d7 = Int(lim?["output_tokens_7d"]?.number ?? 0)
         let pct = lim?["warn_pct"]?.number ?? 0.8
         let on = h5 > 0 || d7 > 0
+        let inactive = Self.accountGateExists
         return ControlGroupCard(icon: "gauge.with.dots.needle.67percent", title: "Usage guard") {
+            if inactive {
+                Text("This guard is inactive. Your account-wide usage gate is in charge of holding automatic cycles, and these limits are only used when that gate script is missing. The controls stay here so you can see what they would be.")
+                    .font(F.meta).foregroundStyle(P.fg2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ControlRow(title: "Skip cycles near my Claude usage limit",
                        detail: "Counts output tokens in your recent transcripts and holds automatic cycles once either window passes the warning level. "
                            + "Turning it on starts at 40,000 per 5 hours and 500,000 per 7 days, the suggested Claude Pro limits; set a window to 0 to leave it unchecked.",
@@ -367,20 +373,31 @@ struct ControlsTab: View {
                 Toggle("", isOn: Binding(get: { on }, set: { new in
                     s.set("limits.output_tokens_5h", new ? "40000" : "0")
                     s.set("limits.output_tokens_7d", new ? "500000" : "0")
-                })).toggleStyle(.switch).labelsHidden()
+                })).toggleStyle(.switch).labelsHidden().disabled(inactive)
             }
             if on {
-                NumberRow(title: "5-hour window", unit: "output tokens", value: h5, revision: s.revision) { s.set("limits.output_tokens_5h", String($0)) }
-                NumberRow(title: "7-day window", unit: "output tokens", value: d7, revision: s.revision) { s.set("limits.output_tokens_7d", String($0)) }
-                ControlRow(title: "Warn at", detail: "Share of either limit at which cycles hold") {
-                    Picker("", selection: Binding(get: { pct }, set: { s.set("limits.warn_pct", String($0)) })) {
-                        ForEach([0.6, 0.7, 0.8, 0.9, 0.95], id: \.self) { Text("\(Int($0 * 100))%").tag($0) }
-                        if ![0.6, 0.7, 0.8, 0.9, 0.95].contains(pct) { Text("\(Int(pct * 100))%").tag(pct) }
+                Group {
+                    NumberRow(title: "5-hour window", unit: "output tokens", value: h5, revision: s.revision) { s.set("limits.output_tokens_5h", String($0)) }
+                    NumberRow(title: "7-day window", unit: "output tokens", value: d7, revision: s.revision) { s.set("limits.output_tokens_7d", String($0)) }
+                    ControlRow(title: "Warn at", detail: "Share of either limit at which cycles hold") {
+                        Picker("", selection: Binding(get: { pct }, set: { s.set("limits.warn_pct", String($0)) })) {
+                            ForEach([0.6, 0.7, 0.8, 0.9, 0.95], id: \.self) { Text("\(Int($0 * 100))%").tag($0) }
+                            if ![0.6, 0.7, 0.8, 0.9, 0.95].contains(pct) { Text("\(Int(pct * 100))%").tag(pct) }
+                        }
+                        .labelsHidden().frame(width: 90)
                     }
-                    .labelsHidden().frame(width: 90)
                 }
+                .disabled(inactive)
             }
         }
+    }
+
+    /// True while the account-wide usage gate script exists. The daemon only
+    /// applies the local token limits when it is missing (daemon.rs, the idle
+    /// consolidation check), so the guard is inactive in the meantime.
+    static var accountGateExists: Bool {
+        FileManager.default.fileExists(atPath: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/scripts/cron/usage-gate.sh").path)
     }
 
     // Modules

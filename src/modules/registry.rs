@@ -976,6 +976,19 @@ pub const RETENTION: &[RetentionRule] = &[
         store: ".claude/subconscious/metacog/_archived",
         policy: RetentionPolicy::MaxBytes(50 * 1024 * 1024),
     },
+    // One chain file per analysed session, 1,265 of them (140 MB) before this
+    // rule. The weekly analysis samples across sessions and reads whatever is
+    // left in the top folder, so the newest few hundred are plenty. A session
+    // already analysed is remembered in introspection/processed.json, not by
+    // its chain file, so an archived chain is never collected a second time.
+    RetentionRule {
+        store: ".claude/subconscious/introspection/chains",
+        policy: RetentionPolicy::KeepNewest(300),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/introspection/chains/_archived",
+        policy: RetentionPolicy::MaxBytes(50 * 1024 * 1024),
+    },
     // Live logs keep a fresh mtime; only logs a renamed/retired job stopped
     // writing get archived (launchd recreates a StandardErrorPath on demand,
     // so archiving a quiet-but-live path is harmless).
@@ -1013,7 +1026,9 @@ pub fn run_retention() -> Vec<ReapReport> {
 /// Apply every retention rule against a filesystem rooted at `home`.
 pub fn run_retention_at(home: &Path) -> Vec<ReapReport> {
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    RETENTION
+    let cut = truncate_open_log(&home.join(LAUNCHD_STDERR), OPEN_LOG_TRIGGER_BYTES, OPEN_LOG_KEEP_BYTES);
+    let stderr_report = ReapReport { store: LAUNCHD_STDERR, archived: usize::from(cut > 0) };
+    let mut reports: Vec<ReapReport> = RETENTION
         .iter()
         .map(|r| {
             let target = home.join(r.store);
@@ -1055,7 +1070,71 @@ pub fn run_retention_at(home: &Path) -> Vec<ReapReport> {
                 archived,
             }
         })
-        .collect()
+        .collect();
+    reports.push(stderr_report);
+    reports
+}
+
+/// A log that a supervisor holds open (launchd's stderr file) is cut once it
+/// passes this size, and keeps this many of its newest bytes.
+const OPEN_LOG_TRIGGER_BYTES: u64 = 15 * 1024 * 1024;
+const OPEN_LOG_KEEP_BYTES: u64 = 10 * 1024 * 1024;
+
+/// The daemon's stderr file as launchd opened it, relative to `$HOME`.
+const LAUNCHD_STDERR: &str = ".claude/subconscious/logs/launchd.stderr.log";
+
+/// Cut a log that another process holds open down to its newest `keep` bytes,
+/// without replacing the file.
+///
+/// launchd keeps its stderr file open for the daemon's life, so renaming or
+/// recreating it would leave the daemon writing into an unlinked inode. The
+/// newest lines are copied to the front of the same file and the file is then
+/// shortened, so the inode (and the holder's handle) stays the same. Returns
+/// the bytes dropped, 0 when the file is under `trigger` or cannot be read.
+///
+/// The holder must have opened the file in append mode, as launchd does for
+/// log paths, or its next write lands past the new end and leaves a hole.
+/// Bytes appended while the tail is being copied are carried over.
+fn truncate_open_log(path: &Path, trigger: u64, keep: u64) -> u64 {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let Ok(mut f) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
+        return 0;
+    };
+    let Ok(len) = f.metadata().map(|m| m.len()) else { return 0 };
+    if len <= trigger || keep >= len {
+        return 0;
+    }
+    let mut tail = Vec::with_capacity(keep as usize);
+    if f.seek(SeekFrom::Start(len - keep)).is_err() || (&mut f).take(keep).read_to_end(&mut tail).is_err() {
+        return 0;
+    }
+    // Start on a line boundary so the log never opens with half a line.
+    if let Some(nl) = tail.iter().position(|&b| b == b'\n') {
+        tail.drain(..=nl);
+    }
+    let write_tail = |f: &mut std::fs::File, tail: &[u8]| -> std::io::Result<u64> {
+        f.seek(SeekFrom::Start(0))?;
+        f.write_all(tail)?;
+        // Anything the holder appended while we were copying sits past `len`.
+        let now = f.metadata()?.len();
+        let mut extra = Vec::new();
+        if now > len {
+            f.seek(SeekFrom::Start(len))?;
+            (&mut *f).take(now - len).read_to_end(&mut extra)?;
+            f.seek(SeekFrom::Start(tail.len() as u64))?;
+            f.write_all(&extra)?;
+        }
+        f.set_len(tail.len() as u64 + extra.len() as u64)?;
+        f.sync_all()?;
+        Ok(len - tail.len() as u64)
+    };
+    match write_tail(&mut f, &tail) {
+        Ok(dropped) => dropped,
+        Err(e) => {
+            warn!("retention: could not cut {}: {e}", path.display());
+            0
+        }
+    }
 }
 
 /// Move one overflow entry into `<root>/_archived/<date_bucket>/`.
@@ -1382,6 +1461,80 @@ mod lane_health_tests {
         assert_eq!(reap_jsonl_max_lines(&f, 6, "d"), 0);
     }
 
+    #[test]
+    fn open_log_is_cut_in_place_and_the_holder_keeps_writing_to_it() {
+        use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("launchd.stderr.log");
+        // The holder, standing in for launchd: opened once, append mode, kept open.
+        let mut holder = std::fs::OpenOptions::new().create(true).append(true).open(&p).unwrap();
+        for i in 0..2_000 {
+            writeln!(holder, "line-{i:05} {}", "x".repeat(40)).unwrap();
+        }
+        let ino = std::fs::metadata(&p).unwrap().ino();
+        let before = std::fs::metadata(&p).unwrap().len();
+
+        let dropped = truncate_open_log(&p, 20_000, 5_000);
+        assert!(dropped > 0 && before - dropped <= 5_000, "dropped {dropped} of {before}");
+        assert_eq!(std::fs::metadata(&p).unwrap().ino(), ino, "same inode, not a rename");
+
+        // The holder's very next write must land in the cut file.
+        writeln!(holder, "after-cut").unwrap();
+        holder.flush().unwrap();
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert!(body.ends_with("after-cut\n"), "append reached the live file");
+        assert!(body.contains("line-01999"), "newest lines survive");
+        assert!(!body.contains("line-00000"), "oldest lines are gone");
+        assert!(body.starts_with("line-"), "file opens on a whole line");
+        assert!(body.len() as u64 <= 5_000 + 10, "file is back under the keep size");
+    }
+
+    #[test]
+    fn open_log_under_the_trigger_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("launchd.stderr.log");
+        std::fs::write(&p, "small\n").unwrap();
+        assert_eq!(truncate_open_log(&p, 1_000, 100), 0);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "small\n");
+        assert_eq!(truncate_open_log(&dir.path().join("absent.log"), 1, 1), 0);
+    }
+
+    #[test]
+    fn chains_keep_the_newest_and_the_archive_is_capped_without_touching_processed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let chains = home.join(".claude/subconscious/introspection/chains");
+        std::fs::create_dir_all(&chains).unwrap();
+        for i in 0..305 {
+            std::fs::write(chains.join(format!("sess-{i:04}.jsonl")), "{}").unwrap();
+        }
+        let processed = home.join(".claude/subconscious/introspection/processed.json");
+        std::fs::write(&processed, r#"{"sessions":["sess-0000"]}"#).unwrap();
+
+        let reports = run_retention_at(home);
+        let r = reports.iter().find(|r| r.store.ends_with("introspection/chains")).unwrap();
+        assert_eq!(r.archived, 5, "305 files keep 300");
+        let top = std::fs::read_dir(&chains)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+            .count();
+        assert_eq!(top, 300, "the module counts only top-level jsonl files");
+        let day = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(std::fs::read_dir(chains.join("_archived").join(day)).unwrap().count(), 5);
+        assert_eq!(
+            std::fs::read_to_string(&processed).unwrap(),
+            r#"{"sessions":["sess-0000"]}"#,
+            "the analysed-sessions list is untouched, so archived chains are not re-collected"
+        );
+        assert!(
+            RETENTION.iter().any(|r| r.store.ends_with("introspection/chains/_archived")
+                && matches!(r.policy, RetentionPolicy::MaxBytes(_))),
+            "the archive itself is capped"
+        );
+    }
+
     // Live one-shot: apply retention to the REAL tree. Archive-only moves —
     // reversible, the same work one daemon cycle does. Ignored by default.
     // Run: cargo test run_retention_live -- --ignored --nocapture
@@ -1429,7 +1582,8 @@ mod lane_health_tests {
     fn retention_on_empty_home_is_a_quiet_noop() {
         let dir = tempfile::tempdir().unwrap();
         let reports = run_retention_at(dir.path());
-        assert_eq!(reports.len(), RETENTION.len());
+        // One report per rule, plus the launchd stderr cut.
+        assert_eq!(reports.len(), RETENTION.len() + 1);
         assert!(reports.iter().all(|r| r.archived == 0));
     }
 

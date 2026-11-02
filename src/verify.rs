@@ -203,15 +203,68 @@ pub fn queue_check(depth: usize, oldest_hours: Option<f64>) -> Check {
     )
 }
 
-/// Do the status counter and the delivery rows tell the same story? A zero
-/// fired count beside delivered items means one of them reads its data wrong.
-pub fn delivery_agrees_check(fired_7d: usize, delivered: usize) -> Check {
-    let agree = (fired_7d == 0) == (delivered == 0);
-    Check::new(
-        "delivery-agrees",
-        if agree { Verdict::Pass } else { Verdict::Fail },
-        format!("status counts {fired_7d} fired; transcripts show {delivered} live item(s) delivered"),
-    )
+/// Share of the items the hooks matched that also show up as delivered in
+/// session transcripts, below which the two sides are called out of step.
+const DELIVERY_AGREE_MIN_SHARE: f64 = 0.5;
+
+/// Do the hooks' ledger and the session transcripts tell the same story?
+///
+/// The two sides count different things: the ledger counts (item, session)
+/// matches, the transcripts show which items arrived at all. So the row
+/// compares items with items: of the distinct live items the ledger matched in
+/// the window (`fired_ids`, from `fired_pairs` matches), how many appear as
+/// delivered (`delivered_ids`). Both sides empty is UNKNOWN, since nothing was
+/// there to compare, and one side empty beside a busy other side is a FAIL.
+/// Ids are compared by their 8-hex prefix.
+pub fn delivery_agrees_check(
+    fired_pairs: usize,
+    fired_ids: &HashSet<String>,
+    delivered_ids: &HashSet<String>,
+) -> Check {
+    let prefix = |s: &String| s.chars().take(8).collect::<String>();
+    let fired: HashSet<String> = fired_ids.iter().map(prefix).collect();
+    let delivered: HashSet<String> = delivered_ids.iter().map(prefix).collect();
+    let detail = |reached: usize| {
+        format!(
+            "ledger matched {} item(s) in {fired_pairs} item-session match(es); transcripts show {} item(s) delivered; {reached} item(s) on both sides",
+            fired.len(),
+            delivered.len()
+        )
+    };
+    if fired.is_empty() && delivered.is_empty() {
+        return Check::new("delivery-agrees", Verdict::Unknown, "no item matched and none delivered in the window");
+    }
+    let reached = fired.intersection(&delivered).count();
+    let share = if fired.is_empty() { 0.0 } else { reached as f64 / fired.len() as f64 };
+    let verdict = if share >= DELIVERY_AGREE_MIN_SHARE { Verdict::Pass } else { Verdict::Fail };
+    Check::new("delivery-agrees", verdict, detail(reached))
+}
+
+/// The distinct live items (by id) and the (item, session) pair count the
+/// hooks ledgered since `cutoff`. Mirrors the status counter's reading of
+/// `would-fire.jsonl`, but keeps the ids so the row can compare items.
+pub fn fired_items_since(ledger: &str, cutoff: DateTime<Utc>) -> (usize, HashSet<String>) {
+    let mut pairs: HashSet<(String, String)> = HashSet::new();
+    for v in ledger.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        if v.get("state").and_then(|s| s.as_str()) != Some("live") {
+            continue;
+        }
+        let at = match v.get("ts").and_then(|t| t.as_i64()) {
+            Some(secs) => DateTime::from_timestamp(secs, 0),
+            None => v
+                .get("ts")
+                .and_then(|t| t.as_str())
+                .and_then(|t| t.parse::<DateTime<Utc>>().ok()),
+        };
+        if !at.is_some_and(|t| t > cutoff) {
+            continue;
+        }
+        let Some(id) = v.get("id").and_then(|i| i.as_str()) else { continue };
+        let sid = v.get("sid").and_then(|s| s.as_str()).unwrap_or("");
+        pairs.insert((id.to_string(), sid.to_string()));
+    }
+    let ids = pairs.iter().map(|(i, _)| i.clone()).collect();
+    (pairs.len(), ids)
 }
 
 /// The metacog calls are healthy now: none of the latest few sent an empty
@@ -452,12 +505,14 @@ pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
             checks.extend(delivery_checks(&items, delivered.as_ref()));
             let would_fire = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap_or_default();
             if let Some(d) = &delivered {
-                let reached = items
+                let live_delivered: HashSet<String> = items
                     .iter()
-                    .filter(|i| i.state == "live" && d.contains(&i.id.chars().take(8).collect::<String>()))
-                    .count();
-                let fired = crate::status::count_fired_since(&would_fire, now - Duration::days(DELIVERY_WINDOW_DAYS));
-                checks.push(delivery_agrees_check(fired, reached));
+                    .filter(|i| i.state == "live")
+                    .map(|i| i.id.chars().take(8).collect::<String>())
+                    .filter(|id| d.contains(id))
+                    .collect();
+                let (pairs, fired_ids) = fired_items_since(&would_fire, now - Duration::days(DELIVERY_WINDOW_DAYS));
+                checks.push(delivery_agrees_check(pairs, &fired_ids, &live_delivered));
             }
             let window = now - Duration::days(14);
             let shown = crate::status::count_fired_since(&would_fire, window);
@@ -554,11 +609,42 @@ mod tests {
     use super::*;
     use crate::consolidation::assay::AssayPanel;
 
+    fn ids(prefix: &str, n: usize) -> HashSet<String> {
+        (0..n).map(|i| format!("{i:04x}{prefix}0000aaaa")).collect()
+    }
+
     #[test]
     fn delivery_counters_must_agree_across_surfaces() {
-        assert_eq!(delivery_agrees_check(0, 15).verdict, Verdict::Fail, "status says none fired, verify says delivered");
-        assert_eq!(delivery_agrees_check(12, 15).verdict, Verdict::Pass);
-        assert_eq!(delivery_agrees_check(0, 0).verdict, Verdict::Pass);
+        let none = HashSet::new();
+        assert_eq!(delivery_agrees_check(0, &none, &ids("d", 15)).verdict, Verdict::Fail, "ledger empty, transcripts show items");
+        assert_eq!(delivery_agrees_check(12, &ids("d", 12), &ids("d", 15)).verdict, Verdict::Pass);
+        assert_eq!(delivery_agrees_check(0, &none, &none).verdict, Verdict::Unknown, "nothing to compare");
+    }
+
+    #[test]
+    fn real_379_fired_against_31_delivered_is_not_a_pass() {
+        // 379 item-session matches over 100 items, 31 delivered, only 10 on both sides.
+        let fired = ids("f", 100);
+        let mut delivered = ids("x", 21);
+        delivered.extend(fired.iter().take(10).cloned());
+        let c = delivery_agrees_check(379, &fired, &delivered);
+        assert_eq!(c.verdict, Verdict::Fail);
+        assert!(c.detail.contains("379 item-session"), "detail names the unit: {}", c.detail);
+    }
+
+    #[test]
+    fn fired_items_counts_pairs_and_ids_in_window_only() {
+        let now: DateTime<Utc> = "2026-11-02T00:00:00Z".parse().unwrap();
+        let t = now.timestamp();
+        let ledger = format!(
+            "{{\"id\":\"aaaaaaaa11\",\"sid\":\"s1\",\"state\":\"live\",\"ts\":{t}}}\n\
+             {{\"id\":\"aaaaaaaa11\",\"sid\":\"s2\",\"state\":\"live\",\"ts\":{t}}}\n\
+             {{\"id\":\"bbbbbbbb22\",\"sid\":\"s1\",\"state\":\"shadow\",\"ts\":{t}}}\n\
+             {{\"id\":\"cccccccc33\",\"sid\":\"s1\",\"state\":\"live\",\"ts\":1}}\n"
+        );
+        let (pairs, ids) = fired_items_since(&ledger, now - Duration::days(7));
+        assert_eq!(pairs, 2);
+        assert_eq!(ids.len(), 1);
     }
 
     #[test]

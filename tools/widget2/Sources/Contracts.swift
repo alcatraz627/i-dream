@@ -35,6 +35,8 @@ struct StatusDoc: Decodable {
         var next_fire: String?
         var held_until: String?
         var delayable: Bool?
+        /// False when the gcc-schedule registry has the job paused; absent in older reports.
+        var enabled: Bool?
         var label: String
         var desc: String?
         var schedule: String

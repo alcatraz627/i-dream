@@ -41,6 +41,10 @@
 
 ---
 
+## Current status
+
+Since the 2.0 rebuild, the part of i-dream you read is the **reader** ([`docs/32-reader-spec.md`](docs/32-reader-spec.md)). Once a day (the recon) it joins every local signal stream without a model, and a weekly run names the strongest clusters on one decision page. The daily recon also runs the paid dreaming, metacognition and introspection extractors, behind the usage gate, so it spends tokens. The menu-bar widget is `tools/widget2` (see [`docs/36-reading-the-widget.md`](docs/36-reading-the-widget.md)). Behavioural rules reach Claude with the prompt they are about (at most two per prompt, once per session), not at session start. The plan is in [`docs/29-i-dream-2.0-plan.md`](docs/29-i-dream-2.0-plan.md). Sections below that describe idle-triggered cycles, dream-pass, digest, board, audit and cron are the older design and are marked where they appear.
+
 <details>
 <summary>Riddle answer</summary>
 
@@ -193,7 +197,7 @@ i-dream models five aspects of human subconsciousness as background processes:
 | **Intuition** | Gut feelings / somatic markers | Surfaces "feelings" about approaches based on past outcomes | Session start |
 | **Prospective** | "Remember to…" intentions | Fires condition-action reminders when context matches | Session start |
 
-After 4+ hours of inactivity the daemon runs a consolidation cycle — calling Claude (via your local CLI subscription or the Anthropic API directly) to analyze accumulated session data within a configurable token budget.
+The "When it runs" column describes the original idle-triggered design. The dreaming, metacognition and introspection extractors now run inside the reader's daily recon, once a day and usage-gated, instead of in the daemon's idle cycle. They call Claude (via your local CLI subscription or the Anthropic API directly) within a configurable token budget.
 
 ### Dream-domain plugins + the ingestion contract
 
@@ -215,6 +219,8 @@ hook the agent keeps bypassing correlating with the very mistake it was meant to
 prevent.
 
 ## Consolidation pipeline
+
+> **Older design.** The diagram below shows the idle-triggered cycle. The extractors it names now run in the reader's daily recon ([`docs/32-reader-spec.md`](docs/32-reader-spec.md)).
 
 ```
 Idle 4+ hours
@@ -255,9 +261,11 @@ Idle 4+ hours
 
 Each phase has a hard timeout. Budget cascades — if dreaming uses less than 50%, the remainder rolls forward.
 
-### Three layers, self-sustaining
+### Three layers, self-sustaining (retired)
 
-Across domains, consolidation runs in three layers (full design:
+> **Retired 2026-09-18.** `dream-pass`, `digest`, `board`, `audit run`, `cron` and `briefing` no longer exist as commands; `i-dream --help` does not list them. The daily recon and weekly reader run replace them. The text below is the historical design.
+
+Across domains, consolidation ran in three layers (full design:
 [`docs/16-consolidation-build.md`](docs/16-consolidation-build.md)):
 
 - **L1 — per-domain dream pass** (`i-dream dream-pass`): grounds patterns in
@@ -321,34 +329,33 @@ Daemon
   dream [phase]             Manually trigger a native cycle (sws|rem|wake|all)
   inspect <module>          Inspect a native module's state
 
-Dream-domain plugins (docs/14 + docs/20)
-  domain list               List registered domains (native + external)
-  dream-pass                LLM dream pass over every domain with fresh delta;
-                            per-domain insights + cross-domain associations
-  dream-pass --domain NAME --dry-run
-                            Show one domain's selected batch and prompt size
+Reader (docs/32)
+  reader                    Latest findings; --json is the contract the widget reads
+  reader recon              Join every signal stream now, then run the paid extractors
+  reader run --dry-run      Name this week's clusters without a page
+  jobs                      Run a scheduled job early, or hold it and run it later
+  transcripts               Count transcripts by who wrote them
+
+Domains and the ingestion contract (docs/14 + docs/20)
+  domain {list,enable,disable}   Registered domains and what the reader read from each
   contract [--install]      Print the ingestion contract; --install writes
                             ~/.claude/i-dream/CONTRACT.md (point other agents here)
-
-Consolidation pipeline (docs/16)
-  digest [--day YMD]        Render the L2 daily digest (→ daily/<day>.md)
-  board                     One-screen 2×2 snapshot (Today/Week/Sources/fitness)
-  thread {add,list,resolve,reopen}   Open investigation threads (auto-decay 14d)
-  audit run [--non-interactive]      L3 weekly audit → GCC-edit proposals
-  cron {install,uninstall,status}    Schedule dream-pass + digest + weekly audit
-  briefing                  Weekly briefing from the past 7 days
+  index / views / verify    Searchable list, derived views, outcome check (docs/35)
 
 Capture + analysis
-  pin                       Pin a session insight for the next dream cycle
-  graph-metrics             Patterns-graph centrality / hubs
-  brief-projects            Per-project SessionStart briefs
-  snapshot-diff / drift / auto-intentions / prune[-patterns]
+  pin                       Pin a session insight (recorded; no dream pass reads pins now)
+  thread {add,list,resolve,reopen}   Open investigation threads (auto-decay 14d)
+  compile / promotions      Lesson compiler and the shadow/candidate/live intervention surface
+  reflect / curves          Recurrence trends from the atone log
+  graph-metrics / brief-projects / snapshot-diff / drift / auto-intentions / prune[-patterns]
 
 Integration
   hooks {install,uninstall,status}   Claude Code hook wiring
   widget                    Manage the menu-bar widget (i-dream-bar)
   dashboard                 Generate an HTML dashboard snapshot
-  config                    Print current config as TOML
+  config [--json|set]       Show config; the settings contract the widget reads
+
+Retired (2026-09-18): dream-pass, digest, board, audit run, cron, briefing.
 
 Options
   -c, --config <path>   Config file (default: ~/.claude/subconscious/config.toml)
@@ -357,11 +364,6 @@ Options
 
 Run `i-dream <command> --help` for full per-command detail.
 
-Each pass selects at most 20 events per domain. The cursor advances through
-that selected batch only after the model returns a valid `DreamOutput` with
-real evidence IDs. A failed pass leaves the batch pending; its model tokens
-still appear in the receipt. Use `--domain NAME` to run one domain without
-calling the others.
 
 ## macOS menu-bar widget
 
@@ -573,14 +575,12 @@ i-dream/
 │   ├── widget.rs            CLI subcommands for managing the menubar widget
 │   ├── domain.rs            `i-dream domain` — list/enable/disable registered domains
 │   ├── idream_runtime.rs    Runtime enable/disable state (~/.claude/i-dream/_runtime.json)
-│   ├── audit.rs             L3 weekly audit (proposals + approval + apply)
 │   ├── pin.rs               `i-dream pin` — session-pinned insights
 │   ├── thread.rs            `i-dream thread` — open-thread lifecycle (auto-decay)
-│   ├── board.rs             `i-dream board` — static 2×2 dashboard
-│   ├── cron.rs              launchd job registry (dream-pass + digest + audit)
-│   ├── consolidation/
-│   │   ├── dream_pass.rs    Cross-domain dream-pass orchestrator (L1)
-│   │   └── l2_digest.rs     Deterministic daily digest (L2)
+│   ├── reader/              The reader: recon join, naming, decision page (docs/32)
+│   ├── jobs.rs              `i-dream jobs` — scheduled job early-run and hold
+│   ├── verify.rs            `i-dream verify` — outcome contract (docs/35)
+│   ├── consolidation/       Assay, forgetting, reinforcement, views, yield SLO
 │   └── modules/
 │       ├── mod.rs           Module + DreamDomain traits, DreamOutput, NativeAdapter
 │       ├── registry.rs      Domain registry + manifest discovery
@@ -591,8 +591,7 @@ i-dream/
 │       ├── introspection.rs Reasoning chain analysis (weekly)
 │       ├── prospective.rs   Condition-action intentions + trigger matching
 │       ├── project_briefs.rs Per-project SessionStart briefs (D6)
-│       ├── weekly_briefing.rs Sunday morning briefing module (D4)
-│       ├── insight_digest.rs  Promoted insight summarization
+│       ├── grounding.rs     Truth-decay guards for dream-derived text
 │       └── user_settings.rs   User preference persistence
 ├── tools/
 │   ├── widget2/

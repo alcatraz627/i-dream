@@ -222,20 +222,14 @@ Fixed with F1. Rule keywords describe behaviour and the gate compared them with 
 
 Whether a delivered rule changes behaviour is still unmeasured.
 
-### F3. Two controls state things that are not so
-A paused job reads "on" after a widget restart, because status carries no `enabled` field. The usage guard shows on but only applies when the account gate script is missing.
+### F3. Two controls stated things that were not so
+Fixed. Status rows now carry `enabled`, so a paused job reads as paused after a restart. The usage guard says it is inactive while the account gate is in charge, and its controls are disabled.
 
-Fix: add `enabled` to the status rows, and remove the guard's controls or make them real.
+### F4. The daily Run early spent without asking
+Fixed. It now asks first and states its measured 47k to 67k tokens, and the row reads "Daily recon".
 
-### F4. The daily Run early spends without asking
-It costs 47k to 67k tokens on one click, and the row still says "Daily dreaming".
-
-Fix: give it the confirm panel and rename the row.
-
-### F5. Green checks that say little
-`delivery-agrees` passes 379 against 31, and the header shows the 379 as "nudges fired". D3 and D5 are unbuilt and were in no plan.
-
-Fix: compare the two counts properly, relabel the header, and build D3 and D5.
+### F5. Green checks that said little
+Fixed. `delivery-agrees` compares items with items, the header says "nudges matched", `reflect` no longer calls tiny counts a trend, and the widget guide (D5) is rewritten.
 
 ### F6. Residue-review has stopped filing
 It has filed nothing for 11 runs, and its log cannot say why.
@@ -243,9 +237,7 @@ It has filed nothing for 11 runs, and its log cannot say why.
 Fix: log findings returned and dropped per session, then probe a session with a known correction.
 
 ### F7. Retention gaps
-Retention runs only inside a consolidation cycle. `introspection/chains` (140 MB) and `launchd.stderr.log` (25.9 MB) have no bound.
-
-Fix: run retention on its own timer inside the daemon, cap the chains, and rotate stderr without breaking the file handle launchd holds.
+Fixed. Retention runs on its own daily timer inside the daemon. Chains keep the newest 300 files, and `launchd.stderr.log` is cut in place to its newest 10 MB, so the handle launchd holds keeps working.
 
 ### Sources for F
 

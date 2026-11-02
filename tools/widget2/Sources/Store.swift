@@ -162,7 +162,7 @@ final class AppModel: ObservableObject {
     /// The Run early click. A review (it makes a model call and fills a page
     /// for the owner) asks first; anything else starts at once.
     func requestRun(_ j: JobRow) {
-        if j.isReview { confirmRun = j.name } else { runJob(j.name) }
+        if j.asksFirst { confirmRun = j.name } else { runJob(j.name) }
     }
 
     /// The probe swaps this so a drive never starts a real job.

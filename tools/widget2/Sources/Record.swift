@@ -150,21 +150,26 @@ struct JobRow: Identifiable {
     /// it not loaded, which is expected and does not mean it is off.
     var runner: String? = nil
     var launchdLoaded = false
+    /// False when the gcc-schedule registry has the job paused.
+    var enabled = true
 
-    /// Whether the job is scheduled to run: under the shared scheduler, or
-    /// loaded in launchd.
-    var on: Bool { runner != nil || launchdLoaded }
+    /// Whether the job is scheduled to run: not paused in the registry, and
+    /// under the shared scheduler or loaded in launchd.
+    var on: Bool { enabled && (runner != nil || launchdLoaded) }
 
-    /// A review makes a model call and puts work in front of the owner, so
-    /// running it early asks first. The daily recon is cheap and keeps one click.
-    var isReview: Bool { name.hasSuffix("reader-weekly") || name.hasSuffix("audit-monthly") }
+    /// Every job here spends model tokens, so running one early asks first and
+    /// says what it costs.
+    var asksFirst: Bool { name.hasSuffix("reader-weekly") || name.hasSuffix("audit-monthly") || name.hasSuffix("reader-daily") }
 
     /// What running a review early does and what it costs, in the owner's terms.
     var runEarlyWarning: String {
         if name.hasSuffix("audit-monthly") {
             return "Raises the monthly audit card now, even outside the first week. Nothing spends until you start it from the card; the audit itself is an Opus session that costs about $10 to $20 of your Claude usage."
         }
-        return "Starts the weekly review now: a few Sonnet calls, about $1 of your Claude usage, then up to seven findings on a page that waits on you."
+        if name.hasSuffix("reader-daily") {
+            return "Starts the daily recon now. It runs the paid pattern extractors, and a run has measured 47,000 to 67,000 tokens of your Claude usage."
+        }
+        return "Starts the weekly review now: a few Sonnet calls plus the brief refresh, 73,463 tokens of your Claude usage in the run of 2026-11-02, then up to seven findings on a page that waits on you."
     }
 }
 
@@ -787,7 +792,7 @@ enum RecordBuilder {
         s.jobs.compactMap { j in
             guard let name = j.name else { return nil }
             let (title, what): (String, String) =
-                name.hasSuffix("reader-daily") ? ("Daily dreaming", "reads every signal, runs the pattern extractors, picks up your answers")
+                name.hasSuffix("reader-daily") ? ("Daily recon", "reads every signal, runs the pattern extractors, picks up your answers")
                 : name.hasSuffix("reader-weekly") ? ("Weekly review", "names this week's strongest findings on a page for you")
                 : name.hasSuffix("audit-monthly") ? ("Monthly audit", "raises the audit card; acts only in the first week of a month")
                 : (name, j.desc ?? "")
@@ -798,7 +803,7 @@ enum RecordBuilder {
                           delayable: j.delayable ?? false,
                           command: j.command ?? "", manual: j.manual, manualNote: j.manual_note,
                           running: j.running ?? false, logTail: j.log_tail ?? [], logPath: j.log_path ?? "",
-                          runner: j.runner, launchdLoaded: j.loaded)
+                          runner: j.runner, launchdLoaded: j.loaded, enabled: j.enabled ?? true)
         }
         .sorted { ($0.held ?? $0.next ?? .distantFuture) < ($1.held ?? $1.next ?? .distantFuture) }
     }

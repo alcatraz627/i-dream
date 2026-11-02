@@ -1,5 +1,7 @@
 # Floating HUD Widget
 
+> **Status 2026-11-02.** Superseded by `tools/widget2` (the SwiftUI widget; see docs/30 and docs/36). This doc describes the retired `tools/menubar` widget and is kept as a record; file and line references below are out of date.
+
 The floating HUD is the **ambient** surface — a small always-on panel pinned to the bottom-right of your primary screen that shows live daemon status, recent activity, and one-tap actions. It is always dark (matches the project brand identity, immune to system theme changes).
 
 ```

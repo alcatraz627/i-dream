@@ -1,5 +1,7 @@
 # 23 — Widget v3: the power-user redo
 
+> **Status 2026-11-02.** Superseded by `tools/widget2` (docs/30, docs/36). This plan targets the retired `tools/menubar` widget and is kept as a record; its build steps and file references are out of date.
+
 <!-- sessions: fable-audit-7c@2026-07-07 -->
 
 Status: **IN PROGRESS.** Stage 0 shipped 2026-07-07 (reliability floor,

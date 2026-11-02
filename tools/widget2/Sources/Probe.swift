@@ -376,8 +376,8 @@ enum Probe {
             log.append("\(opened && d.pane == row.dive.pane && scoped ? "PASS" : "FAIL") row \"\(row.title)\" -> \(row.dive.pane.title) \(describe(row.dive.scope))\(row.url != nil ? " (+ action opens \(row.url!.absoluteString))" : "")")
         }
 
-        // Run early: a review asks first, the daily recon starts at once. A stub
-        // stands in for the CLI so a drive never starts a real job.
+        // Run early: every job spends tokens, so each asks first (the daily recon
+        // included). A stub stands in for the CLI so a drive never starts a real job.
         let mr = model(status, reader)
         var started: [String] = []
         mr.onRunJob = { started.append($0) }
@@ -387,10 +387,23 @@ enum Probe {
             mr.requestRun(j)
             let asks = mr.confirmRun == j.name && started.isEmpty
             let direct = mr.confirmRun == nil && started == [j.name]
-            let right = j.isReview ? asks : direct
-            log.append("\(right ? "PASS" : "FAIL") run early \(j.name): \(j.isReview ? "asks first" : "starts at once") (started \(started), asking \(mr.confirmRun ?? "-"))")
+            let right = j.asksFirst ? asks : direct
+            log.append("\(right ? "PASS" : "FAIL") run early \(j.name): \(j.asksFirst ? "asks first" : "starts at once") (started \(started), asking \(mr.confirmRun ?? "-"))")
         }
-        if let review = mr.record!.jobs.first(where: { $0.isReview }) {
+        // A job paused in the registry reads paused, even under the shared scheduler.
+        if var paused = mr.record!.jobs.first(where: { $0.on }) {
+            let before = paused.on
+            paused.enabled = false
+            log.append(before && !paused.on
+                       ? "PASS paused job: \(paused.name) reads off when the registry has it paused"
+                       : "FAIL paused job: \(paused.name) read on=\(before) before and on=\(paused.on) after a registry pause")
+        }
+        for j in mr.record!.jobs where j.asksFirst && !j.name.hasSuffix("audit-monthly") {
+            log.append(j.runEarlyWarning.contains("tokens")
+                       ? "PASS run early \(j.name): the question states measured token cost"
+                       : "FAIL run early \(j.name): no measured token cost in the question")
+        }
+        if let review = mr.record!.jobs.first(where: { $0.asksFirst }) {
             log.append(review.runEarlyWarning.contains("Claude usage")
                        ? "PASS run early: the question says what it costs"
                        : "FAIL run early: the question does not mention cost")
@@ -475,12 +488,17 @@ enum Probe {
         for p in [Pane.ledger, .patterns, .reader, .landing] {
             let d = model(status, reader)
             d.pane = p
+            // A short live list can end after the first j, so a later j may
+            // stay put as long as the first one moved.
+            var moved = false
             for key in ["j", "j", "k", "\r", "esc", "/", "f"] {
                 let before = keyState(d)
                 let handled = d.handleKey(key)
                 let after = keyState(d)
                 let changed = before != after
-                log.append("\(handled && changed ? "PASS" : "FAIL") key \(key == "\r" ? "return" : key) on \(p.title): \(before) -> \(after)")
+                let atListEnd = key == "j" && moved && !changed
+                if key == "j" && changed { moved = true }
+                log.append("\(handled && (changed || atListEnd) ? "PASS" : "FAIL") key \(key == "\r" ? "return" : key) on \(p.title): \(before) -> \(after)")
             }
             _ = d.handleKey("f")
             _ = d.handleKey("j")

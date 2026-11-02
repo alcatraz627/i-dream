@@ -199,9 +199,8 @@ i-dream status
 
 The daemon will:
 1. Watch for Claude Code activity via the Unix socket
-2. After 4+ hours of inactivity, run a consolidation cycle
-3. Process unprocessed session transcripts through SWS -> REM -> Wake phases
-4. Write patterns, associations, and insights to `~/.claude/subconscious/dreams/`
+2. Receive hook events and run its scheduled jobs (`i-dream status` lists them)
+3. Leave dreaming (SWS -> REM -> Wake) and the other paid extractors to the reader's daily recon, once a day and usage-gated, which writes patterns, associations and insights to `~/.claude/subconscious/dreams/`
 
 ### Manual dream cycle
 
@@ -244,10 +243,6 @@ i-dream widget install           # Build, copy to ~/Applications, start at login
 i-dream brief-projects                    # Backfill + generate for all projects
 i-dream brief-projects --cwd "$PWD"       # Generate just for the current project
 
-# D4 — Sunday morning briefing (or any time with --force)
-i-dream briefing
-i-dream briefing --force                  # Regenerate even if same ISO week
-
 # Patterns Graph metrics (degree centrality + hubs + isolated count)
 i-dream graph-metrics                     # Compute + write dreams/graph-metrics.json
 i-dream graph-metrics --snapshot          # Also snapshot patterns.json + associations.json
@@ -257,33 +252,28 @@ i-dream prune                             # Trim oldest entries to keep limits
 i-dream prune --dry-run                   # Preview without changes
 ```
 
-### Commands shipped in v0.4+ — dream-domain plugins + consolidation
+### Commands shipped in v0.4+ — dream-domain plugins, the reader
+
+The `dream-pass`, `digest`, `board`, `audit run`, `cron` and `briefing` commands were retired on 2026-09-18 and `i-dream --help` no longer lists them. Dreaming now runs inside the reader's daily recon, which also runs the paid extractors, usage-gated ([`docs/32-reader-spec.md`](docs/32-reader-spec.md)). The `dream-pass` and `cron` commands the older guide taught are gone, so there is no chain to schedule by hand.
 
 ```bash
+# The reader
+i-dream reader                            # Latest findings (--json is the widget's contract)
+i-dream reader recon                      # Join every signal stream now, then run the paid extractors
+i-dream reader run --dry-run              # Name this week's clusters without a page
+
 # Dream-domain plugins
-i-dream domain list                       # Registered domains (native + external)
-i-dream dream-pass                        # LLM pass over every domain with fresh delta
+i-dream domain list                       # Registered domains and what the reader read from each
 i-dream contract                          # Print the ingestion contract
 i-dream contract --install                # Write ~/.claude/i-dream/CONTRACT.md
 
-# Consolidation pipeline
-i-dream digest                            # Render today's L2 daily digest
-i-dream board                             # One-screen 2×2 snapshot (Today/Week/Sources/fitness)
-i-dream audit run                         # L3 weekly audit (interactive approve/apply)
-i-dream audit run --non-interactive       # Stage proposals to the log (for cron)
-
-# Open-thread lifecycle (carried in the daily digest)
+# Open-thread lifecycle
 i-dream thread add "loose end" --target-file path/to/file.rs
 i-dream thread list                       # Open threads (auto-decay after 14d)
 i-dream thread resolve <id>               # or: reopen <id>
 
-# Session-pinned insights
+# Session-pinned insights (recorded; no dream pass reads them now)
 i-dream pin add ...                       # (or via the /pin-for-dream skill)
-
-# Schedule the whole chain (launchd): dream-pass 02:45 → digest 03:00 → audit Sun 02:30
-i-dream cron install
-i-dream cron status                       # Per-job loaded state + last exit
-i-dream cron uninstall
 ```
 
 Run `i-dream <command> --help` for authoritative per-command flags — `--help`

@@ -1,6 +1,6 @@
 # Native macOS Dashboard
 
-> **Status 2026-10-03.** This doc predates the July rebuild. The widget source is `tools/menubar/src/01-*.swift` to `09-*.swift`, concatenated by `build.sh`, and the dashboard has four tabs (Overview, Browse, Journal, Search). See `.claude/output/20261003-audit/ui.md` finding U1.
+> **Status 2026-11-02.** Superseded by `tools/widget2` (the SwiftUI widget; see docs/30 and docs/36). This doc describes the retired `tools/menubar` widget and is kept as a record; file and line references below are out of date.
 
 The native dashboard is the **deep-dive** surface — a full NSPanel with sidebar navigation, embedded text views, and interactive graph visualizations for every aspect of the i-dream knowledge base. Opens as a separate window from the menubar widget.
 

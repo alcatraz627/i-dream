@@ -502,6 +502,9 @@ pub struct JobStatus {
     /// Set while the job is held to run later; its regular fire stands down.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub held_until: Option<chrono::DateTime<chrono::Utc>>,
+    /// False when the job is paused in the gcc-schedule registry, whether from
+    /// the CLI or before a restart. A job the registry does not mark is on.
+    pub enabled: bool,
     /// Whether `i-dream jobs delay` accepts this job.
     pub delayable: bool,
     /// The binary launchd reports for this label. launchd is global per
@@ -797,6 +800,7 @@ pub(crate) fn gather_jobs() -> Vec<JobStatus> {
     let history = std::fs::read_to_string(sched.join("history.jsonl")).unwrap_or_default();
     let runs = last_runs(&history);
     let holds = crate::jobs::load_holds();
+    let enabled = registry_enabled(&std::fs::read_to_string(sched.join("registry.json")).unwrap_or_default());
     let now = chrono::Local::now();
     crate::reader::scheduled_jobs()
         .into_iter()
@@ -849,6 +853,7 @@ pub(crate) fn gather_jobs() -> Vec<JobStatus> {
                 running,
                 log_tail: tail,
                 log_path: job.out_log.clone(),
+                enabled: enabled.get(&job.name).copied().unwrap_or(true),
                 delayable: crate::jobs::DELAYABLE.contains(&job.name.as_str()),
                 held_until,
                 next_fire: crate::jobs::next_fire(&job.fire_at, now).map(|t| t.to_rfc3339()),
@@ -867,6 +872,19 @@ pub(crate) fn gather_jobs() -> Vec<JobStatus> {
                 last_outcome: last.map(|r| r.outcome),
                 program,
             }
+        })
+        .collect()
+}
+
+/// Which scheduled jobs the gcc-schedule registry has paused, by job name.
+/// A job with no "enabled" key counts as on, as the scheduler treats it.
+fn registry_enabled(registry: &str) -> std::collections::HashMap<String, bool> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(registry) else { return Default::default() };
+    let Some(map) = v.as_object() else { return Default::default() };
+    map.values()
+        .filter_map(|j| {
+            let name = j.get("name")?.as_str()?.to_string();
+            Some((name, j.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true)))
         })
         .collect()
 }
@@ -1522,6 +1540,18 @@ mod tests {
         // read as "not running", not as PID -5.
         assert_eq!(parse_launchctl_list("\t\"PID\" = -5;\n").0, None);
         assert_eq!(parse_launchctl_list("\t\"PID\" = 0;\n").0, None);
+    }
+
+    /// The real case: residue-review is paused in the registry; a job with no
+    /// "enabled" key is on.
+    #[test]
+    fn registry_enabled_reads_a_paused_job() {
+        let reg = r#"{"a":{"name":"residue-review","enabled":false},"b":{"name":"i-dream-reader-daily"},"c":{"name":"x","enabled":true}}"#;
+        let m = registry_enabled(reg);
+        assert_eq!(m.get("residue-review"), Some(&false));
+        assert_eq!(m.get("i-dream-reader-daily").copied().unwrap_or(true), true);
+        assert_eq!(m.get("x"), Some(&true));
+        assert!(registry_enabled("not json").is_empty());
     }
 
     #[test]

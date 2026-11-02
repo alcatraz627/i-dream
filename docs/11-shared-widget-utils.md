@@ -1,5 +1,7 @@
 # Shared macOS Widget Utilities
 
+> **Status 2026-11-02.** The i-dream examples below cite the retired `tools/menubar` widget, which `tools/widget2` supersedes (docs/30, docs/36). The patterns stand as a record; the i-dream file and line references are out of date.
+
 This doc captures the **reusable patterns** for macOS menubar/dashboard widgets that have proven their worth across two projects so far:
 
 - [`~/.claude/widgets/claude-instances/`](https://github.com/) — original

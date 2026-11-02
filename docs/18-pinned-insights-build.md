@@ -1,6 +1,6 @@
 # Session-pinned insights — BUILD doc
 
-> **Status 2026-10-03.** The scheduled dream jobs (dream-pass, daily digest, weekly audit, weekly review, smell panel) were retired on 2026-09-18. The daemon still runs idle cycles, once per idle period and behind the account usage gate; the nightly residue review remains. Sections below that describe those jobs as live are historical. Current state: `.claude/output/20261003-audit/summary.md`. Pins are recorded but no dream pass reads them now.
+> **Status 2026-11-02.** The scheduled dream jobs (dream-pass, daily digest, weekly audit, weekly review, smell panel) were retired on 2026-09-18. Dreaming now runs in the reader's daily recon, once a day and behind the usage gate, and that recon also runs the paid extractors (see docs/29 and docs/32). Behavioural rules now reach Claude with the prompt they are about, not at session start. Sections below that describe the retired jobs as live are historical. Pins are recorded but no dream pass reads them now.
 
 > **Status:** spec, ready to build · **Date:** 2026-05-17
 > **Author:** claude (spec session)

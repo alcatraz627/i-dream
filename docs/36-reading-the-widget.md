@@ -15,20 +15,20 @@ Everything on screen is one of these stages, with how fresh it is.
 ## What you actually do
 
 1. **Wednesday: answer the weekly page.** The menu bar shows an amber dot and a count when a page waits on you. Open it, untick fixes you don't want, add a note where you have an opinion, Submit. Untouched items count as agreed. Notes now travel with the proposal.
-2. **When something looks red, glance once.** A red dot means a source has gone quiet or a job failed. The only red today is `affirm: dead 15d`, which just means nobody has run `/affirm` in 15 days. It is not broken.
-3. **Nothing else is required.** Daily dreaming, the monthly audit and the weekly review run on their own. Hints reach your interactive sessions automatically as `[i-dream:xxxx]` lines.
+2. **When something looks red, glance once.** A red dot means a source has gone quiet or a job failed. Open the row: it says which source or job, how long it has been quiet, and what to run. A source that is only quiet because you have not used its command lately (for example `/affirm`) is not broken.
+3. **Nothing else is required.** The daily recon, the monthly audit and the weekly review run on their own. Hints reach your interactive sessions automatically as `[i-dream:xxxx]` lines. A job you have paused, from Settings or the command line, shows as paused and does not run until you resume it.
 
 ## The menu bar dropdown (the two-second view)
 
 | Part | What it tells you |
 |---|---|
 | Top strip | daemon alive (green dot), when it last did useful work, mood word |
-| `0 for you · 0 stale · 1 broken · 0 nudges fired 7d` | the only counters that matter; "for you" is what waits on you |
+| `N for you · N stale · N broken · N nudges matched 7d` | the counters that matter; "for you" is what waits on you. "Nudges matched" counts hints whose trigger matched in the last 7 days, not proof that Claude acted on one |
 | Next | the next scheduled run |
 | Constellation | the pattern graph; decoration at this size, click it to open Patterns |
 | Biggest movers | which recurring mistakes went up or down this week |
 | Signals → Reader → Landing | the loop's three stages with counts |
-| Schedule | the three jobs, each with a one-line description; **Run early** starts one ahead of schedule, **Later** holds it |
+| Schedule | the three jobs (Daily recon, Weekly review, Monthly audit), each with a one-line description. **Run early** always asks first, because every job spends your Claude usage, and the question states what a run has cost (the daily recon 47,000 to 67,000 tokens, the weekly review 73,463 tokens in the run of 2026-11-02, including the brief refresh). **Later** holds a job. A paused job is marked paused |
 | You | items needing a decision, such as a gate candidate (a mistake that keeps repeating despite hints and probably needs a blocking hook) |
 | System | i-dream's own health; nothing there needs you unless You says so, and the note says when failing outcomes are re-checked |
 | Quiet | things worth knowing that need nothing from you |
@@ -42,6 +42,10 @@ Open it from the dropdown's footer. Five panes, in the order you'd use them:
 - **Patterns** is the pattern map. It is browsable, but it is i-dream's working memory, not something you need to act on.
 - **Reader** holds past weekly runs and their evidence. Use it when you want to know why a finding appeared.
 - **Landing** is the long answer to "is any of this working": every named finding, where it landed, and a table of every mistake with last week vs this week. A `↘` with a negative number is a mistake easing.
+
+## Settings
+
+Settings lists the scheduled runs with a switch each, the modules, and the usage guard. The usage guard holds automatic cycles near your Claude usage limit, but only when your account-wide usage gate script is missing. While that script exists, the gate is in charge, so Settings says the guard is inactive and disables its switch and fields. They stay visible so you can see what they would be.
 
 ## Getting around
 

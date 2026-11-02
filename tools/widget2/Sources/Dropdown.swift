@@ -119,7 +119,7 @@ struct DropdownView: View {
                     stripLink("clock.badge.exclamationmark", "\(r.count(.stale))", "stale", Dive(pane: .ledger, scope: .sourceState(.stale)))
                     let broken = r.system.filter { $0.sev == .bad }.count
                     stripLink("exclamationmark.triangle", "\(broken)", "broken", Dive(pane: .flow), alert: broken > 0)
-                    stripLink("link", "\(r.interventions.fired_7d)", "nudges fired 7d", Dive(pane: .landing))
+                    stripLink("link", "\(r.interventions.fired_7d)", "nudges matched 7d", Dive(pane: .landing))
                     Spacer(minLength: 0)
                 }
             }

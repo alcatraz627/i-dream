@@ -5,6 +5,8 @@ call in the engine routes through one method, `ClaudeClient::analyze`
 (api.rs:210), so the nine call sites listed at the bottom are the complete set.
 Line references are as of commit `42eae64` (2026-07-17).
 
+> **Status 2026-11-02.** This page describes the 2026-07-17 engine. Since then `insight_digest.rs`, `weekly_briefing.rs`, `consolidation/dream_pass.rs` and `audit.rs` have been removed, and the dream-pass, digest, audit and briefing jobs are retired. The extractors (dreaming, metacognition, introspection) now run in the reader's daily recon ([`docs/32-reader-spec.md`](docs/32-reader-spec.md)), which also runs the paid extractors, usage-gated. The diagrams below still show the old flow, and the line references are not current.
+
 Legend: **✦ = LLM call site** · everything unmarked is mechanical code.
 
 ## Flow diagram (Mermaid)
@@ -193,11 +195,11 @@ flowchart TD
 | 2 | `dreaming.rs:1274`, `:1332` | REM: explore creative associations across patterns | per-cycle |
 | 3 | `metacog.rs:522` | metacognition audit of agent behavior | per-cycle |
 | 4 | `introspection.rs:675` | introspection pass | 4096 tok |
-| 5 | `insight_digest.rs:157` | ~3h digest TL;DR + sentiment | 512 tok |
+| 5 | `insight_digest.rs:157` (file removed) | ~3h digest TL;DR + sentiment | 512 tok |
 | 6 | `project_briefs.rs:195` | per-project briefs | 1024 tok |
-| 7 | `weekly_briefing.rs:257` | weekly briefing | 4000 tok |
-| 8 | `consolidation/dream_pass.rs:241`, `:347` | external-domain dream passes | per manifest |
-| 9 | `audit.rs:734`, `:842` | weekly self-audit: analyst pass + render pass | audit budget |
+| 7 | `weekly_briefing.rs:257` (file removed) | weekly briefing | 4000 tok |
+| 8 | `consolidation/dream_pass.rs:241`, `:347` (file removed) | external-domain dream passes | per manifest |
+| 9 | `audit.rs:734`, `:842` (file removed) | weekly self-audit: analyst pass + render pass | audit budget |
 
 ## Deliberately LLM-free
 
@@ -211,8 +213,8 @@ flowchart TD
 
 ## Runtime
 
-One launchd daemon plus four cron LaunchAgents (`daily`, `dreampass`, `audit`,
-`review`). All ✦ sites call `ClaudeClient::analyze` (api.rs:210), which by
+One launchd daemon, plus scheduled jobs that `i-dream status` lists from the
+gcc schedule registry (the old `dreampass` and `audit` agents are retired). All ✦ sites call `ClaudeClient::analyze` (api.rs:210), which by
 default shells out to the local `claude` CLI on the subscription
 (api.rs:171-199, `budget.use_claude_code_cli`); the direct Anthropic API is
 the explicit fallback. Model: `budget.model` = `claude-sonnet-4-6`

@@ -1,6 +1,6 @@
 # macOS Menubar Widget — `i-dream-bar`
 
-> **Status 2026-10-03.** This doc predates the July rebuild. The widget source is `tools/menubar/src/01-*.swift` to `09-*.swift`, concatenated by `build.sh`, and the dashboard has four tabs (Overview, Browse, Journal, Search). See `.claude/output/20261003-audit/ui.md` finding U1.
+> **Status 2026-11-02.** Superseded by `tools/widget2` (the SwiftUI widget; see docs/30 and docs/36). This doc describes the retired `tools/menubar` widget and is kept as a record; file and line references below are out of date.
 
 The menubar widget is a compact native Swift app that lives in the macOS status bar. It surfaces daemon status, the current dream phase, recent insights, and one-click actions for every common operation. It is the **status surface** — the floating HUD is the *ambient* surface, and the dashboard is the *deep-dive* surface.
 

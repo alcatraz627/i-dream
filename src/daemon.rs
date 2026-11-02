@@ -277,8 +277,17 @@ impl Daemon {
         let mut sigterm =
             unix_signal(SignalKind::terminate()).context("Failed to install SIGTERM handler")?;
 
+        // Retention runs once a day on its own clock, so a daemon that never
+        // finds the machine idle (or is over its usage gate) still bounds its
+        // stores. The first tick fires at startup.
+        let mut retention_tick = tokio::time::interval(RETENTION_INTERVAL);
+        retention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         let result: Result<()> = loop {
             tokio::select! {
+                _ = retention_tick.tick() => {
+                    run_daily_retention().await;
+                }
                 _ = signal::ctrl_c() => {
                     info!("Received SIGINT (Ctrl+C), shutting down");
                     break Ok(());
@@ -713,10 +722,10 @@ impl Daemon {
             Err(e) => warn!("Reinforcement pass failed: {e:#}"),
         }
 
-        // Wave 1 item 7 — universal retention: archive each bounded store's
-        // overflow into its _archived/<date>/ (traces beyond 30d, all but the
-        // 10 newest snapshots, JSONL logs beyond 10k lines). Runs before the
-        // lane-health reading so this cycle's verdict reflects the reap.
+        // Retention also runs here, ahead of the lane-health reading, so this
+        // cycle's verdict reflects the reap. Each store's own cap lives in
+        // `registry::RETENTION`; the daemon's daily timer runs the same pass
+        // even when no cycle does.
         for r in crate::modules::registry::run_retention() {
             if r.archived > 0 {
                 info!(
@@ -1403,6 +1412,22 @@ fn dispatch_due_consolidations(
         }
     }
     (ran, failed)
+}
+
+/// How often the daemon runs retention on its own, apart from any cycle.
+const RETENTION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Trim every bounded store and the launchd log, off the async threads since
+/// the pass walks directories and shells out to `trash`. Never fails the daemon.
+async fn run_daily_retention() {
+    match tokio::task::spawn_blocking(crate::modules::registry::run_retention).await {
+        Ok(reports) => {
+            for r in reports.iter().filter(|r| r.archived > 0) {
+                info!("Retention (daily): {} → {} overflow entries archived", r.store, r.archived);
+            }
+        }
+        Err(e) => warn!("Daily retention task failed: {e}"),
+    }
 }
 
 /// Poll `is_process_alive` up to `attempts` times waiting `interval`
