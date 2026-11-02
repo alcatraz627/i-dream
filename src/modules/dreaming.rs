@@ -1971,6 +1971,7 @@ Output ONLY a JSON array. No commentary."#;
                     self.config.modules.prospective.default_expiry_days as i64,
                 );
             let mut intentions_created = 0u32;
+            let standing_lines = standing_rule_lines();
             for assoc in all_assocs.iter() {
                 if !promoted_ids.contains(assoc.id.as_str()) {
                     continue;
@@ -1979,6 +1980,10 @@ Output ONLY a JSON array. No commentary."#;
                     Some(r) if !r.is_empty() && assoc.actionable => r,
                     _ => continue,
                 };
+                // Claude already loads this rule; delivering it again only spends a fire.
+                if restates_standing_rule(rule, &standing_lines) {
+                    continue;
+                }
                 // The trigger needs two matches, so two topic words at least.
                 let keywords = wake_keywords(rule);
                 if keywords.len() < 2 {
@@ -2282,7 +2287,7 @@ pub fn promotable(a: &Association, threshold: f64, maintenance: bool) -> bool {
 
 /// Words a rule uses to give an order rather than to say what it is about.
 /// A trigger on them matches every prompt, so it is no trigger.
-const GENERIC_RULE_WORDS: &[&str] = &[
+pub(crate) const GENERIC_RULE_WORDS: &[&str] = &[
     "always", "never", "before", "after", "every", "should", "must", "make", "sure", "ensure",
     "check", "when", "with", "without", "instead", "rather", "that", "this", "from", "your",
     "their", "then", "than", "into", "only", "each", "what", "which", "about", "first", "next",
@@ -2296,6 +2301,11 @@ fn rule_content_words(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for w in text.split(|c: char| !c.is_alphanumeric()) {
         let mut lw = w.to_ascii_lowercase();
+        // Judge the word as written first: folding "always" to "alway" would
+        // let it slip past the list.
+        if GENERIC_RULE_WORDS.contains(&lw.as_str()) {
+            continue;
+        }
         if lw.len() > 4 && lw.ends_with('s') && !lw.ends_with("ss") {
             lw.pop();
         }
@@ -2344,15 +2354,65 @@ fn standing_rule_titles() -> Vec<String> {
     titles
 }
 
+/// The lines of the rules Claude already loads every session, in full: the
+/// global CLAUDE.md and every rules file. A line is the unit a candidate rule
+/// is compared with, because a rule restated in new words still shares most of
+/// its topic words with the one line that says it.
+pub(crate) fn standing_rule_lines() -> Vec<String> {
+    let Some(home) = dirs::home_dir() else { return vec![] };
+    let mut texts = vec![std::fs::read_to_string(home.join(".claude/CLAUDE.md")).unwrap_or_default()];
+    if let Ok(dir) = std::fs::read_dir(home.join(".claude/rules")) {
+        let mut files: Vec<_> = dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).collect();
+        files.sort();
+        texts.extend(files.iter().map(|p| std::fs::read_to_string(p).unwrap_or_default()));
+    }
+    texts.iter().flat_map(|t| t.lines()).map(str::to_string).filter(|l| rule_content_words(l).len() >= 3).collect()
+}
+
+/// Does a candidate rule say what one standing line already says? True when
+/// at least three of its topic words, and at least 60 percent of them, appear
+/// in a single standing line.
+pub(crate) fn restates_standing_rule(rule: &str, standing_lines: &[String]) -> bool {
+    let words = rule_content_words(rule);
+    if words.len() < 3 {
+        return false;
+    }
+    standing_lines.iter().any(|line| {
+        let theirs = rule_content_words(line);
+        let shared = words.iter().filter(|w| theirs.contains(w)).count();
+        shared >= 3 && shared * 10 >= words.len() * 6
+    })
+}
+
 #[cfg(test)]
 mod wake_rule_tests {
     use super::*;
 
     #[test]
+    fn a_candidate_that_restates_a_standing_line_is_caught_by_full_text_not_headings() {
+        // Real pair: a dream rule of 27 Oct and the line of the standing
+        // grep-scope rule it repeats. The body line is not a heading.
+        let standing = vec![
+            "Before claiming there is no existing module, grep the full project tree and say what you excluded.".to_string(),
+        ];
+        let rule = "Grep the full project tree before claiming a module does not exist";
+        assert!(restates_standing_rule(rule, &standing));
+        assert!(!restates_standing_rule("Prefer small commits when refactoring parsers", &standing));
+    }
+
+    #[test]
     fn trigger_keywords_skip_the_rules_own_imperatives() {
         let k = wake_keywords("Always execute the migration dry-run before claiming it works");
-        assert!(!k.iter().any(|w| w == "always" || w == "before"), "{k:?}");
+        assert!(!k.iter().any(|w| w.starts_with("alway") || w == "before"), "{k:?}");
         assert!(k.contains(&"migration".to_string()), "{k:?}");
+    }
+
+    #[test]
+    fn a_generic_word_ending_in_s_is_not_folded_past_the_filter() {
+        // "always" folds to "alway", which is not on the list.
+        let k = wake_keywords("Always verify migrations");
+        assert!(!k.iter().any(|w| w.starts_with("alway")), "{k:?}");
+        assert!(k.contains(&"verify".to_string()), "{k:?}");
     }
 
     #[test]

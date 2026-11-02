@@ -17,7 +17,7 @@ const EXAMPLES: &str = "\
 Examples:
   i-dream status                # daemon health, lanes, scheduled jobs
   i-dream reader                # what the reader found; --json for tools
-  i-dream reader recon          # join every signal stream now (no model)
+  i-dream reader recon          # join every signal stream now, then run the paid extractors
   i-dream reader run --dry-run  # name this week's clusters without a page
   i-dream transcripts           # who wrote the transcripts the modules read
   i-dream snapshot-diff         # what did the last dream cycle change?
@@ -597,7 +597,7 @@ pub enum ThreadAction {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum ReaderAction {
-    /// Read every stream and join it, without a model. Writes
+    /// Read every stream and join it, then run the paid extractors. Writes
     /// reader/daily/<date>.json, picks up answered decision pages, and retries
     /// a weekly run the usage gate held back. The daily scheduled job.
     Recon {

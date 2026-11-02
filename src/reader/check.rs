@@ -71,12 +71,21 @@ pub fn prompt(items: &[Named], hooks_dir: &Path) -> Option<String> {
          - If a case in `happened` is a different problem from the others, list it in `drop` with \
          one sentence on why.\n\
          - Leave a field out when it is already right.\n\
+         - Put in `quote` one line copied exactly from a credited check's source that backs your \
+         correction. A correction with no such line is thrown away, so never claim a check lacks \
+         something without having read the line that shows it.\n\
          Keep the same voice rules as before: owner-facing fields are plain sentences about what \
          Claude did, with no hook ids, script names, slugs or numbers.\n\n\
          Answer with one ```json block: {{\"items\": [{{\"cluster\": \"...\", \"why_repeats\": \"...\", \
          \"fix\": \"...\", \"guard\": {{\"hook_id\": \"...\" or null, \"plain\": \"...\", \"verdict\": \
          \"yes|partly|no\", \"gap\": \"...\"}}, \"drop\": [{{\"evidence_id\": \"...\", \"why\": \"...\"}}]}}]}}"
     ))
+}
+
+/// The source header of every hook the items credit, for checking a quote.
+pub fn headers(items: &[Named], hooks_dir: &Path) -> Vec<String> {
+    let ids: HashSet<&str> = items.iter().filter_map(|n| n.guard.as_ref()?.hook_id.as_deref()).collect();
+    ids.into_iter().filter_map(|id| hook_source(hooks_dir, id).map(|(_, h)| h)).collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -96,6 +105,9 @@ struct Checked {
     guard: Option<Guard>,
     #[serde(default, deserialize_with = "null_default")]
     drop: Vec<Dropped>,
+    /// A line copied from a credited check's source that backs the correction.
+    #[serde(default, deserialize_with = "null_default")]
+    quote: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -105,23 +117,37 @@ struct Dropped {
     why: String,
 }
 
+/// Whether the quoted line really appears in one of the credited sources. A
+/// model that misreads a header cannot also produce a line that backs the
+/// misreading, so a correction without one is not trusted.
+fn quote_in_sources(quote: &str, headers: &[String]) -> bool {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let q = squash(quote);
+    !q.is_empty() && headers.iter().any(|h| squash(h).contains(&q))
+}
+
 /// Fold the check call's corrections into the items. Returns one line per
 /// case it took out, for the run's rejected list. A case is taken out only if
 /// the problem keeps at least one other.
-pub fn apply(items: &mut [Named], answer: &str) -> Result<Vec<String>, String> {
+pub fn apply(items: &mut [Named], answer: &str, headers: &[String]) -> Result<Vec<String>, String> {
     let json = crate::modules::parse_json_codeblock(answer).unwrap_or_else(|| answer.trim().to_string());
     let parsed: Answer = serde_json::from_str(&json).map_err(|e| e.to_string())?;
     let mut notes = vec![];
     for c in parsed.items {
         let Some(item) = items.iter_mut().find(|n| n.cluster == c.cluster) else { continue };
-        if !c.why_repeats.trim().is_empty() {
-            item.why_repeats = c.why_repeats;
-        }
-        if !c.fix.trim().is_empty() {
-            item.fix = c.fix;
-        }
-        if let Some(g) = c.guard {
-            item.guard = Some(g);
+        let rewrites = !c.why_repeats.trim().is_empty() || !c.fix.trim().is_empty() || c.guard.is_some();
+        if rewrites && quote_in_sources(&c.quote, headers) {
+            if !c.why_repeats.trim().is_empty() {
+                item.why_repeats = c.why_repeats;
+            }
+            if !c.fix.trim().is_empty() {
+                item.fix = c.fix;
+            }
+            if let Some(g) = c.guard {
+                item.guard = Some(g);
+            }
+        } else if rewrites {
+            notes.push(format!("{}: kept the first account, the correction had no supporting line from the source", item.cluster));
         }
         for d in c.drop {
             if item.happened.len() <= 1 {
@@ -194,19 +220,43 @@ mod tests {
         let mut items = vec![item("c-1", "doc-voice-gate", &["a:1", "a:2"]), item("c-2", "push-gate", &["a:3"])];
         let answer = r#"```json
 {"items": [
-  {"cluster": "c-1", "why_repeats": "The check never sees PR bodies.", "fix": null,
+  {"cluster": "c-1", "why_repeats": "The check never sees PR bodies.", "fix": null, "quote": "docs under docs/ only",
    "drop": [{"evidence_id": "a:2", "why": "a directness problem"}]},
-  {"cluster": "c-2", "guard": {"hook_id": null, "plain": "Nothing", "verdict": "no", "gap": null},
+  {"cluster": "c-2", "quote": "docs under docs/ only", "guard": {"hook_id": null, "plain": "Nothing", "verdict": "no", "gap": null},
    "drop": [{"evidence_id": "a:3", "why": "only case"}]}
 ]}
 ```"#;
-        let notes = apply(&mut items, answer).unwrap();
+        let notes = apply(&mut items, answer, &["Checks docs under docs/ only.".to_string()]).unwrap();
         assert_eq!(items[0].why_repeats, "The check never sees PR bodies.");
         assert_eq!(items[0].fix, "guessed fix", "a null fix leaves the old one");
         assert_eq!(items[0].evidence_ids, vec!["a:1".to_string()]);
         assert_eq!(items[1].guard.as_ref().unwrap().hook_id, None);
         assert_eq!(items[1].happened.len(), 1, "the only case stays");
         assert_eq!(notes.len(), 1);
-        assert!(apply(&mut items, "nope").is_err());
+        assert!(apply(&mut items, "nope", &[]).is_err());
+    }
+
+    /// The w44 page said the voice check "has no pattern for raw internal
+    /// identifiers" although its header lists commit sha, file:line and
+    /// internal id patterns. A correction with no line from the header behind
+    /// it must not rewrite the item.
+    #[test]
+    fn a_correction_with_no_supporting_line_from_the_source_is_discarded() {
+        let header = "PATTERNS = {\n  \"commit sha\": re.compile(...),\n  \"file:line\": re.compile(...),\n  \"internal id\": re.compile(...),\n}".to_string();
+        let claim = |quote: &str| {
+            format!(
+                r#"{{"items": [{{"cluster": "c-1", "why_repeats": "It has no pattern for raw internal identifiers.", "quote": "{quote}"}}]}}"#
+            )
+        };
+        let mut items = vec![item("c-1", "doc-voice-gate", &["a:1", "a:2"])];
+        let notes = apply(&mut items, &claim("has no pattern for identifiers"), std::slice::from_ref(&header)).unwrap();
+        assert_eq!(items[0].why_repeats, "guessed", "an invented quote changes nothing");
+        assert!(notes.iter().any(|n| n.contains("no supporting line")), "{notes:?}");
+        let mut items = vec![item("c-1", "doc-voice-gate", &["a:1", "a:2"])];
+        let _ = apply(&mut items, &claim("\\\"internal id\\\": re.compile"), std::slice::from_ref(&header)).unwrap();
+        assert_ne!(items[0].why_repeats, "guessed", "a quote that is in the header lets the correction land");
+        let mut items = vec![item("c-1", "doc-voice-gate", &["a:1", "a:2"])];
+        let _ = apply(&mut items, &claim(""), &[header]).unwrap();
+        assert_eq!(items[0].why_repeats, "guessed", "no quote, no correction");
     }
 }

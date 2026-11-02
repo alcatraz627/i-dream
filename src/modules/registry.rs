@@ -947,6 +947,39 @@ pub const RETENTION: &[RetentionRule] = &[
         store: ".claude/i-dream/daily",
         policy: RetentionPolicy::MaxAgeDays(90),
     },
+    // The daily recons the reader writes each night. A weekly run only reads
+    // the last few days, and old evidence rows are still citable for a quarter.
+    RetentionRule {
+        store: ".claude/i-dream/reader/daily",
+        policy: RetentionPolicy::MaxAgeDays(90),
+    },
+    // The four append-only logs that grew past 250 MB with no bound. Overflow
+    // lines are archived (newest lines always stay in place), and each archive
+    // directory is itself capped so the old lines do roll off the disk.
+    RetentionRule {
+        store: ".claude/subconscious/logs/events.jsonl",
+        policy: RetentionPolicy::MaxLines(50_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/logs/signals.jsonl",
+        policy: RetentionPolicy::MaxLines(20_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/metacog/activity.jsonl",
+        policy: RetentionPolicy::MaxLines(50_000),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/metacog/samples.jsonl",
+        policy: RetentionPolicy::MaxLines(500),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/logs/_archived",
+        policy: RetentionPolicy::MaxBytes(50 * 1024 * 1024),
+    },
+    RetentionRule {
+        store: ".claude/subconscious/metacog/_archived",
+        policy: RetentionPolicy::MaxBytes(50 * 1024 * 1024),
+    },
     // Live logs keep a fresh mtime; only logs a renamed/retired job stopped
     // writing get archived (launchd recreates a StandardErrorPath on demand,
     // so archiving a quiet-but-live path is harmless).
@@ -1402,6 +1435,50 @@ mod lane_health_tests {
         let reports = run_retention_at(dir.path());
         assert_eq!(reports.len(), RETENTION.len());
         assert!(reports.iter().all(|r| r.archived == 0));
+    }
+
+    #[test]
+    fn the_four_unbounded_logs_roll_off_old_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let stores = [
+            ".claude/subconscious/logs/events.jsonl",
+            ".claude/subconscious/logs/signals.jsonl",
+            ".claude/subconscious/metacog/activity.jsonl",
+            ".claude/subconscious/metacog/samples.jsonl",
+        ];
+        for s in stores {
+            let p = home.join(s);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let body: String = (0..200_000).map(|i| format!("{{\"n\":{i}}}\n")).collect();
+            std::fs::write(&p, body).unwrap();
+        }
+        run_retention_at(home);
+        for s in stores {
+            let body = std::fs::read_to_string(home.join(s)).unwrap();
+            let n = body.lines().count();
+            assert!(n > 0 && n < 200_000, "{s} kept {n} lines");
+            assert!(
+                body.lines().last().unwrap().contains("199999"),
+                "{s} must keep the newest line"
+            );
+        }
+    }
+
+    #[test]
+    fn old_reader_recons_are_archived_and_recent_ones_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let daily = home.join(".claude/i-dream/reader/daily");
+        std::fs::create_dir_all(&daily).unwrap();
+        let (old, recent) = (daily.join("2026-05-01.json"), daily.join("2026-11-01.json"));
+        std::fs::write(&old, "{}").unwrap();
+        std::fs::write(&recent, "{}").unwrap();
+        let long_ago = SystemTime::now() - Duration::from_secs(120 * 86_400);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(long_ago).unwrap();
+        run_retention_at(home);
+        assert!(!old.exists(), "a 120-day-old recon must leave the folder");
+        assert!(recent.exists(), "a recent recon must stay");
     }
 
     #[test]

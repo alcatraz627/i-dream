@@ -455,6 +455,7 @@ async fn main() -> Result<()> {
                     let now = chrono::Utc::now();
                     if !dry_run && let Some(until) = jobs::held_until("i-dream-reader-daily", now) {
                         println!("held until {}; it runs then", until.with_timezone(&chrono::Local).format("%a %d %b %H:%M"));
+                        jobs::report_outcome("held", &until.to_rfc3339());
                         return Ok(());
                     }
                     let since = now - chrono::Duration::days(since_days);
@@ -504,18 +505,22 @@ async fn main() -> Result<()> {
                     let now = chrono::Utc::now();
                     if !dry_run && !force && let Some(until) = jobs::held_until("i-dream-reader-weekly", now) {
                         println!("held until {}; it runs then", until.with_timezone(&chrono::Local).format("%a %d %b %H:%M"));
+                        jobs::report_outcome("held", &until.to_rfc3339());
                         return Ok(());
                     }
                     let since = now - chrono::Duration::days(since_days);
                     let run = reader::run_weekly(&config, &store, now, since, dry_run, force).await?;
                     if let Some(reason) = &run.held_by_gate {
                         println!("held by the usage gate ({reason}); the next daily recon retries within 48h");
+                        jobs::report_outcome("held_by_gate", reason);
                         return Ok(());
                     }
                     if let Some(reason) = &run.skipped {
                         println!("skipped: {reason}; --force replaces a page that is still unanswered");
+                        jobs::report_outcome("skipped", &run.week);
                         return Ok(());
                     }
+                    jobs::report_outcome(if run.page_url.is_some() { "produced" } else { "no_page" }, &run.week);
                     println!(
                         "{}: {} cluster(s) forwarded, {} named, {} rejected, {} foreign id(s) dropped, {} token(s)",
                         run.week,

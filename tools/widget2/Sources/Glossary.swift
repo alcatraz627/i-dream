@@ -9,7 +9,7 @@ enum Glossary {
         case .flow: [
             ("cycle", "One pass of the daemon. An idle cycle only tidies up; the daily run is where model work happens."),
             ("productive", "A cycle that extracted at least one pattern, association or insight."),
-            ("recon", "The daily join of every signal stream, with no model call."),
+            ("recon", "The daily join of every signal stream, followed by the paid extractors."),
             ("reader run", "The weekly pass that names the strongest clusters and puts them on a page for you."),
             ("stage card age", "How long ago that stage last did its work: the last write for signals, the last productive cycle for patterns and associations, the last recon for findings, the last run for filed, the last armed gate for landed."),
             ("drag", "Drag across the week to count every stage over just that range."),
@@ -45,7 +45,7 @@ enum Glossary {
             ("occurrences", "How many times the pattern has been seen in all."),
         ]
         case .reader: [
-            ("recon", "The daily join of every signal stream, with no model call."),
+            ("recon", "The daily join of every signal stream, followed by the paid extractors."),
             ("cluster", "Evidence rows from different streams joined on the same key."),
             ("join key", "What the rows in a cluster share, usually a mistake type or a session."),
             ("forwarded", "Clusters the weekly run sent to the model to name."),

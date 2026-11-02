@@ -1463,14 +1463,14 @@ fn bind_socket(path: &Path) -> Result<()> {
 /// since the last brief generation. Compares each project's most
 /// recent pattern last_seen against the brief file's mtime; if newer,
 /// regenerates the brief.
-pub async fn regen_dirty_project_briefs(config: &Config, store: &Store, client: &ClaudeClient) {
+pub async fn regen_dirty_project_briefs(config: &Config, store: &Store, client: &ClaudeClient) -> u64 {
     use crate::modules::dreaming::ExtractedPattern;
     use std::collections::HashMap;
     let patterns: Vec<ExtractedPattern> = store
         .read_json("dreams/patterns.json")
         .unwrap_or_default();
     if patterns.is_empty() {
-        return;
+        return 0;
     }
     // Map project_id → max(last_seen) across its patterns.
     let mut latest: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
@@ -1492,6 +1492,7 @@ pub async fn regen_dirty_project_briefs(config: &Config, store: &Store, client: 
     let pbm =
         crate::modules::project_briefs::ProjectBriefsModule::new(config, store);
     let mut regen = 0u32;
+    let mut spent = 0u64;
     let cwds = pbm.project_cwds();
     if let Err(e) = pbm.prune_unreachable(&cwds) {
         warn!("project briefs: prune failed: {e:#}");
@@ -1517,12 +1518,36 @@ pub async fn regen_dirty_project_briefs(config: &Config, store: &Store, client: 
             Ok((tokens, _)) => {
                 info!("D6 v2: regenerated brief for {proj} ({tokens} tokens)");
                 regen += 1;
+                spent += tokens;
             }
             Err(e) => warn!("D6 v2: brief regen failed for {proj}: {e:#}"),
         }
     }
     if regen > 0 {
         info!("D6 v2: refreshed {regen} project brief(s) post-cycle");
+    }
+    spent
+}
+
+/// What one extractor run has spent against its token budget. The spend is
+/// the true sum, so a run that overshoots its budget reads as an overshoot;
+/// only the room left for the next stage floors at zero.
+struct SpendTally {
+    budget: u64,
+    spent: u64,
+}
+
+impl SpendTally {
+    fn new(budget: u64) -> Self {
+        Self { budget, spent: 0 }
+    }
+
+    fn add(&mut self, tokens: u64) {
+        self.spent += tokens;
+    }
+
+    fn remaining(&self) -> u64 {
+        self.budget.saturating_sub(self.spent)
     }
 }
 
@@ -1531,14 +1556,14 @@ pub async fn regen_dirty_project_briefs(config: &Config, store: &Store, client: 
 /// them out of the idle cycle; the reader's daily recon runs them, inside
 /// the per-cycle token budget and runtime cap. Returns the tokens spent.
 pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClient) -> Result<u64> {
-    let mut budget = config.budget.max_tokens_per_cycle;
+    let mut tally = SpendTally::new(config.budget.max_tokens_per_cycle);
     let deadline = tokio::time::Instant::now()
         + Duration::from_secs(config.budget.max_runtime_minutes * 60);
     // Phase 1: Dreaming (50% of budget)
     if config.modules.dreaming.enabled {
         let module = DreamingModule::new(config, store);
         if module.should_run()? {
-            let dreaming_budget = budget / 2;
+            let dreaming_budget = tally.remaining() / 2;
             info!("Running dreaming module (budget: {dreaming_budget} tokens)");
             match tokio::time::timeout(
                 deadline - tokio::time::Instant::now(),
@@ -1547,7 +1572,7 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
             .await
             {
                 Ok(Ok(tokens)) => {
-                    budget = budget.saturating_sub(tokens);
+                    tally.add(tokens);
                     info!("Dreaming complete ({tokens} tokens used)");
                 }
                 Ok(Err(e)) => error!("Dreaming failed: {e:#}"),
@@ -1557,10 +1582,10 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
     }
 
     // Phase 2: Metacognitive analysis (25% of remaining budget)
-    if config.modules.metacog.enabled && budget > 0 {
+    if config.modules.metacog.enabled && tally.remaining() > 0 {
         let module = MetacogModule::new(config, store);
         if module.should_run()? {
-            let metacog_budget = budget / 2;
+            let metacog_budget = tally.remaining() / 2;
             info!("Running metacog module (budget: {metacog_budget} tokens)");
             match tokio::time::timeout(
                 deadline - tokio::time::Instant::now(),
@@ -1569,7 +1594,7 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
             .await
             {
                 Ok(Ok(tokens)) => {
-                    budget = budget.saturating_sub(tokens);
+                    tally.add(tokens);
                     info!("Metacog complete ({tokens} tokens used)");
                 }
                 Ok(Err(e)) => error!("Metacog failed: {e:#}"),
@@ -1579,18 +1604,18 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
     }
 
     // Phase 3: Introspection (remaining budget)
-    if config.modules.introspection.enabled && budget > 0 {
+    if config.modules.introspection.enabled && tally.remaining() > 0 {
         let module = IntrospectionModule::new(config, store);
         if module.should_run()? {
-            info!("Running introspection module (budget: {budget} tokens)");
+            info!("Running introspection module (budget: {} tokens)", tally.remaining());
             match tokio::time::timeout(
                 deadline - tokio::time::Instant::now(),
-                module.run(client, budget),
+                module.run(client, tally.remaining()),
             )
             .await
             {
                 Ok(Ok(tokens)) => {
-                    budget = budget.saturating_sub(tokens);
+                    tally.add(tokens);
                     info!("Introspection complete ({tokens} tokens used)");
                 }
                 Ok(Err(e)) => error!("Introspection failed: {e:#}"),
@@ -1599,7 +1624,7 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
         }
     }
 
-    let used = config.budget.max_tokens_per_cycle.saturating_sub(budget);
+    let used = tally.spent;
     record_extractor_spend(store, used, config.budget.max_tokens_per_cycle, Utc::now())?;
     info!("[extractors] complete: used {used} tokens of {}", config.budget.max_tokens_per_cycle);
     Ok(used)
@@ -1799,14 +1824,39 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
 /// repeats themselves. Only interactive sessions vote: a known headless
 /// entrypoint never does, and an absent one (an older hook) can only match
 /// fires from a session that passed SessionStart's own filter.
-/// Does a rule share a content word (four letters or more) with the prompt
-/// that corrected or praised the session? No words means no relevance.
+/// Words that carry no topic in a chat prompt, on top of the rule-order words.
+const PROMPT_FILLER_WORDS: &[&str] = &[
+    "please", "again", "like", "want", "need", "okay", "thanks", "going", "doing", "think",
+    "know", "said", "wrong", "right", "something", "thing", "still", "really", "because",
+    "were", "been", "much", "some", "back", "work", "works", "good", "same", "does", "didn",
+];
+
+/// The most votes one correction or praise may cast.
+const MAX_VOTES_PER_SIGNAL: usize = 3;
+
+fn is_topic_word(w: &str) -> bool {
+    w.len() >= 4
+        && !crate::modules::dreaming::GENERIC_RULE_WORDS.contains(&w)
+        && !PROMPT_FILLER_WORDS.contains(&w)
+}
+
+/// Is this prompt machine input (a sub-agent's task notification) rather than
+/// the owner speaking? Its words arrive with the hook event.
+fn is_machine_prompt(prompt_words: &[String]) -> bool {
+    prompt_words.iter().any(|w| w == "task-notification")
+}
+
+/// Does a rule share two topic words (four letters or more, not filler) with
+/// the prompt that corrected or praised the session? One shared word is
+/// chance, and no words means no relevance.
 fn touches_prompt(message: &str, prompt_words: &[String]) -> bool {
     let words: std::collections::HashSet<&str> = prompt_words.iter().map(String::as_str).collect();
-    message
+    let shared: std::collections::HashSet<String> = message
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 4)
-        .any(|w| words.contains(w.to_lowercase().as_str()))
+        .map(str::to_lowercase)
+        .filter(|w| is_topic_word(w) && words.contains(w.as_str()))
+        .collect();
+    shared.len() >= 2
 }
 
 fn vote_on_surfaced_intentions(
@@ -1823,6 +1873,9 @@ fn vote_on_surfaced_intentions(
         return Ok(0);
     };
     if entrypoint.is_some_and(|ep| !crate::events::is_interactive_entrypoint(ep)) {
+        return Ok(0);
+    }
+    if is_machine_prompt(prompt_words) {
         return Ok(0);
     }
     let fired: Vec<FiredRecord> = store
@@ -1864,6 +1917,9 @@ fn vote_on_surfaced_intentions(
 
     let mut voted = 0usize;
     for intention_id in shown {
+        if voted >= MAX_VOTES_PER_SIGNAL {
+            break;
+        }
         if already.contains(&(intention_id.to_string(), rating.to_string())) {
             continue;
         }
@@ -1937,7 +1993,13 @@ fn build_session_start_response_for(
         // touch config.
         let id = crate::modules::project_briefs::ProjectBriefsModule::encode_cwd(cwd_str);
         let path = store.path(&format!("dreams/project-briefs/{id}.md"));
-        if let Ok(brief) = std::fs::read_to_string(&path) {
+        // A brief goes stale as the project moves; past two weeks it misleads.
+        let fresh = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age <= std::time::Duration::from_secs(14 * 86_400));
+        if fresh && let Ok(brief) = std::fs::read_to_string(&path) {
             let trimmed = brief.trim();
             if !trimmed.is_empty() {
                 sections.push(format!("## Project brief\n\n{trimmed}"));
@@ -1946,7 +2008,7 @@ fn build_session_start_response_for(
     }
 
     // ── 1. Broadcast intentions ─────────────────────────────
-    if let Some((section, ids)) = broadcast_intentions_section_for(store, session_id, record) {
+    if let Some((section, ids)) = broadcast_intentions_section_for(store, session_id, cwd, record) {
         sections.push(section);
         surfaced_ids = ids;
     }
@@ -2057,6 +2119,7 @@ fn record_surfacings(store: &Store, ids: &[String], session_id: Option<&str>) {
 fn broadcast_intentions_section_for(
     store: &Store,
     session_id: Option<&str>,
+    cwd: Option<&str>,
     record: bool,
 ) -> Option<(String, Vec<String>)> {
     let _guard = REGISTRY_REWRITE.lock().unwrap_or_else(|p| p.into_inner());
@@ -2068,15 +2131,29 @@ fn broadcast_intentions_section_for(
     }
 
     let now = Utc::now();
+    let standing = crate::modules::dreaming::standing_rule_lines();
     let surfaced_ids: Vec<String> = registry
         .iter()
         .filter(|intent| intent.expires > now)
+        // A rule Claude already loads from its standing rules is not worth a fire.
+        .filter(|intent| {
+            !(intent.action.source.starts_with("dream-wake:")
+                && crate::modules::dreaming::restates_standing_rule(&intent.action.message, &standing))
+        })
         .filter(|intent| intent.fire_count < intent.max_fires)
         .filter(|intent| match &intent.trigger {
             // Broadcast Time triggers (original behavior)
             Trigger::Time { after, keywords } => *after <= now && keywords.is_empty(),
             // Context triggers — behavioral rules from dream insights
-            Trigger::Context { .. } => true,
+            // A rule with topic keywords reaches only a session whose project
+            // path carries enough of them; a rule with none is for everyone.
+            Trigger::Context { keywords, min_keyword_matches } => {
+                keywords.is_empty() || {
+                    let here = cwd.unwrap_or_default().to_lowercase();
+                    let need = (*min_keyword_matches).max(1).min(keywords.len());
+                    keywords.iter().filter(|k| here.contains(&k.to_lowercase())).count() >= need
+                }
+            }
             // Event triggers need keyword matching — skip at session start
             Trigger::Event { .. } => false,
         })
@@ -2901,13 +2978,107 @@ timeout = "10s"
         assert_eq!(none, 0, "no words, no relevance, no vote");
     }
 
+    /// Registers `n` wake rules with the given message and shows them to sess-A.
+    fn show_rules(store: &Store, n: usize, msg: &str) {
+        for i in 0..n {
+            let mut rule = broadcast_intention(&format!("dw-{i}"), msg, Priority::High, chrono::Duration::hours(-1));
+            rule.action.source = format!("dream-wake:assoc-{i}");
+            store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        }
+        build_session_start_response_for(store, None, Some("sess-A"), true);
+    }
+
+    fn words(w: &[&str]) -> Vec<String> {
+        w.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_session_gets_only_the_context_rules_its_project_matches() {
+        let (_dir, store) = mk_store();
+        for (id, msg, kw) in [
+            ("dw-hit", "Run the migration dry-run first", vec!["migration", "dry-run"]),
+            ("dw-miss", "Name the slack channel in full", vec!["slack", "channel"]),
+        ] {
+            let mut rule = broadcast_intention(id, msg, Priority::High, chrono::Duration::hours(-1));
+            rule.trigger = Trigger::Context {
+                keywords: kw.iter().map(|s| s.to_string()).collect(),
+                min_keyword_matches: 2,
+            };
+            store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
+        }
+        let (out, shown, _) = build_session_start_response_for(&store, Some("/Users/me/Code/migration-dry-run"), Some("sess-A"), false);
+        assert_eq!(shown, vec!["dw-hit".to_string()], "{out}");
+        let (_, shown, _) = build_session_start_response_for(&store, Some("/Users/me/Code/other"), Some("sess-B"), false);
+        assert!(shown.is_empty(), "a project that matches no rule gets none: {shown:?}");
+    }
+
+    #[test]
+    fn an_overrun_reads_as_an_overrun() {
+        let mut t = SpendTally::new(400);
+        t.add(300);
+        t.add(300);
+        assert_eq!(t.spent, 600, "clipping at the budget would record 400");
+        assert_eq!(t.remaining(), 0);
+    }
+
+    #[test]
+    fn a_brief_older_than_fourteen_days_is_not_injected() {
+        let (_dir, store) = mk_store();
+        let cwd = "/Users/me/Code/aged";
+        let id = crate::modules::project_briefs::ProjectBriefsModule::encode_cwd(cwd);
+        let path = store.path(&format!("dreams/project-briefs/{id}.md"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "## What this project is about\nA stale brief.").unwrap();
+        let set_age = |days: u64| {
+            let f = std::fs::File::options().write(true).open(&path).unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400)).unwrap();
+        };
+        set_age(125);
+        let (out, _, _) = build_session_start_response_for(&store, Some(cwd), None, false);
+        assert!(!out.contains("stale brief"), "the 1 May brief was 125 days old: {out}");
+        set_age(3);
+        let (out, _, _) = build_session_start_response_for(&store, Some(cwd), None, false);
+        assert!(out.contains("stale brief"), "{out}");
+    }
+
+    #[test]
+    fn a_task_notification_prompt_never_votes() {
+        let (_dir, store) = mk_store();
+        show_rules(&store, 2, "Read the file before claiming what it holds");
+        // Words of the 27 Oct burst: a sub-agent's notification quoting "try again".
+        let w = words(&["task-notification", "claiming", "holds", "again"]);
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &w).unwrap();
+        assert_eq!(n, 0, "machine input is not the owner correcting");
+    }
+
+    #[test]
+    fn one_shared_word_or_only_stop_words_is_not_relevance() {
+        let (_dir, store) = mk_store();
+        show_rules(&store, 2, "Reconcile ledger exports against the quarterly totals");
+        let one = words(&["ledger"]);
+        assert_eq!(vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &one).unwrap(), 0);
+        let filler = words(&["that", "what", "check", "against"]);
+        assert_eq!(vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &filler).unwrap(), 0);
+        let two = words(&["ledger", "exports"]);
+        assert_eq!(vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &two).unwrap(), 2);
+    }
+
+    #[test]
+    fn one_correction_casts_at_most_three_votes() {
+        let (_dir, store) = mk_store();
+        show_rules(&store, 9, "Rule about quality");
+        let w = words(&["rule", "quality"]);
+        let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &w).unwrap();
+        assert_eq!(n, 3, "35 down-votes in a day came from uncapped bursts");
+    }
+
     #[test]
     fn votes_land_on_exactly_what_the_session_was_shown() {
         let (_dir, store) = mk_store();
         for i in 1..=3 {
             let mut rule = broadcast_intention(
                 &format!("dw-{i}"),
-                "Rule",
+                "Rule about quality",
                 Priority::High,
                 chrono::Duration::hours(-1),
             );
@@ -2919,8 +3090,8 @@ timeout = "10s"
         build_session_start_response_for(&store, None, Some("sess-A"), true);
         build_session_start_response_for(&store, None, Some("sess-B"), true);
 
-        // The correcting prompt's words touch all three rules ("Rule").
-        let rule_words = vec!["rule".to_string()];
+        // The correcting prompt's words touch all three rules ("Rule", "quality").
+        let rule_words = vec!["rule".to_string(), "quality".to_string()];
         // "no that's wrong" in A: exactly A's three, nothing for B.
         let n = vote_on_surfaced_intentions(&store, Some("sess-A"), Some("cli"), "down", "auto-correction", &rule_words).unwrap();
         assert_eq!(n, 3);

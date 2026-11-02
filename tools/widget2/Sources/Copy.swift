@@ -14,7 +14,7 @@ enum Copy {
         case .patterns: ("The strongest patterns, placed by category and linked by associations.",
                          "Stars are placed by category, sized and lit by strength. Hover a star to probe it, click to open it, drag to pan, pinch to zoom.")
         case .reader: ("What the reader found: the daily recon and the findings each weekly run named.",
-                       "The daily recon joins every stream without a model; the weekly run names the strongest clusters and puts them on a page for you. Click a run to load it, and a card to open its evidence.")
+                       "The daily recon joins every stream and runs the paid extractors; the weekly run names the strongest clusters and puts them on a page for you. Click a run to load it, and a card to open its evidence.")
         case .landing: ("Where each finding went, and whether anything moved after.",
                         "An effect is credited only to a fix that is in place: a hook you armed, or a filed proposal that is now done. A proposal still open has changed nothing yet; every other movement reads unattributed.")
         case .changes: ("Everything i-dream did or noticed, newest first, each with its cause.",

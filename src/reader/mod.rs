@@ -1,7 +1,8 @@
 //! The reader: what repeats across every local signal, and where it should land.
 //!
 //! Daily, a deterministic recon reads every stream, joins it, and records the
-//! clusters (no model, no tokens). Weekly, the strongest clusters are named by
+//! clusters without a model; the daily job then runs the paid extractors.
+//! Weekly, the strongest clusters are named by
 //! one bounded model call and landed on a decision page the owner answers;
 //! accepted items go to the backlog. Design: docs/32.
 
@@ -324,7 +325,8 @@ async fn check_against_sources(
             }
         },
     };
-    match check::apply(&mut run.items, &answer) {
+    let headers = check::headers(&run.items, &hooks_dir);
+    match check::apply(&mut run.items, &answer, &headers) {
         Ok(notes) => {
             drop_unknown_hooks_in(&mut run.items, &run.hook_actions);
             run.named.rejected.extend(notes);
@@ -531,7 +533,7 @@ async fn run_weekly_inner(
     // patterns moved since their brief was written.
     if !dry_run {
         let client = crate::api::ClaudeClient::for_config(config)?;
-        crate::daemon::regen_dirty_project_briefs(config, store, &client).await;
+        run.tokens += crate::daemon::regen_dirty_project_briefs(config, store, &client).await;
     }
 
     if !run.forwarded.is_empty() {
@@ -574,7 +576,7 @@ async fn run_weekly_inner(
                     .analyze(&process, &prompt, &config.budget.model, 8192, 0.2)
                     .await
                     .context("reader naming call")?;
-                run.tokens = resp.tokens_used;
+                run.tokens += resp.tokens_used;
                 write(&dir.join("prompt.txt"), &prompt)?;
                 write(&dir.join("response.txt"), &resp.content)?;
                 // Written last, so a call that failed never pairs a new batch

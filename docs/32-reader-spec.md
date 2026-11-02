@@ -6,7 +6,7 @@ This turns docs/29 Phase 2 (rows 2.1 to 2.6) and ruling D7 (two-tier cadence) in
 
 ## 1. What the reader does
 
-Once a day it reads every local signal stream for the last seven days, normalises each event into one evidence row, and joins the rows without a model: the same slug from independent sources, the same file hit from two directions, one session that both corrected the agent and dumped a pending list. That is the **recon**, and it costs no tokens.
+Once a day it reads every local signal stream for the last seven days, normalises each event into one evidence row, and joins the rows without a model: the same slug from independent sources, the same file hit from two directions, one session that both corrected the agent and dumped a pending list. That is the **recon**. The join itself uses no model, but the daily run also fires the paid LLM extractors (about $12.77 over 21 days, audit 2026-10-27), so the recon does spend tokens.
 
 Once a week (Wednesday, per D7) it takes the strongest clusters from the recon, asks one bounded sonnet call to name them and say what kind of thing each is, checks every evidence id it cites, and lands at most seven items on one decision page. Items the owner accepts are filed to the backlog with a fingerprint, so a re-run never refiles them; an accepted item that names a muted gate unmutes it.
 
@@ -77,7 +77,7 @@ Answers are picked up by the next daily recon (`decision-page.sh answer <slug> -
 
 ## 6. Schedule (row 2.5 with D7)
 
-- **Daily recon**, 04:30 local: the join over seven days, written to `reader/daily/<date>.json`, plus answer pickup. No model.
+- **Daily recon**, 04:30 local: the join over seven days, written to `reader/daily/<date>.json`, plus answer pickup. The join uses no model; the run also fires the paid extractors, so it costs tokens.
 - **Weekly deep run**, Wednesday 02:30 local: recon, naming, page. If the usage gate refuses, the run writes `reader/weekly-pending` and every daily recon until Friday retries it, so a gated Wednesday still lands within 48 hours.
 - **On demand**: `i-dream reader run --since 7d`.
 

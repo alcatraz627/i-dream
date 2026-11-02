@@ -336,6 +336,11 @@ touch "{activity}"
     Ok(())
 }
 
+/// Turns the PostToolUse hook's stdin JSON into the one-line tool_use event the
+/// daemon reads. argv[1] is the fallback name when stdin has none. Written
+/// without double quotes or braces so it survives shell quoting and `format!`.
+const POST_TOOL_EVENT_PY: &str = "import sys,json,time; raw=sys.stdin.read()\ntry: d=json.loads(raw)\nexcept Exception: d={}\nn=(d.get('tool_name') or (sys.argv[1] if len(sys.argv)>1 else '') or '')\nprint(json.dumps({'event':'tool_use','tool':n,'ts':int(time.time())}))";
+
 fn write_post_tool_use_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
     let socket = config.data_dir().join("daemon.sock");
     let script = format!(
@@ -346,13 +351,15 @@ fn write_post_tool_use_hook(dir: &std::path::Path, config: &Config) -> Result<()
 # i-dream: PostToolUse hook — captures tool execution metadata
 SOCKET="{socket}"
 if [ -S "$SOCKET" ]; then
-    echo '{{"event":"tool_use","tool":"'$TOOL_NAME'","ts":'$(date +%s)'}}' \
+    # The tool name arrives in the hook's stdin JSON; the harness sets no TOOL_NAME.
+    cat | python3 -c "{build}" "${{TOOL_NAME:-}}" \
         | python3 -c "import sys,socket as S; s=S.socket(S.AF_UNIX); s.connect('$SOCKET'); s.sendall(sys.stdin.buffer.read()); s.close()" 2>/dev/null || true
 fi
 # Touch activity signal
 touch "{activity}"
 "#,
         socket = socket.display(),
+        build = POST_TOOL_EVENT_PY,
         activity = expand_tilde(&config.idle.activity_signal).display(),
     );
     std::fs::write(dir.join("post-tool-use.sh"), &script)?;
@@ -400,6 +407,10 @@ except Exception:
     sys.exit(0)
 
 if not prompt:
+    sys.exit(0)
+
+# A sub-agent's notification is machine input, not the owner speaking.
+if prompt.lstrip().startswith("<task-notification>"):
     sys.exit(0)
 
 # ALL-CAPS words (≥2 letters) — proxy for emphasis or frustration
@@ -1237,6 +1248,34 @@ mod tests {
     // The generated bash scripts are the bridge between Claude Code
     // hooks and the i-dream daemon. They must include the correct
     // socket path and activity signal path from config.
+
+    #[test]
+    fn post_tool_use_records_the_tool_name_from_stdin() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        write_post_tool_use_hook(dir.path(), &Config::default()).unwrap();
+        let script = std::fs::read_to_string(dir.path().join("post-tool-use.sh")).unwrap();
+        assert!(
+            !script.contains("'$TOOL_NAME'"),
+            "the name must not come from an env var the harness never sets"
+        );
+        let mut child = std::process::Command::new("python3")
+            .args(["-c", POST_TOOL_EVENT_PY])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"tool_name":"Bash","tool_input":{}}"#)
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let ev: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(ev["tool"], "Bash");
+        assert_eq!(ev["event"], "tool_use");
+    }
 
     #[test]
     fn every_hook_script_stands_down_for_the_daemons_own_child() {

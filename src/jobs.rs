@@ -22,6 +22,19 @@ pub struct Hold {
     pub oneshot: String,
 }
 
+/// Tell the scheduler what this run really did, so its history can tell a
+/// produced page from a hold or a skip instead of logging every one as `ok`.
+/// Does nothing outside a scheduled run, where the variable is unset.
+pub fn report_outcome(reason: &str, detail: &str) {
+    if let Ok(path) = std::env::var("GCC_SCHED_META") {
+        write_outcome(Path::new(&path), reason, detail);
+    }
+}
+
+fn write_outcome(path: &Path, reason: &str, detail: &str) {
+    let _ = std::fs::write(path, format!("outcome=ok\nreason={reason}\ndetail={detail}\n"));
+}
+
 fn holds_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("cannot resolve home dir")?;
     Ok(home.join(".claude/i-dream/holds.json"))
@@ -240,6 +253,17 @@ mod tests {
 
     fn local(s: &str) -> DateTime<Local> {
         Local.from_local_datetime(&chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_run_tells_the_scheduler_whether_it_made_a_page_or_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = dir.path().join("meta");
+        write_outcome(&meta, "skipped", "2026w45");
+        assert_eq!(
+            std::fs::read_to_string(&meta).unwrap(),
+            "outcome=ok\nreason=skipped\ndetail=2026w45\n"
+        );
     }
 
     #[test]

@@ -23,6 +23,60 @@ use tracing::{info, warn};
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ProcessedState {
     sessions: HashMap<String, u64>,
+    /// How many times a call over each session came back unusable.
+    #[serde(default)]
+    refusals: HashMap<String, u32>,
+}
+
+/// How many unusable answers a session gets before it is given up on, so a
+/// batch the model keeps refusing stops costing a call every run.
+const MAX_REFUSALS: u32 = 3;
+
+/// The sessions whose every sampled unit went into the call. A session with
+/// no sampled units has nothing to read and counts as read; one with a unit
+/// left out of the call stays queued for the next run.
+fn sessions_read(
+    seen: &[(String, u64)],
+    units: &[ExecutionUnit],
+    sent: &[&ExecutionUnit],
+) -> Vec<(String, u64)> {
+    let sent_ids: std::collections::HashSet<&str> = sent.iter().map(|u| u.unit_id.as_str()).collect();
+    seen.iter()
+        .filter(|(sid, _)| {
+            units
+                .iter()
+                .filter(|u| &u.session_id == sid)
+                .all(|u| sent_ids.contains(u.unit_id.as_str()))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Count one unusable answer against each session in the call. Returns the
+/// sessions that have now used up their tries and should be retired.
+fn record_refusal(state: &mut ProcessedState, seen: &[(String, u64)]) -> Vec<(String, u64)> {
+    let mut retired = vec![];
+    for (sid, size) in seen {
+        let n = state.refusals.entry(sid.clone()).or_insert(0);
+        *n += 1;
+        if *n >= MAX_REFUSALS {
+            state.refusals.remove(sid);
+            retired.push((sid.clone(), *size));
+        }
+    }
+    retired
+}
+
+#[derive(Deserialize)]
+struct LlmCalibration {
+    calibration_score: f64,
+    overconfident_count: u64,
+    underconfident_count: u64,
+    well_calibrated_count: u64,
+    #[serde(default)]
+    biases_detected: Vec<String>,
+    #[serde(default)]
+    recommendations: Vec<String>,
 }
 
 /// Result of a scan+sample pass. Used by [`MetacogModule::run`] and
@@ -535,7 +589,10 @@ Output as JSON matching this shape:
             );
         }
 
-        let prompt = format!("Analyze these execution units:\n\n{serialized}");
+        // The instruction lives in the system prompt; the user message is
+        // only the data, so the transcript text cannot pose as the task.
+        system_prompt.push_str("\n\nThe user message is a JSON array of the execution units to analyze.");
+        let prompt = serialized;
 
         let response = client
             .analyze(
@@ -580,17 +637,6 @@ Output as JSON matching this shape:
         }
 
         // Parse the LLM response and append to calibration.jsonl.
-        #[derive(Deserialize)]
-        struct LlmCalibration {
-            calibration_score: f64,
-            overconfident_count: u64,
-            underconfident_count: u64,
-            well_calibrated_count: u64,
-            #[serde(default)]
-            biases_detected: Vec<String>,
-            #[serde(default)]
-            recommendations: Vec<String>,
-        }
         match serde_json::from_str::<LlmCalibration>(&cleaned) {
             Ok(llm) => {
                 let entry = CalibrationEntry {
@@ -611,12 +657,17 @@ Output as JSON matching this shape:
                 if let Err(e) = self.store.append_jsonl("metacog/calibration.jsonl", &entry) {
                     warn!("failed to persist calibration entry: {e:#}");
                 }
-                // Only a usable answer retires these sessions; a refusal or
-                // garbled reply leaves them for the next run.
-                self.persist_processed(&batch.sessions_seen)?;
+                // Only a usable answer retires sessions, and only those whose
+                // units were all in the call; the rest wait for the next run.
+                self.persist_processed(&sessions_read(
+                    &batch.sessions_seen,
+                    &batch.units,
+                    &budget_units,
+                ))?;
             }
             Err(e) => {
                 warn!("metacog: failed to parse LLM calibration response, sessions stay queued: {e:#}");
+                self.note_refusal(&batch.sessions_seen)?;
             }
         }
 
@@ -860,6 +911,18 @@ impl<'a> MetacogModule<'a> {
             );
         }
 
+        Ok(())
+    }
+
+    /// Record an unusable answer for these sessions, retiring any that have
+    /// used up their tries.
+    fn note_refusal(&self, seen: &[(String, u64)]) -> Result<()> {
+        let mut state: ProcessedState = self.store.read_json("metacog/processed.json").unwrap_or_default();
+        for (sid, size) in record_refusal(&mut state, seen) {
+            warn!("metacog: giving up on session {sid} after {MAX_REFUSALS} unusable answers");
+            state.sessions.insert(sid, size);
+        }
+        self.store.write_json("metacog/processed.json", &state)?;
         Ok(())
     }
 
@@ -1255,6 +1318,45 @@ mod tests {
         assert_eq!(picked[0].unit_id, "u-small");
         let none = units_within_budget(&units, 1);
         assert!(none.is_empty(), "nothing fits, nothing is sent");
+    }
+
+    fn unit_in(session: &str, id: &str) -> ExecutionUnit {
+        let mut u = make_unit(id, false, vec![tool("Read", true)]);
+        u.session_id = session.into();
+        u
+    }
+
+    #[test]
+    fn an_oversize_batch_leaves_the_unsent_sessions_queued() {
+        let units = vec![unit_in("s-new", "n1"), unit_in("s-old", "o1"), unit_in("s-old", "o2")];
+        let seen = vec![("s-new".to_string(), 10), ("s-old".to_string(), 20), ("s-empty".to_string(), 30)];
+        // Only the newest session's unit and one of s-old's two fit.
+        let sent = vec![&units[0], &units[1]];
+        let read = sessions_read(&seen, &units, &sent);
+        let ids: Vec<&str> = read.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(ids, vec!["s-new", "s-empty"], "s-old had a unit left out, so it stays queued");
+    }
+
+    #[test]
+    fn a_refused_batch_is_tried_a_bounded_number_of_times() {
+        let seen = vec![("s1".to_string(), 7)];
+        let mut state = ProcessedState::default();
+        for _ in 1..MAX_REFUSALS {
+            assert!(record_refusal(&mut state, &seen).is_empty());
+        }
+        let retired = record_refusal(&mut state, &seen);
+        assert_eq!(retired, seen, "the last allowed refusal retires the session");
+        assert!(!state.refusals.contains_key("s1"), "the counter is cleared once retired");
+    }
+
+    #[test]
+    fn a_refusal_is_not_a_calibration_and_a_good_answer_is() {
+        let refusal = "I can't help with analysing these sessions.";
+        assert!(serde_json::from_str::<LlmCalibration>(refusal).is_err());
+        let empty_json = "{}";
+        assert!(serde_json::from_str::<LlmCalibration>(empty_json).is_err(), "an empty object is not an answer");
+        let good = r#"{"calibration_score":0.4,"overconfident_count":1,"underconfident_count":0,"well_calibrated_count":3}"#;
+        assert!(serde_json::from_str::<LlmCalibration>(good).is_ok());
     }
 
     #[test]
