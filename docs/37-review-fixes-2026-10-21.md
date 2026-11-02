@@ -208,6 +208,55 @@ Fix: add retention rules, and point the build docs at `i-dream widget`.
 - E8: `src/hooks.rs:338`; `~/.claude/hooks/warn-events.jsonl`; `hook-health.sh:209-212`; reports L-27-03, L-27-04, W-27-04 to W-27-07.
 - E9: `src/modules/registry.rs:875-957`; `tools/menubar/build.sh:44-45`.
 
+## F. Monthly audit findings, 2026-11-02
+
+Slices 2 and 3 shipped on 2026-11-02, but the audit (`.claude/output/20261102-audit/summary.md`) found that the rules still do not reach Claude. The fixes below are open.
+
+### F1. The session-start cap drops the rules
+The cap keeps only the about, do and avoid sections, while the daemon still counts every rule as fired. In the 28 capped sessions, 341 fires produced 9 rule tags.
+
+Fix: the owner decides whether the cap keeps rules, rules arrive at prompt time, or the channel stops. Count a fire only for text that enters context, and vote only on rules Claude saw.
+
+### F2. The keyword gate matches the wrong thing
+Rule keywords describe behaviour and the gate compares them with the project path, so almost no rule ever matches. The word "user" matches every path through `/Users/`.
+
+Fix: match against the prompt, or remove the keywords. This depends on F1.
+
+### F3. Two controls state things that are not so
+A paused job reads "on" after a widget restart, because status carries no `enabled` field. The usage guard shows on but only applies when the account gate script is missing.
+
+Fix: add `enabled` to the status rows, and remove the guard's controls or make them real.
+
+### F4. The daily Run early spends without asking
+It costs 47k to 67k tokens on one click, and the row still says "Daily dreaming".
+
+Fix: give it the confirm panel and rename the row.
+
+### F5. Green checks that say little
+`delivery-agrees` passes 379 against 31, and the header shows the 379 as "nudges fired". D3 and D5 are unbuilt and were in no plan.
+
+Fix: compare the two counts properly, relabel the header, and build D3 and D5.
+
+### F6. Residue-review has stopped filing
+It has filed nothing for 11 runs, and its log cannot say why.
+
+Fix: log findings returned and dropped per session, then probe a session with a known correction.
+
+### F7. Retention gaps
+Retention runs only inside a consolidation cycle. `introspection/chains` (140 MB) and `launchd.stderr.log` (25.9 MB) have no bound.
+
+Fix: run retention on its own timer inside the daemon, cap the chains, and rotate stderr without breaking the file handle launchd holds.
+
+### Sources for F
+
+- F1: `~/.claude/scripts/dream/brief-cap.py:65-68`; indictment rank 1.
+- F2: `src/daemon.rs`, `broadcast_intentions_section_for`; indictment rank 2.
+- F3: `tools/widget2/Sources/Record.swift:156`; `src/daemon.rs:374-381`; indictment ranks 3 and 7.
+- F4: `tools/widget2/Sources/Record.swift:158-160,790`; indictment rank 4.
+- F5: `src/verify.rs:208`; `tools/widget2/Sources/Dropdown.swift:122`; indictment ranks 5, 6 and 9.
+- F6: `scripts/residue-review.sh:153-161`; report W-11-01.
+- F7: `src/daemon.rs:720`; reports AR-11-04, AR-11-06, AR-11-07.
+
 ## Sources for the 2026-10-26 notes
 
 Full report: `.claude/output/20261026-1703-adversarial-review/indictment.md`.
