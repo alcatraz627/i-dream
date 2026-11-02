@@ -953,7 +953,7 @@ pub const RETENTION: &[RetentionRule] = &[
         store: ".claude/i-dream/reader/daily",
         policy: RetentionPolicy::MaxAgeDays(90),
     },
-    // The four append-only logs that grew past 250 MB with no bound. Overflow
+    // The append-only logs that grew with no bound (metacog prunes its own samples). Overflow
     // lines are archived (newest lines always stay in place), and each archive
     // directory is itself capped so the old lines do roll off the disk.
     RetentionRule {
@@ -967,10 +967,6 @@ pub const RETENTION: &[RetentionRule] = &[
     RetentionRule {
         store: ".claude/subconscious/metacog/activity.jsonl",
         policy: RetentionPolicy::MaxLines(50_000),
-    },
-    RetentionRule {
-        store: ".claude/subconscious/metacog/samples.jsonl",
-        policy: RetentionPolicy::MaxLines(500),
     },
     RetentionRule {
         store: ".claude/subconscious/logs/_archived",
@@ -1438,14 +1434,13 @@ mod lane_health_tests {
     }
 
     #[test]
-    fn the_four_unbounded_logs_roll_off_old_lines() {
+    fn the_unbounded_logs_roll_off_old_lines() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         let stores = [
             ".claude/subconscious/logs/events.jsonl",
             ".claude/subconscious/logs/signals.jsonl",
             ".claude/subconscious/metacog/activity.jsonl",
-            ".claude/subconscious/metacog/samples.jsonl",
         ];
         for s in stores {
             let p = home.join(s);

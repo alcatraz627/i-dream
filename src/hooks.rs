@@ -339,7 +339,7 @@ touch "{activity}"
 /// Turns the PostToolUse hook's stdin JSON into the one-line tool_use event the
 /// daemon reads. argv[1] is the fallback name when stdin has none. Written
 /// without double quotes or braces so it survives shell quoting and `format!`.
-const POST_TOOL_EVENT_PY: &str = "import sys,json,time; raw=sys.stdin.read()\ntry: d=json.loads(raw)\nexcept Exception: d={}\nn=(d.get('tool_name') or (sys.argv[1] if len(sys.argv)>1 else '') or '')\nprint(json.dumps({'event':'tool_use','tool':n,'ts':int(time.time())}))";
+const POST_TOOL_EVENT_PY: &str = "import sys,json,time,socket as S; raw=sys.stdin.read()\ntry: d=json.loads(raw)\nexcept Exception: d={}\nn=(d.get('tool_name') or sys.argv[1] or '')\ns=S.socket(S.AF_UNIX); s.connect(sys.argv[2]); s.sendall(json.dumps({'event':'tool_use','tool':n,'ts':int(time.time())}).encode()); s.close()";
 
 fn write_post_tool_use_hook(dir: &std::path::Path, config: &Config) -> Result<()> {
     let socket = config.data_dir().join("daemon.sock");
@@ -352,8 +352,8 @@ fn write_post_tool_use_hook(dir: &std::path::Path, config: &Config) -> Result<()
 SOCKET="{socket}"
 if [ -S "$SOCKET" ]; then
     # The tool name arrives in the hook's stdin JSON; the harness sets no TOOL_NAME.
-    cat | python3 -c "{build}" "${{TOOL_NAME:-}}" \
-        | python3 -c "import sys,socket as S; s=S.socket(S.AF_UNIX); s.connect('$SOCKET'); s.sendall(sys.stdin.buffer.read()); s.close()" 2>/dev/null || true
+    # This fires on every tool call, so it spawns one interpreter and no more.
+    python3 -c "{build}" "${{TOOL_NAME:-}}" "$SOCKET" 2>/dev/null || true
 fi
 # Touch activity signal
 touch "{activity}"
@@ -1259,10 +1259,12 @@ mod tests {
             !script.contains("'$TOOL_NAME'"),
             "the name must not come from an env var the harness never sets"
         );
+        assert_eq!(script.matches("python3").count(), 1, "one interpreter per tool call");
+        let sock = dir.path().join("s.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let mut child = std::process::Command::new("python3")
-            .args(["-c", POST_TOOL_EVENT_PY])
+            .args(["-c", POST_TOOL_EVENT_PY, "", sock.to_str().unwrap()])
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         child
@@ -1271,8 +1273,11 @@ mod tests {
             .unwrap()
             .write_all(br#"{"tool_name":"Bash","tool_input":{}}"#)
             .unwrap();
-        let out = child.wait_with_output().unwrap();
-        let ev: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut body = String::new();
+        std::io::Read::read_to_string(&mut conn, &mut body).unwrap();
+        child.wait().unwrap();
+        let ev: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(ev["tool"], "Bash");
         assert_eq!(ev["event"], "tool_use");
     }

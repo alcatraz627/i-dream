@@ -121,7 +121,17 @@ struct Dropped {
 /// model that misreads a header cannot also produce a line that backs the
 /// misreading, so a correction without one is not trusted.
 fn quote_in_sources(quote: &str, headers: &[String]) -> bool {
-    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A model quoting a wrapped comment joins its lines and drops the comment
+    // markers, so compare the words and not the layout.
+    let squash = |s: &str| {
+        s.lines()
+            .map(|l| l.trim_start().trim_start_matches(['#', '/', '*']))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     let q = squash(quote);
     !q.is_empty() && headers.iter().any(|h| squash(h).contains(&q))
 }
@@ -136,7 +146,11 @@ pub fn apply(items: &mut [Named], answer: &str, headers: &[String]) -> Result<Ve
     for c in parsed.items {
         let Some(item) = items.iter_mut().find(|n| n.cluster == c.cluster) else { continue };
         let rewrites = !c.why_repeats.trim().is_empty() || !c.fix.trim().is_empty() || c.guard.is_some();
-        if rewrites && quote_in_sources(&c.quote, headers) {
+        // With no check credited on either side there is no source to misread,
+        // and no line that could be quoted.
+        let names_no_check = item.guard.as_ref().is_none_or(|g| g.hook_id.is_none())
+            && c.guard.as_ref().is_none_or(|g| g.hook_id.is_none());
+        if rewrites && (names_no_check || quote_in_sources(&c.quote, headers)) {
             if !c.why_repeats.trim().is_empty() {
                 item.why_repeats = c.why_repeats;
             }
@@ -240,6 +254,24 @@ mod tests {
     /// identifiers" although its header lists commit sha, file:line and
     /// internal id patterns. A correction with no line from the header behind
     /// it must not rewrite the item.
+    #[test]
+    fn a_quote_joining_a_wrapped_comment_still_counts() {
+        let header = "# Output contract: {hookSpecificOutput:{hookEventName:\"PreToolUse\",\n#   additionalContext:<msg>}} on stdout, exit 0 always.".to_string();
+        let answer = r##"{"items": [{"cluster": "c-1", "why_repeats": "It never blocks.", "quote": "# Output contract: {hookSpecificOutput:{hookEventName:\"PreToolUse\", additionalContext:<msg>}} on stdout, exit 0 always."}]}"##;
+        let mut items = vec![item("c-1", "guard-lazy-question", &["a:1"])];
+        let notes = apply(&mut items, answer, &[header]).unwrap();
+        assert_eq!(items[0].why_repeats, "It never blocks.", "{notes:?}");
+    }
+
+    #[test]
+    fn a_correction_about_a_problem_no_check_covers_needs_no_quote() {
+        let answer = r#"{"items": [{"cluster": "c-1", "guard": {"hook_id": null, "plain": "Nothing checks this", "verdict": "no", "gap": "no check exists"}}]}"#;
+        let mut items = vec![item("c-1", "x", &["a:1"])];
+        items[0].guard.as_mut().unwrap().hook_id = None;
+        let notes = apply(&mut items, answer, &["unrelated header".to_string()]).unwrap();
+        assert_eq!(items[0].guard.as_ref().unwrap().plain, "Nothing checks this", "{notes:?}");
+    }
+
     #[test]
     fn a_correction_with_no_supporting_line_from_the_source_is_discarded() {
         let header = "PATTERNS = {\n  \"commit sha\": re.compile(...),\n  \"file:line\": re.compile(...),\n  \"internal id\": re.compile(...),\n}".to_string();
