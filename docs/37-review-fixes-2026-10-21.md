@@ -260,7 +260,8 @@ The queue feed doubled to 20,000 characters, because busy days queued more than 
 Still open:
 
 - The weekly run has no dark-wake hold. A failure there shows in the widget.
-- Dead config switches (AR-11-10) stay until the owner agrees to lose their Settings rows.
+- Three settings still do nothing, because each marks a feature worth deciding on: `max_active_intentions`, `match_threshold` and `priming_decay_hours`.
+- Metacog captures every correction, then keeps only the newest units that fit its budget, so corrections can be dropped.
 - Five domains have no lane (AR-11-09). New lanes would risk false alarms for domains that are quiet by nature.
 
 ## Sources for the 2026-10-26 notes

@@ -406,7 +406,6 @@ fn config_respects_explicit_config_arg() {
 [daemon]
 socket_path = "/tmp/custom.sock"
 log_level = "debug"
-max_concurrent_modules = 4
 
 [idle]
 threshold_hours = 8
@@ -431,8 +430,6 @@ journal_max_entries = 100
 enabled = false
 sample_rate = 0.1
 triggered_sample_rate = 0.5
-trigger_on_correction = true
-trigger_on_multi_failure = true
 max_samples_per_session = 10
 
 [modules.intuition]
@@ -458,7 +455,6 @@ match_threshold = 0.8
 session_start = false
 post_tool_use = false
 stop = false
-pre_compact = false
 "#;
     std::fs::write(&config_path, toml_body).unwrap();
 

@@ -33,7 +33,6 @@ Process-level wiring. Rarely needs changing.
 |---|---|---|
 | `socket_path` | `~/.claude/subconscious/daemon.sock` | Unix socket for hook scripts + menubar widget. |
 | `log_level` | `"info"` | Override at runtime with `RUST_LOG=debug` for one-shot debugging. |
-| `max_concurrent_modules` | `2` | How many modules can run in parallel within a cycle. |
 
 ### `[idle]`
 
@@ -86,7 +85,6 @@ Which Claude Code hooks the installer enables. All `true` by default.
 | `session_start` | `true` | Inject project brief + active intentions at SessionStart. |
 | `post_tool_use` | `true` | Activity signal + metacog sampling per tool call. |
 | `stop` | `true` | Track session-end consolidation timing. |
-| `pre_compact` | `true` | Take a snapshot before Claude Code compacts context. |
 | `user_prompt_submit` | `true` | Sentiment analysis (correction / frustration) per user message — drives D3 v2 auto-downvote. |
 
 ### `[modules.dreaming]`
@@ -112,8 +110,6 @@ Confidence calibration + bias detection.
 | `enabled` | `true` | Master switch. |
 | `sample_rate` | `0.25` | Probability a given execution unit is sampled. |
 | `triggered_sample_rate` | `1.0` | Sample probability when a trigger fires. |
-| `trigger_on_correction` | `true` | Sample when user correction detected. |
-| `trigger_on_multi_failure` | `true` | Sample when same task fails ≥2 times. |
 | `max_samples_per_session` | `50` | Hard cap per session. |
 
 ### `[modules.intuition]`

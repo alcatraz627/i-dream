@@ -15,8 +15,6 @@
 socket_path = "~/.claude/subconscious/daemon.sock"
 # Default tracing-subscriber filter. Override at runtime with RUST_LOG.
 log_level = "info"
-# How many modules can run concurrently in a single cycle.
-max_concurrent_modules = 2
 
 # ─────────────────────────────────────────────────────────────────────
 #  [idle] — when to fire a consolidation cycle
@@ -81,7 +79,6 @@ max_sessions_per_scan = 50
 session_start      = true     # Inject project brief + intentions
 post_tool_use      = true     # Activity signal + metacog sampling
 stop               = true     # Session-end consolidation timing
-pre_compact        = true     # Pre-compaction snapshot
 # UserPromptSubmit captures correction/frustration sentiment per
 # message — drives D3 v2 auto-downvote of unhelpful insights.
 user_prompt_submit = true
@@ -111,8 +108,6 @@ enabled                  = true
 sample_rate              = 0.25
 # Probability when a trigger condition fires (correction, multi-failure).
 triggered_sample_rate    = 1.0
-trigger_on_correction    = true
-trigger_on_multi_failure = true
 max_samples_per_session  = 50
 
 # ─────────────────────────────────────────────────────────────────────

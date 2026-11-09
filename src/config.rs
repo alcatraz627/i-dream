@@ -74,7 +74,6 @@ impl Default for IngestionConfig {
 pub struct DaemonConfig {
     pub socket_path: PathBuf,
     pub log_level: String,
-    pub max_concurrent_modules: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -177,8 +176,6 @@ pub struct MetacogConfig {
     pub enabled: bool,
     pub sample_rate: f64,
     pub triggered_sample_rate: f64,
-    pub trigger_on_correction: bool,
-    pub trigger_on_multi_failure: bool,
     pub max_samples_per_session: u64,
 }
 
@@ -212,7 +209,6 @@ pub struct HooksConfig {
     pub session_start: bool,
     pub post_tool_use: bool,
     pub stop: bool,
-    pub pre_compact: bool,
     /// Install the UserPromptSubmit hook for sentiment analysis (frustration,
     /// corrections, positive feedback) on each user message.
     #[serde(default = "default_true")]
@@ -275,7 +271,6 @@ impl Default for Config {
             daemon: DaemonConfig {
                 socket_path: PathBuf::from("~/.claude/subconscious/daemon.sock"),
                 log_level: "info".into(),
-                max_concurrent_modules: 2,
             },
             idle: IdleConfig {
                 threshold_hours: 4,
@@ -310,8 +305,6 @@ impl Default for Config {
                     enabled: true,
                     sample_rate: 0.25,
                     triggered_sample_rate: 1.0,
-                    trigger_on_correction: true,
-                    trigger_on_multi_failure: true,
                     max_samples_per_session: 50,
                 },
                 intuition: IntuitionConfig {
@@ -338,7 +331,6 @@ impl Default for Config {
                 session_start: true,
                 post_tool_use: true,
                 stop: true,
-                pre_compact: true,
                 user_prompt_submit: true,
                 pre_tool_use: true,
                 user_prompt_hint: true,

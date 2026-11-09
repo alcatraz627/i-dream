@@ -455,8 +455,7 @@ model_heavy = "claude-opus-4-6"  # Model for creative work (REM phase)
 use_claude_code_cli = true   # Use local CLI (subscription billing, no API key needed)
 
 [modules.metacog]
-sample_rate = 0.25           # Sample 25% of execution units
-trigger_on_correction = true # Always capture corrections
+sample_rate = 0.25           # Sample 25% of units; corrections are always captured
 
 [modules.intuition]
 decay_halflife_days = 30.0   # Exponential decay for valence memory
