@@ -249,6 +249,20 @@ Fixed. Retention runs on its own daily timer inside the daemon. Chains keep the 
 - F6: `scripts/residue-review.sh:153-161`; report W-11-01.
 - F7: `src/daemon.rs:720`; reports AR-11-04, AR-11-06, AR-11-07.
 
+## G. Nightly failures on battery, 2026-11-09
+
+The nightly run failed on 11-08 and 11-09 because the scheduler started it during two-second dark wakes on battery. The Mac went back to sleep mid-call.
+
+Fixed. The run now holds during a dark wake on battery, and the daemon retries it once the Mac can finish. A failed run shows as failed in the scheduler and in the `extractors-ok` row of `verify`.
+
+The queue feed doubled to 20,000 characters, because busy days queued more than one night could drain.
+
+Still open:
+
+- The weekly run has no dark-wake hold. A failure there shows in the widget.
+- Dead config switches (AR-11-10) stay until the owner agrees to lose their Settings rows.
+- Five domains have no lane (AR-11-09). New lanes would risk false alarms for domains that are quiet by nature.
+
 ## Sources for the 2026-10-26 notes
 
 Full report: `.claude/output/20261026-1703-adversarial-review/indictment.md`.

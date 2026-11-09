@@ -283,10 +283,17 @@ impl Daemon {
         let mut retention_tick = tokio::time::interval(RETENTION_INTERVAL);
         retention_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+        let mut extractor_retry_tick = tokio::time::interval(EXTRACTOR_RETRY_CHECK);
+        extractor_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_extractor_retry = None;
+
         let result: Result<()> = loop {
             tokio::select! {
                 _ = retention_tick.tick() => {
                     run_daily_retention().await;
+                }
+                _ = extractor_retry_tick.tick() => {
+                    retry_extractors_if_due(&mut last_extractor_retry);
                 }
                 _ = signal::ctrl_c() => {
                     info!("Received SIGINT (Ctrl+C), shutting down");
@@ -1579,8 +1586,10 @@ impl SpendTally {
 /// The model-spending extractors over the owner's interactive sessions:
 /// dreaming (SWS, REM, wake), metacog and introspection. Ruling D9 keeps
 /// them out of the idle cycle; the reader's daily recon runs them, inside
-/// the per-cycle token budget and runtime cap. Returns the tokens spent.
-pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClient) -> Result<u64> {
+/// the per-cycle token budget and runtime cap. A module that fails does not
+/// stop the others; the result names it.
+pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClient) -> Result<ExtractorRun> {
+    let mut failed: Vec<&'static str> = Vec::new();
     let mut tally = SpendTally::new(config.budget.max_tokens_per_cycle);
     let deadline = tokio::time::Instant::now()
         + Duration::from_secs(config.budget.max_runtime_minutes * 60);
@@ -1600,8 +1609,14 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
                     tally.add(tokens);
                     info!("Dreaming complete ({tokens} tokens used)");
                 }
-                Ok(Err(e)) => error!("Dreaming failed: {e:#}"),
-                Err(_) => warn!("Dreaming timed out"),
+                Ok(Err(e)) => {
+                    error!("Dreaming failed: {e:#}");
+                    failed.push("dreaming");
+                }
+                Err(_) => {
+                    warn!("Dreaming timed out");
+                    failed.push("dreaming");
+                }
             }
         }
     }
@@ -1622,8 +1637,14 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
                     tally.add(tokens);
                     info!("Metacog complete ({tokens} tokens used)");
                 }
-                Ok(Err(e)) => error!("Metacog failed: {e:#}"),
-                Err(_) => warn!("Metacog timed out"),
+                Ok(Err(e)) => {
+                    error!("Metacog failed: {e:#}");
+                    failed.push("metacog");
+                }
+                Err(_) => {
+                    warn!("Metacog timed out");
+                    failed.push("metacog");
+                }
             }
         }
     }
@@ -1643,16 +1664,83 @@ pub async fn run_extractors(config: &Config, store: &Store, client: &ClaudeClien
                     tally.add(tokens);
                     info!("Introspection complete ({tokens} tokens used)");
                 }
-                Ok(Err(e)) => error!("Introspection failed: {e:#}"),
-                Err(_) => warn!("Introspection timed out"),
+                Ok(Err(e)) => {
+                    error!("Introspection failed: {e:#}");
+                    failed.push("introspection");
+                }
+                Err(_) => {
+                    warn!("Introspection timed out");
+                    failed.push("introspection");
+                }
             }
         }
     }
 
     let used = tally.spent;
-    record_extractor_spend(store, used, config.budget.max_tokens_per_cycle, Utc::now())?;
-    info!("[extractors] complete: used {used} tokens of {}", config.budget.max_tokens_per_cycle);
-    Ok(used)
+    record_extractor_spend(store, used, config.budget.max_tokens_per_cycle, &failed, Utc::now())?;
+    info!(
+        "[extractors] finished: used {used} tokens of {}, {} module(s) failed",
+        config.budget.max_tokens_per_cycle,
+        failed.len()
+    );
+    Ok(ExtractorRun { tokens: used, failed })
+}
+
+/// What one nightly extractor run spent and which modules did not finish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractorRun {
+    pub tokens: u64,
+    pub failed: Vec<&'static str>,
+}
+
+/// How often the daemon looks for a nightly run that still needs another try.
+const EXTRACTOR_RETRY_CHECK: Duration = Duration::from_secs(5 * 60);
+
+/// The shortest gap between two retries started by the daemon, long enough
+/// for the previous one to finish and record its result.
+const EXTRACTOR_RETRY_SPACING: Duration = Duration::from_secs(20 * 60);
+
+/// Run the nightly job again if it was held back or failed, and the machine
+/// can now finish it.
+///
+/// The scheduler fires each job once per day, even when that moment is a dark
+/// wake, so the retry lives here: the daemon is running whenever the Mac is
+/// truly awake. The child is the full nightly job, which updates or clears the
+/// retry record itself.
+fn retry_extractors_if_due(last_spawn: &mut Option<tokio::time::Instant>) {
+    let Some(retry) = crate::reader::ReaderState::load().extractors_retry else {
+        return;
+    };
+    if Utc::now() < retry.not_before
+        || last_spawn.is_some_and(|t| t.elapsed() < EXTRACTOR_RETRY_SPACING)
+        || crate::power::sleep_bound_reason().is_some()
+        || shared_usage_gate_closed().is_some()
+    {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            warn!("cannot retry the nightly run: {e}");
+            return;
+        }
+    };
+    *last_spawn = Some(tokio::time::Instant::now());
+    info!("retrying the nightly run ({}; {} failure(s) so far)", retry.reason, retry.failures);
+    match tokio::process::Command::new(exe)
+        .args(["reader", "recon"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+        Err(e) => warn!("cannot retry the nightly run: {e}"),
+    }
 }
 
 /// One row per extractor run: what it spent against its budget. `verify`
@@ -1665,11 +1753,18 @@ pub const EXTRACTOR_SPEND_LOG: &str = "logs/extractor-spend.jsonl";
 /// The extractors run in the reader's own process, not the daemon's, so this
 /// adds to `state.json` on disk; the daemon adopts the larger total the next
 /// time it writes (`merge_newer`).
-pub fn record_extractor_spend(store: &Store, tokens: u64, budget: u64, now: DateTime<Utc>) -> Result<()> {
-    store.append_jsonl(
-        EXTRACTOR_SPEND_LOG,
-        &serde_json::json!({"ts": now.to_rfc3339(), "tokens": tokens, "budget": budget}),
-    )?;
+pub fn record_extractor_spend(
+    store: &Store,
+    tokens: u64,
+    budget: u64,
+    failed: &[&str],
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let mut row = serde_json::json!({"ts": now.to_rfc3339(), "tokens": tokens, "budget": budget});
+    if !failed.is_empty() {
+        row["failed"] = serde_json::json!(failed);
+    }
+    store.append_jsonl(EXTRACTOR_SPEND_LOG, &row)?;
     if tokens > 0 {
         let mut state: DaemonState = if store.exists("state.json") {
             store.read_json("state.json")?
@@ -3678,8 +3773,8 @@ timeout = "10s"
         store
             .write_json("state.json", &DaemonState { total_cycles: 3, total_tokens_used: 1000, ..Default::default() })
             .unwrap();
-        record_extractor_spend(&store, 250, 400, Utc::now()).unwrap();
-        record_extractor_spend(&store, 0, 400, Utc::now()).unwrap();
+        record_extractor_spend(&store, 250, 400, &[], Utc::now()).unwrap();
+        record_extractor_spend(&store, 0, 400, &["metacog"], Utc::now()).unwrap();
         let s: DaemonState = store.read_json("state.json").unwrap();
         assert_eq!(s.total_tokens_used, 1250);
         assert_eq!(s.total_cycles, 3, "an extractor run is not a cycle");

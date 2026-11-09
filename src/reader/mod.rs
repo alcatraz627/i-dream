@@ -45,6 +45,10 @@ pub struct ReaderState {
     /// widget can say the review is broken instead of showing nothing.
     #[serde(default)]
     pub weekly_failure: Option<WeeklyFailure>,
+    /// A nightly extractor run still owed another try. Absent when the last
+    /// run finished, or after it was given up on.
+    #[serde(default)]
+    pub extractors_retry: Option<ExtractorRetry>,
     /// Per-domain read summary from the last recon.
     #[serde(default)]
     pub streams: Vec<StreamRead>,
@@ -73,6 +77,56 @@ impl ReaderState {
 pub struct WeeklyFailure {
     pub at: DateTime<Utc>,
     pub error: String,
+}
+
+/// A nightly run waiting for another try: since when, why, and how soon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractorRetry {
+    pub since: DateTime<Utc>,
+    pub not_before: DateTime<Utc>,
+    pub failures: u32,
+    pub reason: String,
+}
+
+/// What the nightly job's extractor step did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtractorOutcome {
+    Ran(crate::daemon::ExtractorRun),
+    Held(String),
+}
+
+/// Failed retries allowed before waiting for the next scheduled night.
+const EXTRACTOR_MAX_FAILURES: u32 = 3;
+/// Wait after a failed run, so a real outage is not retried every few minutes.
+const EXTRACTOR_RETRY_BACKOFF_MINUTES: i64 = 60;
+/// A retry older than this gives way to the next scheduled night.
+const EXTRACTOR_RETRY_WINDOW_HOURS: i64 = 24;
+
+/// The retry record after this run: cleared on success, kept while the run is
+/// held, and given up on after repeated failures or a full day.
+pub fn next_extractor_retry(
+    previous: Option<ExtractorRetry>,
+    outcome: &ExtractorOutcome,
+    now: DateTime<Utc>,
+) -> Option<ExtractorRetry> {
+    let previous = previous.filter(|p| now - p.since < chrono::Duration::hours(EXTRACTOR_RETRY_WINDOW_HOURS));
+    let since = previous.as_ref().map_or(now, |p| p.since);
+    let earlier_failures = previous.as_ref().map_or(0, |p| p.failures);
+    match outcome {
+        ExtractorOutcome::Ran(run) if run.failed.is_empty() => None,
+        ExtractorOutcome::Ran(run) => {
+            let failures = earlier_failures + 1;
+            (failures < EXTRACTOR_MAX_FAILURES).then(|| ExtractorRetry {
+                since,
+                not_before: now + chrono::Duration::minutes(EXTRACTOR_RETRY_BACKOFF_MINUTES),
+                failures,
+                reason: format!("failed: {}", run.failed.join(", ")),
+            })
+        }
+        ExtractorOutcome::Held(reason) => {
+            Some(ExtractorRetry { since, not_before: now, failures: earlier_failures, reason: reason.clone() })
+        }
+    }
 }
 
 /// One recon: the evidence read and the clusters it joined to.
@@ -187,6 +241,12 @@ fn run_dir(week: &str) -> Result<PathBuf> {
     let dir = reader_dir()?.join("runs").join(week);
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// What a week's review has cost so far. A forced rerun replaces the week's
+/// record, so it carries forward what the week had already spent.
+fn week_tokens(this_run: u64, force: bool, already_spent: Option<u64>) -> u64 {
+    this_run + if force { already_spent.unwrap_or(0) } else { 0 }
 }
 
 fn save_run(run: &WeeklyRun) -> Result<PathBuf> {
@@ -627,6 +687,7 @@ async fn run_weekly_inner(
         // Kept for inspection, but never read as the week's run.
         write(&run_dir(&week)?.join("dry-run.json"), serde_json::to_string_pretty(&run)?)?;
     } else {
+        run.tokens = week_tokens(run.tokens, force, load_run(&week).map(|p| p.tokens));
         save_run(&run).context("save the run record")?;
     }
     // A dry run produces no page, so it must not count as the week's review,
@@ -729,23 +790,29 @@ pub async fn daily(
     store: &Store,
     now: DateTime<Utc>,
     since: DateTime<Utc>,
-) -> Result<(Recon, Vec<(String, Vec<land::Landed>)>, Option<WeeklyRun>, Option<u64>)> {
+) -> Result<(Recon, Vec<(String, Vec<land::Landed>)>, Option<WeeklyRun>, ExtractorOutcome)> {
     let (recon, rows) = recon_at(store, now, since);
     persist_recon(&recon, &rows)?;
     let applied = apply_answers(store, now)?;
     // The LLM extractors (dreaming, metacog, introspection) run here, once a
     // day and usage-gated, instead of in the daemon's idle cycle (ruling D9).
-    let extracted = match crate::daemon::shared_usage_gate_closed() {
+    // Each hold costs nothing and is retried by the daemon.
+    let hold = crate::daemon::shared_usage_gate_closed()
+        .map(|reason| format!("the usage gate is closed: {reason}"))
+        .or_else(crate::power::sleep_bound_reason);
+    let extracted = match hold {
         Some(reason) => {
-            tracing::info!("extractors held by the usage gate: {reason}");
-            None
+            tracing::info!("extractors held: {reason}");
+            ExtractorOutcome::Held(reason)
         }
         None => {
             let client = crate::api::ClaudeClient::for_config(config)?;
-            Some(crate::daemon::run_extractors(config, store, &client).await?)
+            ExtractorOutcome::Ran(crate::daemon::run_extractors(config, store, &client).await?)
         }
     };
-    let state = ReaderState::load();
+    let mut state = ReaderState::load();
+    state.extractors_retry = next_extractor_retry(state.extractors_retry.take(), &extracted, Utc::now());
+    state.save()?;
     let retry = match state.weekly_pending_since {
         Some(t) if now - t < chrono::Duration::hours(48) => {
             Some(run_weekly(config, store, now, since, false, false).await?)
@@ -875,6 +942,56 @@ pub fn republish(week: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::ExtractorRun;
+
+    fn at(hour: i64) -> DateTime<Utc> {
+        "2026-11-09T00:00:00Z".parse::<DateTime<Utc>>().unwrap() + chrono::Duration::hours(hour)
+    }
+
+    fn failed_run() -> ExtractorOutcome {
+        ExtractorOutcome::Ran(ExtractorRun { tokens: 0, failed: vec!["dreaming", "metacog"] })
+    }
+
+    #[test]
+    fn a_forced_rerun_keeps_the_cost_the_week_already_paid() {
+        assert_eq!(week_tokens(0, true, Some(66_000)), 66_000);
+        assert_eq!(week_tokens(1_000, true, None), 1_000);
+        assert_eq!(week_tokens(1_000, false, Some(66_000)), 1_000);
+    }
+
+    #[test]
+    fn a_clean_run_clears_the_retry() {
+        let clean = ExtractorOutcome::Ran(ExtractorRun { tokens: 40_000, failed: vec![] });
+        let open = next_extractor_retry(None, &failed_run(), at(0));
+        assert!(open.is_some());
+        assert_eq!(next_extractor_retry(open, &clean, at(2)), None);
+    }
+
+    #[test]
+    fn a_hold_costs_no_failure_and_can_retry_at_once() {
+        let first = next_extractor_retry(None, &ExtractorOutcome::Held("dark wake".into()), at(0)).unwrap();
+        assert_eq!((first.failures, first.not_before), (0, at(0)));
+        let again = next_extractor_retry(Some(first), &ExtractorOutcome::Held("dark wake".into()), at(3)).unwrap();
+        assert_eq!((again.failures, again.since), (0, at(0)));
+    }
+
+    #[test]
+    fn repeated_failures_back_off_then_give_up() {
+        let one = next_extractor_retry(None, &failed_run(), at(0)).unwrap();
+        assert_eq!(one.failures, 1);
+        assert_eq!(one.not_before, at(1));
+        assert!(one.reason.contains("dreaming, metacog"), "{}", one.reason);
+        let two = next_extractor_retry(Some(one), &failed_run(), at(2)).unwrap();
+        assert_eq!(two.failures, 2);
+        assert_eq!(next_extractor_retry(Some(two), &failed_run(), at(4)), None);
+    }
+
+    #[test]
+    fn a_retry_from_yesterday_starts_over() {
+        let old = next_extractor_retry(None, &failed_run(), at(0)).unwrap();
+        let fresh = next_extractor_retry(Some(old), &failed_run(), at(25)).unwrap();
+        assert_eq!((fresh.failures, fresh.since), (1, at(25)));
+    }
 
     /// A broken publish setup is found in seconds, before any paid step, and
     /// the error says which part is broken.

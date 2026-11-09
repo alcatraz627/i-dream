@@ -624,8 +624,13 @@ pub fn gather(deep: bool) -> Result<StatusReport> {
 
     // Ingest queue — depth plus the age of the oldest unconsumed item.
     let queue_dir = data_dir.join("dreams/ingest-queue");
+    // The archive folder and dotfiles live beside the queue but are not in it.
     let depth = std::fs::read_dir(&queue_dir)
-        .map(|d| d.filter_map(|e| e.ok()).count())
+        .map(|d| {
+            d.flatten()
+                .filter(|e| !e.file_name().to_string_lossy().starts_with(['_', '.']))
+                .count()
+        })
         .unwrap_or(0);
     let queue = QueueSection {
         depth,

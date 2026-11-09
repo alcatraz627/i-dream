@@ -408,19 +408,10 @@ impl ClaudeClient {
             .context("Failed to wait for claude CLI")?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Claude CLI sometimes puts error messages on stdout instead of stderr
-            let detail = if !stderr.trim().is_empty() {
-                stderr.trim().to_string()
-            } else if !stdout.trim().is_empty() {
-                format!(
-                    "(stdout) {}",
-                    &stdout.trim()[..stdout.trim().len().min(300)]
-                )
-            } else {
-                "(no output)".into()
-            };
+            let detail = cli_failure_detail(
+                &String::from_utf8_lossy(&output.stdout),
+                &String::from_utf8_lossy(&output.stderr),
+            );
             anyhow::bail!("claude CLI exited with {}: {}", output.status, detail);
         }
 
@@ -963,6 +954,38 @@ impl CliResult {
     }
 }
 
+/// The reason a failed CLI call gave, in words someone can act on.
+///
+/// With `--output-format json` the CLI reports a failure on stdout as a result
+/// object whose usage block comes first and whose reason comes last, so the
+/// named fields are picked out rather than keeping the start of the text.
+fn cli_failure_detail(stdout: &str, stderr: &str) -> String {
+    let (stdout, stderr) = (stdout.trim(), stderr.trim());
+    if !stderr.is_empty() {
+        return stderr.to_string();
+    }
+    if stdout.is_empty() {
+        return "(no output)".into();
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout) {
+        let named: Vec<String> = ["result", "subtype", "terminal_reason", "api_error_status"]
+            .iter()
+            .filter_map(|key| {
+                let value = match v.get(*key)? {
+                    serde_json::Value::String(s) if !s.trim().is_empty() => s.trim().to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    _ => return None,
+                };
+                Some(format!("{key}={value}"))
+            })
+            .collect();
+        if !named.is_empty() {
+            return named.join(" ");
+        }
+    }
+    format!("(stdout) {}", stdout.chars().take(300).collect::<String>())
+}
+
 /// Parse the CLI's JSON result object. None when the output is not that object.
 pub fn parse_cli_json(raw: &str) -> Option<CliResult> {
     let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
@@ -991,6 +1014,27 @@ mod cli_json_tests {
         assert_eq!(r.result, "[1,2]");
         assert_eq!(r.total(), 370);
         assert_eq!(r.cost_usd, Some(0.0123));
+    }
+
+    #[test]
+    fn a_failure_reports_the_reason_that_comes_after_the_usage_block() {
+        let padding = "x".repeat(400);
+        let raw = format!(
+            r#"{{"usage":{{"note":"{padding}"}},"is_error":true,"subtype":"success","api_error_status":503,"result":"API Error: Connection error."}}"#
+        );
+        let detail = cli_failure_detail(&raw, "");
+        assert!(detail.contains("API Error: Connection error."), "{detail}");
+        assert!(detail.contains("api_error_status=503"), "{detail}");
+        assert!(!detail.contains(&padding), "{detail}");
+    }
+
+    #[test]
+    fn a_failure_prefers_stderr_and_survives_odd_stdout() {
+        assert_eq!(cli_failure_detail("{}", "boom"), "boom");
+        assert_eq!(cli_failure_detail("", ""), "(no output)");
+        // A multi-byte character at the cut must not panic.
+        let long = "é".repeat(400);
+        assert_eq!(cli_failure_detail(&long, "").chars().count(), 300 + "(stdout) ".len());
     }
 
     #[test]

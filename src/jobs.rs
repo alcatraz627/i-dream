@@ -31,6 +31,14 @@ pub fn report_outcome(reason: &str, detail: &str) {
     }
 }
 
+/// Tell the scheduler this run failed, so its history does not record a run
+/// that did none of its work as `ok`.
+pub fn report_failure(reason: &str, detail: &str) {
+    if let Ok(path) = std::env::var("GCC_SCHED_META") {
+        let _ = std::fs::write(path, format!("outcome=failed\nreason={reason}\ndetail={detail}\n"));
+    }
+}
+
 fn write_outcome(path: &Path, reason: &str, detail: &str) {
     let _ = std::fs::write(path, format!("outcome=ok\nreason={reason}\ndetail={detail}\n"));
 }

@@ -550,7 +550,7 @@ const QUEUE_FEED_CAP: usize = 25;
 
 /// Budget (chars) for queue blocks appended to the SWS dump, separate from
 /// the ~30KB transcript budget.
-const QUEUE_DUMP_BUDGET: usize = 10_000;
+const QUEUE_DUMP_BUDGET: usize = 20_000;
 
 /// One queued checkpoint distillation awaiting a dream pass.
 ///

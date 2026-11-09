@@ -20,6 +20,7 @@ it green, not when the commit that touched it passes its own test.
 | Row | Passes when | Read from | Replayable |
 |---|---|---|---|
 | `cycle-ran` | the newest dream cycle is under 36h old | `subconscious/dreams/journal.jsonl` timestamps | yes |
+| `extractors-ok` | no module failed in the newest daily run | `subconscious/logs/extractor-spend.jsonl` `failed` | no |
 | `sws-patterns` | the last 3 cycles that read sessions extracted at least one pattern between them | journal `patterns_extracted` | yes |
 | `rem-associations` | the last 3 cycles found at least one association between them | journal `associations_found` | yes |
 | `wake-insights` | the last 3 cycles promoted at least one insight between them | journal `insights_promoted` | yes |

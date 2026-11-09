@@ -19,6 +19,7 @@ mod index;
 mod logging;
 mod modules;
 mod pin;
+mod power;
 mod reader;
 mod reflect;
 mod review;
@@ -486,9 +487,19 @@ async fn main() -> Result<()> {
                         let (_, applied, retry, extracted) =
                             reader::daily(&config, &store, now, since).await?;
                         println!("✓ wrote reader/daily/{}.json", now.format("%Y-%m-%d"));
-                        match extracted {
-                            Some(t) => println!("✓ extractors ran ({t} tokens)"),
-                            None => println!("extractors held by the usage gate"),
+                        let mut failed_modules = String::new();
+                        match &extracted {
+                            reader::ExtractorOutcome::Ran(run) if run.failed.is_empty() => {
+                                println!("✓ extractors ran ({} tokens)", run.tokens);
+                            }
+                            reader::ExtractorOutcome::Ran(run) => {
+                                failed_modules = run.failed.join(", ");
+                                println!("✗ extractors failed: {failed_modules} ({} tokens)", run.tokens);
+                            }
+                            reader::ExtractorOutcome::Held(reason) => {
+                                println!("extractors held ({reason}); the daemon tries again when it can finish");
+                                jobs::report_outcome("extractors_held", reason);
+                            }
                         }
                         for (slug, landed) in applied {
                             println!("✓ applied answers on {slug}:");
@@ -498,6 +509,10 @@ async fn main() -> Result<()> {
                         }
                         if let Some(run) = retry {
                             println!("✓ retried the held weekly run {}: {} item(s)", run.week, run.items.len());
+                        }
+                        if !failed_modules.is_empty() {
+                            jobs::report_failure("extractors_failed", &failed_modules);
+                            anyhow::bail!("nightly extractors failed: {failed_modules}");
                         }
                     }
                 }

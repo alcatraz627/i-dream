@@ -334,7 +334,7 @@ pub const LANES: &[Lane] = &[
     Lane {
         name: "pins",
         producer: "/pin-for-dream skill",
-        consumer: "pin decay (unscheduled)",
+        consumer: "pin decay (each consolidation)",
         store: ".claude/pinned/events.jsonl",
         cadence_hours: 24,
         check: LaneCheck::Freshness {
@@ -357,10 +357,12 @@ pub const LANES: &[Lane] = &[
         name: "metacog",
         producer: "metacog module",
         consumer: "metacog audits",
-        store: ".claude/subconscious/metacog/activity.jsonl",
+        store: ".claude/subconscious/metacog/samples.jsonl",
         cadence_hours: 24,
+        // The audit writes this file. activity.jsonl moves with every tool
+        // call, so it stays fresh with the audits dead.
         check: LaneCheck::Freshness {
-            signal: ".claude/subconscious/metacog/activity.jsonl",
+            signal: ".claude/subconscious/metacog/processed.json",
         },
         consumed: Consumed::By(".claude/subconscious/metacog/audits"),
     },

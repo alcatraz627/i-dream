@@ -193,6 +193,31 @@ pub fn extractor_ran_check(ledger: &str, as_of: DateTime<Utc>) -> Option<Check> 
     ))
 }
 
+/// Did the newest daily run do its work? A run that fails still logs a row,
+/// so `cycle-ran` alone reads a night of failures as healthy. `None` when no
+/// run has been logged.
+pub fn extractor_outcome_check(ledger: &str) -> Option<Check> {
+    let newest = ledger
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("ts").is_some())
+        .last()?;
+    let failed: Vec<&str> = newest
+        .get("failed")
+        .and_then(|f| f.as_array())
+        .map(|names| names.iter().filter_map(|n| n.as_str()).collect())
+        .unwrap_or_default();
+    Some(if failed.is_empty() {
+        Check::new("extractors-ok", Verdict::Pass, "newest daily run: no module failed")
+    } else {
+        Check::new(
+            "extractors-ok",
+            Verdict::Fail,
+            format!("newest daily run failed: {}", failed.join(", ")),
+        )
+    })
+}
+
 /// The ingest-queue row from the queue folder as it is now.
 pub fn queue_check(depth: usize, oldest_hours: Option<f64>) -> Check {
     let oldest = oldest_hours.unwrap_or(0.0);
@@ -491,6 +516,7 @@ pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
             _ => {}
         }
     }
+    checks.extend(extractor_outcome_check(&spend));
     if dropped > 0 {
         checks.push(Check::new(
             "journal-readable",
@@ -686,6 +712,17 @@ mod tests {
         assert_eq!(firing_scan_check(40, 0).verdict, Verdict::Fail);
         assert_eq!(firing_scan_check(40, 31).verdict, Verdict::Pass);
         assert_eq!(firing_scan_check(0, 0).verdict, Verdict::Unknown);
+    }
+
+    #[test]
+    fn a_run_whose_modules_failed_fails_the_outcome_row() {
+        let good = "{\"ts\":\"2026-11-06T23:00:00Z\",\"tokens\":47000,\"budget\":70000}\n";
+        assert_eq!(extractor_outcome_check(good).unwrap().verdict, Verdict::Pass);
+        let bad = format!("{good}{{\"ts\":\"2026-11-08T04:00:00Z\",\"tokens\":0,\"budget\":70000,\"failed\":[\"dreaming\",\"metacog\"]}}\n");
+        let c = extractor_outcome_check(&bad).unwrap();
+        assert_eq!(c.verdict, Verdict::Fail);
+        assert!(c.detail.contains("dreaming, metacog"), "{}", c.detail);
+        assert!(extractor_outcome_check("").is_none());
     }
 
     #[test]
