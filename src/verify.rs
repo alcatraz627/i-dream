@@ -396,14 +396,47 @@ fn page_week_start(slug: &str) -> Option<DateTime<Utc>> {
     Some(d.and_hms_opt(0, 0, 0)?.and_utc())
 }
 
-/// Not measured yet: needs per-slug weekly counts before and after each
-/// landed fix (docs/34 stage 3). Reported so its absence stays visible.
-pub fn effect_check() -> Check {
-    Check::new(
-        "effect",
-        Verdict::Unknown,
-        "not measured: no before/after mistake counts per landed fix yet (docs/34 stage 3)",
-    )
+/// Whether the fixes the owner accepted made their mistakes rarer.
+///
+/// Each accepted fix compares its mistake's recordings in the fortnight before
+/// and after acceptance. It passes when at least half the fixes that can be
+/// judged came up less often, and names the ones that did not. A fix younger
+/// than a fortnight, or whose mistake came up only once before, is not judged.
+pub fn effect_check(effects: &[crate::reader::effect::FixEffect], now: DateTime<Utc>) -> Check {
+    use crate::reader::effect::{MIN_BEFORE, WINDOW_DAYS};
+    let judged: Vec<_> = effects.iter().filter(|f| f.judgeable()).collect();
+    if judged.is_empty() {
+        let next = effects
+            .iter()
+            .filter(|f| f.after.is_none())
+            .map(|f| f.accepted + Duration::days(WINDOW_DAYS))
+            .min()
+            .filter(|t| *t > now);
+        let when = next.map_or_else(String::new, |t| format!("; the first can be judged on {}", t.format("%F")));
+        return Check::new(
+            "effect",
+            Verdict::Unknown,
+            format!(
+                "not measured: {} accepted fix(es), none both {WINDOW_DAYS} days old and recorded {MIN_BEFORE}+ times before{when}",
+                effects.len()
+            ),
+        );
+    }
+    let moved = judged.iter().filter(|f| f.moved() == Some(true)).count();
+    let stuck: Vec<String> = judged
+        .iter()
+        .filter(|f| f.moved() == Some(false))
+        .map(|f| format!("\"{}\" {}→{}", f.title, f.before, f.after.unwrap_or(0)))
+        .collect();
+    let verdict = if moved * 2 >= judged.len() { Verdict::Pass } else { Verdict::Fail };
+    let mut msg = format!(
+        "{moved} of {} accepted fix(es) made their mistake rarer over {WINDOW_DAYS} days",
+        judged.len()
+    );
+    if !stuck.is_empty() {
+        msg.push_str(&format!("; did not: {}", stuck.join(", ")));
+    }
+    Check::new("effect", verdict, msg)
 }
 
 /// Scan session transcripts modified within the window for `[i-dream:<id>]`
@@ -577,7 +610,9 @@ pub fn gather(home: &Path, now: DateTime<Utc>) -> Result<Report> {
         .unwrap_or_default();
     let audit_refs: Vec<(&str, u64)> = audits.iter().map(|(t, n)| (t.as_str(), *n)).collect();
     checks.push(metacog_calls_check(&audit_refs, now));
-    checks.push(effect_check());
+    let atone_log = std::fs::read_to_string(home.join(".claude/atone/events.jsonl")).unwrap_or_default();
+    let effects = crate::reader::effect::fix_effects(&crate::reader::all_runs(), &atone_log, now);
+    checks.push(effect_check(&effects, now));
     Ok(Report { as_of: now, checks })
 }
 
@@ -633,6 +668,39 @@ pub fn render_text(r: &Report) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fix(title: &str, before: usize, after: Option<usize>) -> crate::reader::effect::FixEffect {
+        crate::reader::effect::FixEffect {
+            title: title.into(),
+            slugs: vec!["s".into()],
+            accepted: "2026-10-21T00:00:00Z".parse().unwrap(),
+            before,
+            after,
+        }
+    }
+
+    #[test]
+    fn effect_is_unknown_until_a_fix_is_old_enough() {
+        let now: DateTime<Utc> = "2026-10-25T00:00:00Z".parse().unwrap();
+        let c = effect_check(&[fix("a", 3, None)], now);
+        assert_eq!(c.verdict, Verdict::Unknown);
+        assert!(c.detail.contains("2026-11-04"), "{}", c.detail);
+    }
+
+    #[test]
+    fn effect_passes_when_most_fixes_made_their_mistake_rarer() {
+        let now: DateTime<Utc> = "2026-11-10T00:00:00Z".parse().unwrap();
+        let c = effect_check(&[fix("a", 3, Some(1)), fix("b", 2, Some(2)), fix("one-off", 1, Some(0))], now);
+        assert_eq!(c.verdict, Verdict::Pass);
+        assert!(c.detail.contains("1 of 2") && c.detail.contains("\"b\" 2→2"), "{}", c.detail);
+    }
+
+    #[test]
+    fn effect_fails_when_most_fixes_changed_nothing() {
+        let now: DateTime<Utc> = "2026-11-10T00:00:00Z".parse().unwrap();
+        let c = effect_check(&[fix("a", 3, Some(1)), fix("b", 2, Some(2)), fix("c", 2, Some(4))], now);
+        assert_eq!(c.verdict, Verdict::Fail);
+    }
     use crate::consolidation::assay::AssayPanel;
 
     fn ids(prefix: &str, n: usize) -> HashSet<String> {

@@ -83,6 +83,8 @@ pub struct ReaderSummary {
     pub latest_week: Option<String>,
     /// Outcomes applied so far: filed, armed, declined, noted.
     pub landed: std::collections::BTreeMap<String, usize>,
+    /// Each accepted fix with its mistake counts before and after.
+    pub fix_effects: Vec<crate::reader::effect::FixEffect>,
     /// Set while a weekly run waits on the usage gate.
     pub weekly_held_since: Option<chrono::DateTime<chrono::Utc>>,
     /// The last weekly run that errored, until a later one succeeds.
@@ -158,6 +160,7 @@ fn gather_reader() -> ReaderSummary {
         latest_items: runs.first().map(|r| r.items.len()).unwrap_or(0),
         latest_week: runs.first().map(|r| r.week.clone()),
         landed,
+        fix_effects: crate::reader::effect::fix_effects(&runs, &atone_log, chrono::Utc::now()),
         weekly_held_since: state.weekly_pending_since,
         weekly_overdue: state
             .last_weekly

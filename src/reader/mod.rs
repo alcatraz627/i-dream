@@ -7,6 +7,7 @@
 //! accepted items go to the backlog. Design: docs/32.
 
 pub mod check;
+pub mod effect;
 pub mod evidence;
 pub mod join;
 pub mod land;

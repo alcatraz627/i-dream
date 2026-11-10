@@ -30,7 +30,11 @@ Each part of i-dream reported green while the whole chain was broken. Nothing me
 | 4 | Widget action section shows only real failures, pages waiting on the owner, and fixes that did not work | Read the real dropdown at real size in dark and light before installing; no row is always on | this week |
 | 5 | Decide with the owner what replaces session-start delivery of mistakes (D12 left this gap) | An owner ruling recorded here | owner |
 
-Stage 3 stays marked UNCONFIRMED until the weekly data exists.
+Stage 3 is built. `verify` now judges each accepted fix by its mistake's count before and after. The method is in `docs/35-outcome-contract.md` under "How `effect` judges a fix".
+
+In the first live reading, 8 of 10 judged fixes made their mistake rarer. Two held at 2 recordings each: "Declared done without running it" and "Process-inspection commands printed live secrets".
+
+The widget does not show fixes that did not work yet. They are in `status --json` under `reader.fix_effects`.
 
 ## Progress, 2026-10-13
 

@@ -29,7 +29,18 @@ it green, not when the commit that touched it passes its own test.
 | `nudge-delivery` | at least one live nudge reached a session transcript in the last 7 days | `[i-dream:<id>]` tags inside hook attachment records of every `.jsonl` under `~/.claude/projects`, sub-agent transcripts included | no |
 | `hint-delivery` | when live hints exist, at least one reached a session transcript in the last 7 days | same scan, hint ids | no |
 | `reader-answered` | no reader page has waited on the owner for more than 7 days | `i-dream/reader/state.json` `pending_pages`, each aged from the Monday of the week its slug names | no |
-| `effect` | a mistake's weekly count drops after its fix lands | not measured yet (docs/34 stage 3) | no |
+| `effect` | at least half the judged fixes made their mistake rarer | weekly runs joined to recorded mistakes (see below) | no |
+
+### How `effect` judges a fix
+
+A fix counts as working when its mistake was recorded less often after the owner accepted it.
+
+1. Each accepted item on a weekly page is one fix. Declined and noted items are not fixes.
+2. Its mistake is recorded some number of times in the 14 days before acceptance, and again in the 14 days after.
+3. A fix is judged only once it is 14 days old, and only if its mistake was recorded at least twice before. One recording is usually the one that put it on the page.
+4. The row passes when at least half the judged fixes show fewer recordings after.
+
+The fixes come from the `landed` rows of each `i-dream/reader/runs/<week>/run.json`. The counts come from `~/.claude/atone/events.jsonl`, matched by the mistake ids in the fix's cluster. `status --json` carries the same numbers as `reader.fix_effects`.
 
 A row has three verdicts: PASS, FAIL, or UNKNOWN when its data is missing or not
 yet measurable. UNKNOWN never counts as passing; it is reported, not hidden.
