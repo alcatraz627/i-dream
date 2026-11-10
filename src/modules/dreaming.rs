@@ -2022,6 +2022,8 @@ Output ONLY a JSON array. No commentary."#;
             }
             if intentions_created > 0 {
                 info!("Wake: created {intentions_created} prospective intentions");
+                crate::modules::prospective::ProspectiveModule::new(self.config, self.store)
+                    .enforce_active_cap()?;
             }
         } else {
             info!("Wake: no new promotable associations");

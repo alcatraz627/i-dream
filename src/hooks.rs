@@ -33,8 +33,9 @@ fn install(config: &Config) -> Result<()> {
     write_post_tool_use_hook(&hooks_dir, config)?;
     write_stop_hook(&hooks_dir, config)?;
     write_user_prompt_submit_hook(&hooks_dir, config)?;
-    write_user_prompt_hint_hook(&hooks_dir, &config.data_dir().join("daemon.sock"))?;
-    write_pre_tool_use_hook(&hooks_dir)?;
+    let priming_hours = config.modules.intuition.priming_decay_hours;
+    write_user_prompt_hint_hook(&hooks_dir, &config.data_dir().join("daemon.sock"), priming_hours)?;
+    write_pre_tool_use_hook(&hooks_dir, priming_hours)?;
 
     // Update Claude Code settings.json
     let settings_path = expand_tilde(Path::new("~/.claude/settings.json"));
@@ -499,6 +500,39 @@ touch "{activity}" 2>/dev/null || true
     Ok(())
 }
 
+/// Python shared by the hint and nudge hooks: has this item just been shown in
+/// any session? Matches are still ledgered, so the promotion evidence is intact.
+const PRIMING_PY: &str = r#"
+PRIMING_HOURS = __IDREAM_PRIMING_HOURS__
+def _recent_path(it):
+    key = hashlib.sha1(str(it.get("id", "")).encode("utf-8", "replace")).hexdigest()[:16]
+    return _p.expanduser("~/.claude/.inject-once/idream-recent/" + key)
+
+def _recently_shown(it):
+    if PRIMING_HOURS <= 0:
+        return False
+    try:
+        return time.time() - os.path.getmtime(_recent_path(it)) < PRIMING_HOURS * 3600
+    except OSError:
+        return False
+
+def _mark_shown(it):
+    path = _recent_path(it)
+    try:
+        os.makedirs(_p.dirname(path), exist_ok=True)
+        with open(path, "a"):
+            os.utime(path, None)
+    except OSError:
+        pass
+"#;
+
+/// Fill the hook template's priming placeholders.
+fn with_priming(script: &str, hours: f64) -> String {
+    script
+        .replace("#__IDREAM_PRIMING__", PRIMING_PY)
+        .replace("__IDREAM_PRIMING_HOURS__", &hours.to_string())
+}
+
 /// The UserPromptSubmit hint deliverer: a short reminder shown to the agent
 /// when the owner's prompt matches a compiled hint's trigger.
 ///
@@ -506,11 +540,13 @@ touch "{activity}" 2>/dev/null || true
 /// prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit",
 /// "additionalContext":...}}`, the only shape the harness reads. File-only,
 /// no daemon dependency for hints. Gates: child guard, mute file, project, regex,
-/// once per hint per session, one per "continue" family, cap of 2.
+/// once per hint per session, one per "continue" family, recently shown in
+/// another session, cap of 2.
 ///
 /// It also asks the daemon which behavioural rules this prompt is about. A down
 /// or slow daemon costs the prompt nothing: the rules are simply left out.
-fn write_user_prompt_hint_hook(dir: &std::path::Path, socket: &Path) -> Result<()> {
+
+fn write_user_prompt_hint_hook(dir: &std::path::Path, socket: &Path, priming_hours: f64) -> Result<()> {
     let script = r#"#!/bin/bash
 # i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
 # not feed the surface (it was downvoting its own intentions, 2026-10-06).
@@ -656,16 +692,18 @@ def _first_time(it):
         pass
     return True
 
+#__IDREAM_PRIMING__
 shown, fams = [], set()
 for it in live:
     fam = _family(it)
     if fam is not None and fam in fams:
         continue
-    if not _first_time(it):
+    if _recently_shown(it) or not _first_time(it):
         continue
     if fam is not None:
         fams.add(fam)
     shown.append(it)
+    _mark_shown(it)
     if len(shown) == 2:
         break
 _finish(["[i-dream:%s] %s" % (str(it.get("id", ""))[:8], it.get("body", ""))
@@ -674,7 +712,10 @@ PYEOF
 exit 0
 "#;
     let path = dir.join("user-prompt-hint.sh");
-    std::fs::write(&path, script.replace("__IDREAM_SOCKET__", &socket.display().to_string()))?;
+    std::fs::write(
+        &path,
+        with_priming(script, priming_hours).replace("__IDREAM_SOCKET__", &socket.display().to_string()),
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -687,7 +728,7 @@ exit 0
 /// File-only — no daemon dependency — and advisory-only by construction:
 /// it can emit additionalContext, never a permission decision. Shadow and
 /// candidate matches log would-fires; only LIVE nudges inject.
-fn write_pre_tool_use_hook(dir: &std::path::Path) -> Result<()> {
+fn write_pre_tool_use_hook(dir: &std::path::Path, priming_hours: f64) -> Result<()> {
     let script = r#"#!/bin/bash
 # i-dream's own background claude calls carry I_DREAM_CHILD=1; their hooks must
 # not feed the daemon (it was downvoting its own intentions, 2026-10-06).
@@ -792,10 +833,12 @@ def _first_time(it):
         pass
     return True
 
+#__IDREAM_PRIMING__
 shown = []
 for it in live:
-    if _first_time(it):
+    if not _recently_shown(it) and _first_time(it):
         shown.append(it)
+        _mark_shown(it)
     if len(shown) == 2:
         break
 if shown:
@@ -808,7 +851,7 @@ PYEOF
 exit 0
 "#;
     let path = dir.join("pre-tool-use.sh");
-    std::fs::write(&path, script)?;
+    std::fs::write(&path, with_priming(script, priming_hours))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -840,6 +883,69 @@ fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hint hook with no priming window, so tests see per-session behaviour alone.
+    fn write_user_prompt_hint_hook(dir: &std::path::Path, socket: &Path) -> Result<()> {
+        super::write_user_prompt_hint_hook(dir, socket, 0.0)
+    }
+
+    /// The nudge hook with no priming window.
+    fn write_pre_tool_use_hook(dir: &std::path::Path) -> Result<()> {
+        super::write_pre_tool_use_hook(dir, 0.0)
+    }
+
+    /// Age every "recently shown" marker past a four-hour window.
+    fn age_recent_markers(home: &std::path::Path) {
+        let dir = home.join(".claude/.inject-once/idream-recent");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 3600);
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            std::fs::File::options().write(true).open(entry.path()).unwrap().set_modified(old).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_hint_shown_recently_waits_out_the_window_in_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        super::write_user_prompt_hint_hook(&hooks, Path::new("/nonexistent.sock"), 4.0).unwrap();
+        let home = dir.path().join("home");
+        intervention_fixture(&home);
+        let script = hooks.join("user-prompt-hint.sh");
+
+        let first = run_hook_script(&script, &home, &hint_payload("deploy it", "sid-a"));
+        assert!(first.contains("[i-dream:liveHint]"), "{first}");
+        let other = run_hook_script(&script, &home, &hint_payload("deploy it", "sid-b"));
+        assert!(other.trim().is_empty(), "inside the window: {other}");
+        let wf = std::fs::read_to_string(home.join(".claude/i-dream/would-fire.jsonl")).unwrap();
+        assert!(wf.contains("sid-b"), "a held-back match still counts as evidence: {wf}");
+
+        age_recent_markers(&home);
+        let later = run_hook_script(&script, &home, &hint_payload("deploy it", "sid-b"));
+        assert!(later.contains("[i-dream:liveHint]"), "the wait did not spend it for sid-b: {later}");
+    }
+
+    #[test]
+    fn a_nudge_shown_recently_waits_out_the_window_in_other_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        super::write_pre_tool_use_hook(&hooks, 4.0).unwrap();
+        let home = dir.path().join("home");
+        intervention_fixture(&home);
+        let script = hooks.join("pre-tool-use.sh");
+        let input = |sid: &str| {
+            serde_json::json!({"tool_name": "Bash", "tool_input": {"command": "rg -rn x ."},
+                "cwd": "/x/proj", "session_id": sid})
+            .to_string()
+        };
+
+        assert!(run_hook_script(&script, &home, &input("sid-a")).contains("[i-dream:liveNudg]"));
+        let other = run_hook_script(&script, &home, &input("sid-b"));
+        assert!(other.trim().is_empty(), "inside the window: {other}");
+        age_recent_markers(&home);
+        assert!(run_hook_script(&script, &home, &input("sid-b")).contains("[i-dream:liveNudg]"));
+    }
 
     const OURS: &str = "/home/u/.claude/subconscious/hooks";
 

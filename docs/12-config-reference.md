@@ -121,7 +121,7 @@ Valence memory + gut-feeling surfacing.
 | `enabled` | `true` | Master switch. |
 | `min_occurrences` | `3` | Min occurrences before a pattern becomes a surfacable feeling. |
 | `decay_halflife_days` | `30.0` | Exponential decay half-life. |
-| `priming_decay_hours` | `4.0` | "Recently surfaced" suppression window. |
+| `priming_decay_hours` | `4.0` | Hours before a rule, hint or nudge shown in one session can appear in another. 0 turns this off. Hook templates carry the value, so run `i-dream hooks install` after changing it. |
 | `max_valence_entries` | `1000` | Cap on the valence memory file. |
 
 ### `[modules.introspection]`
@@ -142,9 +142,9 @@ Condition-action intentions ("remember to…"). Surfaced at SessionStart.
 | Field | Default | Notes |
 |---|---|---|
 | `enabled` | `true` | Master switch. |
-| `max_active_intentions` | `50` | Cap on the registry. |
+| `max_active_intentions` | `50` | Most live rules kept. Over this, the lowest priority and oldest move to the archive. |
 | `default_expiry_days` | `30` | Default lifetime when REM creates one. |
-| `match_threshold` | `0.7` | Min confidence for a context match to fire an intention. |
+| `match_threshold` | `0.7` | Score from 0 to 1 a prompt must reach to bring a rule. Rewards shared rare words, discounts long prompts, and always needs two shared words. It compares word forms, not meaning. |
 
 ### `[modules.briefing]`
 

@@ -317,8 +317,9 @@ impl Daemon {
                             // responsive to the next connection and to
                             // consolidation-timer wakeups.
                             let store = self.store.clone();
+                            let settings = MatchSettings::from_config(&self.config);
                             tokio::spawn(async move {
-                                if let Err(e) = handle_hook_connection(stream, &store).await {
+                                if let Err(e) = handle_hook_connection(stream, &store, settings).await {
                                     warn!("Hook event handler failed: {e:#}");
                                 }
                             });
@@ -1786,7 +1787,7 @@ pub fn record_extractor_spend(
 ///
 /// Task #4 (SessionStart response injection) will populate the response
 /// body with matched intuitions/intentions for `SessionStart` events.
-async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()> {
+async fn handle_hook_connection(stream: UnixStream, store: &Store, settings: MatchSettings) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -1911,7 +1912,7 @@ async fn handle_hook_connection(stream: UnixStream, store: &Store) -> Result<()>
             (String::new(), vec![], None)
         }
         HookEvent::PromptRules { session_id, prompt_words, .. } => {
-            let (text, ids) = rules_for_prompt(store, session_id.as_deref(), prompt_words);
+            let (text, ids) = rules_for_prompt(store, session_id.as_deref(), prompt_words, settings);
             (text, ids, session_id.clone())
         }
         _ => (String::new(), vec![], None),
@@ -2262,19 +2263,101 @@ fn topic_word(word: &str) -> Option<String> {
     is_topic_word(&w).then_some(w)
 }
 
+/// How rules are matched to prompts, from the owner's config.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MatchSettings {
+    /// The score a rule must reach to be shown (see `match_score`).
+    threshold: f64,
+    /// Hours before a rule shown in one session may appear in another.
+    priming_hours: f64,
+}
+
+impl MatchSettings {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            threshold: config.modules.prospective.match_threshold,
+            priming_hours: config.modules.intuition.priming_decay_hours,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Default for MatchSettings {
+    /// Lenient, because a test registry of two or three rules makes every word
+    /// look common. No priming window, so tests see per-session behaviour alone.
+    fn default() -> Self {
+        Self { threshold: 0.4, priming_hours: 0.0 }
+    }
+}
+
+/// A word cut down to a rough root, so "merging", "merged" and "merge" count
+/// as the same word. Only the common English endings are handled, and a root
+/// must keep four letters, so short words pass through unchanged.
+fn word_root(word: &str) -> String {
+    const ENDINGS: [&str; 19] = [
+        "ications", "ication", "ations", "ation", "ings", "ates", "ions", "ing", "ate", "ion",
+        "ied", "ies", "ers", "ed", "er", "es", "e", "s", "y",
+    ];
+    ENDINGS
+        .iter()
+        .find_map(|ending| word.strip_suffix(ending).filter(|root| root.len() >= 4))
+        .unwrap_or(word)
+        .to_string()
+}
+
+/// The roots of a rule's keywords, without the words that carry no topic.
+fn keyword_roots(keywords: &[String]) -> std::collections::HashSet<String> {
+    keywords.iter().filter_map(|k| topic_root(k)).collect()
+}
+
+/// The root of a word that carries a topic, before and after the cut.
+fn topic_root(word: &str) -> Option<String> {
+    topic_word(word).map(|w| word_root(&w)).filter(|root| is_topic_word(root))
+}
+
+/// How strongly a prompt matches a rule, from 0 to 1.
+///
+/// Each shared word adds evidence, and a word few rules use adds more than one
+/// most rules use. A long prompt shares words with almost anything by chance,
+/// so each word counts for less once a prompt passes `FOCUSED_PROMPT_WORDS`.
+/// This compares word forms, not meaning: an embedding model cannot answer
+/// inside the hook's one-second limit when it is cold.
+fn match_score<'a>(
+    shared: impl Iterator<Item = &'a String>,
+    rules_using: &std::collections::HashMap<String, usize>,
+    rule_count: usize,
+    prompt_topic_words: usize,
+) -> f64 {
+    let spread = rule_count.saturating_sub(1).max(1) as f64;
+    let focus = (FOCUSED_PROMPT_WORDS / prompt_topic_words.max(1) as f64).min(1.0).sqrt();
+    let unexplained: f64 = shared
+        .map(|root| {
+            let others = rules_using.get(root).copied().unwrap_or(1).saturating_sub(1) as f64;
+            1.0 - (0.25 + 0.30 * (1.0 - others / spread)) * focus
+        })
+        .product();
+    1.0 - unexplained
+}
+
+/// The prompt length, in topic words, up to which every word counts in full.
+const FOCUSED_PROMPT_WORDS: f64 = 25.0;
+
 /// The behavioural rules this prompt is about, for the hook to put into context.
 ///
 /// A rule's keywords describe behaviour, so the owner's words are what can match
-/// them. Two shared topic words are needed, because one is chance. A session sees
-/// a rule once, and the strongest matches win the two places. Spending a fire is
-/// left to the caller, once the text has been handed over.
+/// them. Two shared topic words are always needed, because one is chance, and
+/// together they must reach the configured score. A session sees a rule once, a
+/// rule just shown elsewhere waits out the priming window, and the strongest
+/// matches win the two places. Spending a fire is left to the caller, once the
+/// text has been handed over.
 fn rules_for_prompt(
     store: &Store,
     session_id: Option<&str>,
     prompt_words: &[String],
+    settings: MatchSettings,
 ) -> (String, Vec<String>) {
     let said: std::collections::HashSet<String> =
-        prompt_words.iter().filter_map(|w| topic_word(w)).collect();
+        prompt_words.iter().filter_map(|w| topic_root(w)).collect();
     if said.len() < 2 {
         return (String::new(), vec![]);
     }
@@ -2294,33 +2377,42 @@ fn rules_for_prompt(
     };
     let now = Utc::now();
     let standing = crate::modules::dreaming::standing_rule_lines();
-    let mut matched: Vec<(usize, &Intention)> = registry
+    let priming_window = chrono::Duration::minutes((settings.priming_hours * 60.0) as i64);
+    let candidates: Vec<(&Intention, std::collections::HashSet<String>, usize)> = registry
         .iter()
-        .filter(|i| i.expires > now && i.fire_count < i.max_fires && !seen.contains(&i.id))
+        .filter(|i| i.expires > now && i.fire_count < i.max_fires)
         .filter_map(|i| {
             let Trigger::Context { keywords, min_keyword_matches } = &i.trigger else {
                 return None;
             };
-            let shared = keywords
-                .iter()
-                .filter_map(|k| topic_word(k))
-                .collect::<std::collections::HashSet<_>>()
-                .intersection(&said)
-                .count();
-            (shared >= (*min_keyword_matches).max(2)).then_some((shared, i))
+            Some((i, keyword_roots(keywords), *min_keyword_matches))
+        })
+        .collect();
+    let mut rules_using: std::collections::HashMap<String, usize> = Default::default();
+    for root in candidates.iter().flat_map(|(_, roots, _)| roots) {
+        *rules_using.entry(root.clone()).or_default() += 1;
+    }
+    let mut matched: Vec<(f64, &Intention)> = candidates
+        .iter()
+        .filter(|(i, _, _)| !seen.contains(&i.id))
+        .filter(|(i, _, _)| i.last_fired.is_none_or(|fired| now - fired >= priming_window))
+        .filter_map(|(i, roots, min_matches)| {
+            let shared: Vec<&String> = roots.intersection(&said).collect();
+            let score = match_score(shared.iter().copied(), &rules_using, candidates.len(), said.len());
+            (shared.len() >= (*min_matches).max(2) && score >= settings.threshold).then_some((score, *i))
         })
         .filter(|(_, i)| {
             !(i.action.source.starts_with("dream-wake:")
                 && crate::modules::dreaming::restates_standing_rule(&i.action.message, &standing))
         })
         .collect();
-    matched.sort_by_key(|(shared, i)| {
-        let rank = match i.action.priority {
+    matched.sort_by(|(score_a, a), (score_b, b)| {
+        let rank = |i: &Intention| match i.action.priority {
             Priority::High => 0,
             Priority::Medium => 1,
             Priority::Low => 2,
         };
-        (std::cmp::Reverse(*shared), rank)
+        score_b.total_cmp(score_a).then_with(|| rank(a).cmp(&rank(b)))
     });
     matched.truncate(MAX_RULES_PER_PROMPT);
     let lines: Vec<String> = matched
@@ -2652,7 +2744,7 @@ timeout = "10s"
 
         // Server side: accept + handle
         let (stream, _) = listener.accept().await.unwrap();
-        handle_hook_connection(stream, &store).await.unwrap();
+        handle_hook_connection(stream, &store, MatchSettings::default()).await.unwrap();
         client.await.unwrap();
 
         // Verify persistence
@@ -2683,7 +2775,7 @@ timeout = "10s"
         });
 
         let (stream, _) = listener.accept().await.unwrap();
-        let result = handle_hook_connection(stream, &store).await;
+        let result = handle_hook_connection(stream, &store, MatchSettings::default()).await;
         client.await.unwrap();
 
         assert!(result.is_err(), "Bad payload should produce an error");
@@ -2722,7 +2814,7 @@ timeout = "10s"
                 let _ = stream.read_to_end(&mut buf).await;
             });
             let (stream, _) = listener.accept().await.unwrap();
-            handle_hook_connection(stream, &store).await.unwrap();
+            handle_hook_connection(stream, &store, MatchSettings::default()).await.unwrap();
             client.await.unwrap();
         }
 
@@ -2792,7 +2884,7 @@ timeout = "10s"
 
         let (stream, _) = listener.accept().await.unwrap();
         let before = Utc::now();
-        handle_hook_connection(stream, &store).await.unwrap();
+        handle_hook_connection(stream, &store, MatchSettings::default()).await.unwrap();
         let after = Utc::now();
         client.await.unwrap();
 
@@ -2830,7 +2922,7 @@ timeout = "10s"
         });
 
         let (stream, _) = listener.accept().await.unwrap();
-        handle_hook_connection(stream, &store).await.unwrap();
+        handle_hook_connection(stream, &store, MatchSettings::default()).await.unwrap();
         client.await.unwrap();
 
         // The events log should have the session_start event…
@@ -3208,6 +3300,81 @@ timeout = "10s"
         store.append_jsonl("intentions/registry.jsonl", &rule).unwrap();
     }
 
+    /// The matcher with its default settings: no priming window, so these
+    /// tests see per-session behaviour alone.
+    fn rules_for_prompt(store: &Store, sid: Option<&str>, said: &[String]) -> (String, Vec<String>) {
+        super::rules_for_prompt(store, sid, said, MatchSettings::default())
+    }
+
+    #[test]
+    fn word_forms_of_a_keyword_count_as_the_same_word() {
+        for (a, b) in [("merging", "merge"), ("dashes", "dashe"), ("merged", "merge"), ("reconciling", "reconcile")] {
+            assert_eq!(word_root(a), word_root(b), "{a} / {b}");
+        }
+        assert_ne!(word_root("gate"), word_root("gather"));
+    }
+
+    #[test]
+    fn a_rare_shared_word_scores_above_a_common_one() {
+        let using: std::collections::HashMap<String, usize> =
+            [("rare".to_string(), 1), ("common".to_string(), 9)].into_iter().collect();
+        let (rare, common) = ("rare".to_string(), "common".to_string());
+        let two_rare = match_score([&rare, &rare].into_iter(), &using, 10, 5);
+        let two_common = match_score([&common, &common].into_iter(), &using, 10, 5);
+        assert!(two_rare > two_common, "{two_rare} vs {two_common}");
+        assert!((0.79..0.81).contains(&two_rare), "{two_rare}");
+        assert_eq!(match_score(std::iter::empty(), &using, 10, 5), 0.0);
+    }
+
+    #[test]
+    fn the_same_words_count_for_less_in_a_long_prompt() {
+        let using: std::collections::HashMap<String, usize> = [("rare".to_string(), 1)].into_iter().collect();
+        let rare = "rare".to_string();
+        let focused = match_score([&rare, &rare].into_iter(), &using, 10, 10);
+        let pasted = match_score([&rare, &rare].into_iter(), &using, 10, 250);
+        assert!(focused > 0.7 && pasted < 0.5, "{focused} vs {pasted}");
+    }
+
+    #[test]
+    fn a_different_form_of_the_words_still_matches() {
+        let (_dir, store) = mk_store();
+        add_context_rule(&store, "dw-1", "Reconcile before merging", &["merge", "reconcile"]);
+        let (_, ids) = rules_for_prompt(&store, Some("sess-A"), &words(&["merging", "reconciling"]));
+        assert_eq!(ids, vec!["dw-1".to_string()]);
+    }
+
+    #[test]
+    fn a_high_threshold_keeps_a_weak_match_out() {
+        let (_dir, store) = mk_store();
+        add_context_rule(&store, "dw-1", "Reconcile ledger exports", &["ledger", "export"]);
+        let strict = MatchSettings { threshold: 0.99, priming_hours: 0.0 };
+        let (_, ids) = super::rules_for_prompt(&store, Some("sess-A"), &words(&["ledger", "exports"]), strict);
+        assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    #[test]
+    fn a_rule_just_shown_waits_out_the_priming_window_in_other_sessions() {
+        let (_dir, store) = mk_store();
+        add_context_rule(&store, "dw-1", "Reconcile ledger exports", &["ledger", "export"]);
+        let said = words(&["ledger", "exports"]);
+        let primed = MatchSettings { priming_hours: 4.0, ..MatchSettings::default() };
+        let (_, first) = super::rules_for_prompt(&store, Some("sess-A"), &said, primed);
+        assert_eq!(first.len(), 1);
+        record_surfacings(&store, &first, Some("sess-A"));
+        let (_, other) = super::rules_for_prompt(&store, Some("sess-B"), &said, primed);
+        assert!(other.is_empty(), "inside the window: {other:?}");
+
+        let mut reg: Vec<Intention> = store.read_jsonl("intentions/registry.jsonl").unwrap();
+        reg[0].last_fired = Some(Utc::now() - chrono::Duration::hours(5));
+        std::fs::write(
+            store.path("intentions/registry.jsonl"),
+            format!("{}\n", serde_json::to_string(&reg[0]).unwrap()),
+        )
+        .unwrap();
+        let (_, later) = super::rules_for_prompt(&store, Some("sess-C"), &said, primed);
+        assert_eq!(later.len(), 1, "after the window it may return");
+    }
+
     #[test]
     fn behavioural_rules_are_not_spent_on_the_session_briefing() {
         let (_dir, store) = mk_store();
@@ -3270,7 +3437,7 @@ timeout = "10s"
             buf
         });
         let (stream, _) = listener.accept().await.unwrap();
-        handle_hook_connection(stream, &store).await.unwrap();
+        handle_hook_connection(stream, &store, MatchSettings::default()).await.unwrap();
         let reply = client.await.unwrap();
         assert!(reply.contains("Reconcile ledger exports"), "{reply}");
         let fired: Vec<FiredRecord> = store.read_jsonl("intentions/fired.jsonl").unwrap();
@@ -3395,7 +3562,7 @@ timeout = "10s"
             String::from_utf8_lossy(&buf).into_owned()
         });
         let (stream, _) = listener.accept().await.unwrap();
-        handle_hook_connection(stream, store).await.unwrap();
+        handle_hook_connection(stream, store, MatchSettings::default()).await.unwrap();
         client.await.unwrap()
     }
 

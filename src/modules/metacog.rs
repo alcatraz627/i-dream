@@ -350,6 +350,13 @@ pub struct MetacogModule<'a> {
     store: &'a Store,
 }
 
+/// A turn where something went wrong: the owner corrected Claude, or two tool
+/// calls failed in a row. These teach the most, so they are always sampled and
+/// are the last to be cut for budget.
+fn is_trigger_unit(unit: &ExecutionUnit) -> bool {
+    unit.input.is_correction || unit.tools.windows(2).any(|w| !w[0].success && !w[1].success)
+}
+
 impl<'a> MetacogModule<'a> {
     pub fn new(config: &'a Config, store: &'a Store) -> Self {
         Self { config, store }
@@ -357,18 +364,7 @@ impl<'a> MetacogModule<'a> {
 
     /// Determine if a unit should be sampled based on config and triggers.
     pub fn should_sample(&self, unit: &ExecutionUnit) -> bool {
-        // Always sample on triggers
-        if unit.input.is_correction {
-            return true;
-        }
-
-        let consecutive_failures = unit
-            .tools
-            .windows(2)
-            .filter(|w| !w[0].success && !w[1].success)
-            .count();
-
-        if consecutive_failures >= 1 {
+        if is_trigger_unit(unit) {
             return true;
         }
 
@@ -436,11 +432,12 @@ impl<'a> MetacogModule<'a> {
             };
 
             let units = transcript::into_execution_units(&entries, &file.session_id);
-            let sampled: Vec<ExecutionUnit> = units
+            let (mut sampled, ordinary): (Vec<ExecutionUnit>, Vec<ExecutionUnit>) = units
                 .into_iter()
                 .filter(|u| self.should_sample(u))
-                .take(max_per_session)
-                .collect();
+                .partition(is_trigger_unit);
+            sampled.extend(ordinary);
+            sampled.truncate(max_per_session);
 
             // Append each sampled unit to the canonical samples log.
             for unit in &sampled {
@@ -557,8 +554,8 @@ Output as JSON matching this shape:
         // Compact JSON (not pretty) to keep token cost down. Fit as many
         // complete units as possible within the effort-level's char budget
         // instead of raw-truncating (which would send malformed JSON).
-        // Newer sessions come first due to rev() scan, so the budget
-        // naturally prioritizes recent activity.
+        // Turns where something went wrong go first, then newer sessions
+        // (the scan runs newest-first).
         let sample_budget = sample_char_budget(
             budget,
             params.max_response_tokens,
@@ -692,7 +689,9 @@ Output as JSON matching this shape:
 fn units_within_budget(units: &[ExecutionUnit], budget_chars: usize) -> Vec<&ExecutionUnit> {
     let mut picked = Vec::new();
     let mut running_len = 2usize; // the "[]" wrapper
-    for unit in units {
+    let (triggered, ordinary): (Vec<&ExecutionUnit>, Vec<&ExecutionUnit>) =
+        units.iter().partition(|u| is_trigger_unit(u));
+    for unit in triggered.into_iter().chain(ordinary) {
         let Ok(json) = serde_json::to_string(unit) else { continue };
         let sep = usize::from(!picked.is_empty());
         if running_len + sep + json.len() > budget_chars {
@@ -762,7 +761,7 @@ impl<'a> MetacogModule<'a> {
             .units
             .iter()
             .filter(|u| {
-                u.input.is_correction || u.tools.windows(2).any(|w| !w[0].success && !w[1].success)
+                is_trigger_unit(u)
             })
             .count();
 
@@ -1318,6 +1317,18 @@ mod tests {
         assert_eq!(picked[0].unit_id, "u-small");
         let none = units_within_budget(&units, 1);
         assert!(none.is_empty(), "nothing fits, nothing is sent");
+    }
+
+    #[test]
+    fn a_tight_budget_keeps_what_went_wrong_before_newer_routine_turns() {
+        let routine = make_unit("u-routine", false, vec![tool("Read", true)]);
+        let corrected = make_unit("u-corrected", true, vec![tool("Read", true)]);
+        let failed = make_unit("u-failed", false, vec![tool("Bash", false), tool("Bash", false)]);
+        let one = serde_json::to_string(&corrected).unwrap().len();
+        let units = vec![routine, corrected, failed];
+        let picked = units_within_budget(&units, one + 2);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].unit_id, "u-corrected", "the routine turn came first but was cut");
     }
 
     fn unit_in(session: &str, id: &str) -> ExecutionUnit {

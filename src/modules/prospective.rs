@@ -66,8 +66,27 @@ pub struct FiredRecord {
     pub was_relevant: Option<bool>,
 }
 
+/// Which live intentions to drop so at most `cap` remain: the lowest priority
+/// first, then the oldest. An intention that has expired or spent its fires is
+/// not live and does not count.
+fn over_cap_ids(registry: &[Intention], cap: usize, now: DateTime<Utc>) -> std::collections::HashSet<String> {
+    let mut live: Vec<&Intention> = registry
+        .iter()
+        .filter(|i| i.expires > now && i.fire_count < i.max_fires)
+        .collect();
+    let excess = live.len().saturating_sub(cap);
+    live.sort_by_key(|i| {
+        let rank = match i.action.priority {
+            Priority::Low => 0,
+            Priority::Medium => 1,
+            Priority::High => 2,
+        };
+        (rank, i.created)
+    });
+    live.into_iter().take(excess).map(|i| i.id.clone()).collect()
+}
+
 pub struct ProspectiveModule<'a> {
-    #[allow(dead_code)] // Needed when match_intentions is wired up
     config: &'a Config,
     store: &'a Store,
 }
@@ -164,20 +183,45 @@ impl<'a> ProspectiveModule<'a> {
                     .append_jsonl("intentions/expired.jsonl", intent)?;
             }
 
-            // Rewrite active registry (atomic via Store)
-            let path = self.store.path("intentions/registry.jsonl");
-            let tmp_path = path.with_extension("tmp");
-
-            let mut file = std::fs::File::create(&tmp_path)?;
-            for intent in &active {
-                let line = serde_json::to_string(intent)?;
-                use std::io::Write;
-                writeln!(file, "{line}")?;
-            }
-            std::fs::rename(tmp_path, path)?;
+            self.rewrite_registry(&active)?;
         }
 
         Ok(())
+    }
+
+    /// Replace the registry file in one step, so a reader never sees half of it.
+    fn rewrite_registry(&self, intentions: &[Intention]) -> Result<()> {
+        let path = self.store.path("intentions/registry.jsonl");
+        let tmp_path = path.with_extension("tmp");
+        let mut file = std::fs::File::create(&tmp_path)?;
+        for intent in intentions {
+            let line = serde_json::to_string(intent)?;
+            use std::io::Write;
+            writeln!(file, "{line}")?;
+        }
+        std::fs::rename(tmp_path, path)?;
+        Ok(())
+    }
+
+    /// Hold the registry to its configured size, moving what no longer fits
+    /// into the archive. Returns how many were moved.
+    pub fn enforce_active_cap(&self) -> Result<usize> {
+        let registry: Vec<Intention> = self
+            .store
+            .read_jsonl("intentions/registry.jsonl")
+            .unwrap_or_default();
+        let cap = self.config.modules.prospective.max_active_intentions as usize;
+        let over = over_cap_ids(&registry, cap, Utc::now());
+        if over.is_empty() {
+            return Ok(0);
+        }
+        let (dropped, kept): (Vec<_>, Vec<_>) = registry.into_iter().partition(|i| over.contains(&i.id));
+        for intent in &dropped {
+            self.store.append_jsonl("intentions/expired.jsonl", intent)?;
+        }
+        self.rewrite_registry(&kept)?;
+        info!("Moved {} intention(s) over the cap of {cap} to the archive", dropped.len());
+        Ok(dropped.len())
     }
 
     /// D8 — auto-promote high-confidence, actionable, already-promoted
@@ -282,6 +326,7 @@ impl<'a> ProspectiveModule<'a> {
                 self.store.append_jsonl("intentions/registry.jsonl", i)?;
             }
             info!(created, "D8 auto-promoted associations to intentions");
+            self.enforce_active_cap()?;
         }
         Ok((created, skipped))
     }
@@ -630,6 +675,58 @@ mod tests {
         let archived: Vec<Intention> = store.read_jsonl("intentions/expired.jsonl").unwrap();
         assert_eq!(archived.len(), 1);
         assert_eq!(archived[0].id, "expired-1");
+    }
+
+    fn context_intention(id: &str, priority: Priority, age_days: i64) -> Intention {
+        let mut i = make_intention(
+            id,
+            Trigger::Context { keywords: vec!["a".into(), "b".into()], min_keyword_matches: 2 },
+            30,
+            0,
+            3,
+        );
+        i.action.priority = priority;
+        i.created = Utc::now() - chrono::Duration::days(age_days);
+        i
+    }
+
+    #[test]
+    fn over_the_cap_the_lowest_priority_and_oldest_go_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        for i in [
+            context_intention("high-old", Priority::High, 20),
+            context_intention("medium-old", Priority::Medium, 10),
+            context_intention("medium-new", Priority::Medium, 1),
+            context_intention("low-new", Priority::Low, 1),
+        ] {
+            store.append_jsonl("intentions/registry.jsonl", &i).unwrap();
+        }
+        let mut config = Config::default();
+        config.modules.prospective.max_active_intentions = 2;
+        let moved = ProspectiveModule::new(&config, &store).enforce_active_cap().unwrap();
+        assert_eq!(moved, 2);
+
+        let kept: Vec<Intention> = store.read_jsonl("intentions/registry.jsonl").unwrap();
+        let kept: Vec<&str> = kept.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(kept, vec!["high-old", "medium-new"]);
+        let archived: Vec<Intention> = store.read_jsonl("intentions/expired.jsonl").unwrap();
+        assert_eq!(archived.len(), 2);
+    }
+
+    #[test]
+    fn spent_intentions_do_not_count_against_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_path_buf()).unwrap();
+        store.init_dirs().unwrap();
+        let mut spent = context_intention("spent", Priority::Low, 5);
+        spent.fire_count = spent.max_fires;
+        store.append_jsonl("intentions/registry.jsonl", &spent).unwrap();
+        store.append_jsonl("intentions/registry.jsonl", &context_intention("live", Priority::Low, 1)).unwrap();
+        let mut config = Config::default();
+        config.modules.prospective.max_active_intentions = 1;
+        assert_eq!(ProspectiveModule::new(&config, &store).enforce_active_cap().unwrap(), 0);
     }
 
     #[test]
