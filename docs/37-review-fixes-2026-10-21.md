@@ -1,282 +1,233 @@
 ---
-reader: the agent session that builds these fixes (file:line anchors are kept on purpose)
+reader: the owner, and the agent session that picks up the open fixes
 ---
 
-# Review fixes, queued 2026-10-21
+# Review fixes since the October review
 
-The owner's ruling on the argon adversarial review (2026-10-21): "lets fix all of these, put it in a work doc, we'll do it next session; also queue up another claude adversarial run against the whole system's efficacy/visual presence/working".
+This is the fix list from three reviews of i-dream: the October adversarial review, a second Claude adversarial run that week, and the monthly audits of late October and early November. It says what is still open, what each fix changed, and where the evidence lives.
 
-The source report, with every citation checked, is `.claude/output/20261021-1948-adversarial-review/indictment.md`. Only the findings that held up against the code are listed here; the false and stale ones are recorded in that report and need no work.
+The reviews gave each item a short code, a letter and a number. Those codes are listed under Sources at the end, next to the name each item has here.
 
-## Order of work next session
+## What is still open
 
-1. Run the queued Claude adversarial review first (section C). Done 2026-10-26; its findings are section D and notes under A and B.
-2. Fix the clear bugs: A1, A2, A3 (retargeted), A4 (with its warning), then D1, D2, D4, D6. They are small and unblock measurement. D3 and D5 follow.
-   Built and installed 2026-10-26:
-   - A1, A2/D6, A3, A4, D1, D2 and D4, each with a test that failed first.
-   - The spend total and cycle-ran row fill in after the next daily run.
-   - Metacog's skip path shows on its next oversize batch.
-   - The usage limits are a fallback; the account-wide gate decides.
-3. Then the design items (B1 to B4), each with the owner's ruling noted before building.
+Five things are not done.
 
-Owner ruling 2026-10-26 on the follow-up suggestions (`.claude/output/20261026-1703-adversarial-review/behavioral-display-suggestions.md`): "Ideas look good, daily is fine as long as it doesn't dent my claude usage. 3 and 5 are fine, lets go on all". So: daily verify rows that re-check each fix (no model calls); a first-look probe test on the local vision model; Landing says "not measured" until B1 lands; intentions fire once per session start, skip bare-word triggers and CLAUDE.md repeats, and votes land only on what the corrected turn showed (this settles B2's delivery side and B3); the monthly audit raises an adversarial-review card rather than spending tokens on its own.
-   Built and installed 2026-10-26:
-   - verify checks that delivery counts agree, that the firing scan runs, and that metacog never sends nothing.
-   - The probe fails when a newcomer's read disagrees with the You section.
-   - You leads the dropdown; Run now reads as an optional link.
-   - Effect panels say not measured.
-   - One fire per rule per session; questions are not corrections.
-   - Votes land only on rules that share a word with the prompt.
-   - Wake triggers skip generic words.
-   - REM gets the standing rule titles and is told not to repeat them.
-   - Word overlap could not spot a reworded rule, so it was dropped.
-   - The monthly audit card carries an adversarial pass.
+### Insights still reach nothing directly
 
-## A. Clear bugs
+Dreaming spends about 25,000 tokens a cycle producing patterns and insights, and the insight injector is switched off. Rules now reach Claude with the prompt they are about, but the insight text itself is read by nothing.
 
-### A1. The "hints are never delivered" switch is still off
-`src/interventions.rs:46` sets `HINTS_DELIVERED = false`, although the synchronous hint hook delivers hints (an `[i-dream:8c24512f]` hint reached session 1674e4f9 on 2026-10-21). Effects: hints can never auto-promote (`:529`), `i-dream promotions` labels 18 live hints `live*` "no delivering surface" (`:596`, legend printed at `:615`).
+The choice is between two paths:
 
-Fix: set it true, then make the status `fired_7d` count agree with `i-dream verify`'s delivery rows (status says 0, verify says 14/17 hints and 18/20 nudges).
+- wire insights into something Claude reads, such as candidate hints or the project brief
+- stop the dreaming steps that only feed them
 
-Check: `i-dream promotions` shows no `live*`; status and verify agree on delivery.
+This is a decision about where the output goes, not a plan to remove dreaming.
 
-Cause, found 2026-10-26: the fired count is always zero because status reads the timestamp as text, and the hooks write it as a number. Parse both.
+### The pattern store keeps near-duplicates
 
-### A2. The firing scan cannot see `[i-dream:` tags
-`src/firings.rs:74-81` recognises only `[L:` and `[I:` tags, which the hooks no longer emit. Result: 12 firings ever, against 21,313 would-fire rows.
+Several patterns restate one rule, such as "no period after a file path", each with one occurrence. They crowd the map and the briefs.
 
-Fix: recognise `[i-dream:xxxxxxxx]` in assistant text and credit the intervention. Note the design caveat: a hint is followed when Claude acts on it, not when it echoes the tag, so this measures echo, not effect (B1 is the real measure).
+A merge already runs every dreaming cycle and turns 507 patterns into 415. Only the dreaming step reads the merged set, so the work is to point the pattern store, the constellation view and the briefs at it too.
 
-Check: a test transcript with the tag produces a firing row.
+### Mistake counts are still raw
 
-### A3. The budget check sees only dreaming
-`src/verify.rs:133-140` judges `cycle-budget` from the dreaming journal entry alone; metacog, introspection and brief regeneration in the same cycle are invisible. The cycle log line has the same blind spot.
+Recording of mistakes fell about fivefold in mid-September. A drop in recordings therefore cannot be told apart from fewer mistakes being filed.
 
-Fix: sum every module's tokens for the cycle in both the verify row and the `[cycle N] complete` line.
+The effect check below limits the damage, because it compares counts only around each fix and needs two recordings before a fix to judge it. Nothing normalises for the recording rate yet.
 
-Check: a cycle with a metacog run shows a ratio that includes it.
+### Residue review is paused
 
-Retargeted 2026-10-26: the idle cycle spends nothing by design, so its "used 0 tokens" line is correct. The real spend happens in the reader's daily run, which never adds to the running total. The total stayed the same from 10-21 to 10-26 while about 163k tokens were spent. Fix the daily run's accounting, and point the verify row at the same sum.
+It filed nothing for 11 runs, and its log could not say why. It stays off until two things are true:
 
-### A4. The menu bar cries wolf and the usage counter is dead
-The `affirm` lane has a 168h cadence, so a source the owner uses rarely turns the dot red ("1 broken"). Separately, the status `usage` block reads all zeros (`output_tokens_7d: 0`, checked 06:43 UTC) while cycles spent tens of thousands of tokens.
+1. It logs the findings it returns and drops for each session.
+2. A test run on a session with a known correction shows it working. That test is a paid run.
 
-Fix: make affirm on-demand (no staleness alarm), and find what feeds `usage` and why it reads zero.
+### The weekly run has no dark-wake hold
 
-Check: dropdown shows 0 broken with affirm idle; usage shows this week's real spend.
+The nightly run waits when the Mac wakes briefly on battery, and the weekly run does not. A failure there already shows in the widget.
 
-Warning, 2026-10-26: usage reads zero because it looks for the token count in the wrong place in each transcript line. Fixing only that would count all of the owner's Claude output, about 115 times the limit, and every automatic cycle would then be skipped. Count only i-dream's own spend, or change the limit, first.
+### Gaps outside i-dream
 
-Two more false reds sit in the same dropdown. claude-ipc reads "store absent" because an empty file counts as missing. cycle-ran fails on a quiet day when dreaming rightly skipped. The menu bar title shows the age of the first dead lane ("20d"), so it has been red for about two weeks.
+The late-October audit found three gaps that belong to `~/.claude`, not i-dream:
 
-## B. Design items (owner ruling needed before building)
+- Hook warnings cannot be joined back to the warning that was heeded.
+- The dense-briefing check failed its own readout, with 1 real catch in 10.
+- The hook health script hides one overdue review, and four hints misfire.
 
-### B1. Nothing measures whether a fix worked
-`src/verify.rs` effect_check always returns Unknown. Two serious mistakes are getting more frequent (`structural-claim-without-reading-code` +2 this week, `ai-smell-prose-against-stored-voice` +1) and nothing ties that to the hints and proposals aimed at them.
+## What changed, by area
 
-Proposal: per slug, compare the weekly atone rate before and after each landing (a filed proposal, a live hint, a hook), and report eased, flat or worse. This is the value loop the owner asked for.
+### Measuring whether fixes work
 
-### B2. Insights are made every cycle and read by nothing
-Dreaming spends about 25k tokens a cycle producing patterns and insights. The insight injector is switched off (`~/.claude/subconscious/dreams/.inject-on` absent; `/Users/alcatraz627/.claude/scripts/dream/dream-insights.sh:30`), and intentions rarely qualify at session start.
+i-dream now checks whether a fix the owner accepted made its mistake rarer. It counts the mistake's recordings in the 14 days before acceptance and the 14 days after.
 
-Question for the owner: wire insights into something that reaches Claude (candidate hints, the project brief), or stop the REM and Wake calls until something reads them. Not decommissioning; deciding where the output goes.
+The `effect` row of `i-dream verify` works like this:
 
-Premise corrected, 2026-10-26: intentions do reach sessions, but a night's output is used up in about 40 minutes. Each session start fires every intention twice, so the five-fire limit lasts two and a half sessions, and one of those was an automated keep-warm ping. 12 of 13 triggers match on the word "always", and several repeat rules CLAUDE.md already loads.
+1. Each accepted item on a weekly page is one fix.
+2. A fix is judged once it is 14 days old, and only if its mistake came up at least twice before.
+3. The row passes when at least half the judged fixes moved, and it names the ones that did not.
 
-### B3. One correction votes on every rule the session saw
-`src/daemon.rs:1771-1826` casts the same vote on every intention shown at session start whenever the owner corrects or praises once (10-19: 30 down, then 30 up, one session).
+The first reading, on 2026-11-10, found 8 of 10 judged fixes made their mistake rarer. Two held at 2 recordings each: "Declared done without running it" and "Process-inspection commands printed live secrets into the conversation".
 
-Proposal: vote only on what was shown in the turn before the correction, or weight the vote by 1/N; the code has no prompt text, so relevance needs the hook to pass it.
+The landing view used to credit any drop in mistakes to a proposal filed a week or more earlier, built or not. Both credited drops belonged to proposals still open.
 
-Added 2026-10-26: the correction detector itself misfires. A design question ("what are we fundamentally doing wrong with our block kit usage?") matched on "wrong" and down-voted 13 unrelated intentions. The fix needs a better detector as well as narrower voting.
+It now credits only finished proposals and shows each proposal's status. Built proposals had shown as "filed", and the dropdown called 28 filed proposals "landed", so each count now has one word.
 
-### B4. The pattern store keeps near-duplicates
-Several patterns restate one rule (no period after a file path: status.json pattern texts near lines 1773, 1797, 2169 of the 2026-10-21 snapshot), each with one occurrence. They crowd the map and the briefs.
+### Rules reaching Claude
 
-Proposal: merge near-duplicate patterns in SWS before storing (text similarity plus shared evidence), keeping the strongest.
+Rules used to reach every session at session start, where a cap kept only three sections of the briefing. The daemon still counted every rule as fired, so 341 fires in 28 capped sessions produced 9 rule tags.
 
-Retargeted 2026-10-26: the merge already runs every dreaming cycle (507 patterns become 415 merged ones), but only REM reads the merged set. The work is to make the pattern store, the constellation and the briefs read it too, not to build a merge.
+Rules now arrive with the prompt they are about, at most two per prompt and once per session. A fire is spent only when the text reaches the hook.
 
-## D. New findings from the Claude adversarial run (2026-10-26)
+The keyword gate compared rule keywords with the project path, so almost no rule matched. It now compares them with the owner's prompt.
 
-The full report holds 13 findings; 11 of 23 checked claims broke. Findings that changed A1, A3, A4, B2, B3 and B4 are noted in those sections. These six are new. File and line anchors for every 2026-10-26 note are under Sources at the end.
+Since 2026-11-10 the gate scores each match:
 
-### D1. Landing credits fixes nobody built
-The Landing pane credits a drop in mistakes to any proposal filed a week or more ago, without checking whether it was built. Both credited drops, also shown as "Biggest movers", belong to proposals that are still open. The two credited to finished proposals show no change.
+- Rare shared words count more than common ones.
+- Long pasted prompts count less, because they share words with anything by chance.
+- Word forms such as "merging" and "merge" count as the same word.
+- A rule or nudge shown in one session waits 4 hours before it can appear in another.
 
-Fix: credit only finished proposals, and show each proposal's status.
+At least 9 of 21 rules and most brief bullets restated rules Claude already loads. Each candidate is now compared with the full text of the standing rules, and briefs older than 14 days are not injected.
 
-Check: no credit lands on an open proposal.
+Generic trigger words are skipped. The stop-word check now runs before the plural fold, which had turned "always" into "alway".
 
-### D2. Metacog pays for empty and refused calls
-Metacog stops adding sessions at the first one that is too big, so a large recent session leaves it nothing to send. It sends the call anyway (about 8.8k tokens on each of two nights). It marks those sessions done before reading the answer, and writes a zero score into its history. On a third night the model refused the prompt.
+The intentions registry holds at most 50 live rules. Past that, the lowest priority and oldest move to the archive.
 
-Fix: skip oversize sessions instead of stopping, never call with nothing, mark sessions done only after a good answer.
+### Votes on rules
 
-Check: a batch with one oversize session still analyses the rest.
+One correction used to vote on every rule the session had seen. One session on 10-19 cast 30 down-votes and then 30 up-votes.
 
-### D3. reflect and Landing treat fewer atones as fewer mistakes
-Atone recording fell about fivefold in week 38, so "landing" cannot be told apart from "fewer atones filed". "Worsening" fires on one against zero. reflect's warned column counts the atone summary, not i-dream hints, and its advice points at a retired command. B1 would inherit all of this.
+The correction detector also misfired:
 
-Fix: normalise by recording rate, require a minimum count, count hint deliveries, drop the retired command.
+- A design question containing "wrong" down-voted 13 unrelated rules.
+- Later bursts came from a sub-agent's task notification and a quoted "try again".
 
-### D4. verify reads an old copy of the queue
-verify checks the ingest queue from the last dream journal entry, 36 hours old, and passed while the real queue was nearly three days old. cycle-ran fails on a quiet day, though a sibling check allows one quiet night.
+Votes now need a real correction from the owner and two shared topic words, capped per correction. Questions are not corrections, and task notifications count as machine input.
 
-Fix: read the live queue; give cycle-ran the same allowance.
+### Delivery and firing counts
 
-### D5. The widget guide (docs/36) is stale
-It tells the owner the only red is affirm and safe to ignore, and names the dead fired counter as one that matters. Rewrite it after A1, A4 and D1 land.
+The switch that said hints are never delivered was still off, although the hint hook does deliver them. As a result, hints could never be promoted, and 18 live hints were labelled as having no delivering surface.
 
-### D6. No followed hint has ever been recorded
-The firing ledger has 24 rows and none says a hint was followed. Same cause as A2.
+The switch is on now. The fired count had been always zero, because status read the hooks' numeric timestamp as text, and it now parses both forms.
 
-## C. Claude adversarial run on efficacy, visual presence and working (done 2026-10-26, see D)
+The firing scan recognised only an old tag format the hooks no longer write. It found 12 firings against 21,313 would-fire rows, and no followed hint was ever recorded.
 
-Run `/adversarial-review` with a Claude prosecutor (opus, worktree-isolated, as the skill specifies) against the whole system, scoped by the owner's three words:
+It now recognises the current tag. That measures that Claude echoed a hint, not that it acted on it, which is why the effect check exists.
 
-- Efficacy: does i-dream change Claude's behaviour per unit of the owner's effort? Attack every claim of effect; use `i-dream reflect`, the atone log and the landing chain.
-- Visual presence: does the menu bar item and dashboard tell the owner what to do at a glance? Walk them as a first-time user in dark and light, using the probe renders (`tools/widget2/probe.sh`) and the local vision model (`lm see`), per the owner's w43 note.
-- Working: re-run every claim this list and the argon report make, including the fixes above once built.
+`verify` also checks three things about delivery:
 
-Inputs to hand it: this doc, the argon indictment with its check table, `docs/36-reading-the-widget.md`, the five 2026-10-19 audits, and the owner's quotes in `.claude/output/20261021-1948-adversarial-review/claims-ledger.md`.
+- the ledger and the transcripts agree on what was delivered
+- the firing scan runs
+- metacog never sends an empty call
 
-## E. Monthly audit findings, 2026-10-27
+### Spend and budget
 
-The monthly audit (`.claude/output/20261027-audit/summary.md`) re-checked everything above and found the items below. The parent session checked each one against the code. Session i-dream-1d06fbbc is planning the fixes. B1 still decides whether any of this changes behaviour.
+The budget check saw only the dreaming step, and the running total never included the reader's daily run. The total stayed the same from 10-21 to 10-26 while about 163,000 tokens were spent.
 
-### E1. Votes come from things that are not corrections
-Both vote bursts after the fix (35 down-votes on 10-27) came from a sub-agent's task notification and a quoted "try again". The word filter has no stop words. This is the same issue as B3.
+Spend now records the true sum, the weekly run counts its brief refresh, and the check reads the same sum.
 
-Fix: treat any prompt that starts with a task notification as machine input, add stop words, require two shared content words, and cap the votes per correction.
+The usage counter read zero because it looked for the token count in the wrong place. Fixing only that would have counted all of the owner's Claude output, about 115 times the limit, and every automatic cycle would have been skipped.
 
-### E2. Every rule reaches every session, and the generic-word filter is broken
-At session start every Context trigger passes, so all 21 rules go to each session and are used up in about three hours. The plural fold turns "always" into "alway" before the stop-word check, and the test passes on the bug.
+The account-wide usage gate now decides, and the local limits are a fallback.
 
-Fix: run the check before the fold, and change the test to use a word that ends in "s". Then either make the keywords gate delivery or remove them.
+The daily recon was documented as using no model, but it ran the paid extractors, $12.77 over 21 days. The docs now say so, and the Run early button asks first and states its cost of 47,000 to 67,000 tokens.
 
-### E3. Delivered rules repeat standing rules
-At least 9 of the 21 rules and most brief bullets restate rules Claude already loads. Briefs have no age limit, and the oldest one delivered was 125 days old.
+### Metacog
 
-Fix: compare each candidate with the full text of the standing rules, not only their headings, and do not inject a brief older than about 14 days.
+Metacog stopped adding sessions at the first one too big for its budget, so one large recent session left it nothing to send. It then sent the empty call anyway, about 8,800 tokens on each of two nights.
 
-### E4. The glance shows alarms that are not real
-The red dot and "1 broken" show for a metacog bug that was fixed on 10-26, and they will stay until about 10-30. Settings shows the daily and weekly jobs as "paused" while both run. The first-look gate compares the screen with its own text, so it cannot catch a misleading glance.
+It also marked sessions done before reading the answer and wrote a zero score. It now does four things differently:
 
-Fix: judge metacog-calls on its last few calls, drive the Settings switch from the job's real state, and give the gate a health question that does not come from the screen.
+- skips oversize sessions instead of stopping
+- never calls with nothing
+- keeps unread sessions queued
+- bounds refusals
 
-### E5. Built proposals show as "filed"
-All seven w44 proposals are done, but Landing and Flow show them as "filed", and the dropdown calls 28 filed proposals "landed".
+Since 2026-11-10 metacog reads corrections and repeated tool failures before routine turns. One night its budget kept 13 of 283 units, newest first, so corrections could be cut before anything read them.
 
-Fix: show each proposal's status on its row, and use one word for one count.
+### The nightly run
 
-### E6. Spend is under-reported
-The daily recon is documented as using no model, but it ran the paid extractors ($12.77 in 21 days). Recorded spend can never go above the budget. The weekly run's brief refresh (76k tokens) and its retried calls are in no ledger.
+The nightly run failed on 11-08 and 11-09. The scheduler started it during two-second dark wakes on battery, and the Mac went back to sleep mid-call.
 
-Fix: record the real sum of tokens, add a ledger row for the brief refresh and for every call in a run, and correct the docs.
+The run now holds during a dark wake on battery, and the daemon retries once the Mac can finish. A failed run shows as failed in the scheduler and in the `extractors-ok` row of `verify`, and the log keeps the real error.
 
-### E7. Metacog drops sessions without reading them
-Sessions that did not fit the budget are marked processed anyway. Two of D2's three fixes have no test behind them.
+The queue feed doubled to 20,000 characters, because busy days queued more than one night could drain. `status` had also counted the archive folder as queued, and now matches `verify`.
 
-Fix: persist only the sessions that were analysed, and add tests for the empty-call guard and the refusal path.
+### The glance
 
-### E8. Hook and telemetry gaps
-- PostToolUse writes an empty tool name on every event.
-- Heed rows cannot be joined to their warnings.
-- The scheduler history cannot tell a produced page from a held or skipped one.
-- dense-briefing-shapes fails its own readout (1 real of 10).
-- hook-health.sh hides one overdue review.
-- Four hints misfire.
+The menu bar raised false alarms. Its title had shown "20d" in red for about two weeks.
 
-Fix: the batch reports give one fix line per item.
+| Alarm | Why it was false | Now |
+|---|---|---|
+| Affirm stale | A rarely used source on a 168-hour cadence | On demand, no alarm |
+| claude-ipc store absent | An empty file counted as missing | Empty counts as present |
+| Cycle missed | Dreaming rightly skipped a quiet day | A quiet day passes |
+| Metacog broken | A bug fixed on 10-26 stayed red for days | Judged on the last few calls |
 
-### E9. Retention, and docs that break the widget
-About 255 MB of logs and chains have no retention. README, USAGE, CONTRIBUTING and docs/05 say to build `tools/menubar`, and that build kills the live widget.
+Settings showed the daily and weekly jobs as paused while both ran. The switch now follows the job's real state, and a paused job reads as paused after a restart.
 
-Fix: add retention rules, and point the build docs at `i-dream widget`.
+The usage guard says it is inactive while the account gate is in charge. The first-look test also asks the local vision model whether the panel looks healthy and checks that against `verify`.
 
-### Sources for E
+The widget guide told the owner the only red was affirm, and named the dead fired counter as one that mattered. It has been rewritten.
 
-- E1: `src/daemon.rs:1804-1810`; `~/.claude/subconscious/hooks/user-prompt-submit.sh:44-58`; indictment rank 2.
-- E2: `src/daemon.rs:2079`; `src/modules/dreaming.rs:2297-2302`, test `:2352-2356`.
-- E3: `src/modules/project_briefs.rs:352-368`; `src/daemon.rs:1938-1945`; agent-workflow W-27-01, W-27-03.
-- E4: `src/verify.rs:218-231`; `tools/widget2/Sources/Record.swift:381-388`; `Settings.swift:317,335`; `tools/widget2/probe.sh` first-look loop.
-- E5: `tools/widget2/Sources/Record.swift:530-541`; `Dropdown.swift:369-371`.
-- E6: `src/reader/mod.rs:577,734-745`; `src/daemon.rs:1466-1527,1549,1602`.
-- E7: `src/modules/metacog.rs:517,616-620`.
-- E8: `src/hooks.rs:338`; `~/.claude/hooks/warn-events.jsonl`; `hook-health.sh:209-212`; reports L-27-03, L-27-04, W-27-04 to W-27-07.
-- E9: `src/modules/registry.rs:875-957`; `tools/menubar/build.sh:44-45`.
+### Housekeeping
 
-## F. Monthly audit findings, 2026-11-02
+- **Retention.** About 255 MB of logs and chains had none. It now runs daily: chains keep the newest 300 files, and the daemon's error log is cut in place to its newest 10 MB.
+- **Build docs.** README, USAGE, CONTRIBUTING and the build doc pointed at the old menu bar tool, which killed the live widget. They now point at `i-dream widget`, and the old build refuses to run.
+- **Telemetry.** PostToolUse records the tool name, which it had left empty. The scheduler history says whether a run produced a page, was held, or was skipped.
+- **Settings.** Seven that changed nothing were removed. The intentions cap, the priming window and the match threshold now do what they say.
 
-Slices 2 and 3 shipped on 2026-11-02, but the audit (`.claude/output/20261102-audit/summary.md`) found that the rules still do not reach Claude. The fixes below are open.
+## How the work was decided
 
-### F1. The session-start cap drops the rules
-Fixed the same night. The cap kept only the about, do and avoid sections, while the daemon still counted every rule as fired. In the 28 capped sessions, 341 fires produced 9 rule tags.
+The owner asked on 2026-10-21 to fix every finding that held up and to queue another Claude adversarial run. That run happened on 2026-10-26, found 13 problems, and broke 11 of 23 checked claims.
 
-Rules now arrive with the prompt they are about, at most two per prompt and once per session. A fire is spent only when the text is handed to the hook, so votes land only on rules Claude was given.
+The owner then approved its follow-up suggestions, on the condition that daily checks do not dent Claude usage. The monthly audits on 10-27 and 11-02 added the rest.
 
-### F2. The keyword gate matched the wrong thing
-Fixed with F1. Rule keywords describe behaviour and the gate compared them with the project path, so almost no rule ever matched. They are now compared with the owner's prompt, and two topic words must match.
+The adversarial run was scoped by the owner's three words:
 
-Whether a delivered rule changes behaviour is still unmeasured.
+- **Efficacy:** does i-dream change Claude's behaviour per unit of the owner's effort?
+- **Visual presence:** do the menu bar and dashboard say what to do at a glance, in dark and light?
+- **Working:** does every claim in the list and the first review hold when re-run?
 
-### F3. Two controls stated things that were not so
-Fixed. Status rows now carry `enabled`, so a paused job reads as paused after a restart. The usage guard says it is inactive while the account gate is in charge, and its controls are disabled.
+## Sources
 
-### F4. The daily Run early spent without asking
-Fixed. It now asks first and states its measured 47k to 67k tokens, and the row reads "Daily recon".
+Owner's words:
 
-### F5. Green checks that said little
-Fixed. `delivery-agrees` compares items with items, the header says "nudges matched", `reflect` no longer calls tiny counts a trend, and the widget guide (D5) is rewritten.
+- 2026-10-21: "lets fix all of these, put it in a work doc, we'll do it next session; also queue up another claude adversarial run against the whole system's efficacy/visual presence/working"
+- 2026-10-26: "Ideas look good, daily is fine as long as it doesn't dent my claude usage. 3 and 5 are fine, lets go on all"
 
-### F6. Residue-review has stopped filing
-It has filed nothing for 11 runs, and its log cannot say why.
+Reports:
 
-Fix: log findings returned and dropped per session, then probe a session with a known correction.
+- First review: `.claude/output/20261021-1948-adversarial-review/indictment.md`, with the owner's quotes in `claims-ledger.md` beside it.
+- Claude adversarial run: `.claude/output/20261026-1703-adversarial-review/indictment.md` and `behavioral-display-suggestions.md`. The visual walk used `tools/widget2/probe.sh` and `lm see`.
+- Audits: `.claude/output/20261027-audit/summary.md` and `.claude/output/20261102-audit/summary.md`.
 
-### F7. Retention gaps
-Fixed. Retention runs on its own daily timer inside the daemon. Chains keep the newest 300 files, and `launchd.stderr.log` is cut in place to its newest 10 MB, so the handle launchd holds keeps working.
+Item codes, as the reviews named them:
 
-### Sources for F
+| Code | Item here | Where |
+|---|---|---|
+| A1 | Delivery switch and fired count | `src/interventions.rs:46`, `:529`, `:596`, `:615`; cause `src/status.rs:145-154` |
+| A2, D6 | Firing scan tag | `src/firings.rs:73-81` |
+| A3 | Budget check and running total | `src/verify.rs:133-140`; `src/daemon.rs:600-604`, `:1512-1525`, `:656` |
+| A4 | Menu bar false alarms and usage counter | `src/daemon.rs:514-518`, `:375-381`; `src/modules/registry.rs:644-650`; `tools/widget2/Sources/Glyph.swift:66-70` |
+| B1 | Effect check | `src/reader/effect.rs`; `src/verify.rs` `effect_check` |
+| B2 | Insights reach nothing (open) | `~/.claude/scripts/dream/dream-insights.sh:30`; adversarial run rank 7 |
+| B3, E1 | Votes on rules | `src/daemon.rs:1771-1826`, `:1804-1810`; `~/.claude/subconscious/hooks/user-prompt-submit.sh:44-58` |
+| B4 | Near-duplicate patterns (open) | `src/modules/dreaming.rs:2107-2134` |
+| D1, E5 | Landing credit and proposal status | `tools/widget2/Sources/Record.swift:423-434`, `:530-541`; `src/reader/mod.rs:330-342`; `Dropdown.swift:369-371` |
+| D2, E7 | Metacog empty and refused calls | `src/modules/metacog.rs:516-541`, `:583`, `:616-620` |
+| D3 | Raw mistake counts (open) | `src/reflect.rs:88-101`, `:169`, `:221-232` |
+| D4 | verify read an old queue copy | `src/verify.rs:144-155`, `:80-89` |
+| D5, F5 | Widget guide and checks that said little | `docs/36-reading-the-widget.md:18,26,42,57`; `src/verify.rs:208`; `Dropdown.swift:122` |
+| E2, F2 | Keyword gate | `src/daemon.rs:2079`; `src/modules/dreaming.rs:2297-2302`, test `:2352-2356` |
+| E3 | Standing-rule repeats and old briefs | `src/modules/project_briefs.rs:352-368`; `src/daemon.rs:1938-1945`; W-27-01, W-27-03 |
+| E4, F3 | The glance and Settings state | `src/verify.rs:218-231`; `Record.swift:156`, `:381-388`; `Settings.swift:317,335`; `src/daemon.rs:374-381` |
+| E6, F4 | Spend and Run early | `src/reader/mod.rs:577,734-745`; `src/daemon.rs:1466-1527,1549,1602`; `Record.swift:158-160,790` |
+| E8 | Hook and telemetry gaps | `src/hooks.rs:338`; `~/.claude/hooks/warn-events.jsonl`; `hook-health.sh:209-212`; L-27-03, L-27-04, W-27-04 to W-27-07 |
+| E9, F7 | Retention and build docs | `src/modules/registry.rs:875-957`; `tools/menubar/build.sh:44-45`; `src/daemon.rs:720`; AR-11-04, AR-11-06, AR-11-07 |
+| F1 | Session-start cap | `~/.claude/scripts/dream/brief-cap.py:65-68` |
+| F6 | Residue review (open) | `scripts/residue-review.sh:153-161`; W-11-01 |
+| G | Nightly dark-wake failures | commit bdcb1f3 |
+| AR-11-09 | Five domains with no health lane, left alone because quiet domains would raise false alarms | November audit |
 
-- F1: `~/.claude/scripts/dream/brief-cap.py:65-68`; indictment rank 1.
-- F2: `src/daemon.rs`, `broadcast_intentions_section_for`; indictment rank 2.
-- F3: `tools/widget2/Sources/Record.swift:156`; `src/daemon.rs:374-381`; indictment ranks 3 and 7.
-- F4: `tools/widget2/Sources/Record.swift:158-160,790`; indictment rank 4.
-- F5: `src/verify.rs:208`; `tools/widget2/Sources/Dropdown.swift:122`; indictment ranks 5, 6 and 9.
-- F6: `scripts/residue-review.sh:153-161`; report W-11-01.
-- F7: `src/daemon.rs:720`; reports AR-11-04, AR-11-06, AR-11-07.
-
-## G. Nightly failures on battery, 2026-11-09
-
-The nightly run failed on 11-08 and 11-09 because the scheduler started it during two-second dark wakes on battery. The Mac went back to sleep mid-call.
-
-Fixed. The run now holds during a dark wake on battery, and the daemon retries it once the Mac can finish. A failed run shows as failed in the scheduler and in the `extractors-ok` row of `verify`.
-
-The queue feed doubled to 20,000 characters, because busy days queued more than one night could drain.
-
-Still open:
-
-- The weekly run has no dark-wake hold. A failure there shows in the widget.
-- Three settings still do nothing, because each marks a feature worth deciding on: `max_active_intentions`, `match_threshold` and `priming_decay_hours`.
-- Metacog captures every correction, then keeps only the newest units that fit its budget, so corrections can be dropped.
-- Five domains have no lane (AR-11-09). New lanes would risk false alarms for domains that are quiet by nature.
-
-## Sources for the 2026-10-26 notes
-
-Full report: `.claude/output/20261026-1703-adversarial-review/indictment.md`.
-
-- A1 cause: `src/status.rs:145-154`.
-- A3 retarget: `src/daemon.rs:600-604`, `:1512-1525`, `:656`.
-- A4 warning: `src/daemon.rs:514-518`, `:375-381`; `src/modules/registry.rs:644-650`; `tools/widget2/Sources/Glyph.swift:66-70`.
-- B2 correction: report rank 7.
-- B3 addition: `~/.claude/subconscious/hooks/user-prompt-submit.sh:44-51`.
-- B4 retarget: `src/modules/dreaming.rs:2107-2134`.
-- D1: `tools/widget2/Sources/Record.swift:423-434`; `src/reader/mod.rs:330-342`.
-- D2: `src/modules/metacog.rs:516-541`, `:583`.
-- D3: `src/reflect.rs:88-101`, `:169`, `:221-232`.
-- D4: `src/verify.rs:144-155`, `:80-89`.
-- D5: `docs/36-reading-the-widget.md:18,26,42,57`.
-- D6: `src/firings.rs:73-81`.
+Commits: the October fixes are in 9a7258f, c246f3e, bb84cc6, 3edc139 and 516f885. The nightly fix is bdcb1f3, the settings work is 9887e0e, 6101a14 and 7ef941b, and the effect check is 5cb7adb.
