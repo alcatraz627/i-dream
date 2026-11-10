@@ -175,7 +175,6 @@ fn default_auto_intention_threshold() -> f64 {
 pub struct MetacogConfig {
     pub enabled: bool,
     pub sample_rate: f64,
-    pub triggered_sample_rate: f64,
     pub max_samples_per_session: u64,
 }
 
@@ -304,7 +303,6 @@ impl Default for Config {
                 metacog: MetacogConfig {
                     enabled: true,
                     sample_rate: 0.25,
-                    triggered_sample_rate: 1.0,
                     max_samples_per_session: 50,
                 },
                 intuition: IntuitionConfig {

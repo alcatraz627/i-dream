@@ -429,7 +429,6 @@ journal_max_entries = 100
 [modules.metacog]
 enabled = false
 sample_rate = 0.1
-triggered_sample_rate = 0.5
 max_samples_per_session = 10
 
 [modules.intuition]

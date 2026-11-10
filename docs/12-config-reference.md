@@ -109,7 +109,6 @@ Confidence calibration + bias detection.
 |---|---|---|
 | `enabled` | `true` | Master switch. |
 | `sample_rate` | `0.25` | Probability a given execution unit is sampled. |
-| `triggered_sample_rate` | `1.0` | Sample probability when a trigger fires. |
 | `max_samples_per_session` | `50` | Hard cap per session. |
 
 ### `[modules.intuition]`

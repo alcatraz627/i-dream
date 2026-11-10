@@ -810,10 +810,6 @@ fn collect_module_cards(config: &Config, store: &Store) -> Vec<ModuleCard> {
                     format!("{:.0}%", m.metacog.sample_rate * 100.0),
                 ),
                 (
-                    "Triggered rate".into(),
-                    format!("{:.0}%", m.metacog.triggered_sample_rate * 100.0),
-                ),
-                (
                     "Max samples / session".into(),
                     m.metacog.max_samples_per_session.to_string(),
                 ),
@@ -3574,18 +3570,12 @@ fn render_architecture_section() -> String {
     <text x="556" y="48" class="arch-svg-node-title">stop</text>
     <text x="556" y="64" class="arch-svg-node-sub">hook ■</text>
   </g>
-  <g class="arch-svg-group" data-svgid="pre_compact">
-    <rect x="630" y="28" width="116" height="48" rx="5" class="arch-svg-node arch-svg-node-hook"/>
-    <text x="688" y="48" class="arch-svg-node-title">pre_compact</text>
-    <text x="688" y="64" class="arch-svg-node-sub">hook ⬛</text>
-  </g>
 
   <!-- ── Arrows: hooks → daemon (hook server) ── -->
   <line x1="160" y1="76" x2="192" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr)"/>
   <line x1="292" y1="76" x2="220" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr)"/>
   <line x1="424" y1="76" x2="245" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.5" marker-end="url(#arr)"/>
   <line x1="556" y1="76" x2="264" y2="154" stroke="var(--accent)" stroke-width="1.5" opacity="0.35" marker-end="url(#arr)"/>
-  <line x1="688" y1="76" x2="690" y2="154" stroke="var(--dim)"    stroke-width="1.5" opacity="0.5" marker-end="url(#arr-dim)" stroke-dasharray="4 3"/>
   <text x="222" y="120" class="arch-svg-edge-label">JSON over daemon.sock</text>
 
   <!-- ── Layer 2: Daemon ── -->
@@ -3603,11 +3593,6 @@ fn render_architecture_section() -> String {
     <rect x="406" y="164" width="130" height="48" rx="5" class="arch-svg-node arch-svg-node-daemon"/>
     <text x="471" y="184" class="arch-svg-node-title">module runner</text>
     <text x="471" y="200" class="arch-svg-node-sub">SWS/REM/Wake 🧠</text>
-  </g>
-  <g class="arch-svg-group" data-svgid="checkpoint" style="opacity:0.7">
-    <rect x="558" y="164" width="130" height="48" rx="5" class="arch-svg-node arch-svg-node-daemon"/>
-    <text x="623" y="184" class="arch-svg-node-title">checkpoint</text>
-    <text x="623" y="200" class="arch-svg-node-sub">pre-compact 📸</text>
   </g>
 
   <!-- hook server → scheduler; scheduler → module runner -->
@@ -3716,11 +3701,6 @@ var SVG_NODE_INFO = {
     desc: 'Fired when the session ends (Stop hook). Records a session_end event. The daemon uses this to mark the session boundary and may trigger an early consolidation cycle if the Dreaming module is due.',
     related: ['hook_server', 'dreaming']
   },
-  pre_compact: {
-    title: 'pre_compact', layer: 'Claude Code hook',
-    desc: 'Fired before every auto-compaction event. Writes a lightweight _precompact-checkpoint.claude.md and a WAL CHECKPOINT so /catchup can restore context after the context window is cleared. Deliberately fast — no LLM calls.',
-    related: ['checkpoint']
-  },
   hook_server: {
     title: 'hook server', layer: 'Daemon',
     desc: 'Unix domain socket server listening on daemon.sock. Receives all hook events from every Claude Code session running on this machine. Deserialises JSON payloads into HookEvent variants, dispatches to module handlers, and appends a HookEventRecord to logs/events.jsonl.',
@@ -3735,11 +3715,6 @@ var SVG_NODE_INFO = {
     title: 'module runner', layer: 'Daemon',
     desc: 'Orchestrates the dream cycle. Runs enabled modules in SWS → REM → Wake order. Each module is a separate async task; budget is shared via a token counter. Respects max_tokens_per_cycle and max_runtime_minutes from config.',
     related: ['scheduler', 'dreaming', 'metacog', 'intuition', 'introspection', 'prospective']
-  },
-  checkpoint: {
-    title: 'checkpoint', layer: 'Daemon (pre-compact path)',
-    desc: 'Separate lightweight path triggered by the pre_compact hook (not by the scheduler). Writes _precompact-checkpoint.claude.md and appends a WAL checkpoint entry. No LLM calls — pure file I/O so it completes before the compaction window closes.',
-    related: ['pre_compact']
   },
   dreaming: {
     title: 'Dreaming module', layer: 'Module',
@@ -3920,12 +3895,6 @@ function initSvgNodes() {
              tabindex="0" role="button">
           <span class="arch-node-icon">■</span>
           <span class="arch-node-label">stop</span>
-          <span class="arch-node-sub">hook</span>
-        </div>
-        <div class="arch-node arch-hook" data-desc="Fired before auto-compaction. The daemon checkpoints current session context so /catchup can recover the session state after the context window is cleared."
-             tabindex="0" role="button">
-          <span class="arch-node-icon">⬛</span>
-          <span class="arch-node-label">pre_compact</span>
           <span class="arch-node-sub">hook</span>
         </div>
       </div>

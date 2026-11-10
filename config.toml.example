@@ -104,10 +104,9 @@ wake_promotion_threshold = 0.5
 # ─────────────────────────────────────────────────────────────────────
 [modules.metacog]
 enabled                  = true
-# Probability a given execution unit is sampled for analysis.
+# Probability a given execution unit is sampled for analysis. Corrections
+# and repeated tool failures are always sampled.
 sample_rate              = 0.25
-# Probability when a trigger condition fires (correction, multi-failure).
-triggered_sample_rate    = 1.0
 max_samples_per_session  = 50
 
 # ─────────────────────────────────────────────────────────────────────
